@@ -150,6 +150,100 @@ Append-only capability ledger, separate from `DECISION_LOG.md`, constrained by `
 
 Candidate 10 correction authorization (AUTH-0008) shall not be represented as an amendment to Candidate 01, as authorization of Candidate 04 or Candidate 05, as acceptance or unblocking of Candidate 06, Candidate 07, Candidate 08, or Candidate 09, as candidate acceptance, or as implementation authorization. AUTH-0001, AUTH-0002, AUTH-0003, AUTH-0004, AUTH-0005, AUTH-0006, AUTH-0007, AUTH-0008, AUTH-0009, and AUTH-0010 remain separate.
 
+### AUTH-0012 — Candidate 01 specification-drafting authorization (Kalshi Demo environment separation)
+- Authorization ID: `GUSTAVO_KALSHI_DEMO_ENVIRONMENT_SEPARATION_SPEC_ONLY_01`
+- Authorizing user: Gustavo
+- Authorized agent: Bruno
+- Task/phase: original Kalshi Demo environment-separation and capability-envelope specification (Candidate 01)
+- Permitted artifact filenames: `SPEC_kalshi_demo_environment_separation_and_capability_envelope_CANDIDATE_01.md`; `HANDOFF_kalshi_demo_environment_separation_and_capability_envelope_spec_CANDIDATE_01.md` (external, specification-only)
+- Permitted repository paths: none
+- Network access: `PERMITTED` only for read-only access to the canonical `rigolugo/ARB` repository; official Kalshi documentation; the official REST OpenAPI specification; the official WebSocket AsyncAPI specification; the official Kalshi changelog; and, only if needed, bounded read-only inspection of these five named external repositories:
+  - `Jonmaa/btc-polymarket-bot`
+  - `ImMike/polymarket-arbitrage`
+  - `tswaim/polymarket-kalshi-arbitrage-bot`
+  - `TopTrenDev/polymarket-kalshi-arbitrage-bot`
+  - `haoo99/Polymarket-Kalshi-Arbitrage-Bot`
+- Execution evidence: this authorization entry records permitted scope only. It does not assert that optional access to any named external repository occurred. Source-code reuse from all five repositories is prohibited under Candidate 01; only non-normative design findings could be drawn from them.
+- Demo reads/writes: `PROHIBITED`
+- Production reads/writes: `PROHIBITED`
+- Credential use: `PROHIBITED`
+- Account funding: `PROHIBITED`
+- Code changes: `PROHIBITED`
+- Tests: `PROHIBITED`
+- Artifact generation: `PERMITTED` only for:
+  - `SPEC_kalshi_demo_environment_separation_and_capability_envelope_CANDIDATE_01.md`
+  - `HANDOFF_kalshi_demo_environment_separation_and_capability_envelope_spec_CANDIDATE_01.md`
+  - reporting their raw byte lengths and SHA-256 identities.
+- Repository commits: `PROHIBITED`
+- Expiration/completion condition: completed upon Candidate 01 delivery
+- Revocation status: not revoked; superseded in effect by the Candidate 02 correction
+- Note: this is historical authorization-scope recording only; it creates no current capability. Does not authorize Candidate 02, repository modification, implementation source, test source, test execution, project imports, package installation, venue access, credentials, funding, orders, cancellations, trading, or Neo.
+- Source verification: independently confirmed against the supplied `SPEC_kalshi_demo_environment_separation_and_capability_envelope_CANDIDATE_01.md` (75847 bytes, sha256 `b8147c989852350bcd02cbc3cf5f18374f50a12a3a3ca140373dab9885431735`), Section 2.2 (`Candidate-authoring capability matrix`) and Section 25 (`Accepted external-repository findings`).
+
+### AUTH-0013 — Candidate 01 blocked disposition (Kalshi Demo environment separation)
+- Candidate ID: `CANDIDATE_01`
+- Authorizing user: n/a (disposition record)
+- Task/phase: Marco's Candidate 01 review
+- Disposition: `BLOCK`
+- Repository effect: none
+- Note: Candidate 01 remains blocked, noncanonical, uninstalled, and non-authorizing. Preserved for historical lineage only.
+
+### AUTH-0014 — Candidate 02 bounded-correction authorization (Kalshi Demo environment separation)
+- Authorization ID: `GUSTAVO_KALSHI_DEMO_ENVIRONMENT_SEPARATION_SPEC_ONLY_CANDIDATE_02_01`
+- Authorizing user: Gustavo
+- Authorized agent: Bruno
+- Task/phase: bounded correction of blocked Candidate 01 (Candidate 02)
+- Permitted artifact filenames: `SPEC_kalshi_demo_environment_separation_and_capability_envelope_CANDIDATE_02.md`; `HANDOFF_kalshi_demo_environment_separation_and_capability_envelope_spec_CANDIDATE_02.md` only
+- Permitted repository paths: none
+- Network access: `PERMITTED` for read-only canonical repository access, exact Candidate 01 artifacts, and bounded verification of the current official fixed-point source page only
+- Demo reads/writes: `PROHIBITED`
+- Production reads/writes: `PROHIBITED`
+- Credential use: `PROHIBITED`
+- Account funding: `PROHIBITED`
+- Code changes: `PROHIBITED`
+- Tests: `PROHIBITED`
+- Artifact generation: `PERMITTED` only for the two named external Markdown candidates and identity reporting
+- Repository commits: `PROHIBITED`
+- Expiration/completion condition: completed upon Candidate 02 delivery with lifecycle `SUBMITTED_FOR_MARCO_REVIEW`
+- Revocation status: not revoked
+- Note: does not itself authorize canonical installation, implementation, tests, venue access, credentials, funding, orders, cancellations, or trading.
+
+### AUTH-0015 — Candidate 02 acceptance (Kalshi Demo environment separation)
+- Candidate ID: `CANDIDATE_02`
+- Authorizing user: Gustavo
+- Action: explicit acceptance of the exact identity-bound Candidate 02 specification (`SPEC_kalshi_demo_environment_separation_and_capability_envelope_CANDIDATE_02.md`, 78876 bytes, sha256 `4a676c4698411db6743d591595918e4ba7af221b7a7b67d86e807925d8b47bf2`) and Bruno handoff (`HANDOFF_kalshi_demo_environment_separation_and_capability_envelope_spec_CANDIDATE_02.md`, 14114 bytes, sha256 `a47d623c4a80048909e4e9df8e4c11904ff0e763ab4e242028bd0c81dcedee6d`)
+- Repository effect: none by itself
+- Note: separate from the Candidate 02 correction authorization (AUTH-0014) and from the canonical-installation authorization (AUTH-0016). Does not accept Candidate 01. Does not authorize implementation source, tests, venue access, credentials, or a later technical phase.
+
+### AUTH-0016 — Kalshi Demo environment-separation Candidate 02 canonical-installation authorization
+- Authorization ID: `GUSTAVO_KALSHI_DEMO_ENVIRONMENT_SEPARATION_SPEC_CANDIDATE_02_CANONICAL_INSTALLATION_01`
+- Authorizing user: Gustavo
+- Date: 2026-08-06
+- Authorized agent: Neo
+- Candidate ID: `CANDIDATE_02`
+- Task/phase: `KALSHI_DEMO_ENVIRONMENT_SEPARATION_SPEC_CANDIDATE_02_CANONICAL_INSTALLATION_PACKAGE_01`, classification `DOCUMENTATION_ONLY_CANONICAL_INSTALLATION_PACKAGE`
+- Exact permitted artifact filenames: `SPEC_kalshi_demo_environment_separation_and_capability_envelope_CANDIDATE_02.md`; `HANDOFF_kalshi_demo_environment_separation_and_capability_envelope_spec_CANDIDATE_02.md`; `REVIEW_kalshi_demo_environment_separation_and_capability_envelope_spec_CANDIDATE_02.md`; `HANDOFF_kalshi_demo_environment_separation_and_capability_envelope_implementation_CANDIDATE_02.md`
+- Permitted repository paths: exactly the ten paths listed in `handoffs/HANDOFF_kalshi_demo_environment_separation_and_capability_envelope_implementation.md` Section 7
+- Repository-transfer mode: `MANUAL_BROWSER_TEMPORARY_BRANCH`
+- Network access: `PERMITTED` (read-only canonical repository clone/fetch only; no push)
+- Demo reads: `PROHIBITED`
+- Demo writes: `PROHIBITED`
+- Production reads: `PROHIBITED`
+- Production writes: `PROHIBITED`
+- Credential use: `PROHIBITED`
+- Account funding: `PROHIBITED`
+- Code changes: `PROHIBITED`
+- Tests: `PROHIBITED`
+- Artifact generation: `PERMITTED` only for the required installation package, detached checksum, manifest, and implementation evidence
+- Repository commits: `PERMITTED` (one local commit on branch `neo-c02-kalshi-demo-spec-installation`; Neo push `PROHIBITED`)
+- Expiration/completion condition: completion of this bounded canonical-installation task and return of required evidence
+- Revocation status: not revoked
+- Related specification identity: `SPEC_kalshi_demo_environment_separation_and_capability_envelope_CANDIDATE_02.md` (see AUTH-0015)
+- Related Marco review: `REVIEW_kalshi_demo_environment_separation_and_capability_envelope_spec_CANDIDATE_02.md`, 6213 bytes, sha256 `6d665601c5eb0b35943e0a782a34141f45b13b9f3440c3052c85171d54fe3c9b`, decision `APPROVE`
+- Related Bruno handoff identity: `HANDOFF_kalshi_demo_environment_separation_and_capability_envelope_spec_CANDIDATE_02.md` (see AUTH-0015)
+- Related implementation handoff: `HANDOFF_kalshi_demo_environment_separation_and_capability_envelope_implementation_CANDIDATE_02.md`, 18572 bytes, sha256 `19ec68c938d2d72dfa769dfc4c40e638d1e5f97f2590abf4928a73b2ba720982`
+- Completion semantics: this authorization is consumed by the exact reviewed installation commit and grants no technical implementation, tests, venue, credential, funding, order, cancellation, or trading capability.
+
 ## All non-bootstrap capabilities
 
 All capabilities not explicitly listed as `PERMITTED` in an active, non-revoked entry above are `PROHIBITED`, including Kalshi Demo access, Kalshi production access, Polymarket interaction, credentials beyond the authorized GitHub push, account funding, order submission, cancellation, and trading.

@@ -215,4 +215,55 @@ Entry schema: Decision ID, Candidate ID (if applicable), Bound artifact identiti
 - Scope affected: repository-bootstrap implementation lifecycle.
 - Superseded decisions: none.
 - User approval reference: Gustavo's exact acceptance statement: "I accept the installed Candidate 10 repository-bootstrap implementation at canonical main commit e136be0b80f0370572e889d1075a11fc1b445348."
-- Authorizes further work: `NO`. No later technical phase is authorized by this acceptance.
+- Authorizes further work: `NO`
+
+### DEC-0019
+- Candidate ID: `CANDIDATE_01` (Kalshi Demo environment separation)
+- Date: 2026-08-06
+- Decision: Marco reviewed the Kalshi Demo environment-separation and capability-envelope specification Candidate 01 and issued decision `BLOCK`.
+- Status: `BLOCKED`
+- Rationale: Independent review gate; the official Fixed-Point Representation source citation was unresolved.
+- Evidence: Candidate 02 Marco review, Section 2 (predecessor disposition).
+- Scope affected: Kalshi Demo environment-separation specification candidate lineage.
+- Superseded decisions: none.
+- User approval reference: n/a (Marco review, not Gustavo decision).
+- Authorizes further work: `NO`
+
+### DEC-0020
+- Candidate ID: `CANDIDATE_02` (Kalshi Demo environment separation)
+- Bound artifact identities: `SPEC_kalshi_demo_environment_separation_and_capability_envelope_CANDIDATE_02.md` (78876 bytes, sha256 4a676c4698411db6743d591595918e4ba7af221b7a7b67d86e807925d8b47bf2); `HANDOFF_kalshi_demo_environment_separation_and_capability_envelope_spec_CANDIDATE_02.md` (14114 bytes, sha256 a47d623c4a80048909e4e9df8e4c11904ff0e763ab4e242028bd0c81dcedee6d)
+- Date: 2026-08-06
+- Decision: Marco reviewed Candidate 02 and issued decision `APPROVE`, meaning the exact candidate is suitable for Gustavo's acceptance decision. This review does not itself authorize implementation.
+- Status: `ACCEPTED`
+- Rationale: Independent review gate; Candidate 02 resolves the sole Candidate 01 blocker.
+- Evidence: `reviews/REVIEW_kalshi_demo_environment_separation_and_capability_envelope_spec.md`.
+- Scope affected: Kalshi Demo environment-separation specification candidate lineage.
+- Superseded decisions: none.
+- User approval reference: n/a (Marco review, not Gustavo decision).
+- Authorizes further work: `NO`
+
+### DEC-0021
+- Candidate ID: `CANDIDATE_02` (Kalshi Demo environment separation)
+- Bound artifact identities: `SPEC_kalshi_demo_environment_separation_and_capability_envelope_CANDIDATE_02.md` (78876 bytes, sha256 4a676c4698411db6743d591595918e4ba7af221b7a7b67d86e807925d8b47bf2); `HANDOFF_kalshi_demo_environment_separation_and_capability_envelope_spec_CANDIDATE_02.md` (14114 bytes, sha256 a47d623c4a80048909e4e9df8e4c11904ff0e763ab4e242028bd0c81dcedee6d)
+- Date: 2026-08-06
+- Decision: Gustavo accepted the exact Candidate 02 specification and Bruno handoff identities. Candidate 01 remains blocked and non-authorizing.
+- Status: `ACCEPTED`
+- Rationale: Explicit Gustavo acceptance of the reviewed correction candidate.
+- Evidence: Gustavo-posted Neo canonical-installation dispatch, "Gustavo acceptance binding" section.
+- Scope affected: Kalshi Demo environment-separation specification lifecycle.
+- Superseded decisions: none.
+- User approval reference: Gustavo's exact Candidate 02 acceptance statement referenced in the canonical-installation dispatch.
+- Authorizes further work: `NO` (acceptance alone does not authorize installation or implementation).
+
+### DEC-0022
+- Candidate ID: `CANDIDATE_02` (Kalshi Demo environment separation)
+- Date: 2026-08-06
+- Decision: Gustavo separately authorized a bounded documentation-only canonical-installation package under authorization ID `GUSTAVO_KALSHI_DEMO_ENVIRONMENT_SEPARATION_SPEC_CANDIDATE_02_CANONICAL_INSTALLATION_01`, naming Neo as the authorized implementation agent, under repository-transfer mode `MANUAL_BROWSER_TEMPORARY_BRANCH`. This is a bounded documentation-only canonical-installation authorization; it is not Candidate acceptance and it is not technical implementation authorization.
+- Status: `ACCEPTED`
+- Rationale: Separate installation authorization event, distinct from candidate acceptance; does not authorize technical implementation, tests, venue access, credentials, funding, orders, cancellations, or trading.
+- Evidence: Gustavo-posted implementation-dispatch prompt in Neo's current project chat; `project_context/AUTHORIZATION_LOG.md` entry `AUTH-0016`.
+- Scope affected: this canonical-installation task only.
+- Superseded decisions: none.
+- User approval reference: `GUSTAVO_KALSHI_DEMO_ENVIRONMENT_SEPARATION_SPEC_CANDIDATE_02_CANONICAL_INSTALLATION_01`.
+- Authorizes further work: `YES` — bounded exclusively to the exact documentation-only canonical-installation package identified by `GUSTAVO_KALSHI_DEMO_ENVIRONMENT_SEPARATION_SPEC_CANDIDATE_02_CANONICAL_INSTALLATION_01`.
+- Note: This is an installation authorization, not an acceptance event. It authorizes no technical implementation, tests, venue access, credential use, funding, order activity, trading, or later phase.

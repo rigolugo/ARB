@@ -18,7 +18,11 @@ Detailed orchestration and restart entry point for this project. This document r
 10. `reviews/REVIEW_repository_bootstrap_spec.md`
 11. `handoffs/HANDOFF_repository_bootstrap_spec.md`
 12. `handoffs/HANDOFF_repository_bootstrap_implementation.md`
-13. relevant `project_context/ARTIFACT_INDEX.md` entries
+13. `specifications/SPEC_kalshi_demo_environment_separation_and_capability_envelope.md`
+14. `handoffs/HANDOFF_kalshi_demo_environment_separation_and_capability_envelope_spec.md`
+15. `reviews/REVIEW_kalshi_demo_environment_separation_and_capability_envelope_spec.md`
+16. `handoffs/HANDOFF_kalshi_demo_environment_separation_and_capability_envelope_implementation.md`
+17. relevant `project_context/ARTIFACT_INDEX.md` entries
 
 ## 3. Source-of-truth hierarchy
 
@@ -39,7 +43,14 @@ Every material change follows: proposal, independent Marco review, explicit Gust
 
 ## 6. Current phase
 
-The Candidate 10 documentation bootstrap is installed and accepted. The canonical accepted implementation commit is `e136be0b80f0370572e889d1075a11fc1b445348`. No later phase is active or authorized.
+The Candidate 10 documentation bootstrap is installed and accepted. The canonical accepted implementation commit is `e136be0b80f0370572e889d1075a11fc1b445348`.
+
+In addition, the Kalshi Demo environment-separation and capability-envelope specification Candidate 02 (Bruno's specification and handoff) is accepted by Gustavo and canonically installed by this task, together with Marco's approval review and this implementation handoff, as governance/specification records. This installation is documentation-only:
+
+1. accepted and canonically installed specification/governance records: the Candidate 02 specification, Bruno's specification handoff, Marco's approval review, and this implementation handoff are now canonical repository records;
+2. unstarted and unauthorized technical implementation: no validator, configuration parser, transport, authentication, connectivity, venue adapter, market data, order, fill, ledger, strategy, or trading source or test exists, and none is authorized by this installation.
+
+No later technical phase is active or authorized.
 
 ## 7. Record locations
 
@@ -47,6 +58,10 @@ The Candidate 10 documentation bootstrap is installed and accepted. The canonica
 - Marco's approval review: `reviews/REVIEW_repository_bootstrap_spec.md`
 - Bruno's specification handoff: `handoffs/HANDOFF_repository_bootstrap_spec.md`
 - Marco's implementation handoff: `handoffs/HANDOFF_repository_bootstrap_implementation.md`
+- Accepted Kalshi Demo environment-separation specification: `specifications/SPEC_kalshi_demo_environment_separation_and_capability_envelope.md`
+- Bruno's Kalshi Demo specification handoff: `handoffs/HANDOFF_kalshi_demo_environment_separation_and_capability_envelope_spec.md`
+- Marco's Kalshi Demo approval review: `reviews/REVIEW_kalshi_demo_environment_separation_and_capability_envelope_spec.md`
+- Marco's Kalshi Demo canonical-installation implementation handoff: `handoffs/HANDOFF_kalshi_demo_environment_separation_and_capability_envelope_implementation.md`
 - Current state: `project_context/PROJECT_STATE.md`
 - Decisions: `project_context/DECISION_LOG.md`
 - Authorizations: `project_context/AUTHORIZATION_LOG.md`

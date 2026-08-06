@@ -16,7 +16,7 @@ Canonical repository: `rigolugo/ARB`.
 
 ## 4. Current authorized phase
 
-The Candidate 10 documentation bootstrap is complete and has been accepted by Gustavo. No subsequent technical phase is currently authorized. All Kalshi Demo, Kalshi production, and Polymarket venue access, all credential use, all account funding, and all order, cancellation, and trading activity remain prohibited.
+The Candidate 10 documentation bootstrap is complete and has been accepted by Gustavo. Gustavo separately accepted the exact Kalshi Demo environment-separation and capability-envelope specification Candidate 02 (Bruno's specification and handoff identities) and separately authorized this bounded documentation-only canonical installation, which records those accepted Candidate 02 artifacts and Marco's approval review in this repository. No validator, configuration-parser, transport, authentication, connectivity, venue-adapter, market-data, order, fill, ledger, strategy, or trading implementation is authorized by this installation. No subsequent technical phase is currently authorized. All Kalshi Demo, Kalshi production, and Polymarket venue access, all credential use, all account funding, and all order, cancellation, and trading activity remain prohibited.
 
 ## 5. Canonical read order
 
@@ -32,7 +32,11 @@ The Candidate 10 documentation bootstrap is complete and has been accepted by Gu
 10. `reviews/REVIEW_repository_bootstrap_spec.md`
 11. `handoffs/HANDOFF_repository_bootstrap_spec.md`
 12. `handoffs/HANDOFF_repository_bootstrap_implementation.md`
-13. relevant `project_context/ARTIFACT_INDEX.md` entries
+13. `specifications/SPEC_kalshi_demo_environment_separation_and_capability_envelope.md`
+14. `handoffs/HANDOFF_kalshi_demo_environment_separation_and_capability_envelope_spec.md`
+15. `reviews/REVIEW_kalshi_demo_environment_separation_and_capability_envelope_spec.md`
+16. `handoffs/HANDOFF_kalshi_demo_environment_separation_and_capability_envelope_implementation.md`
+17. relevant `project_context/ARTIFACT_INDEX.md` entries
 
 ## 6. Prohibited sensitive content
 
