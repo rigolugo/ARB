@@ -1,0 +1,83 @@
+# Environment and credentials
+.env
+.env.*
+!.env.example
+*.pem
+*.key
+*.crt
+*.p12
+credentials.json
+credentials.yaml
+credentials.yml
+secrets/
+
+# Local configuration overrides
+*.local.yaml
+*.local.yml
+*.local.json
+config.local.*
+
+# Caches
+__pycache__/
+*.pyc
+.pytest_cache/
+.mypy_cache/
+.ruff_cache/
+.cache/
+node_modules/
+
+# Virtual environments
+.venv/
+venv/
+env/
+
+# Build output
+build/
+dist/
+*.egg-info/
+
+# Test caches and coverage output
+.coverage
+.coverage.*
+htmlcov/
+coverage.xml
+
+# Editor files
+.vscode/
+.idea/
+*.swp
+*.swo
+
+# Operating-system files
+.DS_Store
+Thumbs.db
+
+# Runtime logs
+*.log
+logs/
+
+# Local databases
+*.db
+*.sqlite
+*.sqlite3
+
+# Downloaded raw data
+data/raw/
+downloads/
+
+# Generated trading or account artifacts
+artifacts/*
+!artifacts/.gitkeep
+
+# Temporary files
+*.tmp
+*.temp
+tmp/
+
+# Local state and recovery snapshots
+*.state
+*.snapshot
+
+# Future runtime secrets and token caches
+.token_cache/
+*.token
