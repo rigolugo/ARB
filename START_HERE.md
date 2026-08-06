@@ -16,7 +16,7 @@ Canonical repository: `rigolugo/ARB`.
 
 ## 4. Current authorized phase
 
-Documentation bootstrap only. No source code, tests, venue access, credentials, funding, orders, cancellations, or trading are authorized by this phase.
+The Candidate 10 documentation bootstrap is complete and has been accepted by Gustavo. No subsequent technical phase is currently authorized. All Kalshi Demo, Kalshi production, and Polymarket venue access, all credential use, all account funding, and all order, cancellation, and trading activity remain prohibited.
 
 ## 5. Canonical read order
 

@@ -39,7 +39,7 @@ Every material change follows: proposal, independent Marco review, explicit Gust
 
 ## 6. Current phase
 
-Documentation bootstrap. The canonical bootstrap records below were installed under the accepted Candidate 10 specification and a bounded Neo implementation dispatch.
+The Candidate 10 documentation bootstrap is installed and accepted. The canonical accepted implementation commit is `e136be0b80f0370572e889d1075a11fc1b445348`. No later phase is active or authorized.
 
 ## 7. Record locations
 

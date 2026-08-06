@@ -119,6 +119,24 @@ Append-only capability ledger, separate from `DECISION_LOG.md`, constrained by `
 - Related Bruno handoff identity: `HANDOFF_repository_bootstrap_spec_CANDIDATE_10.md` (see AUTH-0009)
 - Related implementation handoff: `HANDOFF_repository_bootstrap_implementation_CANDIDATE_10.md`, 9226 bytes, sha256 `a7be9eea76e17cf8729bb256d864bb60fd7a92bb1347db32bea16977a7d4cd71`
 
+### AUTH-0011 — Bootstrap implementation authorization completion
+- Related authorization: `GUSTAVO_CANDIDATE_10_REPOSITORY_BOOTSTRAP_IMPLEMENTATION_01` (see AUTH-0010)
+- Date: 2026-08-06
+- Completion condition satisfied: yes — implementation accepted at commit `e136be0b80f0370572e889d1075a11fc1b445348`
+- Status: `COMPLETED`
+- Grants new capabilities: `NO`
+- Demo reads: `PROHIBITED`
+- Demo writes: `PROHIBITED`
+- Production reads: `PROHIBITED`
+- Production writes: `PROHIBITED`
+- Credential use: `PROHIBITED`
+- Account funding: `PROHIBITED`
+- Orders: `PROHIBITED`
+- Cancellations: `PROHIBITED`
+- Trading: `PROHIBITED`
+- Later-phase work: `PROHIBITED`
+- Note: this completion entry closes AUTH-0010. It does not authorize any subsequent technical phase. Any further work requires its own separate bounded specification, review, and authorization.
+
 ## Required historical authorization distinction (preserved verbatim in effect)
 
 1. **Original Candidate 01 authorization** — see AUTH-0001.

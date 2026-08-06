@@ -203,3 +203,16 @@ Entry schema: Decision ID, Candidate ID (if applicable), Bound artifact identiti
 - Superseded decisions: none.
 - User approval reference: `GUSTAVO_CANDIDATE_10_REPOSITORY_BOOTSTRAP_IMPLEMENTATION_01`.
 - Authorizes further work: `NO` (Marco review and Gustavo acceptance remain separate, later events).
+
+### DEC-0018
+- Candidate ID: `CANDIDATE_10`
+- Accepted implementation commit: `e136be0b80f0370572e889d1075a11fc1b445348`
+- Date: 2026-08-06
+- Decision: Gustavo accepted the installed Candidate 10 repository-bootstrap implementation at canonical `main` commit `e136be0b80f0370572e889d1075a11fc1b445348`.
+- Status: `ACCEPTED`
+- Rationale: Explicit Gustavo acceptance closes the Candidate 10 documentation-bootstrap implementation lifecycle.
+- Evidence: Gustavo's exact acceptance statement issued in Marco's current project chat; canonical `main` accepted implementation commit `e136be0b80f0370572e889d1075a11fc1b445348`.
+- Scope affected: repository-bootstrap implementation lifecycle.
+- Superseded decisions: none.
+- User approval reference: Gustavo's exact acceptance statement: "I accept the installed Candidate 10 repository-bootstrap implementation at canonical main commit e136be0b80f0370572e889d1075a11fc1b445348."
+- Authorizes further work: `NO`. No later technical phase is authorized by this acceptance.
