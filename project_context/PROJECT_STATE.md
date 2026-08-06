@@ -8,14 +8,14 @@ Authority level: canonical current-state snapshot. This document does not author
 - Visibility: public
 - Default branch: `main`
 - Accepted bootstrap implementation commit: `e136be0b80f0370572e889d1075a11fc1b445348`
-- Acceptance-closure installation base: `e136be0b80f0370572e889d1075a11fc1b445348`
+- Accepted Kalshi Demo environment-separation (Candidate 02) canonical documentation implementation commit: `3d19bd9f3d3610f4af0304bfd3ecf833cfd8420d`
 - Current canonical `main`: must be reverified directly from the repository before reliance or further work; this record does not predeclare the SHA of its own installation commit.
 
 ## 2. Current phase
 
 `KALSHI_DEMO_ENVIRONMENT_SEPARATION_SPEC_ACCEPTED_AND_INSTALLED`
 
-The prior phase, `DOCUMENTATION_BOOTSTRAP_COMPLETE`, remains true of the repository-bootstrap workstream; this phase records the additional, separate acceptance and canonical installation of the Kalshi Demo environment-separation and capability-envelope specification (Candidate 02).
+The prior phase, `DOCUMENTATION_BOOTSTRAP_COMPLETE`, remains true of the repository-bootstrap workstream. The Kalshi Demo environment-separation and capability-envelope specification (Candidate 02) documentation-only canonical installation was reviewed by Marco, approved for the remote installation commit, and explicitly accepted by Gustavo at exact commit `3d19bd9f3d3610f4af0304bfd3ecf833cfd8420d`. That installation lifecycle is `ACCEPTED_AND_CLOSURE_AUTHORIZED`; see `project_context/AUTHORIZATION_LOG.md` entry `AUTH-0017` and `project_context/DECISION_LOG.md` entry `DEC-0023`.
 
 ## 3. Current authorization state
 
@@ -42,6 +42,8 @@ The completed bootstrap implementation authorization is distinct from the Candid
 - Marco's Candidate 02 canonical-installation implementation handoff: issued.
   - `HANDOFF_kalshi_demo_environment_separation_and_capability_envelope_implementation_CANDIDATE_02.md`, 18572 bytes, sha256 `19ec68c938d2d72dfa769dfc4c40e638d1e5f97f2590abf4928a73b2ba720982`
 - This documentation-only canonical installation was performed under authorization `GUSTAVO_KALSHI_DEMO_ENVIRONMENT_SEPARATION_SPEC_CANDIDATE_02_CANONICAL_INSTALLATION_01`; it consumes no venue or credential capability.
+- Marco approved the remote installation commit `3d19bd9f3d3610f4af0304bfd3ecf833cfd8420d`.
+- Gustavo explicitly accepted the installed Candidate 02 canonical documentation implementation at exact commit `3d19bd9f3d3610f4af0304bfd3ecf833cfd8420d`. The Candidate 02 documentation-installation lifecycle is accepted and closed.
 - Active technical implementation authorization for the Kalshi Demo environment-separation specification: none.
 - No source code or tests exist for this specification.
 - No Kalshi Demo or production request occurred.
@@ -100,11 +102,16 @@ No technical implementation is authorized until these are resolved and a separat
 - Raw bytes: `78876`
 - SHA-256: `4a676c4698411db6743d591595918e4ba7af221b7a7b67d86e807925d8b47bf2`
 - Canonical target: `specifications/SPEC_kalshi_demo_environment_separation_and_capability_envelope.md`
-- Status: accepted by Gustavo and installed by this documentation-only package, subject to later Marco review of the resulting repository commit. Candidate 02 was not superseded by, and does not supersede, Candidate 10; the two are independent accepted specifications. This acceptance and installation do not authorize technical implementation.
+- Status: accepted by Gustavo and canonically installed at commit `3d19bd9f3d3610f4af0304bfd3ecf833cfd8420d`, following Marco's approval of that remote installation commit and Gustavo's explicit acceptance of the installed implementation. The Candidate 02 documentation-installation lifecycle is accepted and closed. Candidate 02 was not superseded by, and does not supersede, Candidate 10; the two are independent accepted specifications. This acceptance and installation do not authorize technical implementation.
 
 ## 10. Latest accepted implementation
 
-This documentation bootstrap, installed on branch `candidate-10-repository-bootstrap` from base `da629e93ce9255c28ecb485ee2b67bfc0c0ccb86`. Gustavo has accepted this implementation at accepted implementation commit `e136be0b80f0370572e889d1075a11fc1b445348`. Current canonical `main` must be reverified directly from the repository before reliance or further work.
+Two independent accepted implementations exist in this repository:
+
+1. The repository-bootstrap documentation implementation, installed on branch `candidate-10-repository-bootstrap` from base `da629e93ce9255c28ecb485ee2b67bfc0c0ccb86`. Gustavo accepted this implementation at accepted implementation commit `e136be0b80f0370572e889d1075a11fc1b445348`.
+2. The Kalshi Demo environment-separation and capability-envelope specification (Candidate 02) canonical documentation installation, prepared across bounded correction packages from base `e35d56dda77819f0066447e18a0a2dc5bac2bb88`, transferred to `main` via the manual browser temporary-branch workflow, reviewed and approved by Marco, and explicitly accepted by Gustavo at accepted implementation commit `3d19bd9f3d3610f4af0304bfd3ecf833cfd8420d`.
+
+Current canonical `main` must be reverified directly from the repository before reliance or further work.
 
 ## 11. Latest verified test evidence
 
@@ -126,8 +133,8 @@ The Kalshi Demo environment-separation and capability-envelope specification Can
 
 ## 14. Last updated and approving authority
 
-Updated by Neo under authorization `GUSTAVO_KALSHI_DEMO_ENVIRONMENT_SEPARATION_SPEC_CANDIDATE_02_CANONICAL_INSTALLATION_01`, as corrected by bounded correction package authorization `GUSTAVO_KALSHI_DEMO_ENVIRONMENT_SEPARATION_SPEC_CANDIDATE_02_CANONICAL_INSTALLATION_PACKAGE_02`, performing the bounded documentation-only canonical installation of the accepted Kalshi Demo environment-separation and capability-envelope specification Candidate 02, Bruno's handoff, Marco's approval review, and Marco's canonical-installation implementation handoff, with corrected plural active-specifications and split unresolved-state sections. This installation does not itself authorize technical implementation, tests, venue access, credentials, funding, orders, cancellations, or trading.
+Updated by Neo under authorization `GUSTAVO_KALSHI_DEMO_ENVIRONMENT_SEPARATION_SPEC_CANDIDATE_02_INSTALLATION_ACCEPTANCE_CLOSURE_PACKAGE_01`, recording the completed lifecycle of the Kalshi Demo environment-separation and capability-envelope specification Candidate 02 canonical documentation installation: Bruno's accepted specification and handoff, Marco's approval review, Marco's canonical-installation implementation handoff, Marco's approval of the remote installation commit, and Gustavo's explicit acceptance of the installed implementation at commit `3d19bd9f3d3610f4af0304bfd3ecf833cfd8420d`. This closure record does not itself authorize technical implementation, tests, venue access, credentials, funding, orders, cancellations, or trading.
 
 ## 15. Staleness check
 
-This snapshot reflects repository state as of commit-time on branch `neo-c02-kalshi-demo-spec-installation-p02` from base `e35d56dda77819f0066447e18a0a2dc5bac2bb88`. Current canonical `main` must be reverified directly from the repository before reliance or further work. This record does not predeclare the SHA of its own installation commit.
+This snapshot reflects repository state as of commit-time on branch `neo-c02-installation-acceptance-closure-01` from accepted canonical base `3d19bd9f3d3610f4af0304bfd3ecf833cfd8420d`. Current canonical `main` must be reverified directly from the repository before reliance or further work. This record does not predeclare the SHA of its own closure-package installation commit.

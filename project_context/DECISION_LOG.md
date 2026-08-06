@@ -267,3 +267,16 @@ Entry schema: Decision ID, Candidate ID (if applicable), Bound artifact identiti
 - User approval reference: `GUSTAVO_KALSHI_DEMO_ENVIRONMENT_SEPARATION_SPEC_CANDIDATE_02_CANONICAL_INSTALLATION_01`.
 - Authorizes further work: `YES` — bounded exclusively to the exact documentation-only canonical-installation package identified by `GUSTAVO_KALSHI_DEMO_ENVIRONMENT_SEPARATION_SPEC_CANDIDATE_02_CANONICAL_INSTALLATION_01`.
 - Note: This is an installation authorization, not an acceptance event. It authorizes no technical implementation, tests, venue access, credential use, funding, order activity, trading, or later phase.
+
+### DEC-0023
+- Candidate ID: `CANDIDATE_02` (Kalshi Demo environment separation)
+- Date: 2026-08-06
+- Decision: Records the completed Candidate 02 canonical documentation installation lifecycle, distinguishing: (1) Candidate 02 specification acceptance was the earlier exact-artifact acceptance (see DEC-0021); (2) the canonical-installation authorization was a separate bounded documentation authorization (see DEC-0022); (3) Marco's remote-commit approval was a separate independent review event; (4) Gustavo's final installed-implementation acceptance applies to exact commit `3d19bd9f3d3610f4af0304bfd3ecf833cfd8420d`; (5) Gustavo separately authorized this exact documentation-only acceptance-closure package to record that completed lifecycle.
+- Status: `ACCEPTED_AND_CLOSURE_AUTHORIZED`
+- Rationale: Independent review gate followed by explicit Gustavo acceptance closes the Candidate 02 canonical documentation installation lifecycle.
+- Evidence: Marco's approval of remote installation commit `3d19bd9f3d3610f4af0304bfd3ecf833cfd8420d`; Gustavo's exact installed-implementation acceptance statement; Gustavo-posted acceptance-closure dispatch in Neo's current project chat; `project_context/AUTHORIZATION_LOG.md` entry `AUTH-0017`.
+- Scope affected: Candidate 02 canonical documentation installation lifecycle and this exact record-only closure package.
+- Superseded decisions: none.
+- User approval reference: `GUSTAVO_KALSHI_DEMO_ENVIRONMENT_SEPARATION_SPEC_CANDIDATE_02_INSTALLATION_ACCEPTANCE_CLOSURE_PACKAGE_01`.
+- Authorizes further work: `YES` only for the exact documentation-only acceptance-closure package identified by `GUSTAVO_KALSHI_DEMO_ENVIRONMENT_SEPARATION_SPEC_CANDIDATE_02_INSTALLATION_ACCEPTANCE_CLOSURE_PACKAGE_01`.
+- Note: No technical implementation is authorized. No tests are authorized. No venue or credential access is authorized. No funding, order, cancellation, paper-trading, or live-trading capability is authorized. No later phase is authorized.

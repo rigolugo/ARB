@@ -244,6 +244,40 @@ Candidate 10 correction authorization (AUTH-0008) shall not be represented as an
 - Related implementation handoff: `HANDOFF_kalshi_demo_environment_separation_and_capability_envelope_implementation_CANDIDATE_02.md`, 18572 bytes, sha256 `19ec68c938d2d72dfa769dfc4c40e638d1e5f97f2590abf4928a73b2ba720982`
 - Completion semantics: this authorization is consumed by the exact reviewed installation commit and grants no technical implementation, tests, venue, credential, funding, order, cancellation, or trading capability.
 
+### AUTH-0017 — Candidate 02 installed documentation acceptance and closure authorization
+- Authorization ID: `GUSTAVO_KALSHI_DEMO_ENVIRONMENT_SEPARATION_SPEC_CANDIDATE_02_INSTALLATION_ACCEPTANCE_CLOSURE_PACKAGE_01`
+- Authorizing user: Gustavo
+- Authorized agent: Neo
+- Date: 2026-08-06
+- Candidate ID: `CANDIDATE_02`
+- Classification: `DOCUMENTATION_ONLY_CANONICAL_ACCEPTANCE_CLOSURE`
+- Gustavo explicitly accepted the installed Candidate 02 canonical documentation implementation at: `3d19bd9f3d3610f4af0304bfd3ecf833cfd8420d`
+- Related prior installation authorization: `GUSTAVO_KALSHI_DEMO_ENVIRONMENT_SEPARATION_SPEC_CANDIDATE_02_CANONICAL_INSTALLATION_01`
+- The prior installation authorization is completed and consumed by the exact accepted installation commit.
+- Exact permitted repository paths: `project_context/PROJECT_STATE.md`; `project_context/AUTHORIZATION_LOG.md`; `project_context/DECISION_LOG.md`; `project_context/ARTIFACT_INDEX.md` only
+- Repository-transfer mode: `MANUAL_BROWSER_TEMPORARY_BRANCH`
+- Network access: `PERMITTED` only for read-only canonical GitHub clone/fetch and exact-base verification
+- Local documentation changes: `PERMITTED` only for this closure
+- Local repository commit: `PERMITTED` exactly once on the authorized local branch
+- Package, detached checksum, manifest, and deterministic review evidence: `PERMITTED`
+- Neo push: `PROHIBITED`
+- Remote branch creation: `PROHIBITED` for Neo
+- Modification of `main`: `PROHIBITED` for Neo
+- Technical implementation: `PROHIBITED`
+- Source code: `PROHIBITED`
+- Test source and test execution: `PROHIBITED`
+- Project imports and package installation: `PROHIBITED`
+- Kalshi Demo reads and writes: `PROHIBITED`
+- Kalshi production reads and writes: `PROHIBITED`
+- Polymarket reads and writes: `PROHIBITED`
+- Credential, private-key, account, balance, portfolio, and position access: `PROHIBITED`
+- Funding: `PROHIBITED`
+- Orders, amendments, cancellations, paper trading, and live trading: `PROHIBITED`
+- Later-phase work: `PROHIBITED`
+- Completion condition: preparation and return of the exact closure package for Marco review; canonical effect occurs only after later reviewed browser transfer and non-force fast-forward.
+- Grants new technical capability: `NO`
+- Note: this entry records both the accepted installation closure and the bounded authorization to prepare the record-only closure package. It does not imply that the closure package itself is already installed or accepted.
+
 ## All non-bootstrap capabilities
 
 All capabilities not explicitly listed as `PERMITTED` in an active, non-revoked entry above are `PROHIBITED`, including Kalshi Demo access, Kalshi production access, Polymarket interaction, credentials beyond the authorized GitHub push, account funding, order submission, cancellation, and trading.
