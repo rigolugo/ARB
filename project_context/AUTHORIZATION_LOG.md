@@ -1,6 +1,8 @@
 # AUTHORIZATION_LOG
 
-Append-only capability ledger, separate from `DECISION_LOG.md`, constrained by `project_context/GUARDRAILS.md`. Every capability field contains `PERMITTED` or `PROHIBITED`; no blank, inherited, or candidate-carried-forward fields are allowed. History is preserved; revocation is a new entry, not a rewrite.
+Append-oriented capability audit ledger, separate from `DECISION_LOG.md`, constrained by `project_context/GUARDRAILS.md`. Historical entries are preserved; revocation, correction, or supersession is recorded by a new entry rather than rewriting history.
+
+A bounded exact Gustavo current-chat dispatch may itself be operative task authorization. This log records authorization history and need not pre-exist an already-authorized task unless the task explicitly makes a log record a prerequisite. A log entry cannot retroactively authorize out-of-scope activity or fill a missing capability; omitted, malformed, unknown, or ambiguous capability remains `PROHIBITED`.
 
 ---
 
@@ -392,6 +394,32 @@ Candidate 10 correction authorization (AUTH-0008) shall not be represented as an
 - Grants new technical capability: `NO`
 - Note: this entry does not claim that Closure 03 is already installed or accepted. Canonical effect, if any, occurs only after Marco's independent review, browser transfer, and any permitted non-force fast-forward. See `project_context/DECISION_LOG.md` entry `DEC-0028`.
 
-## All non-bootstrap capabilities
+### AUTH-0023 — ARB Workflow Simplification Amendment 01 canonical installation 02 authorization
+- Authorization ID: `ARB_WORKFLOW_SIMPLIFICATION_AMENDMENT_01_CANONICAL_INSTALLATION_02`
+- Authorizing user: Gustavo
+- Authorized agent: Bruno
+- Date: 2026-08-07
+- Task/phase: `ARB_WORKFLOW_SIMPLIFICATION_AMENDMENT_01_CANONICAL_INSTALLATION_02`
+- Classification: `DOCUMENTATION_GOVERNANCE_IMPLEMENTATION_BOUNDED_CORRECTION_ONLY`
+- Risk tier: `LOW`
+- Temporary role exception: Bruno is authorized for this bounded documentation/governance installation work only; Bruno's standing specification-author role is unchanged.
+- Blocked predecessor: `ARB_WORKFLOW_SIMPLIFICATION_AMENDMENT_01_CANONICAL_INSTALLATION_01`; its commit must not be stacked, amended, cherry-picked, merged, or used as ancestry.
+- Controlling specification: `ARB_WORKFLOW_SIMPLIFICATION_AMENDMENT_01_CANDIDATE_02.md` (`69863` bytes, sha256 `5931cf008435e03883098c4aca5020be01e696e6c99d356c6780ab6a03067b8c`), unchanged.
+- Exact canonical base: `6252833f5e315d171c5c4a7002e79ec278ddc888`
+- Exact writable repository paths (eight only): `START_HERE.md`; `project_context/START_HERE.md`; `project_context/AGENT_ROLES.md`; `project_context/PROJECT_STATE.md`; `project_context/AUTHORIZATION_LOG.md`; `project_context/DECISION_LOG.md`; `project_context/PROJECT_AGENT_DISPATCH_AUTHORITY.md`; `BROWSER_BRANCH_REPOSITORY_TRANSFER_WORKFLOW.md`
+- Protected/prohibited paths include: `project_context/GUARDRAILS.md`; `project_context/ARTIFACT_INDEX.md`; `specifications/**`; `handoffs/**`; `reviews/**`; `src/**`; `tests/**`; runtime/configuration; credential/secret; venue implementation paths; and every other unlisted repository path.
+- Repository read-only sync for Bruno: `PERMITTED` only as needed to obtain/verify exact canonical `rigolugo/ARB` base.
+- Repository-transfer mode: `MANUAL_BROWSER_TEMPORARY_BRANCH`
+- `marco_fast_forward_main_after_approval`: `PERMITTED`
+- Bruno push: `PROHIBITED`; remote branch creation: `PROHIBITED`; remote `main` modification: `PROHIBITED`.
+- Source code: `PROHIBITED`; tests/test execution: `PROHIBITED`; project imports: `PROHIBITED`; package installation: `PROHIBITED`.
+- Kalshi/Polymarket requests: `PROHIBITED`; credentials/signing/account access: `PROHIBITED`; funding/orders/cancellations/paper/live trading/connectivity-preflight: `PROHIBITED`.
+- `same_scope_corrections_after_marco_block`: `PROHIBITED` for this authorization because no `PERMITTED` field was stated.
+- Required output: one fresh atomic local documentation/governance commit directly parented by `6252833f5e315d171c5c4a7002e79ec278ddc888` plus `ARB_WORKFLOW_SIMPLIFICATION_AMENDMENT_01_CANONICAL_INSTALLATION_02.zip`, detached checksum, compact manifest, and LOW-risk evidence.
+- Canonical effect: none until Marco review, manual-browser transfer, remote verification, and any permitted non-force fast-forward complete.
+- Later phase: `PROHIBITED`; no subsequent phase begins automatically.
+- Grants new technical capability: `NO`
 
-All capabilities not explicitly listed as `PERMITTED` in an active, non-revoked entry above are `PROHIBITED`, including Kalshi Demo access, Kalshi production access, Polymarket interaction, credentials beyond the authorized GitHub push, account funding, order submission, cancellation, and trading.
+## Capability default
+
+All capabilities not explicitly listed as `PERMITTED` by the operative bounded Gustavo authorization are `PROHIBITED`. The canonical entries above are audit history and may evidence an authorization, but they are not a prerequisite to an already-operative exact current-chat dispatch and cannot broaden it retroactively. Kalshi Demo access, Kalshi production access, Polymarket interaction, credentials/signing, account funding, order submission, cancellation, and trading remain prohibited unless the exact active authorization separately permits them.

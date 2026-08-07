@@ -1,6 +1,8 @@
 # DECISION_LOG
 
-Append-only record of project decisions. Decisions do not grant capabilities unless separately authorized in `AUTHORIZATION_LOG.md`. Historical entries are not rewritten; corrections and supersessions use new entries.
+Append-oriented record of project decisions. Historical entries are not rewritten; corrections and supersessions use new entries. This log is audit history, not a universal authorization prerequisite.
+
+A bounded exact Gustavo current-chat dispatch may itself authorize the exact task it states within `project_context/GUARDRAILS.md`. A decision or authorization log entry need not pre-exist that already-authorized task, cannot retroactively authorize out-of-scope activity, and cannot fill an omitted capability. Marco review direction does not grant capability.
 
 Entry schema: Decision ID, Candidate ID (if applicable), Bound artifact identities (if acceptance-related), Date, Decision, Status, Rationale, Evidence/reviewed artifact, Scope affected, Superseded decisions, User approval reference, Authorizes further work (`YES`/`NO`).
 
@@ -350,3 +352,15 @@ Entry schema: Decision ID, Candidate ID (if applicable), Bound artifact identiti
 - User approval reference: `GUSTAVO_KALSHI_DEMO_OFFLINE_VALIDATOR_IMPLEMENTATION_05_CANONICAL_STATE_CLOSURE_03_01`.
 - Authorizes further work: `NO` beyond this exact documentation closure task.
 - Note: This decision does not claim that Closure 03 is already installed or accepted. Canonical effect, if any, occurs only after Marco's independent review, browser transfer, and any permitted non-force fast-forward.
+
+### DEC-0029
+- Date: 2026-08-07
+- Decision: Records Gustavo's explicit current-chat authorization `ARB_WORKFLOW_SIMPLIFICATION_AMENDMENT_01_CANONICAL_INSTALLATION_02`, authorizing Bruno to prepare one fresh bounded documentation/governance correction to blocked `ARB_WORKFLOW_SIMPLIFICATION_AMENDMENT_01_CANONICAL_INSTALLATION_01` directly from exact canonical base `6252833f5e315d171c5c4a7002e79ec278ddc888`, across exactly eight named governance paths, with no blocked-predecessor ancestry.
+- Status: `AUTHORIZED_PREPARED_FOR_MARCO_REVIEW`
+- Rationale: Correct only the blocked Installation 01 defects: complete dispatch/correction/risk governance; add the accepted streamlined byte-identical remote-review rule; remove log-as-prerequisite contradictions; record Closure 03 as already canonical at `6252833f5e315d171c5c4a7002e79ec278ddc888`; simplify both START_HERE routers; and preserve protected bytes and historical AUTH/DEC entries.
+- Evidence: Gustavo's exact current-chat dispatch; controlling `ARB_WORKFLOW_SIMPLIFICATION_AMENDMENT_01_CANDIDATE_02.md` identity `69863` bytes / sha256 `5931cf008435e03883098c4aca5020be01e696e6c99d356c6780ab6a03067b8c`; canonical `main` observed at `6252833f5e315d171c5c4a7002e79ec278ddc888`; blocked Installation 01 package supplied as correction reference only.
+- Scope affected: exactly `START_HERE.md`; `project_context/START_HERE.md`; `project_context/AGENT_ROLES.md`; `project_context/PROJECT_STATE.md`; `project_context/AUTHORIZATION_LOG.md`; `project_context/DECISION_LOG.md`; `project_context/PROJECT_AGENT_DISPATCH_AUTHORITY.md`; and `BROWSER_BRANCH_REPOSITORY_TRANSFER_WORKFLOW.md`. Every other path is protected.
+- Superseded decisions: none. Blocked Installation 01 had no canonical audit entry or canonical effect at this base.
+- User approval reference: `ARB_WORKFLOW_SIMPLIFICATION_AMENDMENT_01_CANONICAL_INSTALLATION_02`.
+- Authorizes further work: `NO` beyond this exact preparation; no subsequent phase begins automatically.
+- Canonical effect: `NONE` at package preparation. Marco review is pending.
