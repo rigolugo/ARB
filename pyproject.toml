@@ -1,0 +1,6 @@
+[project]
+name = "arb"
+version = "0.1.0"
+description = "Prediction-market arbitrage research project (offline, non-trading utilities)."
+requires-python = ">=3.12"
+dependencies = []
