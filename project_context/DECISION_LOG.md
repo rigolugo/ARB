@@ -280,3 +280,73 @@ Entry schema: Decision ID, Candidate ID (if applicable), Bound artifact identiti
 - User approval reference: `GUSTAVO_KALSHI_DEMO_ENVIRONMENT_SEPARATION_SPEC_CANDIDATE_02_INSTALLATION_ACCEPTANCE_CLOSURE_PACKAGE_01`.
 - Authorizes further work: `YES` only for the exact documentation-only acceptance-closure package identified by `GUSTAVO_KALSHI_DEMO_ENVIRONMENT_SEPARATION_SPEC_CANDIDATE_02_INSTALLATION_ACCEPTANCE_CLOSURE_PACKAGE_01`.
 - Note: No technical implementation is authorized. No tests are authorized. No venue or credential access is authorized. No funding, order, cancellation, paper-trading, or live-trading capability is authorized. No later phase is authorized.
+
+### DEC-0024
+- Accepted implementation commit: `049ce4bdfebd39eee7e366431acea36ca3d55e18`
+- Date: 2026-08-07
+- Decision: Records the accepted and canonically installed Kalshi Demo offline environment-separation and capability-envelope validator implementation (`KALSHI_DEMO_ENVIRONMENT_SEPARATION_OFFLINE_VALIDATOR_IMPLEMENTATION_05`) and this separately bounded canonical-state closure authorization. Distinguishes exactly:
+  1. the Implementation 05 implementation authorization and correction lineage — a bounded technical implementation authorization covering Implementations 01 through 05, of which Implementations 01 through 04 were each independently blocked by Marco's review and Implementation 05 was independently approved;
+  2. Marco's independent implementation review — Marco's review of the submitted Implementation 05 package;
+  3. Marco's independent remote browser-commit review — Marco's separate review of the browser-created remote commit `049ce4bdfebd39eee7e366431acea36ca3d55e18`, resulting in formal decision `APPROVE`;
+  4. the non-force fast-forward installation at exact commit `049ce4bdfebd39eee7e366431acea36ca3d55e18`, a direct child of the exact prior canonical base `9e3643d5667f47fdfd4e7e89dcad046bcc0edbd6`;
+  5. this closure authorization, `GUSTAVO_KALSHI_DEMO_OFFLINE_VALIDATOR_IMPLEMENTATION_05_CANONICAL_STATE_CLOSURE_01`, which only permits recording the completed technical implementation state in exactly six governance/documentation paths, and does not itself authorize any new technical implementation, execution, connectivity, credential use, venue access, or trading.
+- Status: `ACCEPTED_AND_CLOSURE_AUTHORIZED`
+- Rationale: Independent implementation review, independent remote-commit review, and non-force fast-forward installation together close the Implementation 05 technical implementation lifecycle; this closure authorization separately and narrowly permits recording that completed state.
+- Evidence: Marco's independent review of the Implementation 05 package; Marco's independent review and `APPROVE` decision on remote commit `049ce4bdfebd39eee7e366431acea36ca3d55e18`; Neo's acceptance test run (CPython 3.12.3, `PYTHONPATH=src python -m unittest discover -s tests -p "test_*.py" -v`, 186/186 passed); Gustavo-posted canonical-state-closure dispatch in Neo's current project chat; `project_context/AUTHORIZATION_LOG.md` entry `AUTH-0018`.
+- Scope affected: Kalshi Demo offline environment-separation and capability-envelope validator implementation lifecycle, and this exact record-only closure package.
+- Superseded decisions: none. Does not supersede or reopen `DEC-0023` (the separate Candidate 02 documentation-only canonical-installation acceptance and closure).
+- User approval reference: `GUSTAVO_KALSHI_DEMO_OFFLINE_VALIDATOR_IMPLEMENTATION_05_CANONICAL_STATE_CLOSURE_01`.
+- Network access under the original `GUSTAVO_KALSHI_DEMO_OFFLINE_VALIDATOR_IMPLEMENTATION_05_CANONICAL_STATE_CLOSURE_01` authorization: `PROHIBITED`. That original authorization did not itself permit Neo to fetch or clone the canonical repository; see `AUTH-0019` and `DEC-0025` for the separate, later authorization that made the exact canonical base available.
+- Authorizes further work: `YES` only for this exact documentation closure task identified by `GUSTAVO_KALSHI_DEMO_OFFLINE_VALIDATOR_IMPLEMENTATION_05_CANONICAL_STATE_CLOSURE_01`; `NO` for connectivity, credentials, venue access, trading, and any later phase.
+- Note: No connectivity, network execution, credential use, venue access (Kalshi Demo, Kalshi production, or Polymarket), funding, order, cancellation, paper-trading, or live-trading capability is authorized by this decision or by the underlying accepted implementation. Demo results are not, and this decision does not represent them as, production evidence. The offline validator is not represented as a connectivity implementation, venue adapter, market-data implementation, order implementation, or trading implementation.
+
+### DEC-0025
+- Date: 2026-08-07
+- Decision: Records Gustavo's later, separate instruction, issued directly in chat: "update your local repo or clone again main." This instruction followed Neo's valid canonical-base-unavailable halt of `KALSHI_DEMO_OFFLINE_VALIDATOR_IMPLEMENTATION_05_CANONICAL_STATE_CLOSURE_01` (`status: BLOCKED`, blocker `LOCKED — CANONICAL BASELINE UNAVAILABLE_OFFLINE`), which occurred because exact canonical commit `049ce4bdfebd39eee7e366431acea36ca3d55e18` was not available in Neo's local repository and that task's own authorization did not itself permit repository synchronization. This decision authorized only the bounded read-only repository synchronization needed to obtain the exact canonical commit. The actual synchronization operation performed was `git fetch origin main`, followed by local fast-forward/update to the exact required base `049ce4bdfebd39eee7e366431acea36ca3d55e18`.
+- Status: `ACCEPTED`
+- Rationale: A narrowly bounded, explicit, one-time repository-read instruction resolving a correctly-identified offline blocker, distinct from and not expanding the substantive capability grant of the underlying documentation-closure task.
+- Evidence: Gustavo's exact chat instruction; Neo's prior `status: BLOCKED` return with blocker `LOCKED — CANONICAL BASELINE UNAVAILABLE_OFFLINE`; `git fetch origin main` and subsequent fast-forward to `049ce4bdfebd39eee7e366431acea36ca3d55e18`; `project_context/AUTHORIZATION_LOG.md` entry `AUTH-0019`.
+- Scope affected: local repository availability only, for the purpose of continuing the already-authorized `KALSHI_DEMO_OFFLINE_VALIDATOR_IMPLEMENTATION_05_CANONICAL_STATE_CLOSURE_01` documentation task. This decision's scope is limited solely to unblocking that task; it is not represented as authorizing repository synchronization for any later closure task. The later standing authorization (`AUTH-0020` / `DEC-0026`) separately covers repository synchronization for future separately authorized tasks, including Closure 02 or Closure 03 if actually needed.
+- Superseded decisions: none.
+- User approval reference: `GUSTAVO_NEO_CANONICAL_REPOSITORY_BASE_SYNC_01`.
+- Authorizes further work: `NO` — this decision authorized no technical implementation, no tests, no venue access, no credentials, no trading, and no remote repository write. It authorized only the described one-time read-only synchronization.
+
+### DEC-0026
+- Date: 2026-08-07
+- Decision: Records Gustavo's standing authorization permitting Neo to maintain a read-only local filesystem clone of `rigolugo/ARB` for future separately authorized tasks, so that a missing, stale, or behind-canonical local clone does not by itself require a new user authorization merely to become current. Bound to authorization ID `GUSTAVO_NEO_STANDING_CANONICAL_REPOSITORY_READ_ONLY_SYNC_01`.
+- Status: `ACCEPTED`
+- Rationale: Reduces repeated narrow one-time synchronization requests (as in `DEC-0025`) for a routine, read-only, fail-safe repository operation, while preserving the requirement that every material task still carry its own separate bounded authorization.
+- Evidence: Gustavo-posted standing-authorization terms in Neo's current project chat; `project_context/AUTHORIZATION_LOG.md` entry `AUTH-0020`.
+- Scope affected: local repository availability for `rigolugo/ARB` only, across future separately authorized Neo tasks.
+- Superseded decisions: none.
+- User approval reference: `GUSTAVO_NEO_STANDING_CANONICAL_REPOSITORY_READ_ONLY_SYNC_01`.
+- Permits only: canonical repository clone; fetch; fast-forward-only pull/update; checkout; ref retrieval; read-only verification.
+- Grants no: source changes; documentation changes; test changes; test execution; implementation; repository commits; remote writes; venue access; credentials; trading — by itself.
+- Authorizes further work: `NO`, except that read-only canonical repository synchronization may accompany an otherwise separately authorized Neo task.
+
+### DEC-0027
+- Date: 2026-08-07
+- Decision: Records Gustavo's explicit authorization of `KALSHI_DEMO_OFFLINE_VALIDATOR_IMPLEMENTATION_05_CANONICAL_STATE_CLOSURE_02`, bounded to the six documentation/governance paths (`START_HERE.md`; `project_context/START_HERE.md`; `project_context/PROJECT_STATE.md`; `project_context/AUTHORIZATION_LOG.md`; `project_context/DECISION_LOG.md`; `project_context/ARTIFACT_INDEX.md`). This authorization did not authorize technical implementation, tests, venue access, credentials, remote writes, or trading.
+- Status: `BLOCKED`
+- Marco's disposition: `BLOCK`
+- Reason: Closure 02 omitted its own authorization event from `AUTHORIZATION_LOG.md` and `DECISION_LOG.md`; contained incorrect/incomplete dates for the new August 7 authorization events (recorded as August 6); retrospectively broadened `DEC-0025`'s scope from Closure 01 alone to "Closure 01/02"; and left `PROJECT_STATE.md` referring to Closure 01 as the exact current closure task.
+- Canonical effect of Closure 02: `NONE`
+- Blocked local commit: `38bafc11024764b608894ffd3877a9097969a26d`
+- Rationale: Independent Marco review is required before any closure package's documentation corrections take canonical effect; Closure 02 failed that review for the reasons stated above and was not installed.
+- Evidence: Marco's independent review and `BLOCK` disposition of the Closure 02 package; Gustavo-posted Closure 03 correction dispatch in Neo's current project chat; `project_context/AUTHORIZATION_LOG.md` entry `AUTH-0021`.
+- Scope affected: `KALSHI_DEMO_OFFLINE_VALIDATOR_IMPLEMENTATION_05_CANONICAL_STATE_CLOSURE_02` lifecycle only. Does not affect the separately accepted and installed Implementation 05 technical implementation (see `DEC-0024`).
+- Superseded decisions: none.
+- User approval reference: none separately assigned in the original Closure 02 authorization instruction (see `AUTH-0021`).
+- Authorizes further work: `NO`.
+
+### DEC-0028
+- Date: 2026-08-07
+- Decision: Records Gustavo's explicit authorization `GUSTAVO_KALSHI_DEMO_OFFLINE_VALIDATOR_IMPLEMENTATION_05_CANONICAL_STATE_CLOSURE_03_01`, authorizing Neo to prepare `KALSHI_DEMO_OFFLINE_VALIDATOR_IMPLEMENTATION_05_CANONICAL_STATE_CLOSURE_03` as one bounded documentation/governance correction to blocked Closure 02, bounded to the same six documentation/governance paths as Closure 01 and Closure 02.
+- Status: `SUBMITTED_FOR_MARCO_REVIEW`
+- Rationale: Corrects the specific defects that caused Marco to block Closure 02 (missing own-authorization-event record, incorrect dates, over-broadened `DEC-0025` scope, and a stale `PROJECT_STATE.md` reference to Closure 01 as current), while preserving all otherwise-accurate Closure 01/02 content.
+- Evidence: Gustavo-posted Closure 03 correction dispatch in Neo's current project chat; `project_context/AUTHORIZATION_LOG.md` entry `AUTH-0022`.
+- Scope affected: this exact bounded documentation-closure correction task only.
+- Superseded decisions: none.
+- User approval reference: `GUSTAVO_KALSHI_DEMO_OFFLINE_VALIDATOR_IMPLEMENTATION_05_CANONICAL_STATE_CLOSURE_03_01`.
+- Authorizes further work: `NO` beyond this exact documentation closure task.
+- Note: This decision does not claim that Closure 03 is already installed or accepted. Canonical effect, if any, occurs only after Marco's independent review, browser transfer, and any permitted non-force fast-forward.

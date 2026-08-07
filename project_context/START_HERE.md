@@ -45,12 +45,14 @@ Every material change follows: proposal, independent Marco review, explicit Gust
 
 The Candidate 10 documentation bootstrap is installed and accepted. The canonical accepted implementation commit is `e136be0b80f0370572e889d1075a11fc1b445348`.
 
-In addition, the Kalshi Demo environment-separation and capability-envelope specification Candidate 02 (Bruno's specification and handoff) is accepted by Gustavo and canonically installed by this task, together with Marco's approval review and this implementation handoff, as governance/specification records. This installation is documentation-only:
+In addition, the Kalshi Demo environment-separation and capability-envelope specification Candidate 02 (Bruno's specification and handoff) is accepted by Gustavo and canonically installed, together with Marco's approval review and the canonical-installation implementation handoff, as governance/specification records. This installation is documentation-only:
 
-1. accepted and canonically installed specification/governance records: the Candidate 02 specification, Bruno's specification handoff, Marco's approval review, and this implementation handoff are now canonical repository records;
-2. unstarted and unauthorized technical implementation: no validator, configuration parser, transport, authentication, connectivity, venue adapter, market data, order, fill, ledger, strategy, or trading source or test exists, and none is authorized by this installation.
+1. accepted and canonically installed specification/governance records: the Candidate 02 specification, Bruno's specification handoff, Marco's approval review, and the canonical-installation implementation handoff are canonical repository records;
+2. accepted and canonically installed offline validator implementation: the Kalshi Demo offline environment-separation and capability-envelope validator (`KALSHI_DEMO_ENVIRONMENT_SEPARATION_OFFLINE_VALIDATOR_IMPLEMENTATION_05`) source and tests now exist in this repository at exact accepted commit `049ce4bdfebd39eee7e366431acea36ca3d55e18`, following a bounded implementation authorization, a lineage of bounded correction packages, Marco's independent review of the implementation package and of the browser-created remote commit, and Marco's non-force fast-forward of `main` after approval.
 
-No later technical phase is active or authorized.
+This offline validator is pure, offline, and non-secret: it performs no DNS resolution, no socket, HTTP, or WebSocket activity, no credential reads, no private-key parsing, and no signing, and it constructs no transport, signer, or venue client of any kind. It is not a connectivity implementation, venue adapter, market-data implementation, order implementation, or trading implementation.
+
+No connectivity, authentication, venue-adapter, market-data, order, fill, ledger, strategy, or trading source or test exists. No later technical phase beyond the accepted offline validator is active or authorized. Kalshi Demo network access requires a separately accepted connectivity-preflight specification and a separately bounded implementation/execution authorization; no such authorization currently exists.
 
 ## 7. Record locations
 
