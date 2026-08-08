@@ -24,6 +24,7 @@ Use:
 - `project_context/PROJECT_AGENT_DISPATCH_AUTHORITY.md` for current-chat dispatch and same-scope correction rules;
 - `project_context/PROJECT_STATE.md` for current accepted project state;
 - `project_context/AGENT_ROLES.md` for standing role boundaries;
+- `project_context/LOCAL_EXECUTION_ENVIRONMENT.md` for Gustavo's default Windows/Miniconda local execution and shell-command conventions;
 - `project_context/AUTHORIZATION_LOG.md` and `project_context/DECISION_LOG.md` for audit history; and
 - `BROWSER_BRANCH_REPOSITORY_TRANSFER_WORKFLOW.md` for repository-transfer procedure.
 

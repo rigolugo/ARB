@@ -1,178 +1,245 @@
 # PROJECT_STATE
 
-Authority level: canonical current-state snapshot. This document does not authorize work and does not create authorization on its own.
+Authority level: canonical current-state snapshot.
 
-## 1. Repository identity and baseline commit
+This document records accepted state facts only. It does not authorize work and does not create authorization on its own. Historical authorization and decision details remain in `AUTHORIZATION_LOG.md` and `DECISION_LOG.md`; accepted task-specific specifications and evidence remain controlling only within their exact scope.
+
+## 1. Repository identity
 
 - Repository: `rigolugo/ARB`
 - Visibility: public
 - Default branch: `main`
-- Accepted bootstrap implementation commit: `e136be0b80f0370572e889d1075a11fc1b445348`
-- Accepted Kalshi Demo environment-separation (Candidate 02) canonical documentation implementation commit: `3d19bd9f3d3610f4af0304bfd3ecf833cfd8420d`
-- Accepted Kalshi Demo offline environment-separation and capability-envelope validator implementation commit: `049ce4bdfebd39eee7e366431acea36ca3d55e18`
-- Exact canonical base for the current workflow-simplification Installation 02 preparation: `6252833f5e315d171c5c4a7002e79ec278ddc888`.
-- Exact canonical `main` at the start of this task (`ARB_WORKFLOW_SIMPLIFICATION_AMENDMENT_01_CANONICAL_INSTALLATION_02`): `6252833f5e315d171c5c4a7002e79ec278ddc888`. Current canonical `main` must still be reverified directly from the repository before reliance or further work; this record does not predeclare the SHA of its own installation-package commit.
+- Exact canonical base used to prepare this state/environment update: `a7fd2cc9668673cc11d1f3670d048ad87e3b4445`
+- Canonical `main` must always be reverified directly before a task relies on it.
+- This file does not predeclare the commit SHA of the update that installs this file.
 
-## 2. Current phase
+## 2. Current accepted phase
 
-`KALSHI_DEMO_OFFLINE_VALIDATOR_IMPLEMENTATION_05_ACCEPTED_AND_INSTALLED`
+`KALSHI_DEMO_READ_ONLY_CONNECTIVITY_PREFLIGHT_ACCEPTED`
 
-The prior phases, `DOCUMENTATION_BOOTSTRAP_COMPLETE` and `KALSHI_DEMO_ENVIRONMENT_SEPARATION_SPEC_ACCEPTED_AND_INSTALLED`, remain true of their respective workstreams. The Kalshi Demo offline environment-separation and capability-envelope validator, task `KALSHI_DEMO_ENVIRONMENT_SEPARATION_OFFLINE_VALIDATOR_IMPLEMENTATION_05`, is the accepted and canonically installed technical implementation of the accepted Candidate 02 specification's offline validator scope. It was prepared across a lineage of bounded correction packages (Implementations 01 through 04, each blocked by Marco's independent review; Implementation 05, approved), reviewed independently by Marco at both the implementation-package stage and the browser-created remote-commit stage, and installed via Marco's non-force fast-forward of `main` to exact commit `049ce4bdfebd39eee7e366431acea36ca3d55e18` (a direct child of the prior canonical base `9e3643d5667f47fdfd4e7e89dcad046bcc0edbd6`). That installation lifecycle is `ACCEPTED_AND_CLOSURE_AUTHORIZED`; see `project_context/AUTHORIZATION_LOG.md` entry `AUTH-0018` and `project_context/DECISION_LOG.md` entry `DEC-0024`.
+The following predecessor milestones remain accepted:
 
-This validator remains offline-only: no Kalshi Demo, Kalshi production, or Polymarket request occurred at any point in its implementation lifecycle; no credential value was used or read; no signer, HTTP transport, WebSocket transport, venue client, order client, cancellation client, funding action, paper trade, or live trade occurred. Kalshi Demo network access is not currently authorized and requires a separately accepted connectivity-preflight specification and a separately bounded implementation/execution authorization.
+- documentation/bootstrap controls;
+- Kalshi Demo environment separation and capability-envelope specification;
+- Kalshi Demo offline environment/capability validator;
+- browser-branch repository-transfer workflow;
+- Kalshi Demo read-only connectivity specification Revision 03;
+- Kalshi Demo read-only connectivity Implementation 10;
+- one separately authorized Kalshi Demo public unauthenticated connectivity execution with reconciled evidence.
 
-Recording this accepted implementation state in the six canonical governance/documentation paths was completed by Closure 03. Closure 01 (`AUTH-0018`) and Closure 02 (`AUTH-0021`) were independently blocked and had no canonical effect. Closure 03 (`AUTH-0022`) corrected the bounded documentation defects, was reviewed/installed, and is canonically effective at exact commit `6252833f5e315d171c5c4a7002e79ec278ddc888`. See Section 3 below.
+This phase proves only the bounded Demo public read-only connectivity contract described below. It does not establish authenticated access, WebSocket correctness, order-book correctness, order/fill behavior, production safety, trading authorization, profitability, or arbitrage.
 
-### Governance simplification (`ARB_WORKFLOW_SIMPLIFICATION_AMENDMENT_01`)
+## 3. Accepted connectivity implementation
 
-Gustavo separately authorized Bruno to prepare `ARB_WORKFLOW_SIMPLIFICATION_AMENDMENT_01_CANDIDATE_02`, a bounded SPEC-ONLY correction to blocked Candidate 01, against exact canonical `main` `6252833f5e315d171c5c4a7002e79ec278ddc888`:
+Installed implementation:
 
-- `ARB_WORKFLOW_SIMPLIFICATION_AMENDMENT_01_CANDIDATE_02.md`, `69863` bytes, sha256 `5931cf008435e03883098c4aca5020be01e696e6c99d356c6780ab6a03067b8c`
-- `HANDOFF_ARB_WORKFLOW_SIMPLIFICATION_AMENDMENT_01_CANDIDATE_02.md`, `3816` bytes, sha256 `6da18aec990a18f8a924159996c3f7a1d13466a190fa7c45ad94437a909be773`
+`KALSHI_DEMO_READ_ONLY_CONNECTIVITY_PREFLIGHT_IMPLEMENTATION_10`
 
-Predecessor Candidate 01 (`59629` bytes, sha256 `0e8ea02b194dab908af6e33989733f6a03426bccf24aa1e8ccc577a664992ebd`) remains blocked, noncanonical, and non-authorizing; Candidate 02 does not retroactively install it.
+Exact installed commit:
 
-Gustavo separately authorized Bruno to prepare `ARB_WORKFLOW_SIMPLIFICATION_AMENDMENT_01_CANONICAL_INSTALLATION_02` as a bounded correction to blocked Installation 01, preparing the accepted Candidate 02 governance design for installation as one atomic documentation/governance migration across exactly eight canonical paths, bounded to exact canonical base `6252833f5e315d171c5c4a7002e79ec278ddc888`. This installation modifies `START_HERE.md`, `project_context/START_HERE.md`, `project_context/AGENT_ROLES.md`, `project_context/PROJECT_STATE.md` (this file), `project_context/AUTHORIZATION_LOG.md`, and `project_context/DECISION_LOG.md`, and adds `project_context/PROJECT_AGENT_DISPATCH_AUTHORITY.md` and `BROWSER_BRANCH_REPOSITORY_TRANSFER_WORKFLOW.md`. It does not modify `project_context/GUARDRAILS.md` or `project_context/ARTIFACT_INDEX.md`, and consumes no source, test, venue, network, or credential capability. Repository-transfer mode: `MANUAL_BROWSER_TEMPORARY_BRANCH`; `marco_fast_forward_main_after_approval`: `PERMITTED`. This Installation 02 lifecycle is `AUTHORIZED_PREPARED_FOR_MARCO_REVIEW`; it is not yet canonical and has no effect on `main` unless Marco approves the exact bytes, the manual-browser transfer is independently verified, and any permitted non-force fast-forward completes. See `project_context/AUTHORIZATION_LOG.md` entry `AUTH-0023` and `project_context/DECISION_LOG.md` entry `DEC-0029`. This record does not predeclare the SHA of its own installation-package commit.
+`a7fd2cc9668673cc11d1f3670d048ad87e3b4445`
 
-The prior separate Candidate 02 documentation-only canonical installation (the specification/governance records themselves, as distinct from the offline validator technical implementation) was reviewed by Marco, approved for its own remote installation commit, and explicitly accepted by Gustavo at exact commit `3d19bd9f3d3610f4af0304bfd3ecf833cfd8420d`. That installation lifecycle is `ACCEPTED_AND_CLOSURE_AUTHORIZED`; see `project_context/AUTHORIZATION_LOG.md` entry `AUTH-0017` and `project_context/DECISION_LOG.md` entry `DEC-0023`.
+Accepted implementation path identities:
 
-## 3. Current authorization state
+- `src/arb/venues/kalshi/connectivity.py`
+  - raw bytes: `99628`
+  - SHA-256: `b3235b33d14619ff34adb8f0de9b599d1b8aabdde1eee227b4906bac9695d544`
+- `tests/test_kalshi_connectivity_preflight.py`
+  - raw bytes: `143929`
+  - SHA-256: `9e2a71e9bb801b790be40b8a96be46cf7ce5223218aeeb172ce48d66e7d37e15`
 
-- Candidate 10 implementation: `ACCEPTED`
-- Gustavo acceptance is complete.
-- Implementation authorization `GUSTAVO_CANDIDATE_10_REPOSITORY_BOOTSTRAP_IMPLEMENTATION_01` is completed and no longer active. See `project_context/AUTHORIZATION_LOG.md`.
-- Kalshi Demo offline environment-separation and capability-envelope validator implementation (`KALSHI_DEMO_ENVIRONMENT_SEPARATION_OFFLINE_VALIDATOR_IMPLEMENTATION_05`): `ACCEPTED_AND_INSTALLED` at exact commit `049ce4bdfebd39eee7e366431acea36ca3d55e18`. The implementation authorization lineage for this task is completed and no longer active. Three separate canonical-state closure tasks record this state:
-  - `KALSHI_DEMO_OFFLINE_VALIDATOR_IMPLEMENTATION_05_CANONICAL_STATE_CLOSURE_01` (`AUTH-0018`): `BLOCKED` and noncanonical.
-  - `KALSHI_DEMO_OFFLINE_VALIDATOR_IMPLEMENTATION_05_CANONICAL_STATE_CLOSURE_02` (`AUTH-0021`): `BLOCKED` and noncanonical; see `DEC-0027`.
-  - `KALSHI_DEMO_OFFLINE_VALIDATOR_IMPLEMENTATION_05_CANONICAL_STATE_CLOSURE_03` (`AUTH-0022`, `GUSTAVO_KALSHI_DEMO_OFFLINE_VALIDATOR_IMPLEMENTATION_05_CANONICAL_STATE_CLOSURE_03_01`): `ACCEPTED_AND_INSTALLED` at exact canonical commit `6252833f5e315d171c5c4a7002e79ec278ddc888`.
-  Each closure task was documentation/governance-only and granted no technical implementation capability. Implementation 05 remains accepted and installed at `049ce4bdfebd39eee7e366431acea36ca3d55e18`; Closure 03 has canonical governance effect at `6252833f5e315d171c5c4a7002e79ec278ddc888`.
-- Active technical implementation authorization: none.
-- Governance simplification (`ARB_WORKFLOW_SIMPLIFICATION_AMENDMENT_01`): Candidate 02 specification and Bruno handoff accepted by Gustavo (identities in Section 1 above); canonical installation correction `ARB_WORKFLOW_SIMPLIFICATION_AMENDMENT_01_CANONICAL_INSTALLATION_02` is `AUTHORIZED_PREPARED_FOR_MARCO_REVIEW`, not yet canonical. This is a bounded documentation/governance migration only and grants no technical implementation, venue, credential, network, funding, or trading capability.
-- The explicit next user decision (whether to authorize a separately bounded connectivity-preflight specification and, later, a separately bounded connectivity implementation/execution authorization) remains separately gated. No later phase is automatically authorized by the offline-validator closure or by the governance-simplification installation.
+Controlling accepted specification:
 
-The completed bootstrap implementation authorization is distinct from the Candidate 10 specification-drafting authorization and from Candidate 10 specification acceptance. The completed offline validator implementation authorization lineage is distinct from the Candidate 02 specification acceptance, from the Candidate 02 documentation-only canonical-installation authorization, and from this exact documentation/governance closure authorization.
+`KALSHI_DEMO_READ_ONLY_CONNECTIVITY_PREFLIGHT_SPEC_03.md`
 
-## 4. Completed and accepted work
+Exact accepted specification identity:
 
-- Candidate 10 documentation-only repository bootstrap specification and Bruno handoff: accepted.
-- Marco's Candidate 10 approval review: `APPROVE`.
-- Marco's Candidate 10 implementation handoff: issued.
-- This documentation bootstrap implementation: performed under the above authorization.
-- Gustavo accepted the installed Candidate 10 repository-bootstrap implementation at the accepted implementation commit `e136be0b80f0370572e889d1075a11fc1b445348`.
-- Kalshi Demo environment-separation and capability-envelope specification Candidate 01: blocked, noncanonical, uninstalled, non-authorizing.
-- Kalshi Demo environment-separation and capability-envelope specification Candidate 02 and Bruno handoff: accepted by Gustavo.
-  - `SPEC_kalshi_demo_environment_separation_and_capability_envelope_CANDIDATE_02.md`, 78876 bytes, sha256 `4a676c4698411db6743d591595918e4ba7af221b7a7b67d86e807925d8b47bf2`
-  - `HANDOFF_kalshi_demo_environment_separation_and_capability_envelope_spec_CANDIDATE_02.md`, 14114 bytes, sha256 `a47d623c4a80048909e4e9df8e4c11904ff0e763ab4e242028bd0c81dcedee6d`
-- Marco's Candidate 02 approval review: `APPROVE`.
-  - `REVIEW_kalshi_demo_environment_separation_and_capability_envelope_spec_CANDIDATE_02.md`, 6213 bytes, sha256 `6d665601c5eb0b35943e0a782a34141f45b13b9f3440c3052c85171d54fe3c9b`
-- Marco's Candidate 02 canonical-installation implementation handoff: issued.
-  - `HANDOFF_kalshi_demo_environment_separation_and_capability_envelope_implementation_CANDIDATE_02.md`, 18572 bytes, sha256 `19ec68c938d2d72dfa769dfc4c40e638d1e5f97f2590abf4928a73b2ba720982`
-- This documentation-only canonical installation was performed under authorization `GUSTAVO_KALSHI_DEMO_ENVIRONMENT_SEPARATION_SPEC_CANDIDATE_02_CANONICAL_INSTALLATION_01`; it consumes no venue or credential capability.
-- Marco approved the remote installation commit `3d19bd9f3d3610f4af0304bfd3ecf833cfd8420d`.
-- Gustavo explicitly accepted the installed Candidate 02 canonical documentation implementation at exact commit `3d19bd9f3d3610f4af0304bfd3ecf833cfd8420d`. The Candidate 02 documentation-installation lifecycle is accepted and closed.
-- Active technical implementation authorization for the Kalshi Demo environment-separation specification's documentation-only installation: none.
-- Kalshi Demo offline environment-separation and capability-envelope validator implementation (`KALSHI_DEMO_ENVIRONMENT_SEPARATION_OFFLINE_VALIDATOR_IMPLEMENTATION_05`): accepted and canonically installed at exact commit `049ce4bdfebd39eee7e366431acea36ca3d55e18`.
-  - Canonical validator source and tests now exist in this repository at that commit (`src/arb/venues/kalshi/`, `pyproject.toml`, and the `tests/test_kalshi_*.py` test set).
-  - Neo's acceptance test run used CPython `3.12.3`, command `PYTHONPATH=src python -m unittest discover -s tests -p "test_*.py" -v`, result: total `186`, passed `186`, failed `0`, skipped `0`, errors `0`.
-  - Marco independently reviewed the submitted implementation package and, separately, the browser-created remote commit; Marco's formal decision on the remote implementation was `APPROVE`. The reviewed remote commit `049ce4bdfebd39eee7e366431acea36ca3d55e18` was a direct child of the exact prior canonical base `9e3643d5667f47fdfd4e7e89dcad046bcc0edbd6`. Marco performed the previously authorized non-force fast-forward of `main` only after the remote review passed.
-  - The installed implementation remains offline-only: no Kalshi Demo, Kalshi production, or Polymarket request occurred during its implementation lifecycle; no credential value was used or read; no signer, HTTP transport, WebSocket transport, venue client, order client, cancellation client, funding action, paper trade, or live trade occurred.
-  - No Kalshi Demo network access is currently authorized. Kalshi Demo network access requires a separately accepted connectivity-preflight specification and a separately bounded implementation/execution authorization.
-  - Kalshi production access remains prohibited. Polymarket access remains prohibited.
-- No Kalshi Demo or production request occurred at the documentation-installation stage described above.
-- No Polymarket request occurred.
-- No credentials were used.
-- No orders, cancellations, funding, paper trading, or live trading occurred.
+- raw bytes: `52179`
+- SHA-256: `404f57009d1af2a4ff4cf345d482b4ab5c4be51f65cbd05c3a40af8a1d9b2235`
 
-## 5. Open work
+## 4. Accepted official source binding
 
-None recorded by this bootstrap implementation. Later phases require their own bounded specification, review, and authorization.
+Official REST source reviewed for the connectivity execution:
 
-## 6. Blocked work
+`https://docs.kalshi.com/openapi.yaml`
 
-None recorded by this bootstrap implementation.
+Reviewed raw OpenAPI identity:
 
-## 7. Deferred work
+- raw bytes: `323631`
+- SHA-256: `6e6402bf667da7596b5074ba1c687cdcb6e67f73903f49fd6b94f4b83a6a22de`
 
-None recorded by this bootstrap implementation.
+Connectivity operation source-binding record:
 
-## 8. Unresolved assumptions
+- operation: `GET /exchange/status`
+- effective security source: `NONE_DECLARED`
+- classification: `PUBLIC_UNAUTHENTICATED_READ_ONLY`
+- record raw bytes: `758`
+- record SHA-256: `fe4baba81344d46ac3c548e86ce0db854d050357ed2012afdd5a7fa1692a9e97`
 
-### Repository bootstrap
+The `/exchange/status` source binding is operation-specific and must not be reused as authentication authority for another REST operation.
 
-None unresolved. See `specifications/SPEC_repository_bootstrap.md` Section 31.1 for the specification's stated assumptions; the documentation-only bootstrap implementation recorded no unresolved assumptions of its own.
+## 5. Accepted connectivity execution evidence
 
-### Kalshi Demo environment separation (Candidate 02) — unresolved implementation decisions
+Execution task:
 
-Marco's implementation handoff resolved the offline-validator-scoped items from this list (implementation language/runtime/package manager/exact repository paths; the first constructed capability surface being limited to the pure validator/profile types with no factory interfaces; safe credential-path rendering policy; final public names for Demo credential references — `KALSHI_DEMO_API_KEY_ID` and `KALSHI_DEMO_PRIVATE_KEY_PEM`; and the deterministic capability-envelope serialization and identity method), and the corresponding offline validator implementation (`KALSHI_DEMO_ENVIRONMENT_SEPARATION_OFFLINE_VALIDATOR_IMPLEMENTATION_05`) is accepted and canonically installed. See Section 1 and Section 4 above.
+`KALSHI_DEMO_READ_ONLY_CONNECTIVITY_EXECUTION_01`
 
-The remaining items are explicitly deferred to a separate, later connectivity specification and remain unresolved and non-authorizing for any connectivity implementation. See accepted Candidate 02 specification, Section 29 (`Unresolved questions requiring Marco's decision`), including at minimum:
+Terminal result:
 
-- resolution of the public order-book authentication-source conflict against a retrieved and hashed current OpenAPI security declaration;
-- exact OpenAPI and AsyncAPI retrieval, hashing, retention, and comparison procedure;
-- revalidation of future-dated official material (e.g., the fixed-point source's displayed `Last Updated: August 20, 2026` metadata) before adoption.
+`DEMO_REST_CONNECTIVITY_CONFIRMED`
 
-No connectivity technical implementation is authorized until these are resolved and a separate bounded connectivity implementation dispatch is issued. This is distinct from the offline validator, which is already accepted and installed and requires no resolution of these deferred connectivity items.
+Exact execution-evidence SHA-256:
 
-## 9. Active accepted specifications
+`9d1645a75ab507aecb8212ca8c144259e3208b7159b70889d85ac5757d68d417`
 
-### Repository bootstrap
+Accepted execution facts:
 
-- Candidate ID: `CANDIDATE_10`
-- Source filename: `SPEC_repository_bootstrap_CANDIDATE_10.md`
-- Raw bytes: `122041`
-- SHA-256: `6cff9ca01e0d3779d95ecea241ed83e1b47126117b1660e2066862b823f02b71`
-- Canonical target: `specifications/SPEC_repository_bootstrap.md`
-- Status: accepted by Gustavo; documentation-only bootstrap implementation accepted at commit `e136be0b80f0370572e889d1075a11fc1b445348`.
+- environment: `KALSHI_DEMO`
+- method: `GET`
+- full path: `/trade-api/v2/exchange/status`
+- HTTP status: `200`
+- DNS verification: `VERIFIED`
+- resolver returned addresses: `2`
+- verified DNS addresses: `2`
+- selected address family: IPv4
+- selected numeric address: `44.228.125.77`
+- no prohibited address: confirmed
+- no hostname re-resolution: confirmed
+- TLS verification: `VERIFIED`
+- negotiated TLS: `TLSv1.3`
+- caller-visible elapsed time: `844 ms`
+- overall execution deadline: `10000 ms`
+- request count: `1`
+- retry count: `0`
+- redirects followed: `0`
+- credentials read: `0`
+- auth headers sent: `0`
+- production requests: `0`
+- Polymarket requests: `0`
+- WebSocket connections: `0`
+- writes: `0`
+- orders: `0`
+- cancellations: `0`
+- funding actions: `0`
+- authorization provenance mode: `EXTERNAL_GUSTAVO_ORCHESTRATION`
+- runtime authorization provenance proof: `NOT_PERFORMED_BY_DESIGN`
 
-### Kalshi Demo environment separation
+`exchange_active=true` and `trading_active=true` were status observations only. They grant no trading or write capability.
 
-- Candidate ID: `CANDIDATE_02`
-- Source filename: `SPEC_kalshi_demo_environment_separation_and_capability_envelope_CANDIDATE_02.md`
-- Raw bytes: `78876`
-- SHA-256: `4a676c4698411db6743d591595918e4ba7af221b7a7b67d86e807925d8b47bf2`
-- Canonical target: `specifications/SPEC_kalshi_demo_environment_separation_and_capability_envelope.md`
-- Status: accepted by Gustavo and canonically installed at commit `3d19bd9f3d3610f4af0304bfd3ecf833cfd8420d`, following Marco's approval of that remote installation commit and Gustavo's explicit acceptance of the installed implementation. The Candidate 02 documentation-installation lifecycle is accepted and closed. Candidate 02 was not superseded by, and does not supersede, Candidate 10; the two are independent accepted specifications. This acceptance and installation do not authorize technical implementation.
+The one-shot execution authorization is consumed and no additional request may be inferred from it.
 
-## 10. Latest accepted implementation
+## 6. Order-book authentication classification
 
-Three independent accepted implementations exist in this repository:
+A subsequent Bruno SPEC_ONLY attempt targeted a public unauthenticated one-market REST order-book reconstruction.
 
-1. The repository-bootstrap documentation implementation, installed on branch `candidate-10-repository-bootstrap` from base `da629e93ce9255c28ecb485ee2b67bfc0c0ccb86`. Gustavo accepted this implementation at accepted implementation commit `e136be0b80f0370572e889d1075a11fc1b445348`.
-2. The Kalshi Demo environment-separation and capability-envelope specification (Candidate 02) canonical documentation installation, prepared across bounded correction packages from base `e35d56dda77819f0066447e18a0a2dc5bac2bb88`, transferred to `main` via the manual browser temporary-branch workflow, reviewed and approved by Marco, and explicitly accepted by Gustavo at accepted implementation commit `3d19bd9f3d3610f4af0304bfd3ecf833cfd8420d`.
-3. The Kalshi Demo offline environment-separation and capability-envelope validator implementation (`KALSHI_DEMO_ENVIRONMENT_SEPARATION_OFFLINE_VALIDATOR_IMPLEMENTATION_05`), prepared across a lineage of bounded correction packages (Implementations 01 through 05) from base `9e3643d5667f47fdfd4e7e89dcad046bcc0edbd6`, transferred to `main` via the manual browser temporary-branch workflow, independently reviewed by Marco at both the implementation-package stage and the browser-created remote-commit stage, and installed via Marco's non-force fast-forward at accepted implementation commit `049ce4bdfebd39eee7e366431acea36ca3d55e18`.
+Bruno correctly halted with:
 
-Current canonical `main` must be reverified directly from the repository before reliance or further work.
+`OFFICIAL_SOURCE_CONFLICT`
 
-## 11. Latest verified test evidence
+for:
 
-Neo's acceptance test run for the accepted Kalshi Demo offline validator implementation (`KALSHI_DEMO_ENVIRONMENT_SEPARATION_OFFLINE_VALIDATOR_IMPLEMENTATION_05`):
+`GET /trade-api/v2/markets/{ticker}/orderbook`
 
-- Python executable/version: CPython `3.12.3`
-- Exact command: `PYTHONPATH=src python -m unittest discover -s tests -p "test_*.py" -v`
-- Total: `186`; passed: `186`; failed: `0`; skipped: `0`; errors: `0`
+Current official narrative material conflicted:
 
-This evidence was produced during Neo's bounded implementation task, prior to and independent of this documentation-only closure task, which itself performs no test execution, no project imports, and no code or test changes. No other test evidence exists in this repository.
+- the Get Market Orderbook operation reference marks Kalshi authentication headers required;
+- the Orderbook Responses guide states that no authentication is required.
 
-## 12. Environment authorization matrix
+Marco accepted the halt and resolved the project classification by binding the exact reviewed OpenAPI operation-level security declaration.
 
-| Environment | Reads | Writes |
-|---|---|---|
-| Kalshi Demo | `PROHIBITED` | `PROHIBITED` |
-| Kalshi production | `PROHIBITED` | `PROHIBITED` |
-| Polymarket | `PROHIBITED` | `PROHIBITED` |
+Project classification:
 
-No venue, credential, funding, order, cancellation, or trading capability is authorized at this phase.
+`GET /trade-api/v2/markets/{ticker}/orderbook = AUTHENTICATED_READ_ONLY`
 
-## 13. Explicit next user decision
+This resolves the classification question only. It does not authorize authenticated access, credential use, signing, or an order-book request.
 
-The Kalshi Demo offline environment-separation and capability-envelope validator implementation (`KALSHI_DEMO_ENVIRONMENT_SEPARATION_OFFLINE_VALIDATOR_IMPLEMENTATION_05`) is accepted and canonically installed at exact commit `049ce4bdfebd39eee7e366431acea36ca3d55e18`. This offline validator does not perform, and does not authorize, any Kalshi Demo, Kalshi production, or Polymarket network access. The remaining unresolved implementation decisions are those explicitly deferred to a later connectivity specification, listed in Section 8 above and in the accepted Candidate 02 specification, Section 29. The next user decision is whether Gustavo authorizes a separately bounded connectivity-preflight specification, and, later, a separately bounded connectivity implementation/execution authorization. No such authorization currently exists. Active technical implementation authorization: none. Closure 03 is already canonical; the current Installation 02 task is documentation/governance-only. Closure 03 is already canonical at `6252833f5e315d171c5c4a7002e79ec278ddc888`. The current workflow-simplification Installation 02 does not authorize that or any other next technical phase; any further phase requires its own separate bounded specification, review, and authorization. No next phase begins automatically.
+The prior public-unauthenticated REST order-book specification authorization produced no specification or handoff artifact and cannot be reused.
 
-## 14. Last updated and approving authority
+## 7. Local execution environment
 
-This record is being prepared by Bruno under authorization `ARB_WORKFLOW_SIMPLIFICATION_AMENDMENT_01_CANONICAL_INSTALLATION_02` (task `ARB_WORKFLOW_SIMPLIFICATION_AMENDMENT_01_CANONICAL_INSTALLATION_02`), preparing the accepted `ARB_WORKFLOW_SIMPLIFICATION_AMENDMENT_01_CANDIDATE_02` governance simplification as one atomic documentation/governance migration across exactly eight canonical paths from exact canonical base `6252833f5e315d171c5c4a7002e79ec278ddc888`. This Installation 02 update is prepared for Marco review and is not yet canonical. It does not predict the SHA of any future canonical installation commit. See `AUTH-0023` / `DEC-0029`.
+Canonical local-execution conventions are recorded separately in:
 
-This record separately preserves, unchanged in substance, the earlier update by Neo under authorization `GUSTAVO_KALSHI_DEMO_OFFLINE_VALIDATOR_IMPLEMENTATION_05_CANONICAL_STATE_CLOSURE_03_01` (task `KALSHI_DEMO_OFFLINE_VALIDATOR_IMPLEMENTATION_05_CANONICAL_STATE_CLOSURE_03`), recording the accepted and canonically installed state of the Kalshi Demo offline environment-separation and capability-envelope validator implementation (`KALSHI_DEMO_ENVIRONMENT_SEPARATION_OFFLINE_VALIDATOR_IMPLEMENTATION_05`) at exact commit `049ce4bdfebd39eee7e366431acea36ca3d55e18`: Marco's independent review of the submitted implementation package, Marco's independent review of the browser-created remote commit, Marco's formal `APPROVE` decision on the remote implementation, and Marco's non-force fast-forward installation of `main` at that exact commit. `KALSHI_DEMO_OFFLINE_VALIDATOR_IMPLEMENTATION_05_CANONICAL_STATE_CLOSURE_01` and `..._CLOSURE_02` were each independently blocked by Marco's review (see `DEC-0027` for Closure 02's stated block reasons) and neither had canonical effect; Closure 03 corrected the specific defects identified in that review. This record also preserves the earlier, separately recorded acceptance of the Kalshi Demo environment-separation and capability-envelope specification Candidate 02 documentation-only canonical installation at commit `3d19bd9f3d3610f4af0304bfd3ecf833cfd8420d` (see `AUTH-0017` / `DEC-0023`). Closure 03 is already canonical. Neither Closure 03 nor this governance-simplification Installation 02 authorizes connectivity implementation, credential use, venue access, funding, orders, cancellations, or trading.
+`project_context/LOCAL_EXECUTION_ENVIRONMENT.md`
 
-## 15. Staleness check
+That file is operational context only and grants no capability.
 
-This snapshot reflects repository state as prepared by Bruno on a fresh local documentation/governance branch from accepted canonical base `6252833f5e315d171c5c4a7002e79ec278ddc888` for task `ARB_WORKFLOW_SIMPLIFICATION_AMENDMENT_01_CANONICAL_INSTALLATION_02`. Current canonical `main` must be reverified directly from the repository before reliance or further work. This record does not predeclare the SHA of its own installation-package commit.
+Current default local context includes:
+
+- Microsoft Windows;
+- Miniconda / Conda;
+- default project Conda environment: `pmresearch`;
+- CPython 3.12 target;
+- Python execution commands formatted for `cmd.exe`;
+- PowerShell available for verification, hashing, Git diagnostics, filesystem work, and separately authorized installations;
+- explicit Windows LF/CRLF controls and exact Git/blob/byte/SHA-256 verification for byte-sensitive tasks.
+
+## 8. Current authorization state
+
+- Active technical implementation authorization: `NONE`.
+- Active venue execution authorization: `NONE`.
+- Active credential/signing authorization: `NONE`.
+- Production access: `PROHIBITED` unless separately and explicitly authorized.
+- Polymarket access in the current Kalshi workstream: `PROHIBITED` unless separately and explicitly authorized.
+- Demo writes/orders/cancellations/funding/trading: `PROHIBITED` unless separately and explicitly authorized.
+- The accepted connectivity execution authorization has been consumed.
+- No later phase is authorized merely by the accepted connectivity result or by this state record.
+
+## 9. Next gated technical work
+
+The next intended material technical unit is a new Bruno SPEC_ONLY task for:
+
+`ONE_MARKET_KALSHI_DEMO_AUTHENTICATED_REST_ORDER_BOOK_RECONSTRUCTION`
+
+The specification may describe the authentication/signing boundary required for a later Demo authenticated read, but the specification-drafting task itself must not:
+
+- read credentials;
+- construct a live signer;
+- call the Kalshi Demo API;
+- call Kalshi production;
+- connect WebSockets;
+- submit/amend/cancel orders;
+- access funding;
+- trade;
+- implement source code;
+- execute tests.
+
+Any later implementation requires a separate Gustavo authorization after Marco accepts the specification.
+
+Any later authenticated Demo execution requires a separate activity-specific Gustavo authorization after the implementation is accepted and installed.
+
+## 10. Explicitly deferred
+
+Unless separately authorized, the following remain deferred:
+
+- authenticated Demo execution;
+- WebSocket connectivity;
+- WebSocket subscriptions and order-book deltas;
+- sequence-gap handling and reconnect recovery;
+- continuously maintained order books;
+- multiple-market processing;
+- market discovery for strategy selection;
+- order lifecycle;
+- fills;
+- persistent ledger;
+- restart recovery;
+- emergency cancellation;
+- risk limits;
+- market making;
+- profitability accounting;
+- logical arbitrage;
+- Kalshi production observation;
+- Polymarket adapter work;
+- shadow execution;
+- authenticated production canaries;
+- live trading.
+
+## 11. Standing safety interpretation
+
+- Demo does not imply production.
+- Public read does not imply authenticated read.
+- Read does not imply write.
+- Credential presence does not grant capability.
+- Risk tier does not grant capability.
+- Environment ambiguity halts closed.
+- Technical capability never substitutes for Gustavo authorization.
+- No strategy is called arbitrage until required legs are filled or otherwise contractually locked and the payout relationship has been verified at rule level.

@@ -12,10 +12,11 @@ Canonical governance and restart router. This file does not grant capability and
 4. `project_context/PROJECT_AGENT_DISPATCH_AUTHORITY.md`
 5. `project_context/PROJECT_STATE.md`
 6. `project_context/AGENT_ROLES.md`
-7. `project_context/AUTHORIZATION_LOG.md`
-8. `project_context/DECISION_LOG.md`
-9. `BROWSER_BRANCH_REPOSITORY_TRANSFER_WORKFLOW.md`
-10. task-specific accepted specifications, handoffs, reviews, artifacts, or evidence only when relevant to the active task
+7. `project_context/LOCAL_EXECUTION_ENVIRONMENT.md`
+8. `project_context/AUTHORIZATION_LOG.md`
+9. `project_context/DECISION_LOG.md`
+10. `BROWSER_BRANCH_REPOSITORY_TRANSFER_WORKFLOW.md`
+11. task-specific accepted specifications, handoffs, reviews, artifacts, or evidence only when relevant to the active task
 
 `project_context/ARTIFACT_INDEX.md` remains the canonical artifact-reference ledger and is consulted when task-specific artifact provenance is relevant.
 
@@ -28,6 +29,8 @@ Canonical governance and restart router. This file does not grant capability and
 5. `project_context/PROJECT_STATE.md` for current accepted state facts.
 6. `AUTHORIZATION_LOG.md` and `DECISION_LOG.md` as audit history.
 7. Task-specific accepted specifications and evidence within their exact scope.
+
+`LOCAL_EXECUTION_ENVIRONMENT.md` is operational context only. It does not grant capability and does not outrank the authorities above.
 
 Gustavo remains the sole approval authority. Marco remains the independent orchestrator/reviewer. Bruno remains the standing specification author. Neo remains the standing implementation/test agent. A task-specific Gustavo authorization may temporarily permit a narrower different activity without changing a standing role.
 
@@ -43,6 +46,7 @@ A named artifact is required when the active task identifies it as a controlling
 - Dispatch, same-scope correction, risk-tier evidence, and Gustavo-return triggers: `PROJECT_AGENT_DISPATCH_AUTHORITY.md`
 - Current project state: `PROJECT_STATE.md`
 - Standing roles: `AGENT_ROLES.md`
+- Local Windows/Miniconda execution and shell conventions: `LOCAL_EXECUTION_ENVIRONMENT.md`
 - Authorization audit: `AUTHORIZATION_LOG.md`
 - Decision audit: `DECISION_LOG.md`
 - Manual-browser repository transfer and remote verification: `../BROWSER_BRANCH_REPOSITORY_TRANSFER_WORKFLOW.md`
