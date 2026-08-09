@@ -31,6 +31,22 @@ same_scope_corrections_after_marco_block: PERMITTED | PROHIBITED
 
 Omitted, malformed, unknown, or ambiguous values are `PROHIBITED`.
 
+## Source-binding scope and freshness
+
+Source identities are operation- and observation-specific. A raw OpenAPI/AsyncAPI/documentation byte identity accepted for one operation or one prior task is historical provenance; it is not a standing declaration that those bytes remain the venue's current specification and it does not automatically control a different operation.
+
+If an active dispatch requires a `current`, `fresh`, `then-current`, or equivalent source binding, all of the following apply unless the dispatch states a stricter rule:
+
+1. the authorized agent must obtain or directly observe the official source during the active task;
+2. the task must record the retrieval/observation timestamp and every exact byte/hash/version identity required by the dispatch;
+3. operation-specific bindings must be derived from that task-current source rather than inherited from an unrelated earlier operation;
+4. a historical or cached source snapshot may substitute only when the exact active dispatch explicitly permits that substitution;
+5. inability to obtain or identity-bind the required current source is a stop condition, not permission to reuse the newest repository-stored hash;
+6. a renderer, narrative guide, example, cached page, or prior implementation does not override an exact authoritative source precedence stated by the task;
+7. a material conflict among official sources fails closed until the conflict is resolved within authorized scope or returned to Gustavo.
+
+The same rule applies to source-derived schema claims. Required fields, enums, security declarations, request/response semantics, and idempotency behavior needed for a safety invariant must be supported by the exact controlling source for that task. Neo must not be left to choose among documentation versions or infer a missing safety field during implementation.
+
 ## Same-scope corrections after Marco BLOCK
 
 `same_scope_corrections_after_marco_block` is an explicit capability of the original Gustavo task authorization. Marco `BLOCK` is review direction, not a new authorization. Continuation exists only inside the still-active original Gustavo authorization. Marco may narrow corrective work but cannot broaden capability.

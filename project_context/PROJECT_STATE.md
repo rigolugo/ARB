@@ -2,44 +2,49 @@
 
 Authority level: canonical current-state snapshot.
 
-This document records accepted state facts only. It does not authorize work and does not create authorization on its own. Historical authorization and decision details remain in `AUTHORIZATION_LOG.md` and `DECISION_LOG.md`; accepted task-specific specifications and evidence remain controlling only within their exact scope.
+This document records accepted state facts only. It does not authorize work and does not create authorization on its own. Historical authorization and decision details remain audit history; accepted task-specific specifications and evidence remain controlling only within their exact scope.
 
 ## 1. Repository identity
 
 - Repository: `rigolugo/ARB`
 - Visibility: public
 - Default branch: `main`
-- Exact canonical base used to prepare this state/environment update: `a7fd2cc9668673cc11d1f3670d048ad87e3b4445`
+- Exact canonical base used to prepare this state-hygiene update: `36d7d45bc68aa2e56bac74889d2ec9ffaa4eb6d6`
 - Canonical `main` must always be reverified directly before a task relies on it.
-- This file does not predeclare the commit SHA of the update that installs this file.
+- This file does not predeclare the commit SHA of the browser commit that may install this update.
 
-## 2. Current accepted phase
+## 2. Current accepted technical state
 
-`KALSHI_DEMO_READ_ONLY_CONNECTIVITY_PREFLIGHT_ACCEPTED`
+Current accepted state label:
 
-The following predecessor milestones remain accepted:
+`KALSHI_DEMO_AUTHENTICATED_REST_ORDER_BOOK_ACCEPTED__ONE_ORDER_LIFECYCLE_SPEC_REWORK_REQUIRED`
 
-- documentation/bootstrap controls;
-- Kalshi Demo environment separation and capability-envelope specification;
-- Kalshi Demo offline environment/capability validator;
-- browser-branch repository-transfer workflow;
-- Kalshi Demo read-only connectivity specification Revision 03;
-- Kalshi Demo read-only connectivity Implementation 10;
-- one separately authorized Kalshi Demo public unauthenticated connectivity execution with reconciled evidence.
+Accepted milestones now include:
 
-This phase proves only the bounded Demo public read-only connectivity contract described below. It does not establish authenticated access, WebSocket correctness, order-book correctness, order/fill behavior, production safety, trading authorization, profitability, or arbitrage.
+1. canonical documentation/bootstrap controls;
+2. Kalshi Demo environment separation and capability envelope;
+3. Kalshi Demo offline environment/capability validator;
+4. manual browser temporary-branch repository-transfer workflow;
+5. Kalshi Demo public unauthenticated connectivity preflight and one accepted bounded execution;
+6. Kalshi Demo authenticated REST order-book specification;
+7. accepted authenticated REST order-book Implementation 06 installed at canonical commit `36d7d45bc68aa2e56bac74889d2ec9ffaa4eb6d6`;
+8. one accepted real authenticated Kalshi Demo REST order-book observation for one exact ticker;
+9. Kalshi Demo one-order lifecycle specification Revision 01 reviewed and blocked;
+10. Kalshi Demo one-order lifecycle specification Revision 02 reviewed and blocked.
 
-## 3. Accepted connectivity implementation
+The project has **not** accepted or implemented the one-order lifecycle. No Demo order/write capability follows from the accepted authenticated read stage.
 
-Installed implementation:
+## 3. Accepted public connectivity predecessor
+
+Installed connectivity implementation:
 
 `KALSHI_DEMO_READ_ONLY_CONNECTIVITY_PREFLIGHT_IMPLEMENTATION_10`
 
-Exact installed commit:
+Accepted implementation commit:
 
 `a7fd2cc9668673cc11d1f3670d048ad87e3b4445`
 
-Accepted implementation path identities:
+Accepted implementation identities:
 
 - `src/arb/venues/kalshi/connectivity.py`
   - raw bytes: `99628`
@@ -52,178 +57,220 @@ Controlling accepted specification:
 
 `KALSHI_DEMO_READ_ONLY_CONNECTIVITY_PREFLIGHT_SPEC_03.md`
 
-Exact accepted specification identity:
-
 - raw bytes: `52179`
 - SHA-256: `404f57009d1af2a4ff4cf345d482b4ab5c4be51f65cbd05c3a40af8a1d9b2235`
 
-## 4. Accepted official source binding
-
-Official REST source reviewed for the connectivity execution:
-
-`https://docs.kalshi.com/openapi.yaml`
-
-Reviewed raw OpenAPI identity:
-
-- raw bytes: `323631`
-- SHA-256: `6e6402bf667da7596b5074ba1c687cdcb6e67f73903f49fd6b94f4b83a6a22de`
-
-Connectivity operation source-binding record:
-
-- operation: `GET /exchange/status`
-- effective security source: `NONE_DECLARED`
-- classification: `PUBLIC_UNAUTHENTICATED_READ_ONLY`
-- record raw bytes: `758`
-- record SHA-256: `fe4baba81344d46ac3c548e86ce0db854d050357ed2012afdd5a7fa1692a9e97`
-
-The `/exchange/status` source binding is operation-specific and must not be reused as authentication authority for another REST operation.
-
-## 5. Accepted connectivity execution evidence
-
-Execution task:
+Accepted one-shot connectivity execution:
 
 `KALSHI_DEMO_READ_ONLY_CONNECTIVITY_EXECUTION_01`
 
-Terminal result:
-
-`DEMO_REST_CONNECTIVITY_CONFIRMED`
-
-Exact execution-evidence SHA-256:
-
-`9d1645a75ab507aecb8212ca8c144259e3208b7159b70889d85ac5757d68d417`
-
-Accepted execution facts:
-
+- terminal result: `DEMO_REST_CONNECTIVITY_CONFIRMED`
+- exact execution-evidence SHA-256: `9d1645a75ab507aecb8212ca8c144259e3208b7159b70889d85ac5757d68d417`
 - environment: `KALSHI_DEMO`
-- method: `GET`
-- full path: `/trade-api/v2/exchange/status`
+- method/path: `GET /trade-api/v2/exchange/status`
 - HTTP status: `200`
-- DNS verification: `VERIFIED`
-- resolver returned addresses: `2`
-- verified DNS addresses: `2`
-- selected address family: IPv4
-- selected numeric address: `44.228.125.77`
-- no prohibited address: confirmed
-- no hostname re-resolution: confirmed
-- TLS verification: `VERIFIED`
-- negotiated TLS: `TLSv1.3`
-- caller-visible elapsed time: `844 ms`
-- overall execution deadline: `10000 ms`
 - request count: `1`
 - retry count: `0`
-- redirects followed: `0`
-- credentials read: `0`
-- auth headers sent: `0`
-- production requests: `0`
-- Polymarket requests: `0`
-- WebSocket connections: `0`
-- writes: `0`
-- orders: `0`
-- cancellations: `0`
-- funding actions: `0`
-- authorization provenance mode: `EXTERNAL_GUSTAVO_ORCHESTRATION`
-- runtime authorization provenance proof: `NOT_PERFORMED_BY_DESIGN`
+- redirect count: `0`
+- credentials/auth headers: `0`
+- venue writes/orders/cancellations/funding: `0`
 
-`exchange_active=true` and `trading_active=true` were status observations only. They grant no trading or write capability.
+That execution authorization is consumed.
 
-The one-shot execution authorization is consumed and no additional request may be inferred from it.
+## 4. Accepted authenticated REST order-book specification and implementation
 
-## 6. Order-book authentication classification
+Accepted specification:
 
-A subsequent Bruno SPEC_ONLY attempt targeted a public unauthenticated one-market REST order-book reconstruction.
+`KALSHI_DEMO_ONE_MARKET_AUTHENTICATED_REST_ORDER_BOOK_RECONSTRUCTION_SPEC_01.md`
 
-Bruno correctly halted with:
+- raw bytes: `61146`
+- SHA-256: `ae8a57069a261c35c5a204d3358091c7ae3f0f9ddbe1cdbe6c8fb20f9250ead8`
 
-`OFFICIAL_SOURCE_CONFLICT`
+Accepted handoff:
 
-for:
+`HANDOFF_KALSHI_DEMO_ONE_MARKET_AUTHENTICATED_REST_ORDER_BOOK_RECONSTRUCTION_SPEC_01.md`
 
-`GET /trade-api/v2/markets/{ticker}/orderbook`
+- raw bytes: `17316`
+- SHA-256: `4ebbc45dba94a7074783abd44df760647bef5927431efa6f79ef8adbfcb96a63`
 
-Current official narrative material conflicted:
+Accepted operation source-binding record:
 
-- the Get Market Orderbook operation reference marks Kalshi authentication headers required;
-- the Orderbook Responses guide states that no authentication is required.
+- raw bytes: `1556`
+- SHA-256: `295224b34fcd6adde7f54605388286e515b961eb512f631269fc2cbdd0544d0d`
 
-Marco accepted the halt and resolved the project classification by binding the exact reviewed OpenAPI operation-level security declaration.
+Accepted reviewed raw OpenAPI snapshot for that predecessor review:
 
-Project classification:
+- source: `https://docs.kalshi.com/openapi.yaml`
+- retrieved at: `2026-08-08T12:41:45Z`
+- raw bytes: `323631`
+- SHA-256: `6e6402bf667da7596b5074ba1c687cdcb6e67f73903f49fd6b94f4b83a6a22de`
+- OpenAPI: `3.0.0`
+- API info version: `3.27.0`
 
-`GET /trade-api/v2/markets/{ticker}/orderbook = AUTHENTICATED_READ_ONLY`
+Installed implementation:
 
-This resolves the classification question only. It does not authorize authenticated access, credential use, signing, or an order-book request.
+`KALSHI_DEMO_ONE_MARKET_AUTHENTICATED_REST_ORDER_BOOK_RECONSTRUCTION_IMPLEMENTATION_06`
 
-The prior public-unauthenticated REST order-book specification authorization produced no specification or handoff artifact and cannot be reused.
+Exact installed canonical commit:
 
-## 7. Local execution environment
+`36d7d45bc68aa2e56bac74889d2ec9ffaa4eb6d6`
 
-Canonical local-execution conventions are recorded separately in:
+Accepted path identities:
 
-`project_context/LOCAL_EXECUTION_ENVIRONMENT.md`
+- `pyproject.toml`
+  - raw bytes: `210`
+  - SHA-256: `993a3b8b2e20d56b31663757dbf8d79b47901f8cc79d89ad08af1e1ea56f783e`
+- `src/arb/venues/kalshi/orderbook.py`
+  - raw bytes: `109759`
+  - SHA-256: `a692cb9858ee132eee9555fdd320ff59c3db7648e33e5696b89e221217c4230b`
+- `tests/test_kalshi_authenticated_orderbook.py`
+  - raw bytes: `136753`
+  - SHA-256: `f7a78c5b342927eb5035cf0824ed316787d024a5b578ac6f81630d0137681591`
 
-That file is operational context only and grants no capability.
+Canonical dependency added for this implementation:
 
-Current default local context includes:
+`cryptography==49.0.0`
 
-- Microsoft Windows;
-- Miniconda / Conda;
-- default project Conda environment: `pmresearch`;
-- CPython 3.12 target;
-- Python execution commands formatted for `cmd.exe`;
-- PowerShell available for verification, hashing, Git diagnostics, filesystem work, and separately authorized installations;
-- explicit Windows LF/CRLF controls and exact Git/blob/byte/SHA-256 verification for byte-sensitive tasks.
+Accepted test evidence supplied during review:
+
+- authenticated order-book tests: `288` passed;
+- connectivity regression: `241` passed;
+- combined targeted battery: `529` passed;
+- full repository battery: `715` passed, `0` failed;
+- no real network, real secret reads, Demo/production requests, WebSockets, orders, amendments, cancellations, funding, or trades during implementation testing;
+- secret scan clean.
+
+The implementation remains authenticated **read-only**. It contains no accepted order-create, cancel, fill-lifecycle, WebSocket, market-making, arbitrage, or production execution capability.
+
+## 5. Accepted real authenticated Demo order-book observation
+
+Accepted execution task:
+
+`KALSHI_DEMO_ONE_MARKET_AUTHENTICATED_REST_ORDER_BOOK_EXECUTION_01`
+
+Observed and accepted facts:
+
+- environment: `KALSHI_DEMO`;
+- host: `external-api.demo.kalshi.co`;
+- ticker: `KXFEDDECISION-26SEP-H0`;
+- method: `GET`;
+- path: `/trade-api/v2/markets/KXFEDDECISION-26SEP-H0/orderbook`;
+- terminal result: `SUCCESS`;
+- HTTP status classification: `200`;
+- request count: `1`;
+- retry count: `0`;
+- redirect count: `0`;
+- response byte length: `419`;
+- response SHA-256: `2bc5099eff51a3f7f8b7c292a3114df177d6fb97b4604dfd7d67d4e8a14f1ceb`;
+- canonical snapshot SHA-256: `a2989b451ecebddbc99441ba2ecd7f76eba4c6f818f0ae8c3ddcb496e8fa2bdc`;
+- native YES bid levels reconstructed: `14`;
+- native NO bid levels reconstructed: `3`.
+
+This proves one bounded authenticated Demo REST observation only. It does not prove production connectivity, production credentials, WebSocket behavior, order placement, fills, cancellation, ledger correctness, profitability, market-making performance, or arbitrage.
+
+The one-request execution authorization is consumed. No additional request may be inferred from it.
+
+## 6. Source-binding scope and freshness state
+
+The raw OpenAPI identity:
+
+`6e6402bf667da7596b5074ba1c687cdcb6e67f73903f49fd6b94f4b83a6a22de`
+
+is an **exact historical source snapshot retrieved on 2026-08-08** and accepted only as provenance for the operations/reviews that explicitly bound it. Its presence in canonical state, source, or tests does not mean those bytes are the current Kalshi OpenAPI at a later time and does not automatically bind a new operation or write surface.
+
+For a task that explicitly requires a current/fresh official source, the source must be obtained or directly observed during that task and identity-bound as required by the dispatch. A cached/retained repository snapshot may substitute only when the active Gustavo dispatch explicitly permits it. If required current bytes or identity cannot be established, the affected task halts.
+
+Operation-specific source bindings do not generalize across endpoints. In particular, the accepted authenticated order-book binding does not establish Create Order V2, Get Orders, Get Order, Get Fills, or Cancel Order V2 semantics.
+
+## 7. One-order lifecycle specification status
+
+### Revision 01 — BLOCKED
+
+`KALSHI_DEMO_ONE_ORDER_LIFECYCLE_SPEC_01.md`
+
+- raw bytes: `74426`
+- SHA-256: `f19fa936044a513fc47b19a2a20b08ad116c5f7fef2d2fda8dc47dea97d0dbcf`
+
+`HANDOFF_KALSHI_DEMO_ONE_ORDER_LIFECYCLE_SPEC_01.md`
+
+- raw bytes: `29007`
+- SHA-256: `30c15019b7607fde4381eb9eba3d22dc6c85a2f98e90aff4d0090f41191f1341`
+
+Marco blocking findings included:
+
+- the claimed pre-create/no-active-order invariant was not proven by a pre-action venue-truth observation;
+- the lifecycle write/read/fill/cancel source schema was not frozen tightly enough for Neo.
+
+Revision 01 is not accepted and authorizes nothing downstream.
+
+### Revision 02 — BLOCKED
+
+`KALSHI_DEMO_ONE_ORDER_LIFECYCLE_SPEC_02.md`
+
+- raw bytes: `79944`
+- SHA-256: `b318f444382851e15cfe2ddab70e77f36703aab9a4f55ca99b5da3050f53180f`
+
+`HANDOFF_KALSHI_DEMO_ONE_ORDER_LIFECYCLE_SPEC_02.md`
+
+- raw bytes: `18095`
+- SHA-256: `f10192b6c32f190ce88c7a2fbe676018a04bbefdc1ee68349754688b7f842f24`
+
+Revision 02 corrected the pre-create venue-truth design and operation-binding structure but remained blocked because:
+
+1. it reused the retained 2026-08-08 raw OpenAPI snapshot rather than establishing the task-current raw OpenAPI identity required by its exact dispatch; and
+2. its `exclusive_writer_condition` remained insufficiently closed/implementable and did not fully exclude an unresolved prior same-scope write already in flight before the pre-create snapshot.
+
+Revision 02 is not accepted and authorizes nothing downstream.
 
 ## 8. Current authorization state
 
-- Active technical implementation authorization: `NONE`.
-- Active venue execution authorization: `NONE`.
-- Active credential/signing authorization: `NONE`.
-- Production access: `PROHIBITED` unless separately and explicitly authorized.
-- Polymarket access in the current Kalshi workstream: `PROHIBITED` unless separately and explicitly authorized.
-- Demo writes/orders/cancellations/funding/trading: `PROHIBITED` unless separately and explicitly authorized.
-- The accepted connectivity execution authorization has been consumed.
-- No later phase is authorized merely by the accepted connectivity result or by this state record.
+This state document grants no capability.
 
-## 9. Next gated technical work
+Current technical/venue state after the completed authenticated read and the blocked lifecycle specifications:
 
-The next intended material technical unit is a new Bruno SPEC_ONLY task for:
+- active technical implementation authorization: `NONE`;
+- active venue execution authorization: `NONE`;
+- active credential/signing authorization: `NONE`;
+- Demo public/authenticated reads: `PROHIBITED` unless a new exact authorization permits them;
+- Demo writes/orders/cancellations: `PROHIBITED`;
+- production reads/writes: `PROHIBITED` unless separately and explicitly authorized;
+- WebSockets: `PROHIBITED` unless separately and explicitly authorized;
+- funding/trading: `PROHIBITED`;
+- Polymarket activity in the current Kalshi workstream: `PROHIBITED` unless separately authorized.
 
-`ONE_MARKET_KALSHI_DEMO_AUTHENTICATED_REST_ORDER_BOOK_RECONSTRUCTION`
+Technical capability, installed cryptography support, prior successful authentication, or credential presence does not alter these permissions.
 
-The specification may describe the authentication/signing boundary required for a later Demo authenticated read, but the specification-drafting task itself must not:
+## 9. Next gated work
 
-- read credentials;
-- construct a live signer;
-- call the Kalshi Demo API;
-- call Kalshi production;
-- connect WebSockets;
-- submit/amend/cancel orders;
-- access funding;
-- trade;
-- implement source code;
-- execute tests.
+The next intended material design unit remains the same one-order lifecycle, but a new Revision 03 specification is **not automatically authorized** by this state update.
 
-Any later implementation requires a separate Gustavo authorization after Marco accepts the specification.
+A future Gustavo authorization for Revision 03 should remain `SPEC_ONLY` and should correct the two remaining Revision-02 blockers without redesigning accepted direction:
 
-Any later authenticated Demo execution requires a separate activity-specific Gustavo authorization after the implementation is accepted and installed.
+1. bind a task-current official raw OpenAPI snapshot and regenerate/reconfirm all lifecycle operation bindings from that source; and
+2. define a closed, implementation-independent no-competing-writer/no-unresolved-prior-write precondition that begins before the pre-create truth snapshot, identifies the proof/evidence owner, remains true through lifecycle termination, and fails closed when it cannot be established.
 
-## 10. Explicitly deferred
+Only after Marco accepts an exact lifecycle specification may Gustavo separately consider a bounded offline Neo implementation task. No Demo write follows automatically from specification acceptance or implementation acceptance.
 
-Unless separately authorized, the following remain deferred:
+## 10. Local execution environment
 
-- authenticated Demo execution;
-- WebSocket connectivity;
-- WebSocket subscriptions and order-book deltas;
-- sequence-gap handling and reconnect recovery;
+Canonical local command and Windows/Miniconda conventions remain in:
+
+`project_context/LOCAL_EXECUTION_ENVIRONMENT.md`
+
+That document is operational context only and grants no capability.
+
+## 11. Explicitly deferred / prohibited absent new authorization
+
+- one-order implementation;
+- any Demo order submission;
+- any Demo cancellation;
+- persistent ledger/restart recovery;
+- emergency cancellation service;
+- WebSocket connectivity/subscriptions;
+- sequence-gap/reconnect handling;
 - continuously maintained order books;
 - multiple-market processing;
-- market discovery for strategy selection;
-- order lifecycle;
-- fills;
-- persistent ledger;
-- restart recovery;
-- emergency cancellation;
-- risk limits;
+- strategy-driven discovery;
 - market making;
 - profitability accounting;
 - logical arbitrage;
@@ -233,13 +280,16 @@ Unless separately authorized, the following remain deferred:
 - authenticated production canaries;
 - live trading.
 
-## 11. Standing safety interpretation
+## 12. Standing safety interpretation
 
 - Demo does not imply production.
 - Public read does not imply authenticated read.
-- Read does not imply write.
+- Authenticated read does not imply write.
+- Create does not imply cancel.
 - Credential presence does not grant capability.
 - Risk tier does not grant capability.
-- Environment ambiguity halts closed.
+- A historical source hash does not imply current source freshness.
+- An operation-specific source binding does not authorize or define a different operation.
+- Environment or source ambiguity halts closed.
 - Technical capability never substitutes for Gustavo authorization.
-- No strategy is called arbitrage until required legs are filled or otherwise contractually locked and the payout relationship has been verified at rule level.
+- No strategy is called arbitrage until all required legs are filled or otherwise contractually locked and the payout relationship has been verified at rule level.

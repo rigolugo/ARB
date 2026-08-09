@@ -40,10 +40,18 @@ A bounded exact Gustavo prompt posted in the named agent's current project chat 
 
 A named artifact is required when the active task identifies it as a controlling source, predecessor, exact-copy input, required evidence, or required deliverable.
 
+## Current-state and source-binding freshness
+
+`PROJECT_STATE.md` is the current accepted-state snapshot. Audit logs are historical records and may lag a later accepted technical state until a bounded governance update records it. Absence of a later event from an audit log is not evidence that the event did not occur; agents must use the authority hierarchy above, exact active Gustavo authorization, current canonical `main`, and task-specific accepted identities.
+
+A repository-stored API/OpenAPI/AsyncAPI identity is immutable provenance for the exact source snapshot and operations for which it was reviewed. Its presence in canonical history does **not** make that snapshot a standing "current" venue specification, does not bind a different operation automatically, and does not authorize reuse for a later write surface.
+
+When an active dispatch requires a `current`, `fresh`, `then-current`, or equivalent official source binding, the authorized agent must obtain or otherwise directly observe the official source during that task and record the task-current retrieval/observation identity required by the dispatch. A retained or historical source snapshot may substitute only when the exact active dispatch explicitly permits that substitution. If the required current source cannot be obtained or its identity cannot be established, halt rather than silently reusing an older canonical hash.
+
 ## Routing
 
 - Permanent safety and capability floors: `GUARDRAILS.md`
-- Dispatch, same-scope correction, risk-tier evidence, and Gustavo-return triggers: `PROJECT_AGENT_DISPATCH_AUTHORITY.md`
+- Dispatch, same-scope correction, risk-tier evidence, Gustavo-return triggers, and source-binding freshness semantics: `PROJECT_AGENT_DISPATCH_AUTHORITY.md`
 - Current project state: `PROJECT_STATE.md`
 - Standing roles: `AGENT_ROLES.md`
 - Local Windows/Miniconda execution and shell conventions: `LOCAL_EXECUTION_ENVIRONMENT.md`
@@ -53,4 +61,4 @@ A named artifact is required when the active task identifies it as a controlling
 
 ## Fail-closed rule
 
-If any governance record is stale, conflicting, ambiguous, identity-mismatched, or insufficient for a capability the task requires, use the more restrictive interpretation and halt the affected activity. Do not infer authority from technical capability, prior tasks, old candidates, repository state, or missing log entries.
+If any governance record is stale, conflicting, ambiguous, identity-mismatched, or insufficient for a capability the task requires, use the more restrictive interpretation and halt the affected activity. Do not infer authority from technical capability, prior tasks, old candidates, repository state, historical source hashes, or missing log entries.
