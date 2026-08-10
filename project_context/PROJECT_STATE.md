@@ -9,15 +9,16 @@ This document records accepted state facts only. It does not authorize work and 
 - Repository: `rigolugo/ARB`
 - Visibility: public
 - Default branch: `main`
-- Exact canonical base used to prepare this state-hygiene update: `36d7d45bc68aa2e56bac74889d2ec9ffaa4eb6d6`
+- Exact canonical base used to prepare this state update: `5dca2d25df9c01fe1a1c1acfcfff5912bfdf5ec9`
+- Exact canonical tree observed for that base: `783df783a832d5da745fa95d0aa62f35d0797bd2`
 - Canonical `main` must always be reverified directly before a task relies on it.
-- This file does not predeclare the commit SHA of the browser commit that may install this update.
+- This file does not predeclare the commit SHA of any later documentation-transfer commit that may install this update.
 
 ## 2. Current accepted technical state
 
 Current accepted state label:
 
-`KALSHI_DEMO_AUTHENTICATED_REST_ORDER_BOOK_ACCEPTED__ONE_ORDER_LIFECYCLE_SPEC_REWORK_REQUIRED`
+`KALSHI_DEMO_ONE_ORDER_LIFECYCLE_IMPLEMENTATION_ACCEPTED_AND_INSTALLED__REAL_LIFECYCLE_EXECUTION_NOT_YET_PERFORMED`
 
 Accepted milestones now include:
 
@@ -30,9 +31,12 @@ Accepted milestones now include:
 7. accepted authenticated REST order-book Implementation 06 installed at canonical commit `36d7d45bc68aa2e56bac74889d2ec9ffaa4eb6d6`;
 8. one accepted real authenticated Kalshi Demo REST order-book observation for one exact ticker;
 9. Kalshi Demo one-order lifecycle specification Revision 01 reviewed and blocked;
-10. Kalshi Demo one-order lifecycle specification Revision 02 reviewed and blocked.
+10. Kalshi Demo one-order lifecycle specification Revision 02 reviewed and blocked;
+11. later blocked one-order lifecycle predecessor lineage, including Revision 05, retained as historical blocked lineage;
+12. Kalshi Demo one-order lifecycle specification Revision 06 accepted as the controlling lifecycle specification;
+13. accepted one-order lifecycle implementation installed at canonical commit `5dca2d25df9c01fe1a1c1acfcfff5912bfdf5ec9` with exactly the two lifecycle paths recorded in Section 7.
 
-The project has **not** accepted or implemented the one-order lifecycle. No Demo order/write capability follows from the accepted authenticated read stage.
+The one-order lifecycle is technically accepted and installed. **No real one-order lifecycle execution has yet occurred.** Installation of write-capable code is not execution authorization and does not authorize a Demo order, cancellation, credential use, or any further venue request.
 
 ## 3. Accepted public connectivity predecessor
 
@@ -140,7 +144,7 @@ Accepted test evidence supplied during review:
 - no real network, real secret reads, Demo/production requests, WebSockets, orders, amendments, cancellations, funding, or trades during implementation testing;
 - secret scan clean.
 
-The implementation remains authenticated **read-only**. It contains no accepted order-create, cancel, fill-lifecycle, WebSocket, market-making, arbitrage, or production execution capability.
+The predecessor authenticated order-book implementation remains accepted and authenticated **read-only**. Its prior accepted state is not displaced by the later lifecycle implementation.
 
 ## 5. Accepted real authenticated Demo order-book observation
 
@@ -172,19 +176,30 @@ The one-request execution authorization is consumed. No additional request may b
 
 ## 6. Source-binding scope and freshness state
 
-The raw OpenAPI identity:
+The predecessor raw OpenAPI identity:
 
 `6e6402bf667da7596b5074ba1c687cdcb6e67f73903f49fd6b94f4b83a6a22de`
 
 is an **exact historical source snapshot retrieved on 2026-08-08** and accepted only as provenance for the operations/reviews that explicitly bound it. Its presence in canonical state, source, or tests does not mean those bytes are the current Kalshi OpenAPI at a later time and does not automatically bind a new operation or write surface.
 
-For a task that explicitly requires a current/fresh official source, the source must be obtained or directly observed during that task and identity-bound as required by the dispatch. A cached/retained repository snapshot may substitute only when the active Gustavo dispatch explicitly permits it. If required current bytes or identity cannot be established, the affected task halts.
+Revision 06 separately binds the task-current official source snapshot retrieved `2026-08-09T13:00:42Z`:
 
-Operation-specific source bindings do not generalize across endpoints. In particular, the accepted authenticated order-book binding does not establish Create Order V2, Get Orders, Get Order, Get Fills, or Cancel Order V2 semantics.
+- source: `https://docs.kalshi.com/openapi.yaml`;
+- raw bytes: `333283`;
+- SHA-256: `80f4961e275dba2fed8e464c90c6ee77e3e8d521ec0c2e16b1c94dde8bf0160d`;
+- OpenAPI: `3.0.0`;
+- API info version: `3.27.0`;
+- source identity record: `843` bytes / SHA-256 `10c88fbbbbcc017cd9ac8891cd89dc00c5df6c7ca49c5f8671c1121de695d22a`.
 
-## 7. One-order lifecycle specification status
+That source snapshot, source identity record, and the six Revision-06 operation bindings are immutable provenance for the accepted lifecycle contract. They are not standing authorization for future venue activity and do not by themselves establish freshness for a later task.
 
-### Revision 01 — BLOCKED
+For a task that explicitly requires a current/fresh official source, the source must be obtained or directly observed during that task and identity-bound as required by that task. A cached/retained repository snapshot may substitute only when the active technical task explicitly permits it. If required current bytes or identity cannot be established, the affected task halts.
+
+Operation-specific source bindings do not generalize across endpoints.
+
+## 7. One-order lifecycle specification and implementation state
+
+### Revision 01 — historical BLOCKED lineage
 
 `KALSHI_DEMO_ONE_ORDER_LIFECYCLE_SPEC_01.md`
 
@@ -196,14 +211,9 @@ Operation-specific source bindings do not generalize across endpoints. In partic
 - raw bytes: `29007`
 - SHA-256: `30c15019b7607fde4381eb9eba3d22dc6c85a2f98e90aff4d0090f41191f1341`
 
-Marco blocking findings included:
+The blocking findings included an unproven pre-create/no-active-order invariant and insufficiently frozen lifecycle write/read/fill/cancel source schema. Revision 01 remains historical blocked lineage and is not the controlling lifecycle specification.
 
-- the claimed pre-create/no-active-order invariant was not proven by a pre-action venue-truth observation;
-- the lifecycle write/read/fill/cancel source schema was not frozen tightly enough for Neo.
-
-Revision 01 is not accepted and authorizes nothing downstream.
-
-### Revision 02 — BLOCKED
+### Revision 02 — historical BLOCKED lineage
 
 `KALSHI_DEMO_ONE_ORDER_LIFECYCLE_SPEC_02.md`
 
@@ -215,41 +225,125 @@ Revision 01 is not accepted and authorizes nothing downstream.
 - raw bytes: `18095`
 - SHA-256: `f10192b6c32f190ce88c7a2fbe676018a04bbefdc1ee68349754688b7f842f24`
 
-Revision 02 corrected the pre-create venue-truth design and operation-binding structure but remained blocked because:
+Revision 02 corrected the pre-create venue-truth design and operation-binding structure but remained blocked because it did not establish the required task-current raw OpenAPI identity and its no-competing-writer/no-unresolved-prior-write precondition remained insufficiently closed. Revision 02 remains historical blocked lineage and is not the controlling lifecycle specification.
 
-1. it reused the retained 2026-08-08 raw OpenAPI snapshot rather than establishing the task-current raw OpenAPI identity required by its exact dispatch; and
-2. its `exclusive_writer_condition` remained insufficiently closed/implementable and did not fully exclude an unresolved prior same-scope write already in flight before the pre-create snapshot.
+### Later blocked predecessors — historical lineage only
 
-Revision 02 is not accepted and authorizes nothing downstream.
+Revision 05 and other blocked predecessors remain historical blocked lineage. Their historical disposition is preserved; none is relabeled as accepted by this state update.
 
-## 8. Current authorization state
+### Revision 06 — ACCEPTED controlling specification
+
+Accepted specification:
+
+`KALSHI_DEMO_ONE_ORDER_LIFECYCLE_SPEC_06.md`
+
+- raw bytes: `101724`
+- SHA-256: `bb8355ad0022cda0d5ce936ed84993a381028187f207ae4b402f8017c9fbd101`
+
+Accepted handoff:
+
+`HANDOFF_KALSHI_DEMO_ONE_ORDER_LIFECYCLE_SPEC_06.md`
+
+- raw bytes: `13667`
+- SHA-256: `a7cecc181001c0ef646da8a0c53bcbcb53e2cf4c8a2bb2a8b43386b4805e75d5`
+
+Accepted review record provenance:
+
+- raw bytes: `4166`
+- SHA-256: `540dbbcb14fc66e39a268d405b331ed77dbcb3d6ccff3fc9b2a0f9ce9594c8b3`
+
+Accepted Revision-06 operation-binding identities:
+
+- `PRE_CREATE_ORDER_TRUTH`: `3844` bytes / SHA-256 `f51e23154d775b63a9a3de93bce4af97d368a2747de06fc020621e62496e1959`;
+- `CREATE_ORDER_V2`: `3558` bytes / SHA-256 `03c319dfb9fcfd6c5a909c38f408ba27e48f83e0844ebed47fab7f306e9ff4f9`;
+- `EXACT_ORDER_READ`: `3082` bytes / SHA-256 `ed5312101eddd9658f263d81aa7f41a28ca17e6d71dfd7b4c10b3610f5316792`;
+- `ORDER_LIST_RECOVERY`: `3987` bytes / SHA-256 `e03e8bd348641521f84081bd350387c5eecd4e51b433eae2f99b949eef6a1989`;
+- `FILL_READ`: `3260` bytes / SHA-256 `e421bc5ec7a8f65d97b335c7dd6b7e8c8475abb3f64b7f7f2ffba82f2c6b292d`;
+- `CANCEL_ORDER_V2`: `2479` bytes / SHA-256 `4650e325f30a3cd177ad6b948f96dccb581c06585869a83a84e072a6066cde64`.
+
+Accepted installed implementation commit:
+
+`5dca2d25df9c01fe1a1c1acfcfff5912bfdf5ec9`
+
+- parent: `a6a2bd1618011030eeadb410112a967bbbabcb07`;
+- tree: `783df783a832d5da745fa95d0aa62f35d0797bd2`;
+- browser commit message: `Python implementation Correction 06` (non-controlling metadata);
+- accepted technical correction lineage for the installed bytes: Correction 05.
+
+Installed path identities:
+
+- `src/arb/venues/kalshi/order_lifecycle.py`
+  - raw bytes: `181815`
+  - SHA-256: `7ea14d6c4e90f1447eb33ee0df1b04cdb598723f06928eb6077d8449bbf1d133`
+  - Git blob: `0d36a116458469d1436ceed55018c90c9e876a02`
+- `tests/test_kalshi_one_order_lifecycle.py`
+  - raw bytes: `250999`
+  - SHA-256: `31be69106ec6aa4dc31493580d259dba608e011de6afb17fda1bc3e3ec031558`
+  - Git blob: `f17ed92eef3460f023a9d5d4eccdf05c933f37dc`
+
+Accepted offline validation evidence:
+
+- observed dependency: `cryptography==49.0.0`;
+- `python -m py_compile ...`: PASS;
+- lifecycle suite: `413` passed;
+- connectivity regression: `241` passed;
+- authenticated order-book regression: `288` passed;
+- combined lifecycle/connectivity/order-book battery: `942` passed;
+- full repository discovery: `1128` passed;
+- real Kalshi venue activity: `0`;
+- real credential/private-key use: `0`;
+- account access: `0`;
+- real orders: `0`;
+- real cancellations: `0`;
+- WebSocket/production activity: `0`.
+
+The installed implementation is capable of the bounded Kalshi Demo one-order lifecycle only when a separate valid execution input/transport and every runtime predicate required by Revision 06 are supplied. **No accepted real lifecycle execution has yet occurred.**
+
+There is no accepted evidence yet of:
+
+- successful Demo Create;
+- an actual fill;
+- an actual cancellation;
+- live Create/Cancel ambiguity recovery;
+- persistent ledger/restart recovery;
+- market making;
+- profitability;
+- arbitrage;
+- production behavior.
+
+## 8. Current authorization / capability state
 
 This state document grants no capability.
 
-Current technical/venue state after the completed authenticated read and the blocked lifecycle specifications:
+Current technical/venue state after installation of the accepted one-order lifecycle implementation:
 
-- active technical implementation authorization: `NONE`;
 - active venue execution authorization: `NONE`;
 - active credential/signing authorization: `NONE`;
-- Demo public/authenticated reads: `PROHIBITED` unless a new exact authorization permits them;
+- Demo public/authenticated reads: `PROHIBITED` unless a new exact task permits them;
 - Demo writes/orders/cancellations: `PROHIBITED`;
-- production reads/writes: `PROHIBITED` unless separately and explicitly authorized;
-- WebSockets: `PROHIBITED` unless separately and explicitly authorized;
+- production reads/writes: `PROHIBITED` unless separately and explicitly permitted;
+- WebSockets: `PROHIBITED` unless separately and explicitly permitted;
 - funding/trading: `PROHIBITED`;
-- Polymarket activity in the current Kalshi workstream: `PROHIBITED` unless separately authorized.
+- Polymarket activity in the current Kalshi workstream: `PROHIBITED` unless separately permitted.
 
-Technical capability, installed cryptography support, prior successful authentication, or credential presence does not alter these permissions.
+Installation of write-capable code is not execution authorization. No capability is inherited merely because code exists on canonical `main`.
+
+In particular:
+
+- implementation presence does not authorize venue network access;
+- credential presence does not authorize credential use;
+- authenticated read does not authorize write;
+- Create does not authorize Cancel;
+- Demo does not imply production;
+- no order or cancellation may be performed without a separate explicit execution decision and all runtime predicates required by Revision 06.
 
 ## 9. Next gated work
 
-The next intended material design unit remains the same one-order lifecycle, but a new Revision 03 specification is **not automatically authorized** by this state update.
+Any real Kalshi Demo one-order lifecycle execution is a separate gated task. The accepted specification and installed implementation do not themselves permit a venue request.
 
-A future Gustavo authorization for Revision 03 should remain `SPEC_ONLY` and should correct the two remaining Revision-02 blockers without redesigning accepted direction:
+Before any such future execution, the task must separately establish the exact Revision-06 runtime predicates, including the required environment/capability envelope, credential-reference and signing boundaries, writer-exclusivity/prior-write proof, exact source/binding identities, bounded ticker/economics, request budgets/deadlines, and caller-supplied transport behavior.
 
-1. bind a task-current official raw OpenAPI snapshot and regenerate/reconfirm all lifecycle operation bindings from that source; and
-2. define a closed, implementation-independent no-competing-writer/no-unresolved-prior-write precondition that begins before the pre-create truth snapshot, identifies the proof/evidence owner, remains true through lifecycle termination, and fails closed when it cannot be established.
-
-Only after Marco accepts an exact lifecycle specification may Gustavo separately consider a bounded offline Neo implementation task. No Demo write follows automatically from specification acceptance or implementation acceptance.
+No Demo Create, Cancel, credential use, or further venue read/write may be inferred from the present accepted installation state.
 
 ## 10. Local execution environment
 
@@ -259,12 +353,13 @@ Canonical local command and Windows/Miniconda conventions remain in:
 
 That document is operational context only and grants no capability.
 
-## 11. Explicitly deferred / prohibited absent new authorization
+## 11. Explicitly deferred / prohibited absent a separate task
 
-- one-order implementation;
+- real one-order lifecycle execution;
 - any Demo order submission;
 - any Demo cancellation;
-- persistent ledger/restart recovery;
+- any credential/private-key use;
+- persistent ledger/restart recovery beyond the accepted in-memory implementation contract;
 - emergency cancellation service;
 - WebSocket connectivity/subscriptions;
 - sequence-gap/reconnect handling;
@@ -291,5 +386,5 @@ That document is operational context only and grants no capability.
 - A historical source hash does not imply current source freshness.
 - An operation-specific source binding does not authorize or define a different operation.
 - Environment or source ambiguity halts closed.
-- Technical capability never substitutes for Gustavo authorization.
+- Technical capability or installed code never substitutes for a separate explicit execution decision.
 - No strategy is called arbitrage until all required legs are filled or otherwise contractually locked and the payout relationship has been verified at rule level.
