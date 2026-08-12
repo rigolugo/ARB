@@ -9,8 +9,8 @@ This document records accepted state facts only. It does not authorize work and 
 - Repository: `rigolugo/ARB`
 - Visibility: public
 - Default branch: `main`
-- Exact canonical base used to prepare this state update: `7e43435397a6ca26b119b783f165cb6b30406a76`
-- Exact canonical tree observed for that base: `99b4c3b840d3fbf9f99c4c39b962cc07fdb3295c`
+- Exact canonical base used to prepare this state update: `55b4ecaf5bc93978ee23bfd218cfe5ddba35bc49`
+- Exact canonical tree observed for that base: `69df0e38d6830639fc3103ea95c41ceec65a5b2d`
 - Canonical `main` must always be reverified directly before a task relies on it.
 - This file does not predeclare the commit SHA of any later documentation-transfer commit that may install this update.
 
@@ -18,7 +18,7 @@ This document records accepted state facts only. It does not authorize work and 
 
 Current accepted state label:
 
-`KALSHI_DEMO_ONE_ORDER_LIFECYCLE_EXECUTION_01_CONSUMED__WRITE_RESULT_UNRESOLVED__POST_HALT_RECONCILIATION_SPEC_01_ACCEPTED__IMPLEMENTATION_01_INSTALLED__RECONCILIATION_EXECUTION_NOT_AUTHORIZED_OR_PERFORMED`
+`KALSHI_DEMO_ONE_ORDER_LIFECYCLE_EXECUTION_01_CONSUMED__POST_HALT_RECONCILIATION_EXECUTION_01_CONSUMED__WRITE_UNRESOLVED_ZERO_MATCH__WRITER_PROOF_HELD`
 
 Accepted milestones now include:
 
@@ -37,11 +37,12 @@ Accepted milestones now include:
 13. accepted one-order lifecycle implementation installed at canonical commit `5dca2d25df9c01fe1a1c1acfcfff5912bfdf5ec9` with exactly the two lifecycle paths recorded in Section 7;
 14. `KALSHI_DEMO_ONE_ORDER_LIFECYCLE_EXECUTION_01` recorded by accepted external execution evidence (ART-0040): one bounded Kalshi Demo lifecycle attempt, terminal `FAIL_CLOSED_HALT` / `RECOVERY_ZERO_MATCH`, prior CREATE write result unresolved;
 15. `KALSHI_DEMO_POST_HALT_EXACT_WRITE_RESULT_RECONCILIATION_SPEC_01.md` accepted as the controlling read-only reconciliation specification (ART-0041/ART-0042); no implementation or venue execution authorized by the specification itself;
-16. `KALSHI_DEMO_POST_HALT_EXACT_WRITE_RESULT_RECONCILIATION_IMPLEMENTATION_01` accepted and installed at canonical commit `bbec7f203140312169af7db2f5c2936b58fbd6dd` (ART-0043/ART-0044); its implementation and offline validation performed no venue reconciliation.
+16. `KALSHI_DEMO_POST_HALT_EXACT_WRITE_RESULT_RECONCILIATION_IMPLEMENTATION_01` accepted and installed at canonical commit `bbec7f203140312169af7db2f5c2936b58fbd6dd` (ART-0043/ART-0044); its implementation and offline validation performed no venue reconciliation;
+17. `KALSHI_DEMO_POST_HALT_EXACT_WRITE_RESULT_RECONCILIATION_EXECUTION_01` recorded by accepted external execution evidence (ART-0045): its one authorized execution attempt is consumed, the bounded GET-only evidence collection succeeded, and the prior CREATE remains unresolved with result `WRITE_UNRESOLVED_ZERO_MATCH` and writer proof `HELD`.
 
 Canonical `main` later advanced through `ARB_CODEX_IMPLEMENTER_STRUCTURE_01` at commit `7e43435397a6ca26b119b783f165cb6b30406a76` (tree `99b4c3b840d3fbf9f99c4c39b962cc07fdb3295c`, parent `bbec7f203140312169af7db2f5c2936b58fbd6dd`). That advance is tooling/workflow infrastructure only, not a technical phase transition, reconciliation evidence, venue evidence, or execution authorization.
 
-The one-order lifecycle is technically accepted and installed. Accepted execution evidence records that `KALSHI_DEMO_ONE_ORDER_LIFECYCLE_EXECUTION_01` has now occurred: its one-shot execution authorization is consumed, and the accepted terminal disposition is `FAIL_CLOSED_HALT` / `RECOVERY_ZERO_MATCH`. The prior CREATE's write result remains unresolved — the evidence does not establish that the lifecycle succeeded, that a fill or cancellation occurred, or that the CREATE definitely did not reach the venue. See Section 7 for exact evidence-qualified detail. Installation of write-capable code is not execution authorization, and neither Execution 01 nor the accepted reconciliation specification authorizes a further Demo order, cancellation, credential use, or any other venue request.
+The one-order lifecycle is technically accepted and installed. Accepted execution evidence records that `KALSHI_DEMO_ONE_ORDER_LIFECYCLE_EXECUTION_01` occurred with terminal disposition `FAIL_CLOSED_HALT` / `RECOVERY_ZERO_MATCH`, and that the separate `KALSHI_DEMO_POST_HALT_EXACT_WRITE_RESULT_RECONCILIATION_EXECUTION_01` was consumed as a bounded GET-only evidence collection with result `WRITE_UNRESOLVED_ZERO_MATCH`. The prior CREATE's write result remains unresolved — zero live-order and historical-order matches do not establish that the CREATE never existed. Writer proof remains `HELD` and release-ineligible. See Section 7 for exact evidence-qualified detail. No accepted result authorizes a further Demo order, cancellation, retry, second lifecycle, credential use, exploratory venue request, or production activity.
 
 ## 3. Accepted public connectivity predecessor
 
@@ -378,7 +379,31 @@ Accepted and installed implementation:
 
 Accepted installation-review validation evidence records: deterministic evidence test `1 passed`; reconciliation suite `140 passed`; targeted four-module regression `1082 passed`; full repository regression `1268 passed`; failures `0`. The implementation/test activity recorded Kalshi Demo requests `0`, Kalshi production requests `0`, real secret reads `0`, credential activity `NONE`, venue activity `NONE`, and write activity `NONE`. These are accepted project/manifest results and were not rerun by this documentation task.
 
-Implementation installation itself performed no authenticated Demo reconciliation and grants no venue or credential capability. Any authenticated Demo reconciliation execution requires a separate explicit execution decision.
+Implementation installation itself performed no authenticated Demo reconciliation and grants no venue or credential capability.
+
+### Accepted post-halt reconciliation execution
+
+Accepted external execution evidence (ART-0045) for:
+
+`KALSHI_DEMO_POST_HALT_EXACT_WRITE_RESULT_RECONCILIATION_EXECUTION_01`
+
+- evidence file: `KALSHI_DEMO_POST_HALT_EXACT_WRITE_RESULT_RECONCILIATION_EVIDENCE_01.json`;
+- raw bytes: `10541`; SHA-256: `a10eb4a6d7490755bbe055056cbe4960d075fd73048967d7e3d1c846c7be34fe`;
+- frozen target: environment `KALSHI_DEMO`; account scope `ARB_KALSHI_DEMO_PRIMARY_ACCOUNT`; subaccount `0`; ticker `KXFEDDECISION-26SEP-H0`; client order id `2e64d452-2cc2-43fa-a976-e8f996192252`; writer proof `KALSHI_DEMO_ONE_ORDER_LIFECYCLE_EXECUTION_01_WRITER_PROOF`;
+- `authorization_consumed = true`; `overall_execution_attempts_authorized = 1`; `send_boundary_entered_count = 3`;
+- request 1: public `GET /trade-api/v2/historical/cutoff`, HTTP `200`, retries `0`, redirects `0`;
+- request 2: authenticated `GET /trade-api/v2/portfolio/orders` for the frozen ticker, subaccount `0`, limit `1000`, HTTP `200`, records observed `0`, cursor `TERMINAL_EMPTY`, retries `0`, redirects `0`;
+- request 3: authenticated `GET /trade-api/v2/historical/orders` for the frozen ticker, limit `1000`, HTTP `200`, records observed `0`, cursor `TERMINAL_EMPTY`, retries `0`, redirects `0`;
+- request count `3`; retry count `0`; redirect count `0`; no `EXACT_ORDER`, `LIVE_FILLS`, or `HISTORICAL_FILLS` request occurred because no order id was bound;
+- result `WRITE_UNRESOLVED_ZERO_MATCH`; halt code `null`; exact client-order-id match count `0`; bound order id `null`;
+- `created_order_upper_bound = 1`; `active_order_upper_bound = 1`; `unknown_result = true`;
+- writer-proof continuity state `HELD`; writer-proof release eligible `false`;
+- production activity `0`; write activity `0`; funding activity `0`; WebSocket activity `0`;
+- secret values printed `false`; secret values persisted `false`.
+
+The reconciliation execution succeeded as a bounded GET-only evidence collection, but it did **not** resolve the prior ambiguous CREATE. Zero live-order and historical-order matches do **not** prove that the CREATE never existed, so `WRITE_UNRESOLVED_ZERO_MATCH` remains unresolved. Execution 01 is consumed and must not be rerun. Writer proof remains `HELD` and release-ineligible. No CREATE, CANCEL, retry, second lifecycle, or exploratory venue request is authorized by this result, and no production capability or activity was established.
+
+Execution-time public-source provenance recorded OpenAPI `3.0.0`, API info version `3.27.0`, `323714` bytes, SHA-256 `9b7708b12d33b3cb38bfe7b840b3e38399ecdc88a20a5791a674c39ac0304de8`. This is execution-time observation provenance only, not a standing freshness guarantee. The reviewed local runner SHA-256 was `e1e1d0a0665eb443336ec920546b415508bb8df721240e26a1360e1cdeee4c9f`; neither the runner nor the raw OpenAPI file is canonical repository source.
 
 ## 8. Current authorization / capability state
 
@@ -389,7 +414,8 @@ Current technical/venue state after installation of the accepted reconciliation 
 - active venue execution authorization: `NONE`;
 - active credential/signing authorization: `NONE`;
 - reconciliation implementation: `INSTALLED_ACCEPTED`;
-- authenticated Demo reconciliation execution: `NOT AUTHORIZED` and not performed;
+- authenticated Demo reconciliation Execution 01: `CONSUMED`; accepted result `WRITE_UNRESOLVED_ZERO_MATCH`;
+- writer proof: `HELD`; release eligible `false`;
 - Demo public/authenticated reads: `PROHIBITED` unless a new exact task permits them;
 - Demo writes/orders/cancellations: `PROHIBITED`;
 - production reads/writes: `PROHIBITED` unless separately and explicitly permitted;
@@ -410,13 +436,11 @@ In particular:
 
 ## 9. Next gated work
 
-The next gated project decision/task is `KALSHI_DEMO_POST_HALT_EXACT_WRITE_RESULT_RECONCILIATION_EXECUTION_01`.
-
-If separately authorized, that execution is limited to the installed specification's bounded authenticated Kalshi Demo **GET-only** reconciliation surface. It does not imply or authorize CREATE, CANCEL, amend, decrease, resend, WebSocket, production, funding, or trading. Any real Demo reconciliation read requires a separate, explicit execution authorization — the same as any other venue request.
+The next technical design task is a separate SPEC-only fill-discovery binding fallback. Its planned existence does not mean that its specification is accepted, implemented, or executed, and does not authorize any venue request or other capability.
 
 Another one-order lifecycle Create or Cancel is **not authorized** while Execution-01's write result remains unresolved (Section 7). Before any future lifecycle execution, the task must separately establish the exact Revision-06 runtime predicates, including the required environment/capability envelope, credential-reference and signing boundaries, writer-exclusivity/prior-write proof, exact source/binding identities, bounded ticker/economics, request budgets/deadlines, and caller-supplied transport behavior.
 
-No Demo Create, Cancel, credential use, or further venue read/write may be inferred from the present accepted state.
+No Demo Create, Cancel, retry, second lifecycle, exploratory venue request, credential use, or further venue read/write may be inferred from the present accepted state.
 
 ## 10. Local execution environment
 
