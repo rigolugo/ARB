@@ -3,8 +3,10 @@
 This module implements the bounded, read-only reconciliation contract for the
 single unresolved Execution-01 CREATE result.  It performs no network I/O of
 its own.  Every venue observation crosses a caller-supplied ``GET``-only
-transport boundary, and every request path/query is generated internally from
-a closed six-operation set.
+transport boundary, and every request path/query is generated internally.  The
+accepted predecessor keeps its closed six-operation set; the fill-discovery
+continuation has a separate closed four-operation set and cannot enumerate
+orders or emit any write.
 
 The central safety invariant is intentionally conservative: complete live and
 historical enumeration with zero exact ``client_order_id`` matches does *not*
@@ -28,8 +30,8 @@ import json
 import re
 import time
 from dataclasses import dataclass, field
-from datetime import datetime
-from decimal import Decimal
+from datetime import datetime, timezone
+from decimal import ROUND_CEILING, Decimal
 from types import MappingProxyType
 from typing import Callable, Dict, FrozenSet, List, Mapping, Optional, Protocol, Sequence, Tuple
 
@@ -177,6 +179,7 @@ class HaltCode(enum.StrEnum):
     GET_ONLY_CONTRACT_VIOLATION = "GET_ONLY_CONTRACT_VIOLATION"
     CAPABILITY_MISSING = "CAPABILITY_MISSING"
     SECRET_BOUNDARY_VIOLATION = "SECRET_BOUNDARY_VIOLATION"
+    FILL_TIMESTAMP_INVALID = "FILL_TIMESTAMP_INVALID"
 
     CUTOFF_RESPONSE_INVALID = "CUTOFF_RESPONSE_INVALID"
     PAGINATION_CURSOR_MALFORMED = "PAGINATION_CURSOR_MALFORMED"
@@ -200,6 +203,11 @@ class HaltCode(enum.StrEnum):
     FILL_WRONG_ORDER = "FILL_WRONG_ORDER"
     FILL_SCOPE_MISMATCH = "FILL_SCOPE_MISMATCH"
     FILL_ID_DUPLICATE_CONFLICT = "FILL_ID_DUPLICATE_CONFLICT"
+    FILL_SCOPE_CONFLICT = "FILL_SCOPE_CONFLICT"
+    CANDIDATE_ORDER_ID_BUDGET_EXCEEDED = "CANDIDATE_ORDER_ID_BUDGET_EXCEEDED"
+    CANDIDATE_EXACT_ORDER_READ_FAILURE = "CANDIDATE_EXACT_ORDER_READ_FAILURE"
+    ORDER_STATE_AFTER_DISCOVERY_SNAPSHOT = "ORDER_STATE_AFTER_DISCOVERY_SNAPSHOT"
+    ECONOMIC_RISK_INVARIANT_VIOLATION = "ECONOMIC_RISK_INVARIANT_VIOLATION"
     FILL_PRICE_WORSE_THAN_LIMIT = "FILL_PRICE_WORSE_THAN_LIMIT"
     POST_ONLY_TAKER_FILL_CONFLICT = "POST_ONLY_TAKER_FILL_CONFLICT"
     FILLED_PRINCIPAL_EXCEEDS_LIMIT = "FILLED_PRINCIPAL_EXCEEDS_LIMIT"
@@ -217,12 +225,14 @@ _IDENTITY_VIOLATION_CODES: FrozenSet[HaltCode] = frozenset({
     HaltCode.FILL_WRONG_ORDER,
     HaltCode.FILL_SCOPE_MISMATCH,
     HaltCode.FILL_ID_DUPLICATE_CONFLICT,
+    HaltCode.FILL_SCOPE_CONFLICT,
     HaltCode.FILL_PRICE_WORSE_THAN_LIMIT,
     HaltCode.POST_ONLY_TAKER_FILL_CONFLICT,
     HaltCode.FILLED_PRINCIPAL_EXCEEDS_LIMIT,
     HaltCode.FEE_RISK_EXCEEDS_LIMIT,
     HaltCode.TOTAL_RISK_EXCEEDS_LIMIT,
     HaltCode.OVERFILL,
+    HaltCode.ECONOMIC_RISK_INVARIANT_VIOLATION,
 })
 
 
@@ -2426,6 +2436,1886 @@ def _minimal_invalid_input() -> ReconciliationInput:
     )
 
 
+# ---------------------------------------------------------------------------
+# Fill-discovery binding fallback (accepted zero-order-match continuation)
+# ---------------------------------------------------------------------------
+
+FALLBACK_REQUIRED_BASE = "f94eee051d7e845680053ec878c8df2bfcaec672"
+FALLBACK_REQUIRED_TREE = "fddbc085db0f71c1b1dfbba3a8fa3790d656a45e"
+FALLBACK_SPECIFICATION_FILENAME = "KALSHI_DEMO_POST_HALT_FILL_DISCOVERY_BINDING_FALLBACK_SPEC_01.md"
+FALLBACK_SPECIFICATION_BYTES = 62219
+FALLBACK_SPECIFICATION_SHA256 = "361f7bbc172c1a2ecd7f2278f0371966288e4ef63a41a018820f0a7a1d893c0b"
+FALLBACK_HANDOFF_FILENAME = "HANDOFF_KALSHI_DEMO_POST_HALT_FILL_DISCOVERY_BINDING_FALLBACK_SPEC_01.md"
+FALLBACK_HANDOFF_BYTES = 12699
+FALLBACK_HANDOFF_SHA256 = "f81a99e0b3aec7a831065c6da622c6a029cb3d137e2cb4708b8b940445799924"
+PREDECESSOR_RECONCILIATION_EVIDENCE_FILENAME = (
+    "KALSHI_DEMO_POST_HALT_EXACT_WRITE_RESULT_RECONCILIATION_EVIDENCE_01.json"
+)
+PREDECESSOR_RECONCILIATION_EVIDENCE_BYTES = 10541
+PREDECESSOR_RECONCILIATION_EVIDENCE_SHA256 = (
+    "a10eb4a6d7490755bbe055056cbe4960d075fd73048967d7e3d1c846c7be34fe"
+)
+
+INCIDENT_LOWER_BOUND_SOURCE = "writer_proof.valid_from_utc"
+INCIDENT_LOWER_BOUND_UTC = "2026-08-11T01:22:15.7100717Z"
+INCIDENT_LOWER_BOUND_EPOCH_SECONDS = Decimal("1786411335.7100717")
+QUERY_MIN_TS = 1786411334
+CANDIDATE_EXACT_ORDER_GET_MAX = 8
+FALLBACK_GLOBAL_GET_SEND_MAXIMUM = 25
+
+FALLBACK_SOURCE_BINDING_MANIFEST_BYTES = b'{"authentication":{"authenticated_operations":["LIVE_FILLS","HISTORICAL_FILLS","EXACT_ORDER"],"method":"RSA-PSS/SHA-256","public_operations":["HISTORICAL_CUTOFF"],"required_headers":["KALSHI-ACCESS-KEY","KALSHI-ACCESS-TIMESTAMP","KALSHI-ACCESS-SIGNATURE"],"signature_encoding":"Base64","signature_message":"timestamp_ms_text + method + path_without_query"},"binding_manifest_id":"KALSHI_FILL_DISCOVERY_FALLBACK_CURRENT_OFFICIAL_SOURCE_BINDING_2026-08-12","direction_semantics":{"canonical_fields":["outcome_side","book_side"],"fail_closed_rule":"do not invent absent fields; future implementation/execution source binding must prove required current schema or halt AUTHORITATIVE_SCHEMA_DRIFT","legacy_fields_deprecated":["action","side"],"retrieval_note":"current direction guide/changelog define normalized direction fields for Order and Fill; accessible current endpoint render did not expose all child attributes consistently","target_values":{"book_side":"bid","outcome_side":"yes"}},"domain":"docs.kalshi.com","environment":{"api_base_path":"/trade-api/v2","credentials_shared_between_demo_and_production":false,"demo_recommended_origin":"https://external-api.demo.kalshi.co","production_origin":"https://external-api.kalshi.com"},"observed_at_utc":"2026-08-12T14:54:30Z","official_urls":["https://docs.kalshi.com/llms.txt","https://docs.kalshi.com/getting_started/api_environments","https://docs.kalshi.com/getting_started/demo_env","https://docs.kalshi.com/getting_started/quick_start_authenticated_requests","https://docs.kalshi.com/getting_started/historical_data","https://docs.kalshi.com/getting_started/order_direction","https://docs.kalshi.com/getting_started/fixed_point_migration","https://docs.kalshi.com/api-reference/historical/get-historical-cutoff-timestamps","https://docs.kalshi.com/api-reference/portfolio/get-fills","https://docs.kalshi.com/api-reference/historical/get-historical-fills","https://docs.kalshi.com/api-reference/orders/get-order","https://docs.kalshi.com/changelog","https://docs.kalshi.com/openapi.yaml"],"operations":{"EXACT_ORDER":{"auth":"AUTHENTICATED","binding_fields":["order_id","client_order_id","ticker","yes_price_dollars","fill_count_fp","remaining_count_fp","initial_count_fp","cancel_order_on_pause","subaccount_number","exchange_index"],"downstream_fields_when_exposed":["outcome_side","book_side","type","status","self_trade_prevention_type","created_time","last_update_time"],"method":"GET","path_parameters":["order_id"],"path_template":"/trade-api/v2/portfolio/orders/{order_id}","query_parameters":[]},"HISTORICAL_CUTOFF":{"auth":"PUBLIC","method":"GET","path":"/trade-api/v2/historical/cutoff","query_parameters":[],"required_response_fields":["market_settled_ts","trades_created_ts","orders_updated_ts"]},"HISTORICAL_FILLS":{"auth":"AUTHENTICATED","fallback_first_page_query":["ticker","max_ts","limit"],"limit_max":1000,"method":"GET","path":"/trade-api/v2/historical/fills","response_fields_used":["fill_id","trade_id","order_id","ticker","market_ticker","count_fp","yes_price_dollars","no_price_dollars","is_taker","fee_cost","created_time","subaccount_number","ts","cursor"],"supported_query_parameters":["ticker","max_ts","limit","cursor"],"time_filter_wording":{"max_ts":"items before this Unix timestamp"},"unsupported_for_this_binding":["min_ts","order_id","subaccount"]},"LIVE_FILLS":{"auth":"AUTHENTICATED","fallback_first_page_query":["ticker","min_ts","max_ts","limit","subaccount"],"fallback_prohibited_discovery_parameters":["order_id"],"limit_max":1000,"method":"GET","path":"/trade-api/v2/portfolio/fills","response_fields_used":["fill_id","trade_id","order_id","ticker","market_ticker","count_fp","yes_price_dollars","no_price_dollars","is_taker","fee_cost","created_time","subaccount_number","ts","cursor"],"supported_query_parameters":["ticker","order_id","min_ts","max_ts","limit","cursor","subaccount"],"time_filter_wording":{"max_ts":"items before this Unix timestamp","min_ts":"items after this Unix timestamp"}}},"partition":{"fill_cutoff_field":"trades_created_ts","historical_surface":"/trade-api/v2/historical/fills","live_surface":"/trade-api/v2/portfolio/fills","rule":"fills older than trades_created_ts are historical; complete history may require combining live and historical"},"precision":{"arithmetic":"exact Decimal/fixed-point; no premature rounding","binary_float":"PROHIBITED","count_field":"count_fp","fee_field":"fee_cost","price_fields":["yes_price_dollars","no_price_dollars"]},"raw_openapi":{"bytes":null,"materialized":false,"reason":"available retrieval surfaces did not materialize text/yaml bytes; no historical hash is reused as current","sha256":null,"url":"https://docs.kalshi.com/openapi.yaml"},"source_class":"CURRENT_OFFICIAL_RENDERED_DOCUMENTATION_SEMANTIC_BINDING"}'
+FALLBACK_SOURCE_BINDING_MANIFEST_LENGTH = 4782
+FALLBACK_SOURCE_BINDING_MANIFEST_SHA256 = (
+    "50ad091e76a6f00a34f13cf2d3b976f74e16955005156fc60ee8df9af9da25ea"
+)
+FALLBACK_OPERATION_BINDING_IDENTITIES: Mapping[str, Tuple[int, str]] = MappingProxyType({
+    "HISTORICAL_CUTOFF": (184, "7d26ffe56719c0acaad87e6db5d2cc2bb68815d271b3f1d978fa8932059fdf1a"),
+    "LIVE_FILLS": (642, "ed99cbfc6c37753e1989255db3fb1663055da88c678e02175a080a6f34dcd0da"),
+    "HISTORICAL_FILLS": (555, "134cc231a64fa865fbbd09190dcbb23a3816edb18e17ac7a643a38c63e62a724"),
+    "EXACT_ORDER": (487, "ee7d3b4da52153cc3f90f8a6c129cbb2f5ee72eae89e1566daf8dbc26224c19c"),
+})
+
+
+class FallbackCapabilityName(enum.StrEnum):
+    HISTORICAL_CUTOFF_READ = "KALSHI_DEMO_PUBLIC_HISTORICAL_CUTOFF_READ"
+    LIVE_FILL_DISCOVERY_READ = "KALSHI_DEMO_AUTHENTICATED_LIVE_FILL_DISCOVERY_READ"
+    HISTORICAL_FILL_DISCOVERY_READ = "KALSHI_DEMO_AUTHENTICATED_HISTORICAL_FILL_DISCOVERY_READ"
+    EXACT_CANDIDATE_ORDER_READ = "KALSHI_DEMO_AUTHENTICATED_EXACT_CANDIDATE_ORDER_READ"
+    CREDENTIAL_USE = "KALSHI_DEMO_CREDENTIAL_USE_FOR_THE_THREE_AUTHENTICATED_GET_FAMILIES"
+
+
+REQUIRED_FALLBACK_CAPABILITIES: FrozenSet[FallbackCapabilityName] = frozenset(FallbackCapabilityName)
+
+
+class FallbackOperation(enum.StrEnum):
+    HISTORICAL_CUTOFF = "HISTORICAL_CUTOFF"
+    LIVE_FILLS = "LIVE_FILLS"
+    HISTORICAL_FILLS = "HISTORICAL_FILLS"
+    EXACT_ORDER = "EXACT_ORDER"
+
+
+@dataclass(frozen=True, slots=True)
+class FillDiscoveryCapabilityEnvelope:
+    environment: str
+    rest_origin: str
+    credential_reference_names: Tuple[str, ...]
+    granted_capabilities: FrozenSet[FallbackCapabilityName]
+    network_access: CapabilityState
+    demo_public_reads: CapabilityState
+    demo_authenticated_reads: CapabilityState
+    credential_use: CapabilityState
+    demo_writes: CapabilityState
+    production_public_reads: CapabilityState
+    production_authenticated_reads: CapabilityState
+    production_writes: CapabilityState
+    account_funding: CapabilityState
+    websocket: CapabilityState
+
+
+@dataclass(frozen=True, slots=True)
+class FillDiscoveryFallbackInput:
+    capability_envelope: FillDiscoveryCapabilityEnvelope
+    source_binding_manifest_bytes: bytes
+    provenance: ReconciliationProvenance
+    prior_result_class: ResultClass
+    prior_exact_client_order_id_match_count: int
+    prior_bound_order_id: Optional[str]
+    prior_created_order_upper_bound: int
+    prior_active_order_upper_bound: int
+    prior_unknown_result: bool
+    prior_writer_proof_release_eligible: bool
+
+
+@dataclass(frozen=True, slots=True)
+class FillDiscoveryFallbackPlan:
+    environment: str
+    origin: str
+    base_path: str
+    operations: Tuple[FallbackOperation, ...]
+    source_binding_sha256: str
+    ticker: str
+    client_order_id: str
+
+
+@dataclass(frozen=True, slots=True)
+class FallbackPreparedGetRequest:
+    operation: FallbackOperation
+    origin: str
+    path: str
+    query: Mapping[str, object]
+    authentication_class: AuthenticationClass
+    page_ordinal: int
+    effective_deadline_monotonic: float
+
+    @property
+    def method(self) -> str:
+        return "GET"
+
+
+class FillDiscoveryFallbackTransport(Protocol):
+    def send(self, request: FallbackPreparedGetRequest) -> RawHttpResponse: ...
+
+
+@dataclass(frozen=True, slots=True)
+class FillDiscoveryFallbackResult:
+    result_class: ResultClass
+    halt_code: Optional[HaltCode]
+    bound_order_id: Optional[str]
+    created_order_upper_bound: int
+    active_order_upper_bound: int
+    unknown_result: bool
+    writer_proof_release_eligible: bool
+    prior_exact_client_order_id_match_count: int
+    candidate_order_id_count: int
+    candidate_order_ids: Tuple[str, ...]
+    validated_binding_count: int
+    validated_binding_order_ids: Tuple[str, ...]
+    canonical_fill_count: int
+    canonical_fill_quantity: Optional[Decimal]
+    canonical_filled_principal: Optional[Decimal]
+    canonical_fee_cost: Optional[Decimal]
+    incident_lower_bound_utc: str
+    fill_discovery_snapshot_utc: Optional[str]
+    query_min_ts: int
+    query_max_ts: Optional[int]
+    trades_created_ts: Optional[str]
+    historical_fill_stream_required: Optional[bool]
+    request_count: int
+    retry_count: int
+    redirect_count: int
+    production_activity: int
+    write_activity: int
+    funding_activity: int
+    websocket_activity: int
+    evidence_json: bytes
+    evidence_sha256: str
+
+
+@dataclass(frozen=True, slots=True)
+class _FallbackOperationSpec:
+    operation: FallbackOperation
+    path_template: str
+    authentication_class: AuthenticationClass
+    page_budget: int
+
+
+_FALLBACK_OPERATION_SPECS: Mapping[FallbackOperation, _FallbackOperationSpec] = MappingProxyType({
+    FallbackOperation.HISTORICAL_CUTOFF: _FallbackOperationSpec(
+        FallbackOperation.HISTORICAL_CUTOFF,
+        "/trade-api/v2/historical/cutoff",
+        AuthenticationClass.PUBLIC,
+        1,
+    ),
+    FallbackOperation.LIVE_FILLS: _FallbackOperationSpec(
+        FallbackOperation.LIVE_FILLS,
+        "/trade-api/v2/portfolio/fills",
+        AuthenticationClass.AUTHENTICATED,
+        MAX_LIVE_FILL_PAGES,
+    ),
+    FallbackOperation.HISTORICAL_FILLS: _FallbackOperationSpec(
+        FallbackOperation.HISTORICAL_FILLS,
+        "/trade-api/v2/historical/fills",
+        AuthenticationClass.AUTHENTICATED,
+        MAX_HISTORICAL_FILL_PAGES,
+    ),
+    FallbackOperation.EXACT_ORDER: _FallbackOperationSpec(
+        FallbackOperation.EXACT_ORDER,
+        "/trade-api/v2/portfolio/orders/{order_id}",
+        AuthenticationClass.AUTHENTICATED,
+        CANDIDATE_EXACT_ORDER_GET_MAX,
+    ),
+})
+_FALLBACK_OPERATION_ORDER = (
+    FallbackOperation.HISTORICAL_CUTOFF,
+    FallbackOperation.LIVE_FILLS,
+    FallbackOperation.HISTORICAL_FILLS,
+    FallbackOperation.EXACT_ORDER,
+)
+
+
+@dataclass(frozen=True, slots=True)
+class _UtcInstant:
+    text: str
+    epoch_seconds: Decimal
+
+
+@dataclass(frozen=True, slots=True)
+class _DiscoveryFill:
+    fill_id: str
+    trade_id: str
+    order_id: str
+    ticker: str
+    market_ticker: Optional[str]
+    subaccount_number: Optional[int]
+    outcome_side: Optional[str]
+    book_side: Optional[str]
+    count_fp: Decimal
+    yes_price_dollars: Decimal
+    no_price_dollars: Decimal
+    is_taker: bool
+    fee_cost: Decimal
+    created_time: _UtcInstant
+    ts: Optional[object]
+    observations: Tuple[_Observation, ...]
+    raw_authoritative: Mapping[str, object]
+
+
+@dataclass(frozen=True, slots=True)
+class _CandidateOrder:
+    order_id: str
+    client_order_id: str
+    ticker: Optional[str]
+    subaccount_number: Optional[int]
+    outcome_side: Optional[str]
+    book_side: Optional[str]
+    order_type: Optional[str]
+    status: Optional[str]
+    yes_price_dollars: Optional[Decimal]
+    no_price_dollars: Optional[Decimal]
+    initial_count_fp: Optional[Decimal]
+    fill_count_fp: Optional[Decimal]
+    remaining_count_fp: Optional[Decimal]
+    cancel_order_on_pause: Optional[bool]
+    exchange_index: Optional[int]
+    self_trade_prevention_type: Optional[str]
+    legacy_action: Optional[str]
+    legacy_side: Optional[str]
+    created_time: Optional[_UtcInstant]
+    last_update_time: Optional[_UtcInstant]
+    raw_authoritative: Mapping[str, object]
+
+
+@dataclass(slots=True)
+class _FallbackExecutionState:
+    request_counts: Dict[FallbackOperation, int] = field(
+        default_factory=lambda: {operation: 0 for operation in FallbackOperation}
+    )
+    request_ledger: List[Dict[str, object]] = field(default_factory=list)
+    cutoff: Optional[Dict[str, str]] = None
+    fill_pages: Dict[str, List[Dict[str, object]]] = field(
+        default_factory=lambda: {"LIVE_FILLS": [], "HISTORICAL_FILLS": []}
+    )
+    rejected_fills: List[Dict[str, object]] = field(default_factory=list)
+    fill_duplicate_details: List[Dict[str, object]] = field(default_factory=list)
+    discovery_fills: List[_DiscoveryFill] = field(default_factory=list)
+    bound_fills: List[_DiscoveryFill] = field(default_factory=list)
+    candidate_order_ids: List[str] = field(default_factory=list)
+    candidate_validation: List[Dict[str, object]] = field(default_factory=list)
+    validated_binding_order_ids: List[str] = field(default_factory=list)
+    identity_matrices: Dict[str, Dict[str, str]] = field(default_factory=dict)
+    bound_order_id: Optional[str] = None
+    fill_discovery_snapshot_utc: Optional[str] = None
+    query_max_ts: Optional[int] = None
+    trades_created_ts: Optional[str] = None
+    historical_fill_stream_required: Optional[bool] = None
+    canonical_fill_quantity: Optional[Decimal] = None
+    canonical_filled_principal: Optional[Decimal] = None
+    canonical_fee_cost: Optional[Decimal] = None
+    retry_count_observed: int = 0
+    redirect_count_observed: int = 0
+
+    def total_requests(self) -> int:
+        return sum(self.request_counts.values())
+
+
+_UTC_INSTANT_PATTERN = re.compile(
+    r"(?P<year>[0-9]{4})-(?P<month>[0-9]{2})-(?P<day>[0-9]{2})T"
+    r"(?P<hour>[0-9]{2}):(?P<minute>[0-9]{2}):(?P<second>[0-9]{2})"
+    r"(?:\.(?P<fraction>[0-9]+))?(?:Z|\+00:00)"
+)
+_SAFE_ORDER_ID_SEGMENT_PATTERN = re.compile(r"[A-Za-z0-9._~-]{1,256}")
+
+
+def validate_fallback_source_binding_manifest(raw: object) -> Optional[HaltCode]:
+    if type(raw) is not bytes or len(raw) == 0:
+        return HaltCode.TASK_CURRENT_SOURCE_UNAVAILABLE
+    if (
+        len(raw) != FALLBACK_SOURCE_BINDING_MANIFEST_LENGTH
+        or _sha256(raw) != FALLBACK_SOURCE_BINDING_MANIFEST_SHA256
+        or raw != FALLBACK_SOURCE_BINDING_MANIFEST_BYTES
+    ):
+        return HaltCode.AUTHORITATIVE_SCHEMA_DRIFT
+    try:
+        parsed = _strict_json_loads(raw)
+    except ValueError:
+        return HaltCode.AUTHORITATIVE_SCHEMA_DRIFT
+    if type(parsed) is not dict or type(parsed.get("operations")) is not dict:
+        return HaltCode.AUTHORITATIVE_SCHEMA_DRIFT
+    operations = parsed["operations"]
+    if set(operations) != set(FALLBACK_OPERATION_BINDING_IDENTITIES):
+        return HaltCode.AUTHORITATIVE_SCHEMA_DRIFT
+    for name, (expected_bytes, expected_sha256) in FALLBACK_OPERATION_BINDING_IDENTITIES.items():
+        operation_bytes = _canonical_json_bytes(operations[name])
+        if len(operation_bytes) != expected_bytes or _sha256(operation_bytes) != expected_sha256:
+            return HaltCode.AUTHORITATIVE_SCHEMA_DRIFT
+        if type(operations[name]) is not dict or operations[name].get("method") != "GET":
+            return HaltCode.GET_ONLY_CONTRACT_VIOLATION
+    return None
+
+
+def _validate_fallback_capability(envelope: object) -> Optional[HaltCode]:
+    if type(envelope) is not FillDiscoveryCapabilityEnvelope:
+        return HaltCode.CAPABILITY_MISSING
+    if envelope.environment != ENVIRONMENT:
+        return HaltCode.DEMO_ENVIRONMENT_REQUIRED
+    if envelope.rest_origin == "https://external-api.kalshi.com":
+        return HaltCode.PRODUCTION_ENDPOINT_PROHIBITED
+    if envelope.rest_origin != DEMO_REST_ORIGIN:
+        return HaltCode.DEMO_ENVIRONMENT_REQUIRED
+    if envelope.credential_reference_names != _REQUIRED_CREDENTIAL_REFERENCES:
+        return HaltCode.SECRET_BOUNDARY_VIOLATION
+    if (
+        type(envelope.granted_capabilities) is not frozenset
+        or any(type(value) is not FallbackCapabilityName for value in envelope.granted_capabilities)
+        or envelope.granted_capabilities != REQUIRED_FALLBACK_CAPABILITIES
+    ):
+        return HaltCode.CAPABILITY_MISSING
+    for value in (
+        envelope.network_access,
+        envelope.demo_public_reads,
+        envelope.demo_authenticated_reads,
+        envelope.credential_use,
+    ):
+        if type(value) is not CapabilityState or value is not CapabilityState.PERMITTED:
+            return HaltCode.CAPABILITY_MISSING
+    for value in (
+        envelope.demo_writes,
+        envelope.production_public_reads,
+        envelope.production_authenticated_reads,
+        envelope.production_writes,
+        envelope.account_funding,
+        envelope.websocket,
+    ):
+        if type(value) is not CapabilityState or value is not CapabilityState.PROHIBITED:
+            return HaltCode.CAPABILITY_MISSING
+    return None
+
+
+def _validate_fallback_input(value: object) -> Optional[HaltCode]:
+    if type(value) is not FillDiscoveryFallbackInput:
+        return HaltCode.CONTROLLING_ARTIFACT_IDENTITY_MISMATCH
+    capability_halt = _validate_fallback_capability(value.capability_envelope)
+    if capability_halt is not None:
+        return capability_halt
+    source_halt = validate_fallback_source_binding_manifest(value.source_binding_manifest_bytes)
+    if source_halt is not None:
+        return source_halt
+    if type(value.provenance) is not ReconciliationProvenance:
+        return HaltCode.CONTROLLING_ARTIFACT_IDENTITY_MISMATCH
+    if not _validate_artifact_identity(value.provenance.implementation):
+        return HaltCode.CONTROLLING_ARTIFACT_IDENTITY_MISMATCH
+    if not _validate_artifact_identity(value.provenance.tests):
+        return HaltCode.CONTROLLING_ARTIFACT_IDENTITY_MISMATCH
+    if (
+        type(value.provenance.source_raw_openapi_bytes) is not int
+        or value.provenance.source_raw_openapi_bytes <= 0
+        or type(value.provenance.source_raw_openapi_sha256) is not str
+        or _SHA256_PATTERN.fullmatch(value.provenance.source_raw_openapi_sha256) is None
+    ):
+        return HaltCode.TASK_CURRENT_SOURCE_UNAVAILABLE
+    predecessor_exact = (
+        value.prior_result_class is ResultClass.WRITE_UNRESOLVED_ZERO_MATCH
+        and type(value.prior_exact_client_order_id_match_count) is int
+        and type(value.prior_exact_client_order_id_match_count) is not bool
+        and value.prior_exact_client_order_id_match_count == 0
+        and value.prior_bound_order_id is None
+        and type(value.prior_created_order_upper_bound) is int
+        and type(value.prior_created_order_upper_bound) is not bool
+        and value.prior_created_order_upper_bound == 1
+        and type(value.prior_active_order_upper_bound) is int
+        and type(value.prior_active_order_upper_bound) is not bool
+        and value.prior_active_order_upper_bound == 1
+        and value.prior_unknown_result is True
+        and value.prior_writer_proof_release_eligible is False
+    )
+    if not predecessor_exact:
+        return HaltCode.CONTROLLING_ARTIFACT_IDENTITY_MISMATCH
+    return None
+
+
+def plan_fill_discovery_binding_fallback(
+    fallback_input: FillDiscoveryFallbackInput,
+) -> FillDiscoveryFallbackPlan:
+    halt = _validate_fallback_input(fallback_input)
+    if halt is not None:
+        raise ReconciliationPlanningError(halt)
+    return FillDiscoveryFallbackPlan(
+        environment=ENVIRONMENT,
+        origin=DEMO_REST_ORIGIN,
+        base_path=TRADE_API_BASE_PATH,
+        operations=_FALLBACK_OPERATION_ORDER,
+        source_binding_sha256=FALLBACK_SOURCE_BINDING_MANIFEST_SHA256,
+        ticker=TICKER,
+        client_order_id=CLIENT_ORDER_ID,
+    )
+
+
+def _parse_utc_instant(value: object) -> _UtcInstant:
+    if type(value) is not str:
+        raise ValueError("UTC timestamp must be a built-in string")
+    match = _UTC_INSTANT_PATTERN.fullmatch(value)
+    if match is None:
+        raise ValueError("timestamp must be RFC3339 UTC")
+    try:
+        whole = datetime(
+            int(match.group("year")),
+            int(match.group("month")),
+            int(match.group("day")),
+            int(match.group("hour")),
+            int(match.group("minute")),
+            int(match.group("second")),
+            tzinfo=timezone.utc,
+        )
+    except ValueError as exc:
+        raise ValueError("invalid UTC timestamp") from exc
+    epoch = datetime(1970, 1, 1, tzinfo=timezone.utc)
+    delta = whole - epoch
+    whole_seconds = delta.days * 86400 + delta.seconds
+    fraction_text = match.group("fraction")
+    fraction = Decimal(0) if fraction_text is None else Decimal("0." + fraction_text)
+    return _UtcInstant(text=value, epoch_seconds=Decimal(whole_seconds) + fraction)
+
+
+def _query_max_ts(snapshot: _UtcInstant) -> int:
+    return int(snapshot.epoch_seconds.to_integral_value(rounding=ROUND_CEILING)) + 1
+
+
+def _safe_candidate_order_path(order_id: object) -> str:
+    if type(order_id) is not str:
+        raise ValueError(HaltCode.GET_ONLY_CONTRACT_VIOLATION.value)
+    if (
+        _SAFE_ORDER_ID_SEGMENT_PATTERN.fullmatch(order_id) is None
+        or order_id in {".", ".."}
+        or "%" in order_id
+    ):
+        raise ValueError(HaltCode.GET_ONLY_CONTRACT_VIOLATION.value)
+    return "/trade-api/v2/portfolio/orders/" + order_id
+
+
+def _fallback_query_for(
+    operation: FallbackOperation,
+    *,
+    query_max_ts: int,
+    cursor: Optional[str] = None,
+) -> Mapping[str, object]:
+    if type(query_max_ts) is not int or type(query_max_ts) is bool:
+        raise ValueError(HaltCode.GET_ONLY_CONTRACT_VIOLATION.value)
+    if operation is FallbackOperation.HISTORICAL_CUTOFF:
+        query: Dict[str, object] = {}
+    elif operation is FallbackOperation.LIVE_FILLS:
+        query = {
+            "ticker": TICKER,
+            "subaccount": SUBACCOUNT,
+            "min_ts": QUERY_MIN_TS,
+            "max_ts": query_max_ts,
+            "limit": PAGE_LIMIT,
+        }
+    elif operation is FallbackOperation.HISTORICAL_FILLS:
+        query = {
+            "ticker": TICKER,
+            "max_ts": query_max_ts,
+            "limit": PAGE_LIMIT,
+        }
+    elif operation is FallbackOperation.EXACT_ORDER:
+        query = {}
+    else:
+        raise ValueError(HaltCode.GET_ONLY_CONTRACT_VIOLATION.value)
+    if cursor is not None:
+        if operation not in {FallbackOperation.LIVE_FILLS, FallbackOperation.HISTORICAL_FILLS}:
+            raise ValueError(HaltCode.GET_ONLY_CONTRACT_VIOLATION.value)
+        if type(cursor) is not str or cursor == "":
+            raise ValueError(HaltCode.GET_ONLY_CONTRACT_VIOLATION.value)
+        query["cursor"] = cursor
+    return MappingProxyType(query)
+
+
+def _fallback_path_for(operation: FallbackOperation, *, order_id: Optional[str] = None) -> str:
+    if operation is FallbackOperation.EXACT_ORDER:
+        return _safe_candidate_order_path(order_id)
+    if order_id is not None:
+        raise ValueError(HaltCode.GET_ONLY_CONTRACT_VIOLATION.value)
+    return _FALLBACK_OPERATION_SPECS[operation].path_template
+
+
+def _validate_fallback_prepared_request(request: object) -> Optional[HaltCode]:
+    if type(request) is not FallbackPreparedGetRequest:
+        return HaltCode.GET_ONLY_CONTRACT_VIOLATION
+    if type(request.operation) is not FallbackOperation:
+        return HaltCode.GET_ONLY_CONTRACT_VIOLATION
+    if request.origin != DEMO_REST_ORIGIN or request.method != "GET":
+        return HaltCode.GET_ONLY_CONTRACT_VIOLATION
+    spec = _FALLBACK_OPERATION_SPECS[request.operation]
+    if request.authentication_class is not spec.authentication_class:
+        return HaltCode.GET_ONLY_CONTRACT_VIOLATION
+    if type(request.page_ordinal) is not int or type(request.page_ordinal) is bool or request.page_ordinal < 1:
+        return HaltCode.GET_ONLY_CONTRACT_VIOLATION
+    if not isinstance(request.query, Mapping):
+        return HaltCode.GET_ONLY_CONTRACT_VIOLATION
+    keys = set(request.query)
+    if request.operation is FallbackOperation.HISTORICAL_CUTOFF:
+        if request.path != "/trade-api/v2/historical/cutoff" or keys:
+            return HaltCode.GET_ONLY_CONTRACT_VIOLATION
+    elif request.operation is FallbackOperation.LIVE_FILLS:
+        required = {"ticker", "subaccount", "min_ts", "max_ts", "limit"}
+        allowed = required | {"cursor"}
+        if not required.issubset(keys) or not keys.issubset(allowed):
+            return HaltCode.GET_ONLY_CONTRACT_VIOLATION
+        if (
+            request.path != "/trade-api/v2/portfolio/fills"
+            or request.query["ticker"] != TICKER
+            or request.query["subaccount"] != 0
+            or request.query["min_ts"] != QUERY_MIN_TS
+            or request.query["limit"] != 1000
+            or type(request.query["max_ts"]) is not int
+            or type(request.query["max_ts"]) is bool
+            or "order_id" in request.query
+        ):
+            return HaltCode.GET_ONLY_CONTRACT_VIOLATION
+    elif request.operation is FallbackOperation.HISTORICAL_FILLS:
+        required = {"ticker", "max_ts", "limit"}
+        allowed = required | {"cursor"}
+        if not required.issubset(keys) or not keys.issubset(allowed):
+            return HaltCode.GET_ONLY_CONTRACT_VIOLATION
+        if (
+            request.path != "/trade-api/v2/historical/fills"
+            or request.query["ticker"] != TICKER
+            or request.query["limit"] != 1000
+            or type(request.query["max_ts"]) is not int
+            or type(request.query["max_ts"]) is bool
+            or any(name in request.query for name in ("min_ts", "order_id", "subaccount"))
+        ):
+            return HaltCode.GET_ONLY_CONTRACT_VIOLATION
+    else:
+        prefix = "/trade-api/v2/portfolio/orders/"
+        if keys or not request.path.startswith(prefix):
+            return HaltCode.GET_ONLY_CONTRACT_VIOLATION
+        tail = request.path[len(prefix):]
+        try:
+            if _safe_candidate_order_path(tail) != request.path:
+                return HaltCode.GET_ONLY_CONTRACT_VIOLATION
+        except ValueError:
+            return HaltCode.GET_ONLY_CONTRACT_VIOLATION
+    if "cursor" in request.query:
+        cursor = request.query["cursor"]
+        if type(cursor) is not str or cursor == "":
+            return HaltCode.GET_ONLY_CONTRACT_VIOLATION
+    return None
+
+
+def build_fallback_get_signing_message(
+    request: FallbackPreparedGetRequest,
+    *,
+    timestamp_ms_text: str,
+) -> bytes:
+    if type(request) is not FallbackPreparedGetRequest:
+        raise ValueError(HaltCode.GET_ONLY_CONTRACT_VIOLATION.value)
+    if _validate_fallback_prepared_request(request) is not None:
+        raise ValueError(HaltCode.GET_ONLY_CONTRACT_VIOLATION.value)
+    if type(timestamp_ms_text) is not str or _TIMESTAMP_MS_PATTERN.fullmatch(timestamp_ms_text) is None:
+        raise ValueError("timestamp_ms_text must be canonical ASCII digits")
+    return (timestamp_ms_text + "GET" + request.path).encode("utf-8")
+
+
+def _fallback_send_json(
+    *,
+    operation: FallbackOperation,
+    transport: FillDiscoveryFallbackTransport,
+    deadline: _Deadline,
+    state: _FallbackExecutionState,
+    page_ordinal: int,
+    query_max_ts: int,
+    cursor_input: Optional[str] = None,
+    order_id: Optional[str] = None,
+) -> Tuple[Optional[object], Optional[RawHttpResponse], Optional[HaltCode]]:
+    if deadline.expired():
+        return None, None, HaltCode.MASTER_DEADLINE_EXHAUSTED
+    spec = _FALLBACK_OPERATION_SPECS[operation]
+    if state.request_counts[operation] >= spec.page_budget:
+        return None, None, HaltCode.PAGE_BUDGET_EXHAUSTED
+    if state.total_requests() >= FALLBACK_GLOBAL_GET_SEND_MAXIMUM:
+        return None, None, HaltCode.GLOBAL_REQUEST_BUDGET_EXHAUSTED
+    try:
+        path = _fallback_path_for(operation, order_id=order_id)
+        query = _fallback_query_for(operation, query_max_ts=query_max_ts, cursor=cursor_input)
+    except ValueError:
+        return None, None, HaltCode.GET_ONLY_CONTRACT_VIOLATION
+    request_start = deadline.clock()
+    if request_start >= deadline.absolute:
+        return None, None, HaltCode.MASTER_DEADLINE_EXHAUSTED
+    effective = min(request_start + PER_REQUEST_CEILING_MS / 1000.0, deadline.absolute)
+    request = FallbackPreparedGetRequest(
+        operation=operation,
+        origin=DEMO_REST_ORIGIN,
+        path=path,
+        query=query,
+        authentication_class=spec.authentication_class,
+        page_ordinal=page_ordinal,
+        effective_deadline_monotonic=effective,
+    )
+    contract_halt = _validate_fallback_prepared_request(request)
+    if contract_halt is not None:
+        return None, None, contract_halt
+    state.request_counts[operation] += 1
+    ledger: Dict[str, object] = {
+        "ordinal": state.total_requests(),
+        "operation": operation.value,
+        "method": "GET",
+        "path": path,
+        "sanitized_query": dict(query),
+        "authentication_class": spec.authentication_class.value,
+        "cursor_input": _cursor_evidence(cursor_input),
+        "cursor_output": None,
+        "page_ordinal": page_ordinal,
+        "http_status": None,
+        "media_type": None,
+        "response_bytes": None,
+        "response_sha256": None,
+        "json_schema_classification": "TRANSPORT_PENDING",
+        "elapsed_ms": None,
+        "remaining_master_budget_after_parse_ms": None,
+        "retry_count": 0,
+        "redirect_count": 0,
+    }
+    state.request_ledger.append(ledger)
+    try:
+        response = transport.send(request)
+    except Exception:
+        ledger["json_schema_classification"] = "TRANSPORT_READ_FAILURE"
+        ledger["elapsed_ms"] = max(0, int((deadline.clock() - request_start) * 1000))
+        return None, None, HaltCode.TRANSPORT_READ_FAILURE
+    after_receive = deadline.clock()
+    if type(response) is not RawHttpResponse:
+        ledger["json_schema_classification"] = "TRANSPORT_EVIDENCE_INVALID"
+        return None, None, HaltCode.TRANSPORT_READ_FAILURE
+    ledger["http_status"] = response.status
+    ledger["media_type"] = response.media_type
+    ledger["retry_count"] = response.retry_count
+    ledger["redirect_count"] = response.redirect_count
+    if type(response.retry_count) is int and type(response.retry_count) is not bool:
+        state.retry_count_observed += response.retry_count
+    if type(response.redirect_count) is int and type(response.redirect_count) is not bool:
+        state.redirect_count_observed += response.redirect_count
+    if after_receive >= deadline.absolute:
+        ledger["json_schema_classification"] = "MASTER_DEADLINE_EXHAUSTED"
+        return None, response, HaltCode.MASTER_DEADLINE_EXHAUSTED
+    if after_receive >= effective:
+        ledger["json_schema_classification"] = "PER_REQUEST_CEILING_EXHAUSTED"
+        return None, response, HaltCode.TRANSPORT_READ_FAILURE
+    if type(response.retry_count) is not int or type(response.retry_count) is bool or response.retry_count != 0:
+        ledger["json_schema_classification"] = "RETRY_CONTRACT_VIOLATION"
+        return None, response, HaltCode.TRANSPORT_READ_FAILURE
+    if type(response.redirect_count) is not int or type(response.redirect_count) is bool:
+        ledger["json_schema_classification"] = "REDIRECT_EVIDENCE_INVALID"
+        return None, response, HaltCode.TRANSPORT_READ_FAILURE
+    if response.redirect_count != 0 or (type(response.status) is int and 300 <= response.status <= 399):
+        ledger["json_schema_classification"] = "REDIRECT_PROHIBITED"
+        return None, response, HaltCode.REDIRECT_PROHIBITED
+    if type(response.status) is not int or type(response.status) is bool:
+        ledger["json_schema_classification"] = "STATUS_INVALID"
+        return None, response, HaltCode.AUTHORITATIVE_SCHEMA_DRIFT
+    if response.status != 200:
+        ledger["json_schema_classification"] = "UNEXPECTED_HTTP_STATUS"
+        return None, response, HaltCode.UNEXPECTED_HTTP_STATUS
+    if type(response.media_type) is not str or response.media_type.split(";", 1)[0].strip().lower() != "application/json":
+        ledger["json_schema_classification"] = "MEDIA_TYPE_INVALID"
+        return None, response, HaltCode.AUTHORITATIVE_SCHEMA_DRIFT
+    if type(response.body_bytes) is not bytes:
+        ledger["json_schema_classification"] = "BODY_BYTES_INVALID"
+        return None, response, HaltCode.AUTHORITATIVE_SCHEMA_DRIFT
+    ledger["response_bytes"] = len(response.body_bytes)
+    ledger["response_sha256"] = _sha256(response.body_bytes)
+    try:
+        parsed = _strict_json_loads(response.body_bytes)
+    except ValueError:
+        ledger["json_schema_classification"] = "STRICT_JSON_INVALID"
+        return None, response, HaltCode.AUTHORITATIVE_SCHEMA_DRIFT
+    if deadline.expired():
+        ledger["json_schema_classification"] = "MASTER_DEADLINE_EXHAUSTED_AFTER_PARSE"
+        return None, response, HaltCode.MASTER_DEADLINE_EXHAUSTED
+    ledger["json_schema_classification"] = "STRICT_JSON_VALID"
+    ledger["elapsed_ms"] = max(0, int((deadline.clock() - request_start) * 1000))
+    ledger["remaining_master_budget_after_parse_ms"] = deadline.remaining_ms()
+    return parsed, response, None
+
+
+_DISCOVERY_FILL_REQUIRED = (
+    "fill_id",
+    "trade_id",
+    "order_id",
+    "ticker",
+    "count_fp",
+    "yes_price_dollars",
+    "no_price_dollars",
+    "is_taker",
+    "fee_cost",
+    "created_time",
+)
+
+
+def _parse_discovery_fill(
+    raw: object,
+    *,
+    observation: _Observation,
+) -> Tuple[Optional[_DiscoveryFill], Optional[HaltCode]]:
+    if type(raw) is not dict:
+        return None, HaltCode.AUTHORITATIVE_SCHEMA_DRIFT
+    for name in _DISCOVERY_FILL_REQUIRED:
+        if name not in raw:
+            return None, HaltCode.FILL_TIMESTAMP_INVALID if name == "created_time" else HaltCode.FILL_REQUIRED_FIELD_MISSING
+    try:
+        fill_id = _opaque_identifier(raw["fill_id"])
+        trade_id = _opaque_identifier(raw["trade_id"])
+        order_id = _opaque_identifier(raw["order_id"])
+        ticker = _opaque_identifier(raw["ticker"])
+        count = _parse_count(raw["count_fp"])
+        yes_price = _parse_money(raw["yes_price_dollars"])
+        no_price = _parse_money(raw["no_price_dollars"])
+        is_taker = _exact_bool(raw["is_taker"])
+        fee_cost = _parse_money(raw["fee_cost"])
+        created_time = _parse_utc_instant(raw["created_time"])
+        market_ticker = _opaque_identifier(raw["market_ticker"]) if "market_ticker" in raw else None
+        subaccount = _exact_int(raw["subaccount_number"]) if "subaccount_number" in raw else None
+        outcome_side = _opaque_identifier(raw["outcome_side"]) if "outcome_side" in raw else None
+        book_side = _opaque_identifier(raw["book_side"]) if "book_side" in raw else None
+    except ValueError:
+        if "created_time" in raw:
+            try:
+                _parse_utc_instant(raw["created_time"])
+            except ValueError:
+                return None, HaltCode.FILL_TIMESTAMP_INVALID
+        return None, HaltCode.AUTHORITATIVE_SCHEMA_DRIFT
+    ts: Optional[object] = None
+    if "ts" in raw:
+        ts = raw["ts"]
+        if type(ts) is bool or type(ts) not in (int, str):
+            return None, HaltCode.AUTHORITATIVE_SCHEMA_DRIFT
+    authoritative_names = _DISCOVERY_FILL_REQUIRED + (
+        "market_ticker",
+        "subaccount_number",
+        "outcome_side",
+        "book_side",
+        "ts",
+        "action",
+        "side",
+    )
+    authoritative: Dict[str, object] = {}
+    for name in authoritative_names:
+        if name not in raw:
+            continue
+        value = raw[name]
+        if name == "count_fp":
+            value = _parse_count(value)
+        elif name in ("yes_price_dollars", "no_price_dollars", "fee_cost"):
+            value = _parse_money(value)
+        authoritative[name] = value
+    return _DiscoveryFill(
+        fill_id=fill_id,
+        trade_id=trade_id,
+        order_id=order_id,
+        ticker=ticker,
+        market_ticker=market_ticker,
+        subaccount_number=subaccount,
+        outcome_side=outcome_side,
+        book_side=book_side,
+        count_fp=count,
+        yes_price_dollars=yes_price,
+        no_price_dollars=no_price,
+        is_taker=is_taker,
+        fee_cost=fee_cost,
+        created_time=created_time,
+        ts=ts,
+        observations=(observation,),
+        raw_authoritative=MappingProxyType(authoritative),
+    ), None
+
+
+def _merge_discovery_fills(a: _DiscoveryFill, b: _DiscoveryFill) -> _DiscoveryFill:
+    return _DiscoveryFill(
+        fill_id=a.fill_id,
+        trade_id=a.trade_id,
+        order_id=a.order_id,
+        ticker=a.ticker,
+        market_ticker=a.market_ticker if a.market_ticker is not None else b.market_ticker,
+        subaccount_number=a.subaccount_number if a.subaccount_number is not None else b.subaccount_number,
+        outcome_side=a.outcome_side if a.outcome_side is not None else b.outcome_side,
+        book_side=a.book_side if a.book_side is not None else b.book_side,
+        count_fp=a.count_fp,
+        yes_price_dollars=a.yes_price_dollars,
+        no_price_dollars=a.no_price_dollars,
+        is_taker=a.is_taker,
+        fee_cost=a.fee_cost,
+        created_time=a.created_time,
+        ts=a.ts if a.ts is not None else b.ts,
+        observations=a.observations + b.observations,
+        raw_authoritative=MappingProxyType({**dict(b.raw_authoritative), **dict(a.raw_authoritative)}),
+    )
+
+
+def _dedupe_discovery_fills(
+    fills: Sequence[_DiscoveryFill],
+    *,
+    state: _FallbackExecutionState,
+) -> Tuple[Optional[List[_DiscoveryFill]], Optional[HaltCode]]:
+    by_id: Dict[str, _DiscoveryFill] = {}
+    for fill in fills:
+        existing = by_id.get(fill.fill_id)
+        if existing is None:
+            by_id[fill.fill_id] = fill
+            continue
+        compatible = _common_fields_compatible(existing.raw_authoritative, fill.raw_authoritative)
+        state.fill_duplicate_details.append({
+            "fill_id": fill.fill_id,
+            "classification": "COMPATIBLE" if compatible else "CONFLICT",
+        })
+        if not compatible:
+            return None, HaltCode.FILL_ID_DUPLICATE_CONFLICT
+        by_id[fill.fill_id] = _merge_discovery_fills(existing, fill)
+    return [by_id[fill_id] for fill_id in sorted(by_id)], None
+
+
+def _parse_candidate_order(
+    raw: object,
+    *,
+    candidate_order_id: str,
+) -> Tuple[Optional[_CandidateOrder], Optional[HaltCode]]:
+    if type(raw) is not dict:
+        return None, HaltCode.CANDIDATE_EXACT_ORDER_READ_FAILURE
+    if "order_id" not in raw or "client_order_id" not in raw:
+        return None, HaltCode.CANDIDATE_EXACT_ORDER_READ_FAILURE
+    try:
+        order_id = _opaque_identifier(raw["order_id"])
+        client_order_id = _opaque_identifier(raw["client_order_id"])
+    except ValueError:
+        return None, HaltCode.CANDIDATE_EXACT_ORDER_READ_FAILURE
+    if order_id != candidate_order_id:
+        return None, HaltCode.CANDIDATE_EXACT_ORDER_READ_FAILURE
+    if client_order_id != CLIENT_ORDER_ID:
+        return _CandidateOrder(
+            order_id=order_id,
+            client_order_id=client_order_id,
+            ticker=None,
+            subaccount_number=None,
+            outcome_side=None,
+            book_side=None,
+            order_type=None,
+            status=None,
+            yes_price_dollars=None,
+            no_price_dollars=None,
+            initial_count_fp=None,
+            fill_count_fp=None,
+            remaining_count_fp=None,
+            cancel_order_on_pause=None,
+            exchange_index=None,
+            self_trade_prevention_type=None,
+            legacy_action=None,
+            legacy_side=None,
+            created_time=None,
+            last_update_time=None,
+            raw_authoritative=MappingProxyType({"order_id": order_id, "client_order_id": client_order_id}),
+        ), None
+    required = (
+        "ticker",
+        "outcome_side",
+        "book_side",
+        "type",
+        "status",
+        "yes_price_dollars",
+        "no_price_dollars",
+        "initial_count_fp",
+        "fill_count_fp",
+        "remaining_count_fp",
+    )
+    if any(name not in raw for name in required):
+        return None, HaltCode.CANDIDATE_EXACT_ORDER_READ_FAILURE
+    try:
+        ticker = _opaque_identifier(raw["ticker"])
+        outcome_side = _opaque_identifier(raw["outcome_side"])
+        book_side = _opaque_identifier(raw["book_side"])
+        order_type = _opaque_identifier(raw["type"])
+        status = _opaque_identifier(raw["status"])
+        yes_price = _parse_money(raw["yes_price_dollars"])
+        no_price = _parse_money(raw["no_price_dollars"])
+        initial_count = _parse_count(raw["initial_count_fp"])
+        fill_count = _parse_count(raw["fill_count_fp"])
+        remaining_count = _parse_count(raw["remaining_count_fp"])
+        subaccount = _exact_int(raw["subaccount_number"]) if "subaccount_number" in raw else None
+        cancel_on_pause = _exact_bool(raw["cancel_order_on_pause"]) if "cancel_order_on_pause" in raw else None
+        exchange_index = _exact_int(raw["exchange_index"]) if "exchange_index" in raw else None
+        stp = _opaque_identifier(raw["self_trade_prevention_type"]) if "self_trade_prevention_type" in raw else None
+        legacy_action = _opaque_identifier(raw["action"]) if "action" in raw else None
+        legacy_side = _opaque_identifier(raw["side"]) if "side" in raw else None
+        created_time = (
+            None
+            if raw.get("created_time") is None
+            else _parse_utc_instant(raw["created_time"])
+        )
+        last_update_time = (
+            None
+            if raw.get("last_update_time") is None
+            else _parse_utc_instant(raw["last_update_time"])
+        )
+    except ValueError:
+        return None, HaltCode.CANDIDATE_EXACT_ORDER_READ_FAILURE
+    if status not in _SUPPORTED_ORDER_STATUSES:
+        return None, HaltCode.CANDIDATE_EXACT_ORDER_READ_FAILURE
+    authoritative = {name: raw[name] for name in raw if name in {
+        "order_id", "client_order_id", "ticker", "subaccount_number", "outcome_side", "book_side",
+        "type", "status", "yes_price_dollars", "no_price_dollars", "initial_count_fp", "fill_count_fp",
+        "remaining_count_fp", "cancel_order_on_pause", "exchange_index", "self_trade_prevention_type",
+        "action", "side", "created_time", "last_update_time",
+    }}
+    return _CandidateOrder(
+        order_id=order_id,
+        client_order_id=client_order_id,
+        ticker=ticker,
+        subaccount_number=subaccount,
+        outcome_side=outcome_side,
+        book_side=book_side,
+        order_type=order_type,
+        status=status,
+        yes_price_dollars=yes_price,
+        no_price_dollars=no_price,
+        initial_count_fp=initial_count,
+        fill_count_fp=fill_count,
+        remaining_count_fp=remaining_count,
+        cancel_order_on_pause=cancel_on_pause,
+        exchange_index=exchange_index,
+        self_trade_prevention_type=stp,
+        legacy_action=legacy_action,
+        legacy_side=legacy_side,
+        created_time=created_time,
+        last_update_time=last_update_time,
+        raw_authoritative=MappingProxyType(authoritative),
+    ), None
+
+
+def _validate_candidate_order(
+    order: _CandidateOrder,
+    *,
+    snapshot: _UtcInstant,
+) -> Tuple[Dict[str, str], Optional[HaltCode]]:
+    checks = {
+        "order_id": order.order_id != "",
+        "client_order_id": order.client_order_id == CLIENT_ORDER_ID,
+        "ticker": order.ticker == TICKER,
+        "outcome_side": order.outcome_side == OUTCOME_SIDE,
+        "book_side": order.book_side == BOOK_SIDE,
+        "type": order.order_type == "limit",
+        "status": order.status in _SUPPORTED_ORDER_STATUSES,
+        "initial_count_fp": order.initial_count_fp == INITIAL_QUANTITY,
+        "yes_price_dollars": order.yes_price_dollars == LIMIT_PRICE,
+    }
+    matrix = {name: "PASS" if passed else "FAIL" for name, passed in checks.items()}
+    optional = {
+        "subaccount_number": (order.subaccount_number, SUBACCOUNT),
+        "cancel_order_on_pause": (order.cancel_order_on_pause, CANCEL_ORDER_ON_PAUSE),
+        "exchange_index": (order.exchange_index, EXCHANGE_INDEX),
+        "self_trade_prevention_type": (order.self_trade_prevention_type, SELF_TRADE_PREVENTION_TYPE),
+    }
+    for name, (observed, expected) in optional.items():
+        if observed is None:
+            matrix[name] = "FIELD_NOT_EXPOSED_BY_BOUND_SOURCE"
+        elif type(observed) is type(expected) and observed == expected:
+            matrix[name] = "PASS"
+        else:
+            matrix[name] = "FAIL"
+    if order.legacy_action is not None:
+        matrix["legacy_action"] = "PASS" if order.legacy_action == "buy" else "FAIL"
+    if order.legacy_side is not None:
+        matrix["legacy_side"] = "PASS" if order.legacy_side == "yes" else "FAIL"
+    if order.last_update_time is None:
+        matrix["last_update_time"] = "FIELD_NOT_EXPOSED_BY_BOUND_SOURCE"
+    elif order.last_update_time.epoch_seconds <= snapshot.epoch_seconds:
+        matrix["last_update_time"] = "PASS"
+    else:
+        matrix["last_update_time"] = "FAIL_AFTER_DISCOVERY_SNAPSHOT"
+        return matrix, HaltCode.ORDER_STATE_AFTER_DISCOVERY_SNAPSHOT
+    if "FAIL" in matrix.values() or not all(checks.values()):
+        return matrix, HaltCode.ORDER_IDENTITY_OR_ECONOMIC_MISMATCH
+    return matrix, None
+
+
+def _discovery_fill_evidence(fill: _DiscoveryFill) -> Dict[str, object]:
+    return {
+        "fill_id": fill.fill_id,
+        "trade_id": fill.trade_id,
+        "order_id": fill.order_id,
+        "ticker": fill.ticker,
+        "market_ticker": fill.market_ticker,
+        "subaccount_number": fill.subaccount_number,
+        "outcome_side": fill.outcome_side,
+        "book_side": fill.book_side,
+        "count_fp": str(fill.count_fp),
+        "yes_price_dollars": str(fill.yes_price_dollars),
+        "no_price_dollars": str(fill.no_price_dollars),
+        "is_taker": fill.is_taker,
+        "fee_cost": str(fill.fee_cost),
+        "created_time": fill.created_time.text,
+        "ts": fill.ts,
+        "source_provenance": [_observation_evidence(value) for value in fill.observations],
+    }
+
+
+def _candidate_order_evidence(order: _CandidateOrder) -> Dict[str, object]:
+    return {
+        "order_id": order.order_id,
+        "client_order_id": order.client_order_id,
+        "ticker": order.ticker,
+        "subaccount_number": order.subaccount_number,
+        "outcome_side": order.outcome_side,
+        "book_side": order.book_side,
+        "type": order.order_type,
+        "status": order.status,
+        "yes_price_dollars": None if order.yes_price_dollars is None else str(order.yes_price_dollars),
+        "no_price_dollars": None if order.no_price_dollars is None else str(order.no_price_dollars),
+        "initial_count_fp": None if order.initial_count_fp is None else str(order.initial_count_fp),
+        "fill_count_fp": None if order.fill_count_fp is None else str(order.fill_count_fp),
+        "remaining_count_fp": None if order.remaining_count_fp is None else str(order.remaining_count_fp),
+        "cancel_order_on_pause": order.cancel_order_on_pause,
+        "exchange_index": order.exchange_index,
+        "last_update_time": None if order.last_update_time is None else order.last_update_time.text,
+    }
+
+
+def _fallback_evidence_payload(
+    *,
+    fallback_input: FillDiscoveryFallbackInput,
+    state: _FallbackExecutionState,
+    result_class: ResultClass,
+    halt_code: Optional[HaltCode],
+    bound_order_id: Optional[str],
+    created_order_upper_bound: int,
+    active_order_upper_bound: int,
+    unknown_result: bool,
+    writer_proof_release_eligible: bool,
+) -> Dict[str, object]:
+    principal_plus_fee = (
+        state.canonical_filled_principal + state.canonical_fee_cost
+        if state.canonical_filled_principal is not None and state.canonical_fee_cost is not None
+        else None
+    )
+    return {
+        "task_id": "KALSHI_DEMO_POST_HALT_FILL_DISCOVERY_BINDING_FALLBACK_IMPLEMENTATION_01",
+        "repository": REPOSITORY,
+        "canonical_main": FALLBACK_REQUIRED_BASE,
+        "canonical_tree": FALLBACK_REQUIRED_TREE,
+        "identities": {
+            "fallback_specification": {
+                "filename": FALLBACK_SPECIFICATION_FILENAME,
+                "bytes": FALLBACK_SPECIFICATION_BYTES,
+                "sha256": FALLBACK_SPECIFICATION_SHA256,
+            },
+            "fallback_handoff": {
+                "filename": FALLBACK_HANDOFF_FILENAME,
+                "bytes": FALLBACK_HANDOFF_BYTES,
+                "sha256": FALLBACK_HANDOFF_SHA256,
+            },
+            "original_lifecycle_evidence": {
+                "filename": EXECUTION_EVIDENCE_FILENAME,
+                "bytes": EXECUTION_EVIDENCE_BYTES,
+                "sha256": EXECUTION_EVIDENCE_SHA256,
+            },
+            "predecessor_reconciliation_evidence": {
+                "filename": PREDECESSOR_RECONCILIATION_EVIDENCE_FILENAME,
+                "bytes": PREDECESSOR_RECONCILIATION_EVIDENCE_BYTES,
+                "sha256": PREDECESSOR_RECONCILIATION_EVIDENCE_SHA256,
+            },
+            "implementation": _artifact_evidence(fallback_input.provenance.implementation),
+            "tests": _artifact_evidence(fallback_input.provenance.tests),
+            "source_binding_manifest": {
+                "bytes": FALLBACK_SOURCE_BINDING_MANIFEST_LENGTH,
+                "sha256": FALLBACK_SOURCE_BINDING_MANIFEST_SHA256,
+            },
+            "operation_bindings": {
+                name: {"bytes": identity[0], "sha256": identity[1]}
+                for name, identity in FALLBACK_OPERATION_BINDING_IDENTITIES.items()
+            },
+            "raw_openapi": {
+                "bytes": fallback_input.provenance.source_raw_openapi_bytes,
+                "sha256": fallback_input.provenance.source_raw_openapi_sha256,
+            },
+        },
+        "predecessor_result": {
+            "result_class": fallback_input.prior_result_class.value,
+            "exact_client_order_id_match_count": fallback_input.prior_exact_client_order_id_match_count,
+            "bound_order_id": fallback_input.prior_bound_order_id,
+            "created_order_upper_bound": fallback_input.prior_created_order_upper_bound,
+            "active_order_upper_bound": fallback_input.prior_active_order_upper_bound,
+            "unknown_result": fallback_input.prior_unknown_result,
+            "writer_proof_release_eligible": fallback_input.prior_writer_proof_release_eligible,
+        },
+        "frozen_scope": {
+            "environment": ENVIRONMENT,
+            "demo_origin": DEMO_REST_ORIGIN,
+            "account_scope_ref": ACCOUNT_SCOPE_REF,
+            "subaccount": SUBACCOUNT,
+            "ticker": TICKER,
+            "client_order_id": CLIENT_ORDER_ID,
+            "writer_proof_id": WRITER_PROOF_ID,
+            "economic_meaning": ECONOMIC_MEANING,
+            "outcome_side": OUTCOME_SIDE,
+            "book_side": BOOK_SIDE,
+            "initial_quantity": str(INITIAL_QUANTITY),
+            "limit_price": str(LIMIT_PRICE),
+            "post_only": POST_ONLY,
+        },
+        "time_envelope": {
+            "create_send_timestamp_required": False,
+            "incident_lower_bound_source": INCIDENT_LOWER_BOUND_SOURCE,
+            "incident_lower_bound_utc": INCIDENT_LOWER_BOUND_UTC,
+            "fill_discovery_snapshot_utc": state.fill_discovery_snapshot_utc,
+            "query_min_ts": QUERY_MIN_TS,
+            "query_max_ts": state.query_max_ts,
+            "trades_created_ts": state.trades_created_ts,
+            "historical_fill_stream_required": state.historical_fill_stream_required,
+        },
+        "request_ledger": state.request_ledger,
+        "discovery": {
+            "live_fill_pages": state.fill_pages["LIVE_FILLS"],
+            "historical_fill_pages": state.fill_pages["HISTORICAL_FILLS"],
+            "terminal_cursor_state": {
+                "LIVE_FILLS": (
+                    state.fill_pages["LIVE_FILLS"][-1]["cursor_output"]
+                    if state.fill_pages["LIVE_FILLS"] else None
+                ),
+                "HISTORICAL_FILLS": (
+                    state.fill_pages["HISTORICAL_FILLS"][-1]["cursor_output"]
+                    if state.fill_pages["HISTORICAL_FILLS"] else None
+                ),
+            },
+            "rejected_fills": state.rejected_fills,
+            "fill_duplicate_details": state.fill_duplicate_details,
+            "unique_fill_id_count": len(state.discovery_fills),
+            "canonical_discovery_fills": [
+                _discovery_fill_evidence(fill) for fill in state.discovery_fills
+            ],
+            "candidate_order_id_set": state.candidate_order_ids,
+            "candidate_order_id_count": len(state.candidate_order_ids),
+            "candidate_budget_max": CANDIDATE_EXACT_ORDER_GET_MAX,
+            "candidate_budget_passed": len(state.candidate_order_ids) <= CANDIDATE_EXACT_ORDER_GET_MAX,
+        },
+        "candidate_validation": {
+            "results": state.candidate_validation,
+            "validated_binding_count": len(state.validated_binding_order_ids),
+            "validated_binding_order_ids": state.validated_binding_order_ids,
+            "identity_invariant_matrices": state.identity_matrices,
+        },
+        "bound_fill_reconciliation": {
+            "bound_order_id": bound_order_id,
+            "bound_fills": [_discovery_fill_evidence(fill) for fill in state.bound_fills],
+            "canonical_fill_count": len(state.bound_fills),
+            "canonical_fill_quantity": (
+                None if state.canonical_fill_quantity is None else str(state.canonical_fill_quantity)
+            ),
+            "canonical_filled_principal": (
+                None if state.canonical_filled_principal is None else str(state.canonical_filled_principal)
+            ),
+            "canonical_fee_cost": (
+                None if state.canonical_fee_cost is None else str(state.canonical_fee_cost)
+            ),
+            "principal_plus_fee": None if principal_plus_fee is None else str(principal_plus_fee),
+        },
+        "terminal": {
+            "result_class": result_class.value,
+            "halt_code": None if halt_code is None else halt_code.value,
+            "bound_order_id": bound_order_id,
+            "created_order_upper_bound": created_order_upper_bound,
+            "active_order_upper_bound": active_order_upper_bound,
+            "unknown_result": unknown_result,
+            "writer_proof_release_eligible": writer_proof_release_eligible,
+            "prior_exact_client_order_id_match_count": 0,
+            "candidate_order_id_count": len(state.candidate_order_ids),
+            "candidate_order_ids": state.candidate_order_ids,
+            "validated_binding_count": len(state.validated_binding_order_ids),
+            "validated_binding_order_ids": state.validated_binding_order_ids,
+            "canonical_fill_count": len(state.bound_fills),
+            "request_count": state.total_requests(),
+            "retry_count": state.retry_count_observed,
+            "redirect_count": state.redirect_count_observed,
+            "production_activity": 0,
+            "write_activity": 0,
+            "funding_activity": 0,
+            "websocket_activity": 0,
+            "secret_values_printed": False,
+            "secret_values_persisted": False,
+        },
+    }
+
+
+def _fallback_finalize(
+    *,
+    fallback_input: FillDiscoveryFallbackInput,
+    state: _FallbackExecutionState,
+    deadline: _Deadline,
+    result_class: ResultClass,
+    halt_code: Optional[HaltCode],
+    bound_order_id: Optional[str],
+    created_order_upper_bound: int,
+    active_order_upper_bound: int,
+    unknown_result: bool,
+    writer_proof_release_eligible: bool,
+    enforce_deadline: bool = True,
+) -> FillDiscoveryFallbackResult:
+    payload = _fallback_evidence_payload(
+        fallback_input=fallback_input,
+        state=state,
+        result_class=result_class,
+        halt_code=halt_code,
+        bound_order_id=bound_order_id,
+        created_order_upper_bound=created_order_upper_bound,
+        active_order_upper_bound=active_order_upper_bound,
+        unknown_result=unknown_result,
+        writer_proof_release_eligible=writer_proof_release_eligible,
+    )
+    evidence = _canonical_json_bytes(_json_safe(payload))
+    if enforce_deadline and deadline.expired():
+        return _fallback_finalize(
+            fallback_input=fallback_input,
+            state=state,
+            deadline=deadline,
+            result_class=ResultClass.WRITE_UNRESOLVED_READ_FAILURE,
+            halt_code=HaltCode.MASTER_DEADLINE_EXHAUSTED,
+            bound_order_id=state.bound_order_id,
+            created_order_upper_bound=1,
+            active_order_upper_bound=1,
+            unknown_result=True,
+            writer_proof_release_eligible=False,
+            enforce_deadline=False,
+        )
+    return FillDiscoveryFallbackResult(
+        result_class=result_class,
+        halt_code=halt_code,
+        bound_order_id=bound_order_id,
+        created_order_upper_bound=created_order_upper_bound,
+        active_order_upper_bound=active_order_upper_bound,
+        unknown_result=unknown_result,
+        writer_proof_release_eligible=writer_proof_release_eligible,
+        prior_exact_client_order_id_match_count=0,
+        candidate_order_id_count=len(state.candidate_order_ids),
+        candidate_order_ids=tuple(state.candidate_order_ids),
+        validated_binding_count=len(state.validated_binding_order_ids),
+        validated_binding_order_ids=tuple(state.validated_binding_order_ids),
+        canonical_fill_count=len(state.bound_fills),
+        canonical_fill_quantity=state.canonical_fill_quantity,
+        canonical_filled_principal=state.canonical_filled_principal,
+        canonical_fee_cost=state.canonical_fee_cost,
+        incident_lower_bound_utc=INCIDENT_LOWER_BOUND_UTC,
+        fill_discovery_snapshot_utc=state.fill_discovery_snapshot_utc,
+        query_min_ts=QUERY_MIN_TS,
+        query_max_ts=state.query_max_ts,
+        trades_created_ts=state.trades_created_ts,
+        historical_fill_stream_required=state.historical_fill_stream_required,
+        request_count=state.total_requests(),
+        retry_count=state.retry_count_observed,
+        redirect_count=state.redirect_count_observed,
+        production_activity=0,
+        write_activity=0,
+        funding_activity=0,
+        websocket_activity=0,
+        evidence_json=evidence,
+        evidence_sha256=_sha256(evidence),
+    )
+
+
+def _fallback_failure(
+    *,
+    fallback_input: FillDiscoveryFallbackInput,
+    state: _FallbackExecutionState,
+    deadline: _Deadline,
+    code: HaltCode,
+    identity_width: int = 1,
+) -> FillDiscoveryFallbackResult:
+    if code in _IDENTITY_VIOLATION_CODES:
+        result_class = ResultClass.WRITE_UNRESOLVED_IDENTITY_VIOLATION
+        bound_order_id = None
+        created_order_upper_bound = max(1, identity_width)
+        active_order_upper_bound = max(1, identity_width)
+    else:
+        result_class = ResultClass.WRITE_UNRESOLVED_READ_FAILURE
+        bound_order_id = state.bound_order_id
+        created_order_upper_bound = 1
+        active_order_upper_bound = 1
+    return _fallback_finalize(
+        fallback_input=fallback_input,
+        state=state,
+        deadline=deadline,
+        result_class=result_class,
+        halt_code=code,
+        bound_order_id=bound_order_id,
+        created_order_upper_bound=created_order_upper_bound,
+        active_order_upper_bound=active_order_upper_bound,
+        unknown_result=True,
+        writer_proof_release_eligible=False,
+    )
+
+
+def _minimal_invalid_fallback_input() -> FillDiscoveryFallbackInput:
+    capability = FillDiscoveryCapabilityEnvelope(
+        environment=ENVIRONMENT,
+        rest_origin=DEMO_REST_ORIGIN,
+        credential_reference_names=_REQUIRED_CREDENTIAL_REFERENCES,
+        granted_capabilities=frozenset(),
+        network_access=CapabilityState.PROHIBITED,
+        demo_public_reads=CapabilityState.PROHIBITED,
+        demo_authenticated_reads=CapabilityState.PROHIBITED,
+        credential_use=CapabilityState.PROHIBITED,
+        demo_writes=CapabilityState.PROHIBITED,
+        production_public_reads=CapabilityState.PROHIBITED,
+        production_authenticated_reads=CapabilityState.PROHIBITED,
+        production_writes=CapabilityState.PROHIBITED,
+        account_funding=CapabilityState.PROHIBITED,
+        websocket=CapabilityState.PROHIBITED,
+    )
+    placeholder = ArtifactIdentity("UNAVAILABLE", 0, "0" * 64, "0" * 40)
+    return FillDiscoveryFallbackInput(
+        capability_envelope=capability,
+        source_binding_manifest_bytes=b"",
+        provenance=ReconciliationProvenance(
+            implementation=placeholder,
+            tests=placeholder,
+            source_raw_openapi_bytes=1,
+            source_raw_openapi_sha256="0" * 64,
+        ),
+        prior_result_class=ResultClass.WRITE_UNRESOLVED_ZERO_MATCH,
+        prior_exact_client_order_id_match_count=0,
+        prior_bound_order_id=None,
+        prior_created_order_upper_bound=1,
+        prior_active_order_upper_bound=1,
+        prior_unknown_result=True,
+        prior_writer_proof_release_eligible=False,
+    )
+
+
+def execute_fill_discovery_binding_fallback(
+    fallback_input: FillDiscoveryFallbackInput,
+    transport: FillDiscoveryFallbackTransport,
+    *,
+    fill_discovery_snapshot_utc: str,
+    monotonic_clock: Optional[Callable[[], float]] = None,
+) -> FillDiscoveryFallbackResult:
+    """Execute the accepted zero-order-match fill-discovery continuation.
+
+    The caller freezes ``fill_discovery_snapshot_utc`` at executor entry.
+    This function consumes that immutable value before validation or any
+    caller-supplied transport interaction.  It never loads a secret itself.
+    """
+
+    clock = monotonic_clock if monotonic_clock is not None else time.monotonic
+    entry = clock()
+    deadline = _Deadline(clock=clock, entry=entry)
+    state = _FallbackExecutionState()
+    safe_input = fallback_input if type(fallback_input) is FillDiscoveryFallbackInput else _minimal_invalid_fallback_input()
+
+    state.fill_discovery_snapshot_utc = (
+        fill_discovery_snapshot_utc if type(fill_discovery_snapshot_utc) is str else None
+    )
+    try:
+        snapshot = _parse_utc_instant(fill_discovery_snapshot_utc)
+    except ValueError:
+        return _fallback_failure(
+            fallback_input=safe_input,
+            state=state,
+            deadline=deadline,
+            code=HaltCode.FILL_TIMESTAMP_INVALID,
+        )
+    if snapshot.epoch_seconds < INCIDENT_LOWER_BOUND_EPOCH_SECONDS:
+        return _fallback_failure(
+            fallback_input=safe_input,
+            state=state,
+            deadline=deadline,
+            code=HaltCode.FILL_TIMESTAMP_INVALID,
+        )
+    state.query_max_ts = _query_max_ts(snapshot)
+    if deadline.expired():
+        return _fallback_failure(
+            fallback_input=safe_input,
+            state=state,
+            deadline=deadline,
+            code=HaltCode.MASTER_DEADLINE_EXHAUSTED,
+        )
+
+    validation_halt = _validate_fallback_input(fallback_input)
+    if validation_halt is not None:
+        return _fallback_failure(
+            fallback_input=safe_input,
+            state=state,
+            deadline=deadline,
+            code=validation_halt,
+        )
+    try:
+        plan = plan_fill_discovery_binding_fallback(fallback_input)
+    except ReconciliationPlanningError as exc:
+        return _fallback_failure(
+            fallback_input=fallback_input,
+            state=state,
+            deadline=deadline,
+            code=exc.halt_code,
+        )
+    if plan.operations != _FALLBACK_OPERATION_ORDER or plan.origin != DEMO_REST_ORIGIN:
+        return _fallback_failure(
+            fallback_input=fallback_input,
+            state=state,
+            deadline=deadline,
+            code=HaltCode.GET_ONLY_CONTRACT_VIOLATION,
+        )
+    if deadline.expired():
+        return _fallback_failure(
+            fallback_input=fallback_input,
+            state=state,
+            deadline=deadline,
+            code=HaltCode.MASTER_DEADLINE_EXHAUSTED,
+        )
+
+    assert state.query_max_ts is not None
+    parsed, response, halt = _fallback_send_json(
+        operation=FallbackOperation.HISTORICAL_CUTOFF,
+        transport=transport,
+        deadline=deadline,
+        state=state,
+        page_ordinal=1,
+        query_max_ts=state.query_max_ts,
+    )
+    if halt is not None:
+        if halt is HaltCode.AUTHORITATIVE_SCHEMA_DRIFT:
+            halt = HaltCode.CUTOFF_RESPONSE_INVALID
+        return _fallback_failure(
+            fallback_input=fallback_input,
+            state=state,
+            deadline=deadline,
+            code=halt,
+        )
+    if type(parsed) is not dict or response is None:
+        return _fallback_failure(
+            fallback_input=fallback_input,
+            state=state,
+            deadline=deadline,
+            code=HaltCode.CUTOFF_RESPONSE_INVALID,
+        )
+    cutoff_fields = ("market_settled_ts", "trades_created_ts", "orders_updated_ts")
+    if any(name not in parsed for name in cutoff_fields):
+        return _fallback_failure(
+            fallback_input=fallback_input,
+            state=state,
+            deadline=deadline,
+            code=HaltCode.CUTOFF_RESPONSE_INVALID,
+        )
+    try:
+        cutoff_instants = {name: _parse_utc_instant(parsed[name]) for name in cutoff_fields}
+    except ValueError:
+        return _fallback_failure(
+            fallback_input=fallback_input,
+            state=state,
+            deadline=deadline,
+            code=HaltCode.CUTOFF_RESPONSE_INVALID,
+        )
+    state.cutoff = {name: parsed[name] for name in cutoff_fields}
+    state.trades_created_ts = parsed["trades_created_ts"]
+    state.historical_fill_stream_required = (
+        cutoff_instants["trades_created_ts"].epoch_seconds > INCIDENT_LOWER_BOUND_EPOCH_SECONDS
+    )
+
+    retained: List[_DiscoveryFill] = []
+    required_streams = [(FallbackOperation.LIVE_FILLS, "LIVE_FILLS")]
+    if state.historical_fill_stream_required:
+        required_streams.append((FallbackOperation.HISTORICAL_FILLS, "HISTORICAL_FILLS"))
+    for operation, source_name in required_streams:
+        cursor: Optional[str] = None
+        seen_nonempty: set[str] = set()
+        page = 1
+        while True:
+            parsed, response, halt = _fallback_send_json(
+                operation=operation,
+                transport=transport,
+                deadline=deadline,
+                state=state,
+                page_ordinal=page,
+                query_max_ts=state.query_max_ts,
+                cursor_input=cursor,
+            )
+            if halt is not None:
+                return _fallback_failure(
+                    fallback_input=fallback_input,
+                    state=state,
+                    deadline=deadline,
+                    code=halt,
+                )
+            assert response is not None
+            records, next_cursor, page_halt = _extract_page(parsed, record_key="fills")
+            if page_halt is not None:
+                return _fallback_failure(
+                    fallback_input=fallback_input,
+                    state=state,
+                    deadline=deadline,
+                    code=page_halt,
+                )
+            assert records is not None and next_cursor is not None
+            state.request_ledger[-1]["cursor_output"] = _cursor_evidence(next_cursor)
+            page_detail = {
+                "page_ordinal": page,
+                "records_observed": len(records),
+                "records_locally_retained": 0,
+                "cursor_input": _cursor_evidence(cursor),
+                "cursor_output": _cursor_evidence(next_cursor),
+                "response_sha256": _sha256(response.body_bytes),
+            }
+            state.fill_pages[source_name].append(page_detail)
+            for index, raw_fill in enumerate(records, 1):
+                observation = _Observation(source_name, page, index, _sha256(response.body_bytes))
+                fill, fill_halt = _parse_discovery_fill(raw_fill, observation=observation)
+                if fill_halt is not None:
+                    return _fallback_failure(
+                        fallback_input=fallback_input,
+                        state=state,
+                        deadline=deadline,
+                        code=fill_halt,
+                    )
+                assert fill is not None
+                if fill.ticker != TICKER or (
+                    fill.market_ticker is not None and fill.market_ticker != TICKER
+                ):
+                    return _fallback_failure(
+                        fallback_input=fallback_input,
+                        state=state,
+                        deadline=deadline,
+                        code=HaltCode.FILL_SCOPE_CONFLICT,
+                    )
+                if operation is FallbackOperation.LIVE_FILLS and (
+                    fill.subaccount_number is not None and fill.subaccount_number != SUBACCOUNT
+                ):
+                    return _fallback_failure(
+                        fallback_input=fallback_input,
+                        state=state,
+                        deadline=deadline,
+                        code=HaltCode.FILL_SCOPE_CONFLICT,
+                    )
+                rejection_reason: Optional[str] = None
+                if not (
+                    INCIDENT_LOWER_BOUND_EPOCH_SECONDS
+                    <= fill.created_time.epoch_seconds
+                    <= snapshot.epoch_seconds
+                ):
+                    rejection_reason = "OUTSIDE_EXACT_INCIDENT_INTERVAL"
+                elif fill.subaccount_number is not None and fill.subaccount_number != SUBACCOUNT:
+                    rejection_reason = "SUBACCOUNT_OUT_OF_SCOPE"
+                elif fill.outcome_side is not None and fill.outcome_side != OUTCOME_SIDE:
+                    rejection_reason = "OUTCOME_SIDE_OUT_OF_SCOPE"
+                elif fill.book_side is not None and fill.book_side != BOOK_SIDE:
+                    rejection_reason = "BOOK_SIDE_OUT_OF_SCOPE"
+                if rejection_reason is not None:
+                    state.rejected_fills.append({
+                        "fill_id": fill.fill_id,
+                        "order_id": fill.order_id,
+                        "source_stream": source_name,
+                        "reason": rejection_reason,
+                    })
+                    continue
+                retained.append(fill)
+                page_detail["records_locally_retained"] += 1
+            if deadline.expired():
+                return _fallback_failure(
+                    fallback_input=fallback_input,
+                    state=state,
+                    deadline=deadline,
+                    code=HaltCode.MASTER_DEADLINE_EXHAUSTED,
+                )
+            if next_cursor == "":
+                break
+            if next_cursor in seen_nonempty:
+                return _fallback_failure(
+                    fallback_input=fallback_input,
+                    state=state,
+                    deadline=deadline,
+                    code=HaltCode.PAGINATION_CURSOR_CYCLE,
+                )
+            seen_nonempty.add(next_cursor)
+            if page >= _FALLBACK_OPERATION_SPECS[operation].page_budget:
+                return _fallback_failure(
+                    fallback_input=fallback_input,
+                    state=state,
+                    deadline=deadline,
+                    code=HaltCode.PAGE_BUDGET_EXHAUSTED,
+                )
+            cursor = next_cursor
+            page += 1
+
+    unique_fills, dedupe_halt = _dedupe_discovery_fills(retained, state=state)
+    if dedupe_halt is not None:
+        return _fallback_failure(
+            fallback_input=fallback_input,
+            state=state,
+            deadline=deadline,
+            code=dedupe_halt,
+        )
+    assert unique_fills is not None
+    state.discovery_fills = unique_fills
+    if deadline.expired():
+        return _fallback_failure(
+            fallback_input=fallback_input,
+            state=state,
+            deadline=deadline,
+            code=HaltCode.MASTER_DEADLINE_EXHAUSTED,
+        )
+    state.candidate_order_ids = sorted({fill.order_id for fill in unique_fills})
+    if len(state.candidate_order_ids) > CANDIDATE_EXACT_ORDER_GET_MAX:
+        return _fallback_failure(
+            fallback_input=fallback_input,
+            state=state,
+            deadline=deadline,
+            code=HaltCode.CANDIDATE_ORDER_ID_BUDGET_EXCEEDED,
+        )
+    try:
+        for candidate_order_id in state.candidate_order_ids:
+            _safe_candidate_order_path(candidate_order_id)
+    except ValueError:
+        return _fallback_failure(
+            fallback_input=fallback_input,
+            state=state,
+            deadline=deadline,
+            code=HaltCode.GET_ONLY_CONTRACT_VIOLATION,
+        )
+
+    validated_orders: Dict[str, _CandidateOrder] = {}
+    deferred_halts: List[HaltCode] = []
+    for candidate_order_id in state.candidate_order_ids:
+        parsed, response, halt = _fallback_send_json(
+            operation=FallbackOperation.EXACT_ORDER,
+            transport=transport,
+            deadline=deadline,
+            state=state,
+            page_ordinal=1,
+            query_max_ts=state.query_max_ts,
+            order_id=candidate_order_id,
+        )
+        if halt is not None:
+            mapped = (
+                HaltCode.MASTER_DEADLINE_EXHAUSTED
+                if halt is HaltCode.MASTER_DEADLINE_EXHAUSTED
+                else HaltCode.CANDIDATE_EXACT_ORDER_READ_FAILURE
+            )
+            return _fallback_failure(
+                fallback_input=fallback_input,
+                state=state,
+                deadline=deadline,
+                code=mapped,
+            )
+        if type(parsed) is not dict or "order" not in parsed or response is None:
+            return _fallback_failure(
+                fallback_input=fallback_input,
+                state=state,
+                deadline=deadline,
+                code=HaltCode.CANDIDATE_EXACT_ORDER_READ_FAILURE,
+            )
+        order, order_halt = _parse_candidate_order(parsed["order"], candidate_order_id=candidate_order_id)
+        if order_halt is not None or order is None:
+            return _fallback_failure(
+                fallback_input=fallback_input,
+                state=state,
+                deadline=deadline,
+                code=HaltCode.CANDIDATE_EXACT_ORDER_READ_FAILURE,
+            )
+        if order.client_order_id != CLIENT_ORDER_ID:
+            state.candidate_validation.append({
+                "candidate_order_id": candidate_order_id,
+                "returned_order": _candidate_order_evidence(order),
+                "client_order_id_exact_match": False,
+                "disposition": "REJECTED_DIFFERENT_CLIENT_ID",
+            })
+            continue
+        matrix, identity_halt = _validate_candidate_order(order, snapshot=snapshot)
+        state.identity_matrices[candidate_order_id] = matrix
+        state.candidate_validation.append({
+            "candidate_order_id": candidate_order_id,
+            "returned_order": _candidate_order_evidence(order),
+            "client_order_id_exact_match": True,
+            "disposition": "VALIDATED" if identity_halt is None else "FAILURE",
+            "halt_code": None if identity_halt is None else identity_halt.value,
+        })
+        if identity_halt is not None:
+            deferred_halts.append(identity_halt)
+            continue
+        validated_orders[candidate_order_id] = order
+        state.validated_binding_order_ids.append(candidate_order_id)
+    if deadline.expired():
+        return _fallback_failure(
+            fallback_input=fallback_input,
+            state=state,
+            deadline=deadline,
+            code=HaltCode.MASTER_DEADLINE_EXHAUSTED,
+        )
+    if deferred_halts:
+        selected = (
+            HaltCode.ORDER_STATE_AFTER_DISCOVERY_SNAPSHOT
+            if HaltCode.ORDER_STATE_AFTER_DISCOVERY_SNAPSHOT in deferred_halts
+            else deferred_halts[0]
+        )
+        return _fallback_failure(
+            fallback_input=fallback_input,
+            state=state,
+            deadline=deadline,
+            code=selected,
+        )
+    if not state.validated_binding_order_ids:
+        return _fallback_finalize(
+            fallback_input=fallback_input,
+            state=state,
+            deadline=deadline,
+            result_class=ResultClass.WRITE_UNRESOLVED_ZERO_MATCH,
+            halt_code=None,
+            bound_order_id=None,
+            created_order_upper_bound=1,
+            active_order_upper_bound=1,
+            unknown_result=True,
+            writer_proof_release_eligible=False,
+        )
+    if len(state.validated_binding_order_ids) > 1:
+        return _fallback_failure(
+            fallback_input=fallback_input,
+            state=state,
+            deadline=deadline,
+            code=HaltCode.MULTIPLE_ORDER_IDS_FOR_CLIENT_ORDER_ID,
+            identity_width=len(state.validated_binding_order_ids),
+        )
+
+    state.bound_order_id = state.validated_binding_order_ids[0]
+    order = validated_orders[state.bound_order_id]
+    state.bound_fills = [fill for fill in unique_fills if fill.order_id == state.bound_order_id]
+    if any(fill.subaccount_number is None for fill in state.bound_fills) and order.subaccount_number != SUBACCOUNT:
+        return _fallback_failure(
+            fallback_input=fallback_input,
+            state=state,
+            deadline=deadline,
+            code=HaltCode.AUTHORITATIVE_SCHEMA_DRIFT,
+        )
+    fill_quantity = Decimal("0.00")
+    filled_principal = Decimal("0")
+    fee_cost = Decimal("0")
+    for fill in state.bound_fills:
+        if fill.is_taker:
+            return _fallback_failure(
+                fallback_input=fallback_input,
+                state=state,
+                deadline=deadline,
+                code=HaltCode.POST_ONLY_TAKER_FILL_CONFLICT,
+            )
+        if fill.yes_price_dollars > LIMIT_PRICE:
+            return _fallback_failure(
+                fallback_input=fallback_input,
+                state=state,
+                deadline=deadline,
+                code=HaltCode.FILL_PRICE_WORSE_THAN_LIMIT,
+            )
+        fill_quantity += fill.count_fp
+        filled_principal += fill.count_fp * fill.yes_price_dollars
+        fee_cost += fill.fee_cost
+        if fill_quantity > INITIAL_QUANTITY:
+            return _fallback_failure(
+                fallback_input=fallback_input,
+                state=state,
+                deadline=deadline,
+                code=HaltCode.OVERFILL,
+            )
+    state.canonical_fill_quantity = fill_quantity
+    state.canonical_filled_principal = filled_principal
+    state.canonical_fee_cost = fee_cost
+    if deadline.expired():
+        return _fallback_failure(
+            fallback_input=fallback_input,
+            state=state,
+            deadline=deadline,
+            code=HaltCode.MASTER_DEADLINE_EXHAUSTED,
+        )
+    if filled_principal > MAX_FILLED_PRINCIPAL:
+        return _fallback_failure(
+            fallback_input=fallback_input,
+            state=state,
+            deadline=deadline,
+            code=HaltCode.FILLED_PRINCIPAL_EXCEEDS_LIMIT,
+        )
+    if fee_cost > MAX_FEE_COST:
+        return _fallback_failure(
+            fallback_input=fallback_input,
+            state=state,
+            deadline=deadline,
+            code=HaltCode.FEE_RISK_EXCEEDS_LIMIT,
+        )
+    if filled_principal + fee_cost > MAX_TOTAL_RISK:
+        return _fallback_failure(
+            fallback_input=fallback_input,
+            state=state,
+            deadline=deadline,
+            code=HaltCode.TOTAL_RISK_EXCEEDS_LIMIT,
+        )
+    if order.fill_count_fp != fill_quantity:
+        return _fallback_failure(
+            fallback_input=fallback_input,
+            state=state,
+            deadline=deadline,
+            code=HaltCode.FILL_ORDER_RECONCILIATION_MISMATCH,
+        )
+    if order.initial_count_fp != INITIAL_QUANTITY:
+        return _fallback_failure(
+            fallback_input=fallback_input,
+            state=state,
+            deadline=deadline,
+            code=HaltCode.ORDER_IDENTITY_OR_ECONOMIC_MISMATCH,
+        )
+    if order.status == "executed":
+        if fill_quantity != INITIAL_QUANTITY or order.remaining_count_fp != Decimal("0.00"):
+            return _fallback_failure(
+                fallback_input=fallback_input,
+                state=state,
+                deadline=deadline,
+                code=HaltCode.FILL_ORDER_RECONCILIATION_MISMATCH,
+            )
+    elif order.status == "canceled":
+        if not (Decimal("0.00") <= fill_quantity <= INITIAL_QUANTITY):
+            return _fallback_failure(
+                fallback_input=fallback_input,
+                state=state,
+                deadline=deadline,
+                code=HaltCode.FILL_ORDER_RECONCILIATION_MISMATCH,
+            )
+    elif order.status == "resting":
+        if fill_quantity >= INITIAL_QUANTITY or order.remaining_count_fp is None or order.remaining_count_fp <= Decimal("0.00"):
+            return _fallback_failure(
+                fallback_input=fallback_input,
+                state=state,
+                deadline=deadline,
+                code=HaltCode.FILL_ORDER_RECONCILIATION_MISMATCH,
+            )
+    else:
+        return _fallback_failure(
+            fallback_input=fallback_input,
+            state=state,
+            deadline=deadline,
+            code=HaltCode.UNSUPPORTED_ORDER_STATUS,
+        )
+    if deadline.expired():
+        return _fallback_failure(
+            fallback_input=fallback_input,
+            state=state,
+            deadline=deadline,
+            code=HaltCode.MASTER_DEADLINE_EXHAUSTED,
+        )
+    active = order.status == "resting"
+    return _fallback_finalize(
+        fallback_input=fallback_input,
+        state=state,
+        deadline=deadline,
+        result_class=(
+            ResultClass.WRITE_RECONCILED_ORDER_EXISTS_ACTIVE
+            if active
+            else ResultClass.WRITE_RECONCILED_ORDER_EXISTS_TERMINAL
+        ),
+        halt_code=None,
+        bound_order_id=state.bound_order_id,
+        created_order_upper_bound=1,
+        active_order_upper_bound=1 if active else 0,
+        unknown_result=False,
+        writer_proof_release_eligible=not active,
+    )
+
+
 __all__ = [
     "ACCOUNT_SCOPE_REF",
     "ArtifactIdentity",
@@ -2434,11 +4324,27 @@ __all__ = [
     "CANCEL_ORDER_ON_PAUSE",
     "CLIENT_ORDER_ID",
     "CapabilityState",
+    "CANDIDATE_EXACT_ORDER_GET_MAX",
     "DEMO_REST_ORIGIN",
     "ENVIRONMENT",
+    "FALLBACK_GLOBAL_GET_SEND_MAXIMUM",
+    "FALLBACK_OPERATION_BINDING_IDENTITIES",
+    "FALLBACK_SOURCE_BINDING_MANIFEST_BYTES",
+    "FALLBACK_SOURCE_BINDING_MANIFEST_LENGTH",
+    "FALLBACK_SOURCE_BINDING_MANIFEST_SHA256",
+    "FallbackCapabilityName",
+    "FallbackOperation",
+    "FallbackPreparedGetRequest",
+    "FillDiscoveryCapabilityEnvelope",
+    "FillDiscoveryFallbackInput",
+    "FillDiscoveryFallbackPlan",
+    "FillDiscoveryFallbackResult",
+    "FillDiscoveryFallbackTransport",
     "GLOBAL_GET_SEND_MAXIMUM",
     "HaltCode",
     "INITIAL_QUANTITY",
+    "INCIDENT_LOWER_BOUND_SOURCE",
+    "INCIDENT_LOWER_BOUND_UTC",
     "LIMIT_PRICE",
     "MASTER_DEADLINE_MS",
     "MAX_FEE_COST",
@@ -2449,7 +4355,9 @@ __all__ = [
     "PAGE_LIMIT",
     "PER_REQUEST_CEILING_MS",
     "PreparedGetRequest",
+    "QUERY_MIN_TS",
     "RawHttpResponse",
+    "REQUIRED_FALLBACK_CAPABILITIES",
     "ReconciliationCapabilityEnvelope",
     "ReconciliationInput",
     "ReconciliationOperation",
@@ -2466,7 +4374,11 @@ __all__ = [
     "TICKER",
     "WRITER_PROOF_ID",
     "build_prepared_get_signing_message",
+    "build_fallback_get_signing_message",
+    "execute_fill_discovery_binding_fallback",
     "execute_post_halt_reconciliation",
     "plan_post_halt_reconciliation",
+    "plan_fill_discovery_binding_fallback",
+    "validate_fallback_source_binding_manifest",
     "validate_source_binding_manifest",
 ]

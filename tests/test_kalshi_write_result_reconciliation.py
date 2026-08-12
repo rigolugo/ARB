@@ -1034,5 +1034,796 @@ class TestEvidenceAndSecrets(ReconciliationTestCase):
         r,_=self.active_result(); e=json.loads(r.evidence_json); self.assertEqual(e["frozen_scope"]["client_order_id"],wr.CLIENT_ORDER_ID); self.assertEqual(e["frozen_scope"]["ticker"],wr.TICKER)
 
 
+FALLBACK_SNAPSHOT = "2026-08-11T10:00:00.2500000Z"
+FALLBACK_OPENAPI_BYTES = 311201
+FALLBACK_OPENAPI_SHA256 = "5a58b866d9034261cc0b2f9f5f31f44799cf72153270380d66fdb2523235fa78"
+
+
+def _fallback_cutoff(*, trades_created_ts: str = "2026-06-12T00:00:00Z") -> dict:
+    return {
+        "market_settled_ts": "2026-06-12T00:00:00Z",
+        "trades_created_ts": trades_created_ts,
+        "orders_updated_ts": "2026-06-12T00:00:00Z",
+    }
+
+
+def _fallback_fill(
+    *,
+    fill_id: str = "fill-discovery-001",
+    trade_id: str = "trade-discovery-001",
+    order_id: str = "candidate-order-001",
+    ticker: str = wr.TICKER,
+    market_ticker: Optional[str] = wr.TICKER,
+    subaccount_number: object = 0,
+    outcome_side: Optional[str] = "yes",
+    book_side: Optional[str] = "bid",
+    count_fp: object = "0.25",
+    yes_price_dollars: object = "0.0100",
+    no_price_dollars: object = "0.9900",
+    is_taker: object = False,
+    fee_cost: object = "0.000000",
+    created_time: object = "2026-08-11T02:00:00Z",
+) -> dict:
+    value = {
+        "fill_id": fill_id,
+        "trade_id": trade_id,
+        "order_id": order_id,
+        "ticker": ticker,
+        "count_fp": count_fp,
+        "yes_price_dollars": yes_price_dollars,
+        "no_price_dollars": no_price_dollars,
+        "is_taker": is_taker,
+        "fee_cost": fee_cost,
+        "created_time": created_time,
+        "ts": 1786413600,
+    }
+    if market_ticker is not None:
+        value["market_ticker"] = market_ticker
+    if subaccount_number is not None:
+        value["subaccount_number"] = subaccount_number
+    if outcome_side is not None:
+        value["outcome_side"] = outcome_side
+    if book_side is not None:
+        value["book_side"] = book_side
+    return value
+
+
+def _fallback_order(
+    *,
+    order_id: str = "candidate-order-001",
+    client_order_id: str = wr.CLIENT_ORDER_ID,
+    ticker: str = wr.TICKER,
+    subaccount_number: object = 0,
+    outcome_side: str = "yes",
+    book_side: str = "bid",
+    order_type: str = "limit",
+    status: str = "resting",
+    yes_price_dollars: object = "0.0100",
+    no_price_dollars: object = "0.9900",
+    initial_count_fp: object = "1.00",
+    fill_count_fp: object = "0.25",
+    remaining_count_fp: object = "0.75",
+    cancel_order_on_pause: object = True,
+    exchange_index: object = 0,
+    last_update_time: Optional[str] = "2026-08-11T09:59:59Z",
+) -> dict:
+    value = {
+        "order_id": order_id,
+        "client_order_id": client_order_id,
+        "ticker": ticker,
+        "subaccount_number": subaccount_number,
+        "outcome_side": outcome_side,
+        "book_side": book_side,
+        "type": order_type,
+        "status": status,
+        "yes_price_dollars": yes_price_dollars,
+        "no_price_dollars": no_price_dollars,
+        "initial_count_fp": initial_count_fp,
+        "fill_count_fp": fill_count_fp,
+        "remaining_count_fp": remaining_count_fp,
+        "cancel_order_on_pause": cancel_order_on_pause,
+        "exchange_index": exchange_index,
+        "self_trade_prevention_type": wr.SELF_TRADE_PREVENTION_TYPE,
+    }
+    if last_update_time is not None:
+        value["last_update_time"] = last_update_time
+    return value
+
+
+def _fallback_capability(**changes: object) -> wr.FillDiscoveryCapabilityEnvelope:
+    values = dict(
+        environment=wr.ENVIRONMENT,
+        rest_origin=wr.DEMO_REST_ORIGIN,
+        credential_reference_names=("KALSHI_DEMO_API_KEY_ID", "KALSHI_DEMO_PRIVATE_KEY_PEM"),
+        granted_capabilities=wr.REQUIRED_FALLBACK_CAPABILITIES,
+        network_access=wr.CapabilityState.PERMITTED,
+        demo_public_reads=wr.CapabilityState.PERMITTED,
+        demo_authenticated_reads=wr.CapabilityState.PERMITTED,
+        credential_use=wr.CapabilityState.PERMITTED,
+        demo_writes=wr.CapabilityState.PROHIBITED,
+        production_public_reads=wr.CapabilityState.PROHIBITED,
+        production_authenticated_reads=wr.CapabilityState.PROHIBITED,
+        production_writes=wr.CapabilityState.PROHIBITED,
+        account_funding=wr.CapabilityState.PROHIBITED,
+        websocket=wr.CapabilityState.PROHIBITED,
+    )
+    values.update(changes)
+    return wr.FillDiscoveryCapabilityEnvelope(**values)
+
+
+def _fallback_input(**changes: object) -> wr.FillDiscoveryFallbackInput:
+    values = dict(
+        capability_envelope=_fallback_capability(),
+        source_binding_manifest_bytes=wr.FALLBACK_SOURCE_BINDING_MANIFEST_BYTES,
+        provenance=wr.ReconciliationProvenance(
+            implementation=_artifact("src/arb/venues/kalshi/write_result_reconciliation.py"),
+            tests=_artifact("tests/test_kalshi_write_result_reconciliation.py"),
+            source_raw_openapi_bytes=FALLBACK_OPENAPI_BYTES,
+            source_raw_openapi_sha256=FALLBACK_OPENAPI_SHA256,
+        ),
+        prior_result_class=wr.ResultClass.WRITE_UNRESOLVED_ZERO_MATCH,
+        prior_exact_client_order_id_match_count=0,
+        prior_bound_order_id=None,
+        prior_created_order_upper_bound=1,
+        prior_active_order_upper_bound=1,
+        prior_unknown_result=True,
+        prior_writer_proof_release_eligible=False,
+    )
+    values.update(changes)
+    return wr.FillDiscoveryFallbackInput(**values)
+
+
+class FallbackFakeTransport:
+    def __init__(self, handler: Optional[Callable[[wr.FallbackPreparedGetRequest, int], wr.RawHttpResponse]] = None):
+        self.requests: List[wr.FallbackPreparedGetRequest] = []
+        self.counts: Dict[wr.FallbackOperation, int] = defaultdict(int)
+        self.handler = handler or self._default
+        self.cutoff = _fallback_cutoff()
+        self.live_fills: List[dict] = []
+        self.historical_fills: List[dict] = []
+        self.orders: Dict[str, dict] = {}
+
+    def send(self, request: wr.FallbackPreparedGetRequest) -> wr.RawHttpResponse:
+        self.requests.append(request)
+        self.counts[request.operation] += 1
+        return self.handler(request, self.counts[request.operation])
+
+    def _default(self, request: wr.FallbackPreparedGetRequest, ordinal: int) -> wr.RawHttpResponse:
+        if request.operation is wr.FallbackOperation.HISTORICAL_CUTOFF:
+            return _response(self.cutoff)
+        if request.operation is wr.FallbackOperation.LIVE_FILLS:
+            return _response({"fills": self.live_fills, "cursor": ""})
+        if request.operation is wr.FallbackOperation.HISTORICAL_FILLS:
+            return _response({"fills": self.historical_fills, "cursor": ""})
+        if request.operation is wr.FallbackOperation.EXACT_ORDER:
+            order_id = request.path.rsplit("/", 1)[-1]
+            return _response({"order": self.orders[order_id]})
+        raise AssertionError(request.operation)
+
+
+class FallbackTestCase(unittest.TestCase):
+    def run_fallback(
+        self,
+        transport: Optional[FallbackFakeTransport] = None,
+        *,
+        fallback_input: Optional[wr.FillDiscoveryFallbackInput] = None,
+        snapshot: str = FALLBACK_SNAPSHOT,
+        clock: Optional[Callable[[], float]] = None,
+    ) -> Tuple[wr.FillDiscoveryFallbackResult, FallbackFakeTransport]:
+        actual_transport = transport or FallbackFakeTransport()
+        result = wr.execute_fill_discovery_binding_fallback(
+            fallback_input or _fallback_input(),
+            actual_transport,
+            fill_discovery_snapshot_utc=snapshot,
+            monotonic_clock=clock,
+        )
+        return result, actual_transport
+
+    def active_result(self) -> Tuple[wr.FillDiscoveryFallbackResult, FallbackFakeTransport]:
+        transport = FallbackFakeTransport()
+        transport.live_fills = [_fallback_fill()]
+        transport.orders["candidate-order-001"] = _fallback_order()
+        result, _ = self.run_fallback(transport)
+        self.assertEqual(result.result_class, wr.ResultClass.WRITE_RECONCILED_ORDER_EXISTS_ACTIVE)
+        return result, transport
+
+    def assertFallbackHalt(self, result: wr.FillDiscoveryFallbackResult, code: wr.HaltCode) -> None:
+        self.assertEqual(result.result_class, wr.ResultClass.WRITE_UNRESOLVED_READ_FAILURE)
+        self.assertEqual(result.halt_code, code)
+        self.assertFalse(result.writer_proof_release_eligible)
+
+    def assertFallbackIdentity(self, result: wr.FillDiscoveryFallbackResult, code: wr.HaltCode) -> None:
+        self.assertEqual(result.result_class, wr.ResultClass.WRITE_UNRESOLVED_IDENTITY_VIOLATION)
+        self.assertEqual(result.halt_code, code)
+        self.assertIsNone(result.bound_order_id)
+        self.assertFalse(result.writer_proof_release_eligible)
+
+
+class TestFallbackArchitectureSourceAndTime(FallbackTestCase):
+    def test_exact_source_manifest_and_operation_identities(self):
+        self.assertEqual(len(wr.FALLBACK_SOURCE_BINDING_MANIFEST_BYTES), 4782)
+        self.assertEqual(
+            hashlib.sha256(wr.FALLBACK_SOURCE_BINDING_MANIFEST_BYTES).hexdigest(),
+            wr.FALLBACK_SOURCE_BINDING_MANIFEST_SHA256,
+        )
+        self.assertIsNone(
+            wr.validate_fallback_source_binding_manifest(wr.FALLBACK_SOURCE_BINDING_MANIFEST_BYTES)
+        )
+        parsed = json.loads(wr.FALLBACK_SOURCE_BINDING_MANIFEST_BYTES)
+        for name, (length, digest) in wr.FALLBACK_OPERATION_BINDING_IDENTITIES.items():
+            raw = _json_bytes(parsed["operations"][name])
+            self.assertEqual(len(raw), length, name)
+            self.assertEqual(hashlib.sha256(raw).hexdigest(), digest, name)
+
+    def test_only_four_fallback_operations(self):
+        self.assertEqual(
+            tuple(operation.value for operation in wr.FallbackOperation),
+            ("HISTORICAL_CUTOFF", "LIVE_FILLS", "HISTORICAL_FILLS", "EXACT_ORDER"),
+        )
+
+    def test_fallback_public_surface_has_no_arbitrary_http_shape(self):
+        names = {field.name for field in dataclasses.fields(wr.FallbackPreparedGetRequest)}
+        for forbidden in ("method", "body", "headers", "url", "host"):
+            self.assertNotIn(forbidden, names)
+        params = set(inspect.signature(wr.execute_fill_discovery_binding_fallback).parameters)
+        for forbidden in ("method", "url", "host", "path", "query", "headers", "body", "operation"):
+            self.assertNotIn(forbidden, params)
+
+    def test_fallback_source_drift_halts_before_send(self):
+        bad = bytearray(wr.FALLBACK_SOURCE_BINDING_MANIFEST_BYTES)
+        bad[-2] = ord("0") if bad[-2] != ord("0") else ord("1")
+        result, transport = self.run_fallback(
+            fallback_input=_fallback_input(source_binding_manifest_bytes=bytes(bad))
+        )
+        self.assertFallbackHalt(result, wr.HaltCode.AUTHORITATIVE_SCHEMA_DRIFT)
+        self.assertEqual(transport.requests, [])
+
+    def test_task_current_raw_source_is_required(self):
+        provenance = wr.ReconciliationProvenance(
+            implementation=_artifact("source"),
+            tests=_artifact("tests"),
+        )
+        result, transport = self.run_fallback(
+            fallback_input=_fallback_input(provenance=provenance)
+        )
+        self.assertFallbackHalt(result, wr.HaltCode.TASK_CURRENT_SOURCE_UNAVAILABLE)
+        self.assertEqual(transport.requests, [])
+
+    def test_production_and_compatibility_origins_unreachable(self):
+        for origin, expected in (
+            ("https://external-api.kalshi.com", wr.HaltCode.PRODUCTION_ENDPOINT_PROHIBITED),
+            ("https://demo-api.kalshi.co", wr.HaltCode.DEMO_ENVIRONMENT_REQUIRED),
+        ):
+            with self.subTest(origin=origin):
+                result, transport = self.run_fallback(
+                    fallback_input=_fallback_input(
+                        capability_envelope=_fallback_capability(rest_origin=origin)
+                    )
+                )
+                self.assertFallbackHalt(result, expected)
+                self.assertEqual(transport.requests, [])
+
+    def test_each_fallback_capability_is_independent(self):
+        for missing in wr.FallbackCapabilityName:
+            with self.subTest(missing=missing.value):
+                granted = frozenset(
+                    capability for capability in wr.REQUIRED_FALLBACK_CAPABILITIES
+                    if capability is not missing
+                )
+                result, transport = self.run_fallback(
+                    fallback_input=_fallback_input(
+                        capability_envelope=_fallback_capability(granted_capabilities=granted)
+                    )
+                )
+                self.assertFallbackHalt(result, wr.HaltCode.CAPABILITY_MISSING)
+                self.assertEqual(transport.requests, [])
+
+    def test_exact_predecessor_zero_match_state_required(self):
+        result, transport = self.run_fallback(
+            fallback_input=_fallback_input(prior_exact_client_order_id_match_count=1)
+        )
+        self.assertFallbackHalt(result, wr.HaltCode.CONTROLLING_ARTIFACT_IDENTITY_MISMATCH)
+        self.assertEqual(transport.requests, [])
+
+    def test_query_time_bounds_fractional_ceiling_are_exact(self):
+        result, transport = self.run_fallback()
+        self.assertEqual(result.query_min_ts, 1786411334)
+        self.assertEqual(result.query_max_ts, 1786442402)
+        live = next(request for request in transport.requests if request.operation is wr.FallbackOperation.LIVE_FILLS)
+        self.assertEqual(live.query["min_ts"], 1786411334)
+        self.assertEqual(live.query["max_ts"], 1786442402)
+
+    def test_snapshot_at_lower_bound_is_accepted(self):
+        result, _ = self.run_fallback(snapshot=wr.INCIDENT_LOWER_BOUND_UTC)
+        self.assertEqual(result.result_class, wr.ResultClass.WRITE_UNRESOLVED_ZERO_MATCH)
+        self.assertEqual(result.query_max_ts, 1786411337)
+
+    def test_snapshot_before_lower_bound_halts_before_network(self):
+        result, transport = self.run_fallback(snapshot="2026-08-11T01:22:15.7100716Z")
+        self.assertFallbackHalt(result, wr.HaltCode.FILL_TIMESTAMP_INVALID)
+        self.assertEqual(transport.requests, [])
+
+    def test_malformed_snapshot_halts_before_network(self):
+        result, transport = self.run_fallback(snapshot="not-a-time")
+        self.assertFallbackHalt(result, wr.HaltCode.FILL_TIMESTAMP_INVALID)
+        self.assertEqual(transport.requests, [])
+
+    def test_create_timestamp_is_not_required_or_inferred(self):
+        result, _ = self.run_fallback()
+        evidence = json.loads(result.evidence_json)
+        self.assertFalse(evidence["time_envelope"]["create_send_timestamp_required"])
+        self.assertEqual(
+            evidence["time_envelope"]["incident_lower_bound_source"],
+            "writer_proof.valid_from_utc",
+        )
+        self.assertNotIn("create_send_timestamp_utc", result.evidence_json.decode("utf-8"))
+
+
+class TestFallbackPartitionQueriesAndPagination(FallbackTestCase):
+    def test_cutoff_less_than_or_equal_lower_uses_live_only(self):
+        for cutoff in ("2026-06-12T00:00:00Z", wr.INCIDENT_LOWER_BOUND_UTC):
+            with self.subTest(cutoff=cutoff):
+                transport = FallbackFakeTransport()
+                transport.cutoff = _fallback_cutoff(trades_created_ts=cutoff)
+                result, _ = self.run_fallback(transport)
+                self.assertEqual(result.result_class, wr.ResultClass.WRITE_UNRESOLVED_ZERO_MATCH)
+                self.assertFalse(result.historical_fill_stream_required)
+                self.assertEqual(
+                    [request.operation for request in transport.requests],
+                    [wr.FallbackOperation.HISTORICAL_CUTOFF, wr.FallbackOperation.LIVE_FILLS],
+                )
+
+    def test_cutoff_greater_than_lower_uses_live_then_historical(self):
+        transport = FallbackFakeTransport()
+        transport.cutoff = _fallback_cutoff(trades_created_ts="2026-08-11T02:00:00Z")
+        result, _ = self.run_fallback(transport)
+        self.assertEqual(result.result_class, wr.ResultClass.WRITE_UNRESOLVED_ZERO_MATCH)
+        self.assertTrue(result.historical_fill_stream_required)
+        self.assertEqual(
+            [request.operation for request in transport.requests],
+            [
+                wr.FallbackOperation.HISTORICAL_CUTOFF,
+                wr.FallbackOperation.LIVE_FILLS,
+                wr.FallbackOperation.HISTORICAL_FILLS,
+            ],
+        )
+
+    def test_exact_live_and_historical_query_allowlists(self):
+        transport = FallbackFakeTransport()
+        transport.cutoff = _fallback_cutoff(trades_created_ts="2026-08-11T02:00:00Z")
+        self.run_fallback(transport)
+        live = next(request for request in transport.requests if request.operation is wr.FallbackOperation.LIVE_FILLS)
+        historical = next(
+            request for request in transport.requests
+            if request.operation is wr.FallbackOperation.HISTORICAL_FILLS
+        )
+        self.assertEqual(dict(live.query), {
+            "ticker": wr.TICKER,
+            "subaccount": 0,
+            "min_ts": 1786411334,
+            "max_ts": 1786442402,
+            "limit": 1000,
+        })
+        self.assertNotIn("order_id", live.query)
+        self.assertEqual(dict(historical.query), {
+            "ticker": wr.TICKER,
+            "max_ts": 1786442402,
+            "limit": 1000,
+        })
+        for unsupported in ("min_ts", "order_id", "subaccount"):
+            self.assertNotIn(unsupported, historical.query)
+
+    def test_multi_page_live_and_historical_cursor_propagation(self):
+        token_live = " opaque-live+/= "
+        token_historical = " opaque-historical+/= "
+        def handler(request, ordinal):
+            if request.operation is wr.FallbackOperation.HISTORICAL_CUTOFF:
+                return _response(_fallback_cutoff(trades_created_ts="2026-08-11T02:00:00Z"))
+            if request.operation is wr.FallbackOperation.LIVE_FILLS:
+                return _response({"fills": [], "cursor": token_live if ordinal == 1 else ""})
+            if request.operation is wr.FallbackOperation.HISTORICAL_FILLS:
+                return _response({"fills": [], "cursor": token_historical if ordinal == 1 else ""})
+            raise AssertionError(request.operation)
+        transport = FallbackFakeTransport(handler)
+        result, _ = self.run_fallback(transport)
+        self.assertEqual(result.result_class, wr.ResultClass.WRITE_UNRESOLVED_ZERO_MATCH)
+        live = [request for request in transport.requests if request.operation is wr.FallbackOperation.LIVE_FILLS]
+        historical = [request for request in transport.requests if request.operation is wr.FallbackOperation.HISTORICAL_FILLS]
+        self.assertEqual(live[1].query["cursor"], token_live)
+        self.assertEqual(historical[1].query["cursor"], token_historical)
+
+    def test_cursor_cycle_malformed_and_page_budget_fail_closed(self):
+        def cycle_handler(request, ordinal):
+            if request.operation is wr.FallbackOperation.HISTORICAL_CUTOFF:
+                return _response(_fallback_cutoff())
+            return _response({"fills": [], "cursor": "cycle"})
+        result, _ = self.run_fallback(FallbackFakeTransport(cycle_handler))
+        self.assertFallbackHalt(result, wr.HaltCode.PAGINATION_CURSOR_CYCLE)
+
+        def malformed_handler(request, ordinal):
+            if request.operation is wr.FallbackOperation.HISTORICAL_CUTOFF:
+                return _response(_fallback_cutoff())
+            return _response({"fills": [], "cursor": None})
+        result, _ = self.run_fallback(FallbackFakeTransport(malformed_handler))
+        self.assertFallbackHalt(result, wr.HaltCode.PAGINATION_CURSOR_MALFORMED)
+
+        def budget_handler(request, ordinal):
+            if request.operation is wr.FallbackOperation.HISTORICAL_CUTOFF:
+                return _response(_fallback_cutoff())
+            return _response({"fills": [], "cursor": "cursor-" + str(ordinal)})
+        result, transport = self.run_fallback(FallbackFakeTransport(budget_handler))
+        self.assertFallbackHalt(result, wr.HaltCode.PAGE_BUDGET_EXHAUSTED)
+        self.assertEqual(transport.counts[wr.FallbackOperation.LIVE_FILLS], 8)
+
+    def test_pagination_does_not_stop_after_candidate_found(self):
+        def handler(request, ordinal):
+            if request.operation is wr.FallbackOperation.HISTORICAL_CUTOFF:
+                return _response(_fallback_cutoff())
+            if request.operation is wr.FallbackOperation.LIVE_FILLS:
+                return _response({
+                    "fills": [_fallback_fill()] if ordinal == 1 else [],
+                    "cursor": "next" if ordinal == 1 else "",
+                })
+            if request.operation is wr.FallbackOperation.EXACT_ORDER:
+                return _response({"order": _fallback_order()})
+            raise AssertionError(request.operation)
+        transport = FallbackFakeTransport(handler)
+        result, _ = self.run_fallback(transport)
+        self.assertEqual(result.result_class, wr.ResultClass.WRITE_RECONCILED_ORDER_EXISTS_ACTIVE)
+        self.assertEqual(transport.counts[wr.FallbackOperation.LIVE_FILLS], 2)
+
+
+class TestFallbackCandidateBindingAndPathSafety(FallbackTestCase):
+    def test_zero_order_and_zero_fill_remains_unresolved(self):
+        result, _ = self.run_fallback()
+        self.assertEqual(result.result_class, wr.ResultClass.WRITE_UNRESOLVED_ZERO_MATCH)
+        self.assertIsNone(result.halt_code)
+        self.assertIsNone(result.bound_order_id)
+        self.assertTrue(result.unknown_result)
+        self.assertFalse(result.writer_proof_release_eligible)
+
+    def test_candidate_is_derived_only_from_fill_order_id(self):
+        transport = FallbackFakeTransport()
+        transport.live_fills = [_fallback_fill(order_id="authoritative-order-id", trade_id=wr.CLIENT_ORDER_ID)]
+        transport.orders["authoritative-order-id"] = _fallback_order(
+            order_id="authoritative-order-id", client_order_id="different"
+        )
+        result, _ = self.run_fallback(transport)
+        self.assertEqual(result.candidate_order_ids, ("authoritative-order-id",))
+        self.assertEqual(result.result_class, wr.ResultClass.WRITE_UNRESOLVED_ZERO_MATCH)
+
+    def test_candidate_path_injection_shapes_are_rejected_before_exact_send(self):
+        shapes = (
+            "../escape",
+            "..",
+            "order/extra",
+            "order?query=1",
+            "order#fragment",
+            "order\\extra",
+            "order%2fextra",
+            "order%5Cextra",
+            "//evil.example/path",
+            "https://evil.example",
+            "order\x00control",
+        )
+        for shape in shapes:
+            with self.subTest(shape=repr(shape)):
+                transport = FallbackFakeTransport()
+                transport.live_fills = [_fallback_fill(order_id=shape)]
+                result, _ = self.run_fallback(transport)
+                self.assertFallbackHalt(result, wr.HaltCode.GET_ONLY_CONTRACT_VIOLATION)
+                self.assertEqual(transport.counts[wr.FallbackOperation.EXACT_ORDER], 0)
+
+    def test_more_than_eight_candidates_halts_before_exact_reads(self):
+        transport = FallbackFakeTransport()
+        transport.live_fills = [
+            _fallback_fill(fill_id=f"fill-{index}", trade_id=f"trade-{index}", order_id=f"order-{index}")
+            for index in range(9)
+        ]
+        result, _ = self.run_fallback(transport)
+        self.assertFallbackHalt(result, wr.HaltCode.CANDIDATE_ORDER_ID_BUDGET_EXCEEDED)
+        self.assertEqual(result.candidate_order_id_count, 9)
+        self.assertEqual(transport.counts[wr.FallbackOperation.EXACT_ORDER], 0)
+
+    def test_one_exact_client_match_binds_active_order(self):
+        result, transport = self.active_result()
+        self.assertEqual(result.bound_order_id, "candidate-order-001")
+        self.assertEqual(result.validated_binding_count, 1)
+        self.assertEqual(result.canonical_fill_quantity, Decimal("0.25"))
+        self.assertEqual(transport.counts[wr.FallbackOperation.EXACT_ORDER], 1)
+
+    def test_wrong_client_candidate_is_rejected_not_failed(self):
+        transport = FallbackFakeTransport()
+        transport.live_fills = [_fallback_fill()]
+        transport.orders["candidate-order-001"] = _fallback_order(client_order_id="different")
+        result, _ = self.run_fallback(transport)
+        self.assertEqual(result.result_class, wr.ResultClass.WRITE_UNRESOLVED_ZERO_MATCH)
+        self.assertEqual(result.validated_binding_count, 0)
+        self.assertFalse(result.writer_proof_release_eligible)
+
+    def test_all_bounded_candidates_checked_after_first_validates(self):
+        transport = FallbackFakeTransport()
+        transport.live_fills = [
+            _fallback_fill(fill_id="fill-a", trade_id="trade-a", order_id="candidate-a"),
+            _fallback_fill(fill_id="fill-b", trade_id="trade-b", order_id="candidate-b"),
+        ]
+        transport.orders["candidate-a"] = _fallback_order(order_id="candidate-a")
+        transport.orders["candidate-b"] = _fallback_order(
+            order_id="candidate-b", client_order_id="different"
+        )
+        result, _ = self.run_fallback(transport)
+        self.assertEqual(result.result_class, wr.ResultClass.WRITE_RECONCILED_ORDER_EXISTS_ACTIVE)
+        self.assertEqual(result.bound_order_id, "candidate-a")
+        self.assertEqual(transport.counts[wr.FallbackOperation.EXACT_ORDER], 2)
+
+    def test_multiple_exact_bindings_are_identity_violation(self):
+        transport = FallbackFakeTransport()
+        transport.live_fills = [
+            _fallback_fill(fill_id="fill-a", trade_id="trade-a", order_id="candidate-a"),
+            _fallback_fill(fill_id="fill-b", trade_id="trade-b", order_id="candidate-b"),
+        ]
+        transport.orders["candidate-a"] = _fallback_order(order_id="candidate-a")
+        transport.orders["candidate-b"] = _fallback_order(order_id="candidate-b")
+        result, _ = self.run_fallback(transport)
+        self.assertFallbackIdentity(result, wr.HaltCode.MULTIPLE_ORDER_IDS_FOR_CLIENT_ORDER_ID)
+        self.assertEqual(result.validated_binding_count, 2)
+        self.assertEqual(transport.counts[wr.FallbackOperation.EXACT_ORDER], 2)
+
+    def test_candidate_read_non_200_and_transport_failure_are_read_failures(self):
+        for mode in ("404", "transport"):
+            with self.subTest(mode=mode):
+                def handler(request, ordinal):
+                    if request.operation is wr.FallbackOperation.HISTORICAL_CUTOFF:
+                        return _response(_fallback_cutoff())
+                    if request.operation is wr.FallbackOperation.LIVE_FILLS:
+                        return _response({"fills": [_fallback_fill()], "cursor": ""})
+                    if mode == "transport":
+                        raise TimeoutError("synthetic")
+                    return _response({}, status=404)
+                result, _ = self.run_fallback(FallbackFakeTransport(handler))
+                self.assertFallbackHalt(result, wr.HaltCode.CANDIDATE_EXACT_ORDER_READ_FAILURE)
+
+    def test_exact_client_plus_invariant_conflict_is_identity_violation(self):
+        transport = FallbackFakeTransport()
+        transport.live_fills = [_fallback_fill()]
+        transport.orders["candidate-order-001"] = _fallback_order(ticker="OTHER")
+        result, _ = self.run_fallback(transport)
+        self.assertFallbackIdentity(result, wr.HaltCode.ORDER_IDENTITY_OR_ECONOMIC_MISMATCH)
+
+
+class TestFallbackFillExactlyOnceEconomicsAndProof(FallbackTestCase):
+    def test_equivalent_duplicate_fill_id_counts_once_and_preserves_trade_id(self):
+        duplicate = _fallback_fill()
+        transport = FallbackFakeTransport()
+        transport.live_fills = [duplicate, dict(duplicate)]
+        transport.orders["candidate-order-001"] = _fallback_order()
+        result, _ = self.run_fallback(transport)
+        self.assertEqual(result.result_class, wr.ResultClass.WRITE_RECONCILED_ORDER_EXISTS_ACTIVE)
+        self.assertEqual(result.canonical_fill_count, 1)
+        evidence = json.loads(result.evidence_json)
+        self.assertEqual(
+            evidence["bound_fill_reconciliation"]["bound_fills"][0]["trade_id"],
+            "trade-discovery-001",
+        )
+
+    def test_conflicting_duplicate_fill_id_is_identity_violation(self):
+        one = _fallback_fill()
+        two = _fallback_fill(yes_price_dollars="0.0099")
+        transport = FallbackFakeTransport()
+        transport.live_fills = [one, two]
+        result, _ = self.run_fallback(transport)
+        self.assertFallbackIdentity(result, wr.HaltCode.FILL_ID_DUPLICATE_CONFLICT)
+
+    def test_same_economics_different_fill_ids_are_not_deduped(self):
+        transport = FallbackFakeTransport()
+        transport.live_fills = [
+            _fallback_fill(fill_id="fill-a", trade_id="trade-a", count_fp="0.25"),
+            _fallback_fill(fill_id="fill-b", trade_id="trade-b", count_fp="0.25"),
+        ]
+        transport.orders["candidate-order-001"] = _fallback_order(
+            fill_count_fp="0.50", remaining_count_fp="0.50"
+        )
+        result, _ = self.run_fallback(transport)
+        self.assertEqual(result.result_class, wr.ResultClass.WRITE_RECONCILED_ORDER_EXISTS_ACTIVE)
+        self.assertEqual(result.canonical_fill_count, 2)
+        self.assertEqual(result.canonical_fill_quantity, Decimal("0.50"))
+
+    def test_out_of_window_fill_is_locally_rejected(self):
+        transport = FallbackFakeTransport()
+        transport.live_fills = [
+            _fallback_fill(created_time="2026-08-11T01:22:15.7100716Z")
+        ]
+        result, _ = self.run_fallback(transport)
+        self.assertEqual(result.result_class, wr.ResultClass.WRITE_UNRESOLVED_ZERO_MATCH)
+        self.assertEqual(result.candidate_order_id_count, 0)
+        evidence = json.loads(result.evidence_json)
+        self.assertEqual(
+            evidence["discovery"]["rejected_fills"][0]["reason"],
+            "OUTSIDE_EXACT_INCIDENT_INTERVAL",
+        )
+
+    def test_historical_missing_subaccount_requires_exact_order_proof(self):
+        transport = FallbackFakeTransport()
+        transport.cutoff = _fallback_cutoff(trades_created_ts="2026-08-11T02:00:00Z")
+        transport.historical_fills = [_fallback_fill(subaccount_number=None)]
+        transport.orders["candidate-order-001"] = _fallback_order()
+        result, _ = self.run_fallback(transport)
+        self.assertEqual(result.result_class, wr.ResultClass.WRITE_RECONCILED_ORDER_EXISTS_ACTIVE)
+
+        transport = FallbackFakeTransport()
+        transport.cutoff = _fallback_cutoff(trades_created_ts="2026-08-11T02:00:00Z")
+        transport.historical_fills = [_fallback_fill(subaccount_number=None)]
+        order = _fallback_order(); order.pop("subaccount_number")
+        transport.orders["candidate-order-001"] = order
+        result, _ = self.run_fallback(transport)
+        self.assertFallbackHalt(result, wr.HaltCode.AUTHORITATIVE_SCHEMA_DRIFT)
+
+    def test_post_only_taker_and_limit_price_conflicts(self):
+        for changes, expected in (
+            ({"is_taker": True}, wr.HaltCode.POST_ONLY_TAKER_FILL_CONFLICT),
+            ({"yes_price_dollars": "0.0101"}, wr.HaltCode.FILL_PRICE_WORSE_THAN_LIMIT),
+        ):
+            with self.subTest(expected=expected.value):
+                transport = FallbackFakeTransport()
+                transport.live_fills = [_fallback_fill(**changes)]
+                transport.orders["candidate-order-001"] = _fallback_order()
+                result, _ = self.run_fallback(transport)
+                self.assertFallbackIdentity(result, expected)
+
+    def test_decimal_principal_fee_and_risk_are_exact(self):
+        transport = FallbackFakeTransport()
+        transport.live_fills = [
+            _fallback_fill(count_fp="0.25", yes_price_dollars="0.0100", fee_cost="0.000001")
+        ]
+        transport.orders["candidate-order-001"] = _fallback_order()
+        result, _ = self.run_fallback(transport)
+        self.assertEqual(result.canonical_filled_principal, Decimal("0.002500"))
+        self.assertEqual(result.canonical_fee_cost, Decimal("0.000001"))
+        self.assertNotIn("float(", inspect.getsource(wr.execute_fill_discovery_binding_fallback))
+
+    def test_fee_and_total_risk_bounds_fail_closed(self):
+        transport = FallbackFakeTransport()
+        transport.live_fills = [_fallback_fill(fee_cost="0.040001")]
+        transport.orders["candidate-order-001"] = _fallback_order()
+        result, _ = self.run_fallback(transport)
+        self.assertFallbackIdentity(result, wr.HaltCode.FEE_RISK_EXCEEDS_LIMIT)
+
+        transport = FallbackFakeTransport()
+        transport.live_fills = [_fallback_fill(count_fp="1.00", fee_cost="0.040001")]
+        transport.orders["candidate-order-001"] = _fallback_order(
+            status="executed", fill_count_fp="1.00", remaining_count_fp="0.00"
+        )
+        result, _ = self.run_fallback(transport)
+        self.assertFallbackIdentity(result, wr.HaltCode.FEE_RISK_EXCEEDS_LIMIT)
+
+    def test_order_fill_mismatch_is_read_failure(self):
+        transport = FallbackFakeTransport()
+        transport.live_fills = [_fallback_fill()]
+        transport.orders["candidate-order-001"] = _fallback_order(fill_count_fp="0.50")
+        result, _ = self.run_fallback(transport)
+        self.assertFallbackHalt(result, wr.HaltCode.FILL_ORDER_RECONCILIATION_MISMATCH)
+
+    def test_no_complement_price_synthesis(self):
+        transport = FallbackFakeTransport()
+        transport.live_fills = [_fallback_fill(no_price_dollars="0.123456")]
+        transport.orders["candidate-order-001"] = _fallback_order(no_price_dollars="0.123456")
+        result, _ = self.run_fallback(transport)
+        self.assertEqual(result.result_class, wr.ResultClass.WRITE_RECONCILED_ORDER_EXISTS_ACTIVE)
+        evidence = json.loads(result.evidence_json)
+        self.assertEqual(
+            evidence["bound_fill_reconciliation"]["bound_fills"][0]["no_price_dollars"],
+            "0.123456",
+        )
+
+    def test_post_snapshot_order_mutation_fails_closed(self):
+        transport = FallbackFakeTransport()
+        transport.live_fills = [_fallback_fill()]
+        transport.orders["candidate-order-001"] = _fallback_order(
+            last_update_time="2026-08-11T10:00:00.2500001Z"
+        )
+        result, _ = self.run_fallback(transport)
+        self.assertFallbackHalt(result, wr.HaltCode.ORDER_STATE_AFTER_DISCOVERY_SNAPSHOT)
+
+    def test_terminal_executed_releases_only_after_exact_reconciliation(self):
+        transport = FallbackFakeTransport()
+        transport.live_fills = [_fallback_fill(count_fp="1.00")]
+        transport.orders["candidate-order-001"] = _fallback_order(
+            status="executed", fill_count_fp="1.00", remaining_count_fp="0.00"
+        )
+        result, _ = self.run_fallback(transport)
+        self.assertEqual(result.result_class, wr.ResultClass.WRITE_RECONCILED_ORDER_EXISTS_TERMINAL)
+        self.assertTrue(result.writer_proof_release_eligible)
+        self.assertEqual(result.active_order_upper_bound, 0)
+
+
+class TestFallbackTransportDeadlineEvidenceAndRegression(FallbackTestCase):
+    def test_all_requests_are_get_only_and_exact_order_has_no_query(self):
+        result, transport = self.active_result()
+        self.assertTrue(all(request.method == "GET" for request in transport.requests))
+        exact = next(request for request in transport.requests if request.operation is wr.FallbackOperation.EXACT_ORDER)
+        self.assertEqual(dict(exact.query), {})
+        self.assertEqual(
+            wr.build_fallback_get_signing_message(exact, timestamp_ms_text="12345"),
+            ("12345GET" + exact.path).encode("utf-8"),
+        )
+
+    def test_retry_redirect_and_non_200_fail_closed(self):
+        for response, expected in (
+            (_response(_fallback_cutoff(), retry_count=1), wr.HaltCode.TRANSPORT_READ_FAILURE),
+            (_response(_fallback_cutoff(), status=302), wr.HaltCode.REDIRECT_PROHIBITED),
+            (_response(_fallback_cutoff(), status=500), wr.HaltCode.UNEXPECTED_HTTP_STATUS),
+        ):
+            with self.subTest(expected=expected.value):
+                result, _ = self.run_fallback(FallbackFakeTransport(lambda request, ordinal, r=response: r))
+                self.assertFallbackHalt(result, expected)
+
+    def test_deadline_before_request_and_per_request_ceiling(self):
+        result, transport = self.run_fallback(clock=FakeClock(start=0.0, step=100.0))
+        self.assertFallbackHalt(result, wr.HaltCode.MASTER_DEADLINE_EXHAUSTED)
+        self.assertEqual(transport.requests, [])
+
+        clock = FakeClock(start=0.0, step=0.0)
+        def slow(request, ordinal):
+            clock.current += 11.0
+            return _response(_fallback_cutoff())
+        result, _ = self.run_fallback(FallbackFakeTransport(slow), clock=clock)
+        self.assertFallbackHalt(result, wr.HaltCode.TRANSPORT_READ_FAILURE)
+
+    def test_evidence_is_deterministic_secret_safe_and_zero_activity(self):
+        first, _ = self.run_fallback(clock=lambda: 0.0)
+        second, _ = self.run_fallback(clock=lambda: 0.0)
+        self.assertEqual(first.evidence_json, second.evidence_json)
+        self.assertEqual(first.evidence_sha256, second.evidence_sha256)
+        self.assertEqual(
+            hashlib.sha256(first.evidence_json).hexdigest(),
+            first.evidence_sha256,
+        )
+        evidence_text = first.evidence_json.decode("utf-8").lower()
+        for forbidden in (
+            "-----begin private key-----",
+            "api-key-value",
+            "raw_signature",
+            "signature_hash",
+            "os.environ",
+        ):
+            self.assertNotIn(forbidden, evidence_text)
+        self.assertEqual(
+            (first.retry_count, first.redirect_count, first.production_activity,
+             first.write_activity, first.funding_activity, first.websocket_activity),
+            (0, 0, 0, 0, 0, 0),
+        )
+
+    def test_evidence_has_complete_fallback_sections(self):
+        result, _ = self.active_result()
+        evidence = json.loads(result.evidence_json)
+        for key in (
+            "identities",
+            "predecessor_result",
+            "frozen_scope",
+            "time_envelope",
+            "request_ledger",
+            "discovery",
+            "candidate_validation",
+            "bound_fill_reconciliation",
+            "terminal",
+        ):
+            self.assertIn(key, evidence)
+        self.assertTrue(all(item["method"] == "GET" for item in evidence["request_ledger"]))
+
+    def test_predecessor_zero_match_behavior_remains_intact(self):
+        transport = FakeTransport(); transport.live_orders = []
+        result = wr.execute_post_halt_reconciliation(_input(), transport)
+        self.assertEqual(result.result_class, wr.ResultClass.WRITE_UNRESOLVED_ZERO_MATCH)
+        self.assertEqual(result.request_count, 3)
+        self.assertEqual(
+            [request.operation for request in transport.requests],
+            [
+                wr.ReconciliationOperation.HISTORICAL_CUTOFF,
+                wr.ReconciliationOperation.LIVE_ORDERS,
+                wr.ReconciliationOperation.HISTORICAL_ORDERS,
+            ],
+        )
+
+
 if __name__ == "__main__":
     unittest.main()
