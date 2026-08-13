@@ -9,8 +9,8 @@ This document records accepted state facts only. It does not authorize work and 
 - Repository: `rigolugo/ARB`
 - Visibility: public
 - Default branch: `main`
-- Exact canonical base used to prepare this state update: `55b4ecaf5bc93978ee23bfd218cfe5ddba35bc49`
-- Exact canonical tree observed for that base: `69df0e38d6830639fc3103ea95c41ceec65a5b2d`
+- Exact canonical base used to prepare this state update: `7681676edb86e0f8fda52d5cebd46a5f52356401`
+- Exact canonical tree observed for that base: `0da7384dc499288b49793cc5c5755666b1f90fd1`
 - Canonical `main` must always be reverified directly before a task relies on it.
 - This file does not predeclare the commit SHA of any later documentation-transfer commit that may install this update.
 
@@ -18,7 +18,7 @@ This document records accepted state facts only. It does not authorize work and 
 
 Current accepted state label:
 
-`KALSHI_DEMO_ONE_ORDER_LIFECYCLE_EXECUTION_01_CONSUMED__POST_HALT_RECONCILIATION_EXECUTION_01_CONSUMED__WRITE_UNRESOLVED_ZERO_MATCH__WRITER_PROOF_HELD`
+`KALSHI_DEMO_ONE_ORDER_LIFECYCLE_EXECUTION_01_CONSUMED__POST_HALT_RECONCILIATION_EXECUTION_01_CONSUMED__FILL_DISCOVERY_FALLBACK_EXECUTION_01_CONSUMED__WRITE_UNRESOLVED_ZERO_MATCH__WRITER_PROOF_HELD`
 
 Accepted milestones now include:
 
@@ -39,10 +39,13 @@ Accepted milestones now include:
 15. `KALSHI_DEMO_POST_HALT_EXACT_WRITE_RESULT_RECONCILIATION_SPEC_01.md` accepted as the controlling read-only reconciliation specification (ART-0041/ART-0042); no implementation or venue execution authorized by the specification itself;
 16. `KALSHI_DEMO_POST_HALT_EXACT_WRITE_RESULT_RECONCILIATION_IMPLEMENTATION_01` accepted and installed at canonical commit `bbec7f203140312169af7db2f5c2936b58fbd6dd` (ART-0043/ART-0044); its implementation and offline validation performed no venue reconciliation;
 17. `KALSHI_DEMO_POST_HALT_EXACT_WRITE_RESULT_RECONCILIATION_EXECUTION_01` recorded by accepted external execution evidence (ART-0045): its one authorized execution attempt is consumed, the bounded GET-only evidence collection succeeded, and the prior CREATE remains unresolved with result `WRITE_UNRESOLVED_ZERO_MATCH` and writer proof `HELD`.
+18. `KALSHI_DEMO_POST_HALT_FILL_DISCOVERY_BINDING_FALLBACK_SPEC_01.md` and its handoff accepted as the controlling fill-discovery binding fallback contract (ART-0046/ART-0047); neither artifact authorizes venue execution;
+19. `KALSHI_DEMO_POST_HALT_FILL_DISCOVERY_BINDING_FALLBACK_IMPLEMENTATION_01` accepted and installed at canonical commit `7681676edb86e0f8fda52d5cebd46a5f52356401` (ART-0048/ART-0049); its implementation and offline validation performed no venue or credential activity;
+20. `KALSHI_DEMO_POST_HALT_FILL_DISCOVERY_BINDING_FALLBACK_EXECUTION_01` recorded by accepted external execution evidence (ART-0050): its one-shot authorization is consumed, two bounded Demo GETs found zero incident-scoped fills and zero candidate order ids, and the prior CREATE remains unresolved with result `WRITE_UNRESOLVED_ZERO_MATCH` and writer proof `HELD`.
 
 Canonical `main` later advanced through `ARB_CODEX_IMPLEMENTER_STRUCTURE_01` at commit `7e43435397a6ca26b119b783f165cb6b30406a76` (tree `99b4c3b840d3fbf9f99c4c39b962cc07fdb3295c`, parent `bbec7f203140312169af7db2f5c2936b58fbd6dd`). That advance is tooling/workflow infrastructure only, not a technical phase transition, reconciliation evidence, venue evidence, or execution authorization.
 
-The one-order lifecycle is technically accepted and installed. Accepted execution evidence records that `KALSHI_DEMO_ONE_ORDER_LIFECYCLE_EXECUTION_01` occurred with terminal disposition `FAIL_CLOSED_HALT` / `RECOVERY_ZERO_MATCH`, and that the separate `KALSHI_DEMO_POST_HALT_EXACT_WRITE_RESULT_RECONCILIATION_EXECUTION_01` was consumed as a bounded GET-only evidence collection with result `WRITE_UNRESOLVED_ZERO_MATCH`. The prior CREATE's write result remains unresolved — zero live-order and historical-order matches do not establish that the CREATE never existed. Writer proof remains `HELD` and release-ineligible. See Section 7 for exact evidence-qualified detail. No accepted result authorizes a further Demo order, cancellation, retry, second lifecycle, credential use, exploratory venue request, or production activity.
+The one-order lifecycle is technically accepted and installed. Accepted execution evidence records that `KALSHI_DEMO_ONE_ORDER_LIFECYCLE_EXECUTION_01` occurred with terminal disposition `FAIL_CLOSED_HALT` / `RECOVERY_ZERO_MATCH`, that `KALSHI_DEMO_POST_HALT_EXACT_WRITE_RESULT_RECONCILIATION_EXECUTION_01` was consumed as a bounded GET-only evidence collection with result `WRITE_UNRESOLVED_ZERO_MATCH`, and that the separate fill-discovery fallback execution was also consumed after observing zero incident-scoped fills and zero candidate order ids. The prior CREATE's write result remains unresolved — zero order evidence plus zero fill evidence does not establish that the CREATE never existed. Writer proof remains `HELD` and release-ineligible. See Section 7 for exact evidence-qualified detail. No accepted result authorizes a further Demo order, cancellation, retry, recovery GET, credential use, exploratory venue request, or production activity.
 
 ## 3. Accepted public connectivity predecessor
 
@@ -405,16 +408,82 @@ The reconciliation execution succeeded as a bounded GET-only evidence collection
 
 Execution-time public-source provenance recorded OpenAPI `3.0.0`, API info version `3.27.0`, `323714` bytes, SHA-256 `9b7708b12d33b3cb38bfe7b840b3e38399ecdc88a20a5791a674c39ac0304de8`. This is execution-time observation provenance only, not a standing freshness guarantee. The reviewed local runner SHA-256 was `e1e1d0a0665eb443336ec920546b415508bb8df721240e26a1360e1cdeee4c9f`; neither the runner nor the raw OpenAPI file is canonical repository source.
 
+### Accepted fill-discovery binding fallback specification
+
+Accepted external controlling specification (ART-0046):
+
+`KALSHI_DEMO_POST_HALT_FILL_DISCOVERY_BINDING_FALLBACK_SPEC_01.md`
+
+- raw bytes: `62219`;
+- SHA-256: `361f7bbc172c1a2ecd7f2278f0371966288e4ef63a41a018820f0a7a1d893c0b`;
+- classification: `SPEC_ONLY`; external accepted controlling specification; public;
+- implementation or venue execution performed or authorized by this artifact: `false`.
+
+Accepted external handoff (ART-0047):
+
+`HANDOFF_KALSHI_DEMO_POST_HALT_FILL_DISCOVERY_BINDING_FALLBACK_SPEC_01.md`
+
+- raw bytes: `12699`;
+- SHA-256: `f81a99e0b3aec7a831065c6da622c6a029cb3d137e2cb4708b8b940445799924`.
+
+The accepted contract adds a bounded, partition-aware fill-discovery and exact-candidate-order binding fallback to the unresolved predecessor state. Its permanent negative-proof rule is that zero order evidence plus zero fill evidence is not proof that the prior CREATE never existed. The specification and handoff grant no venue, credential, retry, Create, or Cancel capability.
+
+### Accepted fill-discovery binding fallback implementation
+
+Accepted and installed implementation:
+
+`KALSHI_DEMO_POST_HALT_FILL_DISCOVERY_BINDING_FALLBACK_IMPLEMENTATION_01`
+
+- exact installed canonical commit: `7681676edb86e0f8fda52d5cebd46a5f52356401`;
+- parent: `f94eee051d7e845680053ec878c8df2bfcaec672`;
+- tree: `0da7384dc499288b49793cc5c5755666b1f90fd1`;
+- `src/arb/venues/kalshi/write_result_reconciliation.py`: `189881` bytes / SHA-256 `a30d4eb9a43f4e1e75022384621a61defaec581c5062ba7ed5610edee7c1db8a` / Git blob `101c1e7d5566b8a4b604ef60f92211e33888c2bb` (ART-0048);
+- `tests/test_kalshi_write_result_reconciliation.py`: `97543` bytes / SHA-256 `05e05c84d0c265d611b42905f98e94a2249da21aeab4c31a1dcb187af203f6df` / Git blob `8edc70a0b8fc8dcac4f50061fa338b27c3b8c45c` (ART-0049).
+
+Accepted validation evidence records syntax compilation `PASS`; focused reconciliation `187 passed, 46 subtests passed`; targeted regression `1129 passed, 211 subtests passed`; full repository regression `1315 passed, 328 subtests passed`; and `git diff --check` `PASS`. Implementation/testing activity performed no Kalshi venue request or credential use. The task-current implementation source was OpenAPI `3.0.0`, API info version `3.28.0`, `311201` bytes, SHA-256 `5a58b866d9034261cc0b2f9f5f31f44799cf72153270380d66fdb2523235fa78`, with no material contract drift identified. Installed fallback code is not venue authorization.
+
+### Accepted fill-discovery fallback execution
+
+Accepted external execution evidence (ART-0050) for:
+
+`KALSHI_DEMO_POST_HALT_FILL_DISCOVERY_BINDING_FALLBACK_EXECUTION_01`
+
+- evidence file: `KALSHI_DEMO_POST_HALT_FILL_DISCOVERY_BINDING_FALLBACK_EXECUTION_EVIDENCE_01.json`;
+- raw bytes: `10882`; SHA-256: `5e9cb2690854309f5684fa1b31cc4d837e301152a8466732382acb913dd73aa2`;
+- execution-time canonical repository commit: `7681676edb86e0f8fda52d5cebd46a5f52356401`; tree: `0da7384dc499288b49793cc5c5755666b1f90fd1`;
+- `authorization_consumed = true`; authorization-consumed marker exists; `send_boundary_entered_count = 2`; rerun permitted under that authorization: `false`;
+- frozen fill-discovery snapshot: `2026-08-13T01:05:12.769205Z`;
+- result `WRITE_UNRESOLVED_ZERO_MATCH`; halt code `null`; bound order id `null`;
+- candidate order id count `0`; validated binding count `0`; canonical fill count `0`;
+- canonical fill quantity, filled principal, and fee cost: `null` because no canonical fill was found;
+- `created_order_upper_bound = 1`; `active_order_upper_bound = 1`; `unknown_result = true`;
+- writer proof `KALSHI_DEMO_ONE_ORDER_LIFECYCLE_EXECUTION_01_WRITER_PROOF`: `HELD`; release eligible `false`.
+
+Exact accepted request evidence:
+
+1. Public `GET /trade-api/v2/historical/cutoff` — HTTP `200`; response `188` bytes / SHA-256 `f8b69dc9cb74a79674086111ea97fe6b7698caf2b0dc6a1326c715706422c77c`; retries `0`; redirects `0`.
+2. Authenticated `GET /trade-api/v2/portfolio/fills` — HTTP `200`; sanitized query ticker `KXFEDDECISION-26SEP-H0`, subaccount `0`, `min_ts = 1786411334`, `max_ts = 1786583114`, limit `1000`; records observed/retained `0`/`0`; cursor `TERMINAL_EMPTY`; response `24` bytes / SHA-256 `9905bdcb2d2a7c99230e0f6e73962bd250733a1094a76bd902bd925df96f4a24`; retries `0`; redirects `0`.
+
+The cutoff recorded `trades_created_ts = 2026-06-13T00:00:00Z`, earlier than the incident lower bound `2026-08-11T01:22:15.7100717Z`; therefore a historical-fill request was not required. No candidate exact-order GET occurred because the candidate set was empty. Totals were requests `2`, retries `0`, redirects `0`, production activity `0`, write activity `0`, funding activity `0`, and WebSocket activity `0`.
+
+Execution-time current-source provenance recorded retrieval at `2026-08-13T01:05:17.185988Z`, HTTP `200`, OpenAPI `3.0.0`, API info version `3.28.0`, `311201` bytes, and SHA-256 `5a58b866d9034261cc0b2f9f5f31f44799cf72153270380d66fdb2523235fa78`. The outer evidence contains a canonical-core payload of `6130` bytes / SHA-256 `0615565b5a3a816d0773b780a33c21054a02a98a36272732003d97338f1e9a1f`. That nested payload's fields named `canonical_main = f94eee051d7e845680053ec878c8df2bfcaec672` and `canonical_tree = fddbc085db0f71c1b1dfbba3a8fa3790d656a45e` are frozen implementation-base provenance only; they are not the execution-time canonical repository identity stated above.
+
+The final local-only corrected runner had SHA-256 `140f576d00364dfd29426d3bd9b6673ad68023ba39a74fdba13db543b464e309`; it is not a canonical repository artifact. Credential values were read locally by the runner solely for authenticated GET signing; credential values, signatures, and authentication headers were neither printed nor persisted. No credential value, private key, signature, fingerprint, authentication header, local runner, or credential source is canonicalized here.
+
+This execution does **not** resolve the prior ambiguous CREATE. Zero order evidence plus zero fill evidence does not prove that the CREATE never existed. The accepted state remains `WRITE_UNRESOLVED_ZERO_MATCH`, with upper bounds `1`/`1`, unknown result `true`, and writer proof `HELD` and release-ineligible. The incident-specific one-shot fallback authorization is consumed and cannot be rerun; this result authorizes no further GET, CREATE, CANCEL, credential use, or production activity.
+
 ## 8. Current authorization / capability state
 
 This state document grants no capability.
 
-Current technical/venue state after installation of the accepted reconciliation implementation:
+Current technical/venue state after the accepted lifecycle, reconciliation, and fill-discovery fallback executions:
 
 - active venue execution authorization: `NONE`;
 - active credential/signing authorization: `NONE`;
-- reconciliation implementation: `INSTALLED_ACCEPTED`;
-- authenticated Demo reconciliation Execution 01: `CONSUMED`; accepted result `WRITE_UNRESOLVED_ZERO_MATCH`;
+- one-order lifecycle Execution 01: `CONSUMED`; terminal write result unresolved;
+- exact reconciliation Execution 01: `CONSUMED`; accepted result `WRITE_UNRESOLVED_ZERO_MATCH`;
+- fill-discovery fallback implementation: `INSTALLED_ACCEPTED`;
+- fill-discovery fallback Execution 01: `CONSUMED`; accepted result `WRITE_UNRESOLVED_ZERO_MATCH`;
 - writer proof: `HELD`; release eligible `false`;
 - Demo public/authenticated reads: `PROHIBITED` unless a new exact task permits them;
 - Demo writes/orders/cancellations: `PROHIBITED`;
@@ -423,7 +492,7 @@ Current technical/venue state after installation of the accepted reconciliation 
 - funding/trading: `PROHIBITED`;
 - Polymarket activity in the current Kalshi workstream: `PROHIBITED` unless separately permitted.
 
-Installation of write-capable code is not execution authorization. No capability is inherited merely because code exists on canonical `main`.
+Installation of write-capable or fallback code is not execution authorization. No capability is inherited merely because code exists on canonical `main`.
 
 In particular:
 
@@ -436,11 +505,13 @@ In particular:
 
 ## 9. Next gated work
 
-The next technical design task is a separate SPEC-only fill-discovery binding fallback. Its planned existence does not mean that its specification is accepted, implemented, or executed, and does not authorize any venue request or other capability.
+The next gated technical design task is:
 
-Another one-order lifecycle Create or Cancel is **not authorized** while Execution-01's write result remains unresolved (Section 7). Before any future lifecycle execution, the task must separately establish the exact Revision-06 runtime predicates, including the required environment/capability envelope, credential-reference and signing boundaries, writer-exclusivity/prior-write proof, exact source/binding identities, bounded ticker/economics, request budgets/deadlines, and caller-supplied transport behavior.
+`PERSISTENT_LEDGER_AND_RESTART_RECOVERY_SPEC_ONLY`
 
-No Demo Create, Cancel, retry, second lifecycle, exploratory venue request, credential use, or further venue read/write may be inferred from the present accepted state.
+That task is design work only. It does not authorize venue requests, credential use, CREATE, CANCEL, replay, another recovery GET, market making, production activity, implementation, or execution. The incident-specific bounded order and fill recovery attempts are exhausted under their consumed authorizations, while the ambiguous CREATE remains unresolved and writer proof remains `HELD` and release-ineligible.
+
+A future persistent-ledger contract must not be described as retroactively resolving this incident unless a separately reviewed and accepted contract establishes a technically valid mechanism. No Demo Create, Cancel, retry, second lifecycle, exploratory venue request, credential use, or further venue read/write may be inferred from the present accepted state.
 
 ## 10. Local execution environment
 
