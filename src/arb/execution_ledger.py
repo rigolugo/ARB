@@ -45,6 +45,7 @@ _HEX64_RE = re.compile(r"^[0-9a-f]{64}$")
 _EVENT_ID_RE = re.compile(r"^evt_[0-9a-f]{32}$")
 _LEGACY_EVENT_ID_RE = re.compile(r"^legacy_[0-9a-f]{64}$")
 _WRITER_SESSION_ID_RE = re.compile(r"^ws_[0-9a-f]{32}$")
+_RESTRICTED_SESSION_ID_RE = re.compile(r"^rs_[0-9a-f]{32}$")
 _TIMESTAMP_RE = re.compile(
     r"^(?P<date>\d{4}-\d{2}-\d{2})T(?P<time>\d{2}:\d{2}:\d{2})"
     r"\.(?P<micro>\d{6})Z$"
@@ -106,6 +107,17 @@ class FailureCode(enum.StrEnum):
     LEGACY_IMPORT_ONLY_ACQUISITION_REJECTED = "LEGACY_IMPORT_ONLY_ACQUISITION_REJECTED"
     SECRET_FIELD_PROHIBITED = "SECRET_FIELD_PROHIBITED"
     SECRET_PATTERN_PROHIBITED = "SECRET_PATTERN_PROHIBITED"
+    EVENT_SCHEMA_CONTRACT_VIOLATION = "EVENT_SCHEMA_CONTRACT_VIOLATION"
+    EVENT_REQUIRED_REFERENCE_INVALID = "EVENT_REQUIRED_REFERENCE_INVALID"
+    RESTRICTED_SESSION_EVENT_NOT_PERMITTED = "RESTRICTED_SESSION_EVENT_NOT_PERMITTED"
+    RESTRICTED_SESSION_STATE_CONFLICT = "RESTRICTED_SESSION_STATE_CONFLICT"
+    RISK_STATE_TRANSITION_INVALID = "RISK_STATE_TRANSITION_INVALID"
+    EMERGENCY_ACTION_DUPLICATE_CONFLICT = "EMERGENCY_ACTION_DUPLICATE_CONFLICT"
+    CANCEL_ATTEMPT_PREDECESSOR_INVALID = "CANCEL_ATTEMPT_PREDECESSOR_INVALID"
+    CANCEL_RESULT_EVIDENCE_CONFLICT = "CANCEL_RESULT_EVIDENCE_CONFLICT"
+    CANCEL_RESULT_REVISION_CONFLICT = "CANCEL_RESULT_REVISION_CONFLICT"
+    RELEASE_PREDICATE_FAILED = "RELEASE_PREDICATE_FAILED"
+    RELEASE_PREDICATE_CHANGED = "RELEASE_PREDICATE_CHANGED"
 
 
 class RestartClassification(enum.StrEnum):
@@ -124,6 +136,8 @@ class RestartClassification(enum.StrEnum):
 class AcquisitionMode(enum.StrEnum):
     NORMAL_WRITER = "NORMAL_WRITER"
     LEGACY_IMPORT_ONLY = "LEGACY_IMPORT_ONLY"
+    EMERGENCY_CONTROL_ONLY = "EMERGENCY_CONTROL_ONLY"
+    RELEASE_ONLY = "RELEASE_ONLY"
 
 
 class EventType(enum.StrEnum):
@@ -146,6 +160,15 @@ class EventType(enum.StrEnum):
     WRITER_PROOF_RELEASED = "WRITER_PROOF_RELEASED"
     WRITER_SESSION_ENDED = "WRITER_SESSION_ENDED"
     LEGACY_INCIDENT_IMPORTED = "LEGACY_INCIDENT_IMPORTED"
+    RISK_CONTROL_STATE_CHANGED = "RISK_CONTROL_STATE_CHANGED"
+    EMERGENCY_ACTION_OPENED = "EMERGENCY_ACTION_OPENED"
+    CANCEL_INTENT_RECORDED = "CANCEL_INTENT_RECORDED"
+    CANCEL_SEND_BOUNDARY_ENTERED = "CANCEL_SEND_BOUNDARY_ENTERED"
+    CANCEL_RESULT_RECORDED = "CANCEL_RESULT_RECORDED"
+    RISK_RELEASE_RECORDED = "RISK_RELEASE_RECORDED"
+    RESTRICTED_SESSION_STARTED = "RESTRICTED_SESSION_STARTED"
+    RESTRICTED_SESSION_ENDED = "RESTRICTED_SESSION_ENDED"
+    RESTRICTED_SESSION_ABANDONED = "RESTRICTED_SESSION_ABANDONED"
 
 
 class AuthorityLedgerRelation(enum.StrEnum):
@@ -156,6 +179,70 @@ class AuthorityLedgerRelation(enum.StrEnum):
 class AppendStatus(enum.StrEnum):
     APPENDED_AND_ANCHORED = "APPENDED_AND_ANCHORED"
     IDEMPOTENT_DUPLICATE = "IDEMPOTENT_DUPLICATE"
+
+
+RISK_CONTROL_STATES = frozenset({
+    "BOOT_HOLD", "HALTED", "EMERGENCY_CANCELING", "RECONCILING",
+    "QUIESCENT_HELD", "SAFE_HELD", "WRITER_ELIGIBLE",
+})
+RISK_CONTROL_TRANSITIONS = MappingProxyType({
+    ("BOOT_HOLD", "HALTED"): "REPLAY_OR_CURRENT_HARD_VIOLATION",
+    ("BOOT_HOLD", "QUIESCENT_HELD"): "REPLAY_UNCERTAINTY_NO_CANCEL_TARGET",
+    ("BOOT_HOLD", "SAFE_HELD"): "REPLAY_ALL_SAFETY_PREDICATES_PASS",
+    ("HALTED", "EMERGENCY_CANCELING"): "EXACT_CANCEL_TARGET_SET_OPENED",
+    ("HALTED", "RECONCILING"): "AUTHORITATIVE_TRUTH_REQUIRED",
+    ("HALTED", "QUIESCENT_HELD"): "NO_CANCEL_TARGET_UNCERTAINTY_REMAINS",
+    ("EMERGENCY_CANCELING", "RECONCILING"): "CANCEL_WAVE_ENDED_OR_AMBIGUOUS",
+    ("RECONCILING", "EMERGENCY_CANCELING"): "RECONCILIATION_REVEALED_EXACT_ACTIVE_TARGET",
+    ("RECONCILING", "QUIESCENT_HELD"): "NO_CANCEL_TARGET_RELEASE_PREDICATE_FALSE_OR_UNKNOWN",
+    ("RECONCILING", "SAFE_HELD"): "ALL_RELEASE_PREDICATES_EXCEPT_EXPLICIT_RELEASE_PASS",
+    ("QUIESCENT_HELD", "RECONCILING"): "NEW_RECONCILIATION_REQUIRED",
+    ("QUIESCENT_HELD", "SAFE_HELD"): "UNCERTAINTY_RESOLVED_ALL_RELEASE_PREDICATES_PASS",
+    ("SAFE_HELD", "WRITER_ELIGIBLE"): "DURABLE_RELEASE_COMPLETED",
+    ("WRITER_ELIGIBLE", "HALTED"): "HARD_SAFETY_VIOLATION",
+})
+
+_NEW_EVENT_DOMAINS = MappingProxyType({
+    EventType.RISK_CONTROL_STATE_CHANGED: b"ARB_RISK_CONTROL_STATE_CHANGED_V1\x00",
+    EventType.EMERGENCY_ACTION_OPENED: b"ARB_EMERGENCY_ACTION_OPENED_V1\x00",
+    EventType.CANCEL_INTENT_RECORDED: b"ARB_CANCEL_INTENT_RECORDED_V1\x00",
+    EventType.CANCEL_SEND_BOUNDARY_ENTERED: b"ARB_CANCEL_SEND_BOUNDARY_ENTERED_V1\x00",
+    EventType.CANCEL_RESULT_RECORDED: b"ARB_CANCEL_RESULT_RECORDED_V1\x00",
+    EventType.RISK_RELEASE_RECORDED: b"ARB_RISK_RELEASE_RECORDED_V1\x00",
+    EventType.RESTRICTED_SESSION_STARTED: b"ARB_RESTRICTED_SESSION_STARTED_V1\x00",
+    EventType.RESTRICTED_SESSION_ENDED: b"ARB_RESTRICTED_SESSION_ENDED_V1\x00",
+    EventType.RESTRICTED_SESSION_ABANDONED: b"ARB_RESTRICTED_SESSION_ABANDONED_V1\x00",
+})
+
+
+def _new_event_logical_identity(event_type: EventType, payload: Mapping[str, object]) -> Mapping[str, object]:
+    if event_type is EventType.RISK_CONTROL_STATE_CHANGED:
+        return {"risk_state_epoch_after": payload.get("risk_state_epoch_after")}
+    if event_type is EventType.EMERGENCY_ACTION_OPENED:
+        return {"emergency_action_id": payload.get("emergency_action_id")}
+    if event_type is EventType.CANCEL_INTENT_RECORDED:
+        return {"cancel_attempt_id": payload.get("cancel_attempt_id"), "stage": "INTENT"}
+    if event_type is EventType.CANCEL_SEND_BOUNDARY_ENTERED:
+        return {"cancel_attempt_id": payload.get("cancel_attempt_id"), "stage": "SEND_BOUNDARY"}
+    if event_type is EventType.CANCEL_RESULT_RECORDED:
+        return {"cancel_attempt_id": payload.get("cancel_attempt_id"), "result_revision": payload.get("result_revision")}
+    if event_type is EventType.RISK_RELEASE_RECORDED:
+        return {"release_id": payload.get("release_id")}
+    if event_type is EventType.RESTRICTED_SESSION_STARTED:
+        return {"restricted_session_id": payload.get("restricted_session_id"), "stage": "START"}
+    if event_type is EventType.RESTRICTED_SESSION_ENDED:
+        return {"restricted_session_id": payload.get("restricted_session_id"), "stage": "END"}
+    if event_type is EventType.RESTRICTED_SESSION_ABANDONED:
+        return {"abandoned_restricted_session_id": payload.get("abandoned_restricted_session_id"), "stage": "ABANDON"}
+    raise LedgerError(FailureCode.LEDGER_SCHEMA_UNSUPPORTED_EVENT_TYPE)
+
+
+def deterministic_event_id(event_type: EventType, payload: Mapping[str, object]) -> str:
+    """Return the Spec-03 deterministic ID for one new logical event."""
+    if event_type not in _NEW_EVENT_DOMAINS:
+        raise LedgerError(FailureCode.LEDGER_SCHEMA_UNSUPPORTED_EVENT_TYPE)
+    identity = _new_event_logical_identity(event_type, payload)
+    return "evt_" + sha256_hex(_NEW_EVENT_DOMAINS[event_type] + canonical_json_bytes(identity))[:32]
 
 
 @dataclass(frozen=True, slots=True)
@@ -599,6 +686,18 @@ class SafetyProjection:
     protected_unresolved_legacy_write_count: int
     restart_classification: RestartClassification
     last_writer_session_id: str | None
+    restricted_sessions: tuple[str, ...]
+    restricted_session_modes: Mapping[str, AcquisitionMode]
+    active_restricted_session_id: str | None
+    abnormal_restricted_session_ids: tuple[str, ...]
+    risk_control_state: str
+    risk_state_epoch: int
+    active_risk_config_sha256: str | None
+    emergency_actions_by_id: Mapping[str, Mapping[str, object]]
+    cancel_attempts_by_id: Mapping[str, Mapping[str, object]]
+    cancel_send_may_have_been_sent_by_attempt: Mapping[str, bool]
+    cancel_result_revision_by_attempt: Mapping[str, int]
+    release_records_by_id: Mapping[str, Mapping[str, object]]
 
 
 def _sqlite_uri(path: Path, mode: str) -> str:
@@ -955,7 +1054,13 @@ def _construct_event(
     payload_bytes = canonical_json_bytes(dict(event_input.payload))
     payload_text = payload_bytes.decode("utf-8")
     payload_hash = sha256_hex(payload_bytes)
-    event_id = event_input.event_id or f"evt_{uuid_factory().hex}"
+    if event_input.event_type in _NEW_EVENT_DOMAINS:
+        expected_new_event_id = deterministic_event_id(event_input.event_type, event_input.payload)
+        event_id = event_input.event_id or expected_new_event_id
+        if event_id != expected_new_event_id:
+            raise LedgerError(FailureCode.EVENT_ID_CONTENT_CONFLICT)
+    else:
+        event_id = event_input.event_id or f"evt_{uuid_factory().hex}"
     if event_input.event_type is EventType.LEGACY_INCIDENT_IMPORTED:
         expected = f"legacy_{payload_hash}"
         if event_id != expected:
@@ -967,7 +1072,11 @@ def _construct_event(
     for optional in (event_input.writer_session_id, event_input.incident_id, event_input.execution_attempt_id):
         if optional is not None:
             _require_canonical_text(optional)
-    if event_input.writer_session_id is not None and _WRITER_SESSION_ID_RE.fullmatch(event_input.writer_session_id) is None:
+    if (
+        event_input.writer_session_id is not None
+        and _WRITER_SESSION_ID_RE.fullmatch(event_input.writer_session_id) is None
+        and _RESTRICTED_SESSION_ID_RE.fullmatch(event_input.writer_session_id) is None
+    ):
         raise LedgerError(FailureCode.WRITER_SESSION_REFERENCE_INVALID)
     placeholder = LedgerEvent(sequence, event_id, meta.ledger_instance_id, event_input.event_type, 1, event_input.writer_session_id, event_input.incident_id, event_input.execution_attempt_id, recorded, MappingProxyType(dict(parse_canonical_json(payload_text))), payload_text, payload_hash, previous_hash, "")
     event_hash = sha256_hex(EVENT_HASH_DOMAIN + _canonical_stored_json_bytes(_event_core(placeholder)))
@@ -1018,7 +1127,10 @@ def load_and_validate_events(connection: sqlite3.Connection, meta: LedgerMeta) -
             raise LedgerError(FailureCode.LEDGER_HASH_CHAIN_FAILURE)
         if event.event_id in seen_ids:
             raise LedgerError(FailureCode.EVENT_ID_CONTENT_CONFLICT)
-        if event.event_type is EventType.LEGACY_INCIDENT_IMPORTED:
+        if event.event_type in _NEW_EVENT_DOMAINS:
+            if event.event_id != deterministic_event_id(event.event_type, event.payload):
+                raise LedgerError(FailureCode.EVENT_ID_CONTENT_CONFLICT)
+        elif event.event_type is EventType.LEGACY_INCIDENT_IMPORTED:
             if event.event_id != f"legacy_{event.payload_sha256}":
                 raise LedgerError(FailureCode.EVENT_ID_CONTENT_CONFLICT)
         elif _EVENT_ID_RE.fullmatch(event.event_id) is None:
@@ -1067,9 +1179,512 @@ def _require_exact_payload_keys(event: LedgerEvent, required: set[str]) -> None:
         raise LedgerError(FailureCode.EVENT_REQUIRED_PARENT_MISSING)
 
 
+_RELEASE_PREDICATE_KEYS = frozenset({
+    "ledger_integrity_pass", "authority_anchor_consistency_pass", "binding_identity_pass",
+    "supported_event_set_pass", "trusted_replay_complete", "no_unresolved_emergency_cancel",
+    "known_active_orders_reconciled", "fills_reconciled", "zero_identity_conflicts",
+    "conservative_exposure_finite_and_within_limits", "risk_config_complete_valid",
+    "market_data_fresh", "reconciliation_fresh", "venue_defense_pass",
+    "protected_unresolved_legacy_write_count_zero", "no_controlling_unresolved_write",
+    "writer_proof_release_eligible", "state_safe_held", "no_outstanding_permits",
+})
+
+_NEW_EVENT_PAYLOAD_KEYS = MappingProxyType({
+    EventType.RISK_CONTROL_STATE_CHANGED: frozenset({
+        "previous_state", "new_state", "cause", "risk_state_epoch_before",
+        "risk_state_epoch_after", "risk_config_sha256", "related_emergency_action_id",
+        "related_release_id", "predecessor_state_event_id",
+        "observed_authority_trusted_sequence", "observed_authority_trusted_hash",
+        "observed_ledger_terminal_sequence", "observed_ledger_terminal_hash",
+    }),
+    EventType.EMERGENCY_ACTION_OPENED: frozenset({
+        "emergency_action_id", "conflict_domain_ref", "cause", "starting_control_state",
+        "target_set_kind", "target_order_ids", "target_set_sha256", "risk_config_sha256",
+        "risk_state_epoch", "authority_trusted_sequence", "authority_trusted_hash",
+        "ledger_terminal_sequence", "ledger_terminal_hash", "opened_at_utc",
+        "deduplication_key_sha256",
+    }),
+    EventType.CANCEL_INTENT_RECORDED: frozenset({
+        "emergency_action_id", "cancel_attempt_id", "target_order_id", "conflict_domain_ref",
+        "subaccount", "exchange_index", "source_binding_id", "risk_state_epoch",
+        "risk_config_sha256", "authoritative_order_observation_event_id",
+        "authoritative_order_observation_event_hash", "prior_order_status",
+        "prior_remaining_count_fp", "attempt_ordinal", "request_id", "intent_recorded_at_utc",
+    }),
+    EventType.CANCEL_SEND_BOUNDARY_ENTERED: frozenset({
+        "emergency_action_id", "cancel_attempt_id", "target_order_id", "request_id",
+        "canonical_request_sha256", "operation_name", "method", "path_without_query",
+        "attempt_ordinal", "deadline_id", "deadline_budget_ms", "deadline_process_instance_id",
+        "deadline_started_monotonic_ns", "deadline_absolute_monotonic_ns",
+        "predecessor_intent_event_id", "predecessor_intent_event_hash",
+        "predecessor_authority_trusted_sequence", "predecessor_authority_trusted_hash",
+        "predecessor_ledger_terminal_sequence", "predecessor_ledger_terminal_hash",
+        "write_ambiguity_rule", "boundary_recorded_at_utc",
+    }),
+    EventType.CANCEL_RESULT_RECORDED: frozenset({
+        "emergency_action_id", "cancel_attempt_id", "target_order_id", "result_revision",
+        "prior_result_event_id", "result_class", "response_present", "response_http_status",
+        "response_media_type_class", "response_body_sha256", "response_byte_length",
+        "response_order_id", "response_reduced_by_fp", "reconciliation_basis_event_ids",
+        "fill_basis_event_ids", "order_state_basis_event_ids", "canceled_quantity_fp",
+        "filled_quantity_fp", "remaining_quantity_fp", "write_closure_class", "unresolved",
+        "result_at_utc",
+    }),
+    EventType.RISK_RELEASE_RECORDED: frozenset({
+        "release_id", "risk_config_sha256", "risk_state_epoch", "authority_trusted_sequence",
+        "authority_trusted_hash", "ledger_terminal_sequence", "ledger_terminal_hash",
+        "reconciliation_snapshot_sha256", "risk_snapshot_sha256", "predicate_vector",
+        "predicate_vector_sha256", "writer_proof_id", "safe_held_state_event_id",
+        "safe_held_state_event_hash", "release_recorded_at_utc",
+    }),
+    EventType.RESTRICTED_SESSION_STARTED: frozenset({
+        "restricted_session_id", "acquisition_mode", "session_schema_revision", "lock_model",
+        "prior_restricted_session_state", "opening_trusted_sequence", "opening_trusted_event_hash",
+        "opening_ledger_sequence", "opening_ledger_event_hash",
+    }),
+    EventType.RESTRICTED_SESSION_ENDED: frozenset({
+        "restricted_session_id", "acquisition_mode", "pre_end_trusted_sequence",
+        "pre_end_trusted_event_hash", "pre_end_ledger_sequence", "pre_end_ledger_event_hash",
+        "end_reason",
+    }),
+    EventType.RESTRICTED_SESSION_ABANDONED: frozenset({
+        "abandoned_restricted_session_id", "acquisition_mode", "reason",
+        "observed_trusted_sequence", "observed_trusted_event_hash",
+        "observed_ledger_sequence", "observed_ledger_event_hash",
+    }),
+})
+
+_ID_PATTERNS = MappingProxyType({
+    "emergency_action_id": re.compile(r"^ea_[0-9a-f]{32}$"),
+    "cancel_attempt_id": re.compile(r"^ca_[0-9a-f]{32}$"),
+    "request_id": re.compile(r"^req_[0-9a-f]{32}$"),
+    "deadline_id": re.compile(r"^dl_[0-9a-f]{32}$"),
+    "release_id": re.compile(r"^rel_[0-9a-f]{32}$"),
+    "process_instance_id": re.compile(r"^proc_[0-9a-f]{32}$"),
+})
+_QTY2_RE = re.compile(r"^(?:0|[1-9][0-9]*)\.[0-9]{2}$")
+
+
+def _schema_error(code: FailureCode = FailureCode.EVENT_SCHEMA_CONTRACT_VIOLATION) -> None:
+    raise LedgerError(code)
+
+
+def _is_sha256(value: object) -> bool:
+    return type(value) is str and _HEX64_RE.fullmatch(value) is not None
+
+
+def _is_event_id(value: object) -> bool:
+    return type(value) is str and _EVENT_ID_RE.fullmatch(value) is not None
+
+
+def _is_named_id(name: str, value: object) -> bool:
+    return type(value) is str and _ID_PATTERNS[name].fullmatch(value) is not None
+
+
+def _is_qty2(value: object, *, positive: bool = False) -> bool:
+    return (
+        type(value) is str
+        and _QTY2_RE.fullmatch(value) is not None
+        and (not positive or Decimal(value) > 0)
+    )
+
+
+def _require_tail(payload: Mapping[str, object], seq_key: str, hash_key: str, previous: LedgerEvent) -> None:
+    if type(payload.get(seq_key)) is not int or payload.get(seq_key) != previous.sequence or payload.get(hash_key) != previous.event_hash:
+        _schema_error(FailureCode.EVENT_REQUIRED_REFERENCE_INVALID)
+
+
+def _require_sorted_unique_ids(value: object, *, event_ids: bool = False) -> list[str]:
+    if type(value) is not list or any(type(item) is not str for item in value):
+        _schema_error()
+    items = list(value)
+    if items != sorted(set(items)):
+        _schema_error()
+    if event_ids and any(_EVENT_ID_RE.fullmatch(item) is None for item in items):
+        _schema_error()
+    return items
+
+
+def _validate_spec03_event_sequence(events: Sequence[LedgerEvent], session_modes: Mapping[str, AcquisitionMode]) -> None:
+    """Validate the closed Spec-03 vocabulary without altering historical schemas."""
+    by_id: dict[str, LedgerEvent] = {}
+    active_session: str | None = None
+    active_mode: AcquisitionMode | None = None
+    risk_state = "BOOT_HOLD"
+    risk_epoch = 0
+    last_state_event: LedgerEvent | None = None
+    actions: dict[str, LedgerEvent] = {}
+    action_dedup: dict[str, str] = {}
+    intents: dict[str, LedgerEvent] = {}
+    intent_ordinals: dict[tuple[str, str], int] = {}
+    attempt_by_action_target: dict[tuple[str, str], str] = {}
+    boundaries: set[str] = set()
+    results: dict[str, LedgerEvent] = {}
+    releases: dict[str, LedgerEvent] = {}
+    proof_states: dict[str, str] = {}
+    proof_eligible: dict[str, bool] = {}
+    proof_incidents: dict[str, str | None] = {}
+    emergency_old = {
+        EventType.ORDER_OBSERVED, EventType.FILL_OBSERVED, EventType.RECONCILIATION_RECORDED,
+        EventType.EXECUTION_HALTED, EventType.WRITER_PROOF_HELD,
+    }
+    for index, event in enumerate(events):
+        previous = events[index - 1] if index else event
+        payload = event.payload
+        if event.event_type is EventType.WRITER_SESSION_STARTED:
+            active_session = event.writer_session_id
+            active_mode = AcquisitionMode.NORMAL_WRITER
+        elif event.event_type in {EventType.WRITER_SESSION_ENDED, EventType.WRITER_SESSION_ABANDONED}:
+            active_session = None
+            active_mode = None
+
+        if event.event_type is EventType.RESTRICTED_SESSION_STARTED:
+            if set(payload) != _NEW_EVENT_PAYLOAD_KEYS[event.event_type]:
+                _schema_error()
+            sid = payload["restricted_session_id"]
+            try:
+                mode = AcquisitionMode(payload["acquisition_mode"])
+            except (TypeError, ValueError):
+                _schema_error(FailureCode.RESTRICTED_SESSION_STATE_CONFLICT)
+            if (
+                event.incident_id is not None or event.execution_attempt_id is not None
+                or event.writer_session_id != sid or type(sid) is not str
+                or _RESTRICTED_SESSION_ID_RE.fullmatch(sid) is None
+                or mode not in {AcquisitionMode.EMERGENCY_CONTROL_ONLY, AcquisitionMode.RELEASE_ONLY}
+                or active_session is not None or type(payload["session_schema_revision"]) is not int
+                or payload["session_schema_revision"] != 1 or payload["lock_model"] != LOCK_MODEL
+                or payload["prior_restricted_session_state"] not in {"NONE", "CLEAN", "ABNORMAL"}
+            ):
+                _schema_error(FailureCode.RESTRICTED_SESSION_STATE_CONFLICT)
+            _require_tail(payload, "opening_trusted_sequence", "opening_trusted_event_hash", previous)
+            _require_tail(payload, "opening_ledger_sequence", "opening_ledger_event_hash", previous)
+            active_session, active_mode = sid, mode
+        elif event.event_type is EventType.RESTRICTED_SESSION_ENDED:
+            if set(payload) != _NEW_EVENT_PAYLOAD_KEYS[event.event_type]:
+                _schema_error()
+            sid = payload["restricted_session_id"]
+            if (
+                event.writer_session_id != sid or event.incident_id is not None or event.execution_attempt_id is not None
+                or sid != active_session or payload["acquisition_mode"] != (active_mode.value if active_mode else None)
+                or payload["end_reason"] != "CLEAN_RELEASE_OF_EXCLUSIVE_LOCKS"
+            ):
+                _schema_error(FailureCode.RESTRICTED_SESSION_STATE_CONFLICT)
+            _require_tail(payload, "pre_end_trusted_sequence", "pre_end_trusted_event_hash", previous)
+            _require_tail(payload, "pre_end_ledger_sequence", "pre_end_ledger_event_hash", previous)
+            active_session = None
+            active_mode = None
+        elif event.event_type is EventType.RESTRICTED_SESSION_ABANDONED:
+            if set(payload) != _NEW_EVENT_PAYLOAD_KEYS[event.event_type]:
+                _schema_error()
+            sid = payload["abandoned_restricted_session_id"]
+            if (
+                event.writer_session_id is not None or event.incident_id is not None or event.execution_attempt_id is not None
+                or sid != active_session or payload["acquisition_mode"] != (active_mode.value if active_mode else None)
+                or payload["reason"] != "PREVIOUS_RESTRICTED_SESSION_NO_LONGER_HOLDS_REQUIRED_AUTHORITY_AND_LEDGER_LOCKS"
+            ):
+                _schema_error(FailureCode.RESTRICTED_SESSION_STATE_CONFLICT)
+            _require_tail(payload, "observed_trusted_sequence", "observed_trusted_event_hash", previous)
+            _require_tail(payload, "observed_ledger_sequence", "observed_ledger_event_hash", previous)
+            active_session = None
+            active_mode = None
+        elif event.writer_session_id is not None and _RESTRICTED_SESSION_ID_RE.fullmatch(event.writer_session_id):
+            if event.writer_session_id != active_session:
+                _schema_error(FailureCode.RESTRICTED_SESSION_STATE_CONFLICT)
+            if active_mode is AcquisitionMode.EMERGENCY_CONTROL_ONLY:
+                admitted = emergency_old | {
+                    EventType.RISK_CONTROL_STATE_CHANGED, EventType.EMERGENCY_ACTION_OPENED,
+                    EventType.CANCEL_INTENT_RECORDED, EventType.CANCEL_SEND_BOUNDARY_ENTERED,
+                    EventType.CANCEL_RESULT_RECORDED,
+                }
+            else:
+                admitted = {EventType.RISK_RELEASE_RECORDED, EventType.WRITER_PROOF_RELEASED, EventType.RISK_CONTROL_STATE_CHANGED}
+            if event.event_type not in admitted:
+                _schema_error(FailureCode.RESTRICTED_SESSION_EVENT_NOT_PERMITTED)
+
+        if event.event_type in _NEW_EVENT_PAYLOAD_KEYS and event.event_type not in {
+            EventType.RESTRICTED_SESSION_STARTED, EventType.RESTRICTED_SESSION_ENDED,
+            EventType.RESTRICTED_SESSION_ABANDONED,
+        }:
+            if set(payload) != _NEW_EVENT_PAYLOAD_KEYS[event.event_type] or event.incident_id is not None or event.execution_attempt_id is not None:
+                _schema_error()
+
+        if event.event_type is EventType.WRITER_PROOF_HELD:
+            proof_id = str(payload.get("writer_proof_id"))
+            proof_states[proof_id] = "HELD"
+            proof_eligible[proof_id] = False
+            proof_incidents[proof_id] = event.incident_id
+        elif event.event_type is EventType.RECONCILIATION_RECORDED:
+            if payload.get("writer_proof_release_eligible") is True:
+                for proof_id, incident_id in proof_incidents.items():
+                    if incident_id == event.incident_id and proof_states.get(proof_id) == "HELD":
+                        proof_eligible[proof_id] = True
+        elif event.event_type is EventType.WRITER_PROOF_RELEASED:
+            proof_id = payload.get("writer_proof_id")
+            release_basis = payload.get("release_basis_event_ids")
+            prior_release = previous if index else None
+            if (
+                active_mode is not AcquisitionMode.RELEASE_ONLY
+                or risk_state != "SAFE_HELD"
+                or type(proof_id) is not str
+                or proof_states.get(proof_id) != "HELD"
+                or proof_eligible.get(proof_id) is not True
+                or prior_release is None
+                or prior_release.event_type is not EventType.RISK_RELEASE_RECORDED
+                or prior_release.payload.get("writer_proof_id") != proof_id
+                or type(release_basis) is not list
+                or prior_release.event_id not in release_basis
+            ):
+                _schema_error(FailureCode.RELEASE_PREDICATE_CHANGED)
+            proof_states[proof_id] = "RELEASED"
+
+        if event.event_type is EventType.RISK_CONTROL_STATE_CHANGED:
+            before, after, cause = payload["previous_state"], payload["new_state"], payload["cause"]
+            if (
+                before not in RISK_CONTROL_STATES or after not in RISK_CONTROL_STATES
+                or RISK_CONTROL_TRANSITIONS.get((before, after)) != cause
+                or before != risk_state or type(payload["risk_state_epoch_before"]) is not int
+                or type(payload["risk_state_epoch_after"]) is not int
+                or payload["risk_state_epoch_before"] != risk_epoch
+                or payload["risk_state_epoch_after"] != risk_epoch + 1
+            ):
+                _schema_error(FailureCode.RISK_STATE_TRANSITION_INVALID)
+            if payload["risk_config_sha256"] is not None and not _is_sha256(payload["risk_config_sha256"]):
+                _schema_error()
+            if after in {"SAFE_HELD", "WRITER_ELIGIBLE"} and not _is_sha256(payload["risk_config_sha256"]):
+                _schema_error(FailureCode.RISK_STATE_TRANSITION_INVALID)
+            expected_predecessor = None if last_state_event is None else last_state_event.event_id
+            if payload["predecessor_state_event_id"] != expected_predecessor:
+                _schema_error(FailureCode.EVENT_REQUIRED_REFERENCE_INVALID)
+            _require_tail(payload, "observed_authority_trusted_sequence", "observed_authority_trusted_hash", previous)
+            _require_tail(payload, "observed_ledger_terminal_sequence", "observed_ledger_terminal_hash", previous)
+            if active_mode is AcquisitionMode.NORMAL_WRITER and (before, after, cause) != ("WRITER_ELIGIBLE", "HALTED", "HARD_SAFETY_VIOLATION"):
+                _schema_error(FailureCode.RESTRICTED_SESSION_EVENT_NOT_PERMITTED)
+            if active_mode is AcquisitionMode.RELEASE_ONLY and (before, after, cause) != ("SAFE_HELD", "WRITER_ELIGIBLE", "DURABLE_RELEASE_COMPLETED"):
+                _schema_error(FailureCode.RESTRICTED_SESSION_EVENT_NOT_PERMITTED)
+            if active_mode is AcquisitionMode.EMERGENCY_CONTROL_ONLY and (after == "WRITER_ELIGIBLE" or before == "WRITER_ELIGIBLE"):
+                _schema_error(FailureCode.RESTRICTED_SESSION_EVENT_NOT_PERMITTED)
+            action_id = payload["related_emergency_action_id"]
+            if (before, after) in {
+                ("HALTED", "EMERGENCY_CANCELING"),
+                ("RECONCILING", "EMERGENCY_CANCELING"),
+                ("EMERGENCY_CANCELING", "RECONCILING"),
+            }:
+                if not _is_named_id("emergency_action_id", action_id) or action_id not in actions:
+                    _schema_error(FailureCode.EVENT_REQUIRED_REFERENCE_INVALID)
+            elif action_id is not None:
+                _schema_error(FailureCode.EVENT_REQUIRED_REFERENCE_INVALID)
+            if after == "WRITER_ELIGIBLE":
+                release_id = payload["related_release_id"]
+                if not _is_named_id("release_id", release_id) or release_id not in releases:
+                    _schema_error(FailureCode.EVENT_REQUIRED_REFERENCE_INVALID)
+                released_proof = releases[release_id].payload.get("writer_proof_id")
+                if type(released_proof) is not str or proof_states.get(released_proof) != "RELEASED":
+                    _schema_error(FailureCode.RELEASE_PREDICATE_CHANGED)
+            elif payload["related_release_id"] is not None:
+                _schema_error()
+            risk_state, risk_epoch, last_state_event = after, risk_epoch + 1, event
+        elif event.event_type is EventType.EMERGENCY_ACTION_OPENED:
+            action_id = payload["emergency_action_id"]
+            targets = _require_sorted_unique_ids(payload["target_order_ids"])
+            authoritative_known_orders = set()
+            for prior in by_id.values():
+                if prior.event_type is not EventType.ORDER_OBSERVED:
+                    continue
+                canonical_order = prior.payload["canonical_venue_payload"]
+                if (
+                    type(canonical_order) is dict
+                    and canonical_order.get("status") == "resting"
+                    and _is_qty2(canonical_order.get("remaining_count_fp"), positive=True)
+                ):
+                    authoritative_known_orders.add(str(prior.payload["venue_order_id"]))
+            if (
+                active_mode is not AcquisitionMode.EMERGENCY_CONTROL_ONLY or risk_state != "HALTED"
+                or not _is_named_id("emergency_action_id", action_id)
+                or type(payload["conflict_domain_ref"]) is not str or not payload["conflict_domain_ref"]
+                or payload["starting_control_state"] != "HALTED"
+                or payload["cause"] not in {"HARD_RISK_HALT", "EXPLICIT_EMERGENCY_CONTROL", "RESTART_RECOVERY_OF_PERSISTED_HALT"}
+                or payload["target_set_kind"] not in {"EXACT_ORDER_ID_SET", "EMPTY"}
+                or (payload["target_set_kind"] == "EMPTY") != (targets == [])
+                or payload["target_set_sha256"] != sha256_hex(canonical_json_bytes(targets))
+                or any(target not in authoritative_known_orders for target in targets)
+                or (payload["risk_config_sha256"] is not None and not _is_sha256(payload["risk_config_sha256"]))
+                or (last_state_event is not None and payload["risk_config_sha256"] != last_state_event.payload["risk_config_sha256"])
+                or type(payload["risk_state_epoch"]) is not int or payload["risk_state_epoch"] != risk_epoch
+                or payload["opened_at_utc"] != event.recorded_at_utc
+            ):
+                _schema_error()
+            _require_tail(payload, "authority_trusted_sequence", "authority_trusted_hash", previous)
+            _require_tail(payload, "ledger_terminal_sequence", "ledger_terminal_hash", previous)
+            dedup_obj = {key: payload[key] for key in ("conflict_domain_ref", "risk_state_epoch", "cause", "target_set_sha256")}
+            if payload["deduplication_key_sha256"] != sha256_hex(canonical_json_bytes(dedup_obj)):
+                _schema_error()
+            dedup = payload["deduplication_key_sha256"]
+            if dedup in action_dedup and action_dedup[dedup] != action_id:
+                _schema_error(FailureCode.EMERGENCY_ACTION_DUPLICATE_CONFLICT)
+            action_dedup[dedup], actions[action_id] = action_id, event
+        elif event.event_type is EventType.CANCEL_INTENT_RECORDED:
+            action_id, attempt_id, target = payload["emergency_action_id"], payload["cancel_attempt_id"], payload["target_order_id"]
+            observation = by_id.get(str(payload["authoritative_order_observation_event_id"]))
+            key = (str(action_id), str(target))
+            ordinal = payload["attempt_ordinal"]
+            previous_attempt = attempt_by_action_target.get(key)
+            previous_result = results.get(previous_attempt) if previous_attempt is not None else None
+            observed_order = observation.payload["canonical_venue_payload"] if observation is not None and observation.event_type is EventType.ORDER_OBSERVED else None
+            if (
+                active_mode is not AcquisitionMode.EMERGENCY_CONTROL_ONLY or action_id not in actions
+                or not _is_named_id("cancel_attempt_id", attempt_id) or type(target) is not str or not target
+                or target not in actions[action_id].payload["target_order_ids"]
+                or type(payload["subaccount"]) is not int or not 0 <= payload["subaccount"] <= 63
+                or type(payload["exchange_index"]) is not int or payload["exchange_index"] < 0
+                or payload["source_binding_id"] != "KSR-02_CANCEL_ORDER_V2_2026-08-13T20:18:41Z"
+                or type(payload["risk_state_epoch"]) is not int or payload["risk_state_epoch"] != risk_epoch
+                or observation is None or observation.event_type is not EventType.ORDER_OBSERVED
+                or observation.event_hash != payload["authoritative_order_observation_event_hash"]
+                or observation.payload["venue_order_id"] != target
+                or type(observed_order) is not dict
+                or observed_order.get("status") != "resting"
+                or observed_order.get("remaining_count_fp") != payload["prior_remaining_count_fp"]
+                or payload["conflict_domain_ref"] != actions[action_id].payload["conflict_domain_ref"]
+                or payload["prior_order_status"] != "resting"
+                or not _is_qty2(payload["prior_remaining_count_fp"], positive=True)
+                or type(ordinal) is not int or ordinal != intent_ordinals.get(key, 0) + 1
+                or (ordinal > 1 and (previous_result is None or previous_result.payload["result_class"] != "CANCEL_REJECTED_CONFIRMED"))
+                or not _is_named_id("request_id", payload["request_id"])
+                or (payload["risk_config_sha256"] is not None and not _is_sha256(payload["risk_config_sha256"]))
+                or payload["risk_config_sha256"] != actions[action_id].payload["risk_config_sha256"]
+                or payload["intent_recorded_at_utc"] != event.recorded_at_utc
+            ):
+                _schema_error(FailureCode.CANCEL_ATTEMPT_PREDECESSOR_INVALID)
+            intent_ordinals[key] = ordinal
+            attempt_by_action_target[key] = str(attempt_id)
+            intents[attempt_id] = event
+        elif event.event_type is EventType.CANCEL_SEND_BOUNDARY_ENTERED:
+            attempt_id = payload["cancel_attempt_id"]
+            intent = intents.get(str(attempt_id))
+            if (
+                intent is None or attempt_id in boundaries
+                or payload["predecessor_intent_event_id"] != intent.event_id
+                or payload["predecessor_intent_event_hash"] != intent.event_hash
+                or any(payload[key] != intent.payload[key] for key in ("emergency_action_id", "cancel_attempt_id", "target_order_id", "request_id", "attempt_ordinal"))
+                or not _is_sha256(payload["canonical_request_sha256"])
+                or payload["operation_name"] != "CANCEL_ORDER_V2" or payload["method"] != "DELETE"
+                or payload["path_without_query"] != "/trade-api/v2/portfolio/events/orders/" + payload["target_order_id"]
+                or not _is_named_id("deadline_id", payload["deadline_id"])
+                or not _is_named_id("process_instance_id", payload["deadline_process_instance_id"])
+                or type(payload["deadline_budget_ms"]) is not int or payload["deadline_budget_ms"] <= 0
+                or type(payload["deadline_started_monotonic_ns"]) is not int or payload["deadline_started_monotonic_ns"] < 0
+                or type(payload["deadline_absolute_monotonic_ns"]) is not int
+                or payload["deadline_absolute_monotonic_ns"] != payload["deadline_started_monotonic_ns"] + payload["deadline_budget_ms"] * 1_000_000
+                or payload["write_ambiguity_rule"] != "CANCEL_MAY_HAVE_BEEN_SENT_AFTER_THIS_ANCHORED_EVENT"
+                or payload["boundary_recorded_at_utc"] != event.recorded_at_utc
+            ):
+                _schema_error(FailureCode.CANCEL_ATTEMPT_PREDECESSOR_INVALID)
+            _require_tail(payload, "predecessor_authority_trusted_sequence", "predecessor_authority_trusted_hash", previous)
+            _require_tail(payload, "predecessor_ledger_terminal_sequence", "predecessor_ledger_terminal_hash", previous)
+            boundaries.add(str(attempt_id))
+        elif event.event_type is EventType.CANCEL_RESULT_RECORDED:
+            attempt_id = str(payload["cancel_attempt_id"])
+            intent = intents.get(attempt_id)
+            prior = results.get(attempt_id)
+            revision = payload["result_revision"]
+            result_class = payload["result_class"]
+            if (
+                intent is None or type(revision) is not int or revision < 1
+                or (revision == 1 and payload["prior_result_event_id"] is not None)
+                or (revision > 1 and (prior is None or prior.event_id != payload["prior_result_event_id"] or prior.payload["result_revision"] != revision - 1 or prior.payload["result_class"] != "CANCEL_UNRESOLVED"))
+                or any(payload[key] != intent.payload[key] for key in ("emergency_action_id", "cancel_attempt_id", "target_order_id"))
+                or result_class not in {"CANCELED_CONFIRMED", "FILLED_BEFORE_CANCEL", "PARTIAL_FILL_THEN_REMAINDER_CANCELED", "ALREADY_TERMINAL", "CANCEL_REJECTED_CONFIRMED", "CANCEL_UNRESOLVED"}
+                or type(payload["response_present"]) is not bool or type(payload["unresolved"]) is not bool
+                or payload["unresolved"] != (result_class == "CANCEL_UNRESOLVED")
+                or payload["write_closure_class"] != ("UNRESOLVED" if payload["unresolved"] else "AUTHORITATIVE_RESULT_CLOSED")
+                or payload["result_at_utc"] != event.recorded_at_utc
+            ):
+                _schema_error(FailureCode.CANCEL_RESULT_REVISION_CONFLICT)
+            expected_basis_types = {
+                "reconciliation_basis_event_ids": EventType.RECONCILIATION_RECORDED,
+                "fill_basis_event_ids": EventType.FILL_OBSERVED,
+                "order_state_basis_event_ids": EventType.ORDER_OBSERVED,
+            }
+            for key, expected_type in expected_basis_types.items():
+                ids = _require_sorted_unique_ids(payload[key], event_ids=True)
+                if any(item not in by_id or by_id[item].event_type is not expected_type for item in ids):
+                    _schema_error(FailureCode.EVENT_REQUIRED_REFERENCE_INVALID)
+                if expected_type in {EventType.FILL_OBSERVED, EventType.ORDER_OBSERVED} and any(
+                    by_id[item].payload["venue_order_id"] != intent.payload["target_order_id"] for item in ids
+                ):
+                    _schema_error(FailureCode.CANCEL_RESULT_EVIDENCE_CONFLICT)
+            response_present = payload["response_present"]
+            response_fields = ("response_http_status", "response_media_type_class", "response_body_sha256", "response_byte_length")
+            if response_present:
+                if (
+                    type(payload["response_http_status"]) is not int
+                    or not 100 <= payload["response_http_status"] <= 599
+                    or payload["response_media_type_class"] not in {"APPLICATION_JSON", "OTHER", "MISSING"}
+                    or not _is_sha256(payload["response_body_sha256"])
+                    or type(payload["response_byte_length"]) is not int
+                    or payload["response_byte_length"] < 0
+                ):
+                    _schema_error(FailureCode.CANCEL_RESULT_EVIDENCE_CONFLICT)
+            elif any(payload[key] is not None for key in response_fields + ("response_order_id", "response_reduced_by_fp")):
+                _schema_error(FailureCode.CANCEL_RESULT_EVIDENCE_CONFLICT)
+            if payload["response_order_id"] is not None and payload["response_order_id"] != intent.payload["target_order_id"]:
+                _schema_error(FailureCode.CANCEL_RESULT_EVIDENCE_CONFLICT)
+            if payload["response_media_type_class"] != "APPLICATION_JSON" and (payload["response_order_id"] is not None or payload["response_reduced_by_fp"] is not None):
+                _schema_error(FailureCode.CANCEL_RESULT_EVIDENCE_CONFLICT)
+            if payload["response_reduced_by_fp"] is not None and not _is_qty2(payload["response_reduced_by_fp"]):
+                _schema_error(FailureCode.CANCEL_RESULT_EVIDENCE_CONFLICT)
+            filled = payload["filled_quantity_fp"]
+            canceled = payload["canceled_quantity_fp"]
+            remaining = payload["remaining_quantity_fp"]
+            if not _is_qty2(filled) or canceled is not None and not _is_qty2(canceled) or remaining is not None and not _is_qty2(remaining):
+                _schema_error(FailureCode.CANCEL_RESULT_EVIDENCE_CONFLICT)
+            if result_class == "CANCEL_UNRESOLVED":
+                pass
+            elif canceled is None or remaining is None or Decimal(intent.payload["prior_remaining_count_fp"]) != Decimal(filled) + Decimal(canceled) + Decimal(remaining):
+                _schema_error(FailureCode.CANCEL_RESULT_EVIDENCE_CONFLICT)
+            elif not payload["order_state_basis_event_ids"] and not payload["fill_basis_event_ids"]:
+                _schema_error(FailureCode.CANCEL_RESULT_EVIDENCE_CONFLICT)
+            if result_class == "CANCELED_CONFIRMED" and not (Decimal(filled) == 0 and Decimal(remaining) == 0 and Decimal(canceled) == Decimal(intent.payload["prior_remaining_count_fp"])):
+                _schema_error(FailureCode.CANCEL_RESULT_EVIDENCE_CONFLICT)
+            if result_class == "FILLED_BEFORE_CANCEL" and not (Decimal(filled) == Decimal(intent.payload["prior_remaining_count_fp"]) and Decimal(canceled) == 0 and Decimal(remaining) == 0):
+                _schema_error(FailureCode.CANCEL_RESULT_EVIDENCE_CONFLICT)
+            if result_class == "PARTIAL_FILL_THEN_REMAINDER_CANCELED" and not (0 < Decimal(filled) < Decimal(intent.payload["prior_remaining_count_fp"]) and Decimal(remaining) == 0):
+                _schema_error(FailureCode.CANCEL_RESULT_EVIDENCE_CONFLICT)
+            if result_class == "CANCEL_REJECTED_CONFIRMED" and not (Decimal(canceled) == 0 and Decimal(remaining) == Decimal(intent.payload["prior_remaining_count_fp"]) - Decimal(filled)):
+                _schema_error(FailureCode.CANCEL_RESULT_EVIDENCE_CONFLICT)
+            if payload["response_reduced_by_fp"] is not None and result_class in {"CANCELED_CONFIRMED", "PARTIAL_FILL_THEN_REMAINDER_CANCELED"} and payload["response_reduced_by_fp"] != canceled:
+                _schema_error(FailureCode.CANCEL_RESULT_EVIDENCE_CONFLICT)
+            results[attempt_id] = event
+        elif event.event_type is EventType.RISK_RELEASE_RECORDED:
+            vector = payload["predicate_vector"]
+            state_event = by_id.get(str(payload["safe_held_state_event_id"]))
+            if (
+                active_mode is not AcquisitionMode.RELEASE_ONLY or risk_state != "SAFE_HELD"
+                or not _is_named_id("release_id", payload["release_id"])
+                or not _is_sha256(payload["risk_config_sha256"])
+                or not _is_sha256(payload["reconciliation_snapshot_sha256"])
+                or not _is_sha256(payload["risk_snapshot_sha256"])
+                or type(payload["writer_proof_id"]) is not str or not payload["writer_proof_id"]
+                or type(payload["risk_state_epoch"]) is not int or payload["risk_state_epoch"] != risk_epoch
+                or type(vector) is not dict or set(vector) != _RELEASE_PREDICATE_KEYS
+                or any(type(value) is not bool or not value for value in vector.values())
+                or payload["predicate_vector_sha256"] != sha256_hex(canonical_json_bytes(vector))
+                or state_event is None or state_event is not last_state_event or state_event.event_hash != payload["safe_held_state_event_hash"]
+                or state_event.payload["risk_state_epoch_after"] != payload["risk_state_epoch"]
+                or state_event.payload["risk_config_sha256"] != payload["risk_config_sha256"]
+                or payload["release_recorded_at_utc"] != event.recorded_at_utc
+            ):
+                _schema_error(FailureCode.RELEASE_PREDICATE_FAILED)
+            _require_tail(payload, "authority_trusted_sequence", "authority_trusted_hash", previous)
+            _require_tail(payload, "ledger_terminal_sequence", "ledger_terminal_hash", previous)
+            releases[str(payload["release_id"])] = event
+        by_id[event.event_id] = event
+
+
 def _validate_event_semantics(events: Sequence[LedgerEvent]) -> None:
     sessions: set[str] = set()
     active_sessions: set[str] = set()
+    session_modes: dict[str, AcquisitionMode] = {}
     requests: dict[str, LedgerEvent] = {}
     boundaries: set[str] = set()
     imports: list[int] = []
@@ -1092,6 +1707,26 @@ def _validate_event_semantics(events: Sequence[LedgerEvent]) -> None:
                 raise LedgerError(FailureCode.WRITER_SESSION_REFERENCE_INVALID)
             sessions.add(session_id)
             active_sessions.add(session_id)
+            session_modes[session_id] = AcquisitionMode.NORMAL_WRITER
+        elif event.event_type is EventType.RESTRICTED_SESSION_STARTED:
+            session_id = event.payload.get("restricted_session_id")
+            mode_value = event.payload.get("acquisition_mode")
+            try:
+                mode = AcquisitionMode(mode_value)
+            except (TypeError, ValueError) as exc:
+                raise LedgerError(FailureCode.RESTRICTED_SESSION_STATE_CONFLICT) from exc
+            if (
+                type(session_id) is not str
+                or _RESTRICTED_SESSION_ID_RE.fullmatch(session_id) is None
+                or event.writer_session_id != session_id
+                or session_id in sessions
+                or active_sessions
+                or mode not in {AcquisitionMode.EMERGENCY_CONTROL_ONLY, AcquisitionMode.RELEASE_ONLY}
+            ):
+                raise LedgerError(FailureCode.RESTRICTED_SESSION_STATE_CONFLICT)
+            sessions.add(session_id)
+            active_sessions.add(session_id)
+            session_modes[session_id] = mode
         elif event.event_type in {EventType.WRITER_SESSION_ENDED, EventType.EXECUTION_INTENT_RECORDED, EventType.REQUEST_PREPARED, EventType.WRITE_SEND_BOUNDARY_ENTERED, EventType.READ_SEND_BOUNDARY_ENTERED, EventType.HTTP_RESPONSE_CLASSIFIED, EventType.TRANSPORT_UNKNOWN_AFTER_SEND, EventType.ORDER_IDENTITY_BOUND, EventType.ORDER_OBSERVED, EventType.FILL_OBSERVED, EventType.RECONCILIATION_RECORDED, EventType.EXECUTION_HALTED, EventType.EXECUTION_TERMINAL, EventType.WRITER_PROOF_RELEASED}:
             if event.writer_session_id is None or event.writer_session_id not in active_sessions:
                 raise LedgerError(FailureCode.WRITER_SESSION_REFERENCE_INVALID)
@@ -1100,6 +1735,16 @@ def _validate_event_semantics(events: Sequence[LedgerEvent]) -> None:
             if event.payload["writer_session_id"] != event.writer_session_id:
                 raise LedgerError(FailureCode.WRITER_SESSION_REFERENCE_INVALID)
             active_sessions.remove(event.writer_session_id)
+        if event.event_type is EventType.RESTRICTED_SESSION_ENDED:
+            session_id = event.payload.get("restricted_session_id")
+            if type(session_id) is not str or session_id not in active_sessions or event.writer_session_id != session_id:
+                raise LedgerError(FailureCode.RESTRICTED_SESSION_STATE_CONFLICT)
+            active_sessions.remove(session_id)
+        if event.event_type is EventType.RESTRICTED_SESSION_ABANDONED:
+            abandoned_restricted = event.payload.get("abandoned_restricted_session_id")
+            if type(abandoned_restricted) is not str or abandoned_restricted not in active_sessions:
+                raise LedgerError(FailureCode.RESTRICTED_SESSION_STATE_CONFLICT)
+            active_sessions.remove(abandoned_restricted)
         if event.event_type is EventType.WRITER_SESSION_ABANDONED:
             _require_exact_payload_keys(event, {"abandoned_writer_session_id", "reason"})
             abandoned = event.payload["abandoned_writer_session_id"]
@@ -1207,6 +1852,7 @@ def _validate_event_semantics(events: Sequence[LedgerEvent]) -> None:
                 raise LedgerError(FailureCode.LEGACY_INCIDENT_IMPORT_CONFLICT)
     if len(imports) > 1:
         raise LedgerError(FailureCode.LEGACY_INCIDENT_IMPORT_CONFLICT)
+    _validate_spec03_event_sequence(events, session_modes)
 
 
 def initialize_ledger_binding(
@@ -1365,13 +2011,32 @@ class LockedLedger:
             raise LedgerError(FailureCode.AUTHORITY_LEDGER_ANCHOR_HASH_MISMATCH)
         if any(item.event_type is EventType.WRITER_PROOF_RELEASED for item in inputs):
             projection = self.projection()
-            if (
-                projection.history_completeness != "COMPLETE"
-                or projection.unresolved_write_request_ids
-                or projection.protected_unresolved_legacy_write_count
-                or any(state == "HELD" for state in projection.writer_proof_state_by_proof_id.values())
-            ):
+            if len(inputs) != 1:
                 raise LedgerError(FailureCode.EVENT_REQUIRED_PARENT_MISSING)
+            item = inputs[0]
+            proof_id = item.payload.get("writer_proof_id")
+            release_basis = item.payload.get("release_basis_event_ids")
+            prior = self.events[-1]
+            prior_payload = prior.payload
+            active_restricted = projection.active_restricted_session_id
+            if (
+                type(proof_id) is not str
+                or projection.writer_proof_state_by_proof_id.get(proof_id) != "HELD"
+                or projection.writer_proof_release_eligible_by_proof_id.get(proof_id) is not True
+                or projection.unresolved_write_request_ids
+                or projection.protected_unresolved_legacy_write_count != 0
+                or any(projection.cancel_send_may_have_been_sent_by_attempt.values())
+                or active_restricted is None
+                or projection.restricted_session_modes.get(active_restricted) is not AcquisitionMode.RELEASE_ONLY
+                or item.writer_session_id != active_restricted
+                or prior.event_type is not EventType.RISK_RELEASE_RECORDED
+                or prior.writer_session_id != active_restricted
+                or prior_payload.get("writer_proof_id") != proof_id
+                or type(release_basis) is not list
+                or prior.event_id not in release_basis
+                or item.payload.get("conflict_domain_ref") != self.conflict_domain_ref
+            ):
+                raise LedgerError(FailureCode.RELEASE_PREDICATE_CHANGED)
         duplicates: list[LedgerEvent] = []
         existing_by_id = {event.event_id: event for event in self.events}
         if all(item.event_id is not None and item.event_id in existing_by_id for item in inputs):
@@ -1567,7 +2232,20 @@ def replay_projection(authority_meta: AuthorityMeta, authority_row: AuthorityRow
     legacy_states: dict[str, Mapping[str, object]] = {}
     proofs: dict[str, str] = {}
     proof_eligible: dict[str, bool] = {}
+    proof_incident: dict[str, str | None] = {}
     legacy_count = 0
+    restricted_sessions: list[str] = []
+    restricted_modes: dict[str, AcquisitionMode] = {}
+    open_restricted: set[str] = set()
+    abnormal_restricted: list[str] = []
+    risk_state = "BOOT_HOLD"
+    risk_epoch = 0
+    active_risk_config: str | None = None
+    emergency_actions: dict[str, Mapping[str, object]] = {}
+    cancel_attempts: dict[str, Mapping[str, object]] = {}
+    cancel_may_sent: dict[str, bool] = {}
+    cancel_result_revision: dict[str, int] = {}
+    release_records: dict[str, Mapping[str, object]] = {}
     for event in events:
         if event.incident_id is not None:
             incidents.add(event.incident_id)
@@ -1607,9 +2285,17 @@ def replay_projection(authority_meta: AuthorityMeta, authority_row: AuthorityRow
                 raise LedgerError(FailureCode.DUPLICATE_FILL_CONFLICT)
             fills[fill_id] = canonical_payload
         elif event.event_type is EventType.RECONCILIATION_RECORDED:
-            reconciliation[str(payload["incident_id"])] = str(payload["disposition"])
+            incident = str(payload["incident_id"])
+            reconciliation[incident] = str(payload["disposition"])
+            if payload["writer_proof_release_eligible"] is True:
+                for proof, held_incident in proof_incident.items():
+                    if held_incident == incident and proofs.get(proof) == "HELD":
+                        proof_eligible[proof] = True
         elif event.event_type is EventType.WRITER_PROOF_HELD:
-            proof = str(payload["writer_proof_id"]); proofs[proof] = "HELD"; proof_eligible[proof] = False
+            proof = str(payload["writer_proof_id"])
+            proofs[proof] = "HELD"
+            proof_eligible[proof] = False
+            proof_incident[proof] = event.incident_id
         elif event.event_type is EventType.WRITER_PROOF_RELEASED:
             proof = str(payload["writer_proof_id"]); proofs[proof] = "RELEASED"; proof_eligible[proof] = True
         elif event.event_type is EventType.LEGACY_INCIDENT_IMPORTED:
@@ -1624,6 +2310,38 @@ def replay_projection(authority_meta: AuthorityMeta, authority_row: AuthorityRow
                 "writer_proof_release_eligible": payload["writer_proof_release_eligible"],
                 "writer_proof_state": payload["writer_proof_state"],
             })
+        elif event.event_type is EventType.RESTRICTED_SESSION_STARTED:
+            sid = str(payload["restricted_session_id"])
+            restricted_sessions.append(sid)
+            restricted_modes[sid] = AcquisitionMode(payload["acquisition_mode"])
+            open_restricted.add(sid)
+        elif event.event_type is EventType.RESTRICTED_SESSION_ENDED:
+            open_restricted.discard(str(payload["restricted_session_id"]))
+        elif event.event_type is EventType.RESTRICTED_SESSION_ABANDONED:
+            sid = str(payload["abandoned_restricted_session_id"])
+            abnormal_restricted.append(sid)
+            open_restricted.discard(sid)
+        elif event.event_type is EventType.RISK_CONTROL_STATE_CHANGED:
+            risk_state = str(payload["new_state"])
+            risk_epoch = int(payload["risk_state_epoch_after"])
+            config = payload["risk_config_sha256"]
+            active_risk_config = str(config) if config is not None else None
+        elif event.event_type is EventType.EMERGENCY_ACTION_OPENED:
+            emergency_actions[str(payload["emergency_action_id"])] = payload
+        elif event.event_type is EventType.CANCEL_INTENT_RECORDED:
+            attempt = str(payload["cancel_attempt_id"])
+            cancel_attempts[attempt] = payload
+            cancel_may_sent[attempt] = False
+        elif event.event_type is EventType.CANCEL_SEND_BOUNDARY_ENTERED:
+            cancel_may_sent[str(payload["cancel_attempt_id"])] = True
+        elif event.event_type is EventType.CANCEL_RESULT_RECORDED:
+            attempt = str(payload["cancel_attempt_id"])
+            cancel_attempts[attempt] = payload
+            cancel_result_revision[attempt] = int(payload["result_revision"])
+            if not bool(payload["unresolved"]):
+                cancel_may_sent[attempt] = False
+        elif event.event_type is EventType.RISK_RELEASE_RECORDED:
+            release_records[str(payload["release_id"])] = payload
     if open_sessions:
         abnormal.extend(sorted(open_sessions))
     history = "INCOMPLETE" if legacy_count == 0 else "COMPLETE_WITH_PROTECTED_UNRESOLVED_LEGACY_WRITE"
@@ -1650,6 +2368,14 @@ def replay_projection(authority_meta: AuthorityMeta, authority_row: AuthorityRow
         MappingProxyType(dict(sorted(proofs.items()))),
         MappingProxyType(dict(sorted(proof_eligible.items()))), legacy_count, restart,
         sessions[-1] if sessions else None,
+        tuple(restricted_sessions), MappingProxyType(dict(sorted(restricted_modes.items()))),
+        sorted(open_restricted)[-1] if open_restricted else None,
+        tuple(sorted(set(abnormal_restricted))), risk_state, risk_epoch, active_risk_config,
+        MappingProxyType(dict(sorted(emergency_actions.items()))),
+        MappingProxyType(dict(sorted(cancel_attempts.items()))),
+        MappingProxyType(dict(sorted(cancel_may_sent.items()))),
+        MappingProxyType(dict(sorted(cancel_result_revision.items()))),
+        MappingProxyType(dict(sorted(release_records.items()))),
     )
 
 
@@ -1682,6 +2408,15 @@ def deterministic_review_export(projection: SafetyProjection, *, relation: Autho
         },
         "reconciliation_dispositions": dict(projection.reconciliation_disposition_by_incident),
         "restart_classification": projection.restart_classification.value,
+        "risk_control_state": projection.risk_control_state,
+        "risk_state_epoch": projection.risk_state_epoch,
+        "active_risk_config_sha256": projection.active_risk_config_sha256,
+        "restricted_session_ids": list(projection.restricted_sessions),
+        "active_restricted_session_id": projection.active_restricted_session_id,
+        "abnormal_restricted_session_ids": list(projection.abnormal_restricted_session_ids),
+        "emergency_action_ids": sorted(projection.emergency_actions_by_id),
+        "cancel_attempt_ids": sorted(projection.cancel_attempts_by_id),
+        "release_ids": sorted(projection.release_records_by_id),
         "terminal_event_hash": projection.terminal_event_hash,
         "trusted_event_hash": projection.trusted_event_hash,
         "trusted_sequence": projection.trusted_sequence,
@@ -1747,6 +2482,28 @@ def end_writer_session(locked: LockedLedger, *, writer_session_id: str) -> None:
         locked.close()
 
 
+def end_restricted_session(
+    locked: LockedLedger,
+    *,
+    restricted_session_id: str,
+    acquisition_mode: AcquisitionMode,
+) -> None:
+    """Anchor a clean restricted end before releasing ledger then authority locks."""
+    try:
+        previous = locked.events[-1]
+        locked.append_batch((EventInput(EventType.RESTRICTED_SESSION_ENDED, {
+            "restricted_session_id": restricted_session_id,
+            "acquisition_mode": acquisition_mode.value,
+            "pre_end_trusted_sequence": previous.sequence,
+            "pre_end_trusted_event_hash": previous.event_hash,
+            "pre_end_ledger_sequence": previous.sequence,
+            "pre_end_ledger_event_hash": previous.event_hash,
+            "end_reason": "CLEAN_RELEASE_OF_EXCLUSIVE_LOCKS",
+        }, writer_session_id=restricted_session_id),))
+    finally:
+        locked.close()
+
+
 @dataclass(frozen=True, slots=True)
 class OpenResult:
     projection: SafetyProjection | None
@@ -1763,6 +2520,23 @@ class _LegacyImportInternalResult:
     projection: SafetyProjection | None
     restart_classification: RestartClassification
     locked: LockedLedger | None
+    failure_code: FailureCode | None = None
+    authority_ledger_relation: AuthorityLedgerRelation | None = None
+
+
+@dataclass(frozen=True, slots=True)
+class _RestrictedInternalResult:
+    """Fresh restricted acquisition plus its already-anchored ``rs_`` session.
+
+    No caller can convert a pre-existing normal-writer lock into a restricted
+    session: construction and session start both occur inside the single fresh
+    acquisition operation below, before the locked ledger is returned.
+    """
+
+    projection: SafetyProjection | None
+    restart_classification: RestartClassification
+    locked: LockedLedger | None
+    restricted_session_id: str | None = None
     failure_code: FailureCode | None = None
     authority_ledger_relation: AuthorityLedgerRelation | None = None
 
@@ -1791,6 +2565,8 @@ def _acquire_local_state_internal(
             # valid state can expose an ordinary writer handle.
             locked.close()
             return OpenResult(projection, projection.restart_classification, None, None, locked.relation)
+        if acquisition_mode in {AcquisitionMode.EMERGENCY_CONTROL_ONLY, AcquisitionMode.RELEASE_ONLY}:
+            return OpenResult(projection, projection.restart_classification, locked, None, locked.relation)
         if projection.history_completeness != "INCOMPLETE":
             locked.close()
             return OpenResult(projection, projection.restart_classification, None, None, locked.relation)
@@ -1822,7 +2598,11 @@ def acquire_local_state(
     wraps its internal lock object in ``LegacyImportOnlyHandle`` before any
     result becomes caller-visible.
     """
-    if acquisition_mode is AcquisitionMode.LEGACY_IMPORT_ONLY:
+    if acquisition_mode in {
+        AcquisitionMode.LEGACY_IMPORT_ONLY,
+        AcquisitionMode.EMERGENCY_CONTROL_ONLY,
+        AcquisitionMode.RELEASE_ONLY,
+    }:
         return OpenResult(
             None,
             RestartClassification.LEDGER_INTEGRITY_FAILURE,
@@ -1877,6 +2657,104 @@ def _acquire_legacy_import_state(
     )
 
 
+def _acquire_restricted_state(
+    binding: AuthorityNamespaceBinding,
+    *,
+    conflict_domain_ref: str,
+    expected_environment: str,
+    canonical_repository_root: str | os.PathLike[str],
+    acquisition_mode: AcquisitionMode,
+    expected_ledger_path: str | os.PathLike[str] | None = None,
+    clock: Clock = _utc_now,
+    uuid_factory: UuidFactory = uuid.uuid4,
+    fault_hook: FaultHook = _noop_fault_hook,
+    history_validator: HistoryValidator | None = None,
+) -> _RestrictedInternalResult:
+    """Private bridge for narrow emergency/release binding handles."""
+    if acquisition_mode not in {AcquisitionMode.EMERGENCY_CONTROL_ONLY, AcquisitionMode.RELEASE_ONLY}:
+        return _RestrictedInternalResult(
+            None, RestartClassification.LEDGER_INTEGRITY_FAILURE, None,
+            failure_code=FailureCode.RESTRICTED_SESSION_STATE_CONFLICT,
+        )
+    opened = _acquire_local_state_internal(
+        binding,
+        conflict_domain_ref=conflict_domain_ref,
+        expected_environment=expected_environment,
+        canonical_repository_root=canonical_repository_root,
+        acquisition_mode=acquisition_mode,
+        expected_ledger_path=expected_ledger_path,
+        clock=clock,
+        uuid_factory=uuid_factory,
+        fault_hook=fault_hook,
+        history_validator=history_validator,
+    )
+    if opened.handle is None:
+        return _RestrictedInternalResult(
+            opened.projection, opened.restart_classification, None,
+            failure_code=opened.failure_code,
+            authority_ledger_relation=opened.authority_ledger_relation,
+        )
+
+    # This is deliberately the only restricted-session start site.  The lock
+    # was acquired afresh immediately above; it has never been exposed to a
+    # normal writer or to the caller.  Replayed open sessions therefore denote
+    # owners that cannot still hold the newly acquired OS/SQLite locks.
+    locked = opened.handle
+    try:
+        projection = locked.projection()
+        prior_state = "NONE"
+        if projection.active_writer_session_id is not None:
+            locked.append_batch((EventInput(EventType.WRITER_SESSION_ABANDONED, {
+                "abandoned_writer_session_id": projection.active_writer_session_id,
+                "reason": "PREVIOUS_SESSION_NO_LONGER_HOLDS_REQUIRED_AUTHORITY_AND_LEDGER_LOCKS",
+            }),))
+            prior_state = "ABNORMAL"
+            projection = locked.projection()
+        if projection.active_restricted_session_id is not None:
+            prior = projection.active_restricted_session_id
+            prior_mode = projection.restricted_session_modes[prior]
+            previous = locked.events[-1]
+            locked.append_batch((EventInput(EventType.RESTRICTED_SESSION_ABANDONED, {
+                "abandoned_restricted_session_id": prior,
+                "acquisition_mode": prior_mode.value,
+                "reason": "PREVIOUS_RESTRICTED_SESSION_NO_LONGER_HOLDS_REQUIRED_AUTHORITY_AND_LEDGER_LOCKS",
+                "observed_trusted_sequence": previous.sequence,
+                "observed_trusted_event_hash": previous.event_hash,
+                "observed_ledger_sequence": previous.sequence,
+                "observed_ledger_event_hash": previous.event_hash,
+            }),))
+            prior_state = "ABNORMAL"
+        projection = locked.projection()
+        if projection.active_writer_session_id is not None or projection.active_restricted_session_id is not None:
+            raise LedgerError(FailureCode.RESTRICTED_SESSION_STATE_CONFLICT)
+        session_id = f"rs_{locked.uuid_factory().hex}"
+        if _RESTRICTED_SESSION_ID_RE.fullmatch(session_id) is None:
+            raise LedgerError(FailureCode.RESTRICTED_SESSION_STATE_CONFLICT)
+        previous = locked.events[-1]
+        locked.append_batch((EventInput(EventType.RESTRICTED_SESSION_STARTED, {
+            "restricted_session_id": session_id,
+            "acquisition_mode": acquisition_mode.value,
+            "session_schema_revision": 1,
+            "lock_model": LOCK_MODEL,
+            "prior_restricted_session_state": prior_state,
+            "opening_trusted_sequence": previous.sequence,
+            "opening_trusted_event_hash": previous.event_hash,
+            "opening_ledger_sequence": previous.sequence,
+            "opening_ledger_event_hash": previous.event_hash,
+        }, writer_session_id=session_id),))
+        return _RestrictedInternalResult(
+            locked.projection(), opened.restart_classification, locked,
+            restricted_session_id=session_id,
+            authority_ledger_relation=opened.authority_ledger_relation,
+        )
+    except LedgerError as exc:
+        locked.close()
+        return _RestrictedInternalResult(
+            None, _classify_error(exc), None, failure_code=exc.code,
+            authority_ledger_relation=opened.authority_ledger_relation,
+        )
+
+
 def sqlite_posture(connection: sqlite3.Connection) -> Mapping[str, object]:
     """Return exact non-secret SQLite readback evidence for tests/review."""
     return MappingProxyType({
@@ -1896,7 +2774,8 @@ __all__ = [
     "LedgerEvent", "LedgerMeta", "LockedLedger", "OpenResult", "RestartClassification",
     "SafetyProjection", "acquire_local_state", "assert_secret_safe", "canonical_json_bytes",
     "canonical_json_text", "canonical_timestamp", "deterministic_review_export",
-    "end_writer_session", "initialize_authority_namespace", "initialize_ledger_binding", "load_and_validate_events",
+    "deterministic_event_id", "end_restricted_session", "end_writer_session",
+    "initialize_authority_namespace", "initialize_ledger_binding", "load_and_validate_events",
     "parse_canonical_json", "path_identity", "replay_projection", "sha256_hex", "sqlite_posture",
-    "start_writer_session",
+    "start_writer_session", "RISK_CONTROL_STATES", "RISK_CONTROL_TRANSITIONS",
 ]

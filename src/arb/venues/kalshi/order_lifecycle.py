@@ -190,6 +190,9 @@ __all__ = [
     "LifecycleTransportPreSendError",
     "LifecycleTransportUnknownAfterSendError",
     "LifecycleTransport",
+    "NormalWriteAuthorizationProvider",
+    "lifecycle_request_sha256",
+    "invoke_permit_required_normal_write",
     "OneOrderLifecycleInput",
     "OneOrderLifecyclePlan",
     "OneOrderLifecycleResult",
@@ -335,6 +338,8 @@ _LIFECYCLE_SIGNING_CONTRACT: Mapping[LifecycleOperation, Tuple[str, str]] = {
     LifecycleOperation.FILLS: ("GET", "/trade-api/v2/portfolio/fills"),
     LifecycleOperation.CANCEL: ("DELETE", "/trade-api/v2/portfolio/events/orders/"),
 }
+
+_NORMAL_WRITE_OPERATIONS = frozenset({LifecycleOperation.CREATE, LifecycleOperation.CANCEL})
 
 
 OPERATION_BUDGET: Mapping[LifecycleOperation, int] = {
@@ -2486,6 +2491,62 @@ class LifecycleTransport(Protocol):
     def send(self, request: PreparedRequest) -> RawHttpResponse: ...
 
 
+class NormalWriteAuthorizationProvider(Protocol):
+    """Supplies a T3 permit and its exact gate-owned adapter on demand.
+
+    The provider is asked only after the final CREATE/CANCEL request has been
+    constructed and contract-validated.  It cannot authorize a write itself:
+    the returned objects must still be exact gate-issued types, request-bound,
+    durably advanced through T0--T3, and re-read at adapter entry.
+    """
+
+    def authorize_normal_write(self, request: PreparedRequest) -> Tuple[object, object]: ...
+
+
+def lifecycle_request_sha256(request: PreparedRequest) -> str:
+    """Canonical identity of the HTTP semantics bound by a normal permit."""
+
+    if type(request) is not PreparedRequest:
+        raise ValueError("request must have exact type PreparedRequest")
+    value = {
+        "operation": request.operation.value,
+        "method": request.method,
+        "path": request.path,
+        "query": dict(request.query),
+        "body": None if request.body is None else dict(request.body),
+    }
+    raw = json.dumps(value, sort_keys=True, separators=(",", ":"), ensure_ascii=True).encode("ascii")
+    return hashlib.sha256(raw).hexdigest()
+
+
+def invoke_permit_required_normal_write(adapter: object, permit: object, request: PreparedRequest) -> object:
+    """Invoke the Spec-03 normal-write adapter without exposing a raw write callable.
+
+    Read-only lifecycle requests retain the predecessor transport contract.  A
+    supported normal venue write integration must cross this exact-type bridge,
+    whose adapter validates and atomically consumes ``NormalWriterPermit``.
+    """
+
+    from arb.venues.kalshi.risk_control import NormalWriteAdapter, NormalWriterPermit
+
+    expected_operation_kind = {
+        LifecycleOperation.CREATE: "CREATE_ORDER_V2",
+        LifecycleOperation.CANCEL: "CANCEL_ORDER_V2",
+    }.get(request.operation if type(request) is PreparedRequest else None)
+    if (
+        type(adapter) is not NormalWriteAdapter
+        or type(permit) is not NormalWriterPermit
+        or type(request) is not PreparedRequest
+        or expected_operation_kind is None
+        or permit.operation_kind != expected_operation_kind
+        or permit.candidate_request_sha256 != lifecycle_request_sha256(request)
+    ):
+        from arb.venues.kalshi.risk_control import RiskControlCode, RiskControlError
+
+        raise RiskControlError(RiskControlCode.NORMAL_WRITER_PERMIT_INVALID)
+    return adapter.invoke(permit, request)
+
+
 class LifecycleTerminal(enum.StrEnum):
     """SAME_SCOPE_CORRECTION_03: only the three genuine success terminal
     states remain here. A halt is never represented as a
@@ -3288,6 +3349,7 @@ def execute_demo_one_order_lifecycle(
     plan: OneOrderLifecyclePlan,
     transport: LifecycleTransport,
     *,
+    normal_write_authorizer: NormalWriteAuthorizationProvider | None = None,
     monotonic_clock: Optional[Callable[[], float]] = None,
     _wall_clock: Optional[Callable[[], float]] = None,
 ) -> Union[OneOrderLifecycleResult, OneOrderLifecycleHalt]:
@@ -3302,6 +3364,13 @@ def execute_demo_one_order_lifecycle(
         monotonic_clock = _time.monotonic
     if _wall_clock is None:
         _wall_clock = _time.time
+    if normal_write_authorizer is None and callable(
+        getattr(transport, "authorize_normal_write", None)
+    ):
+        # A combined integration object is accepted only as an authorization
+        # *provider*. Its raw ``send`` method still cannot service a write;
+        # the exact adapter/permit checks below remain mandatory.
+        normal_write_authorizer = transport  # type: ignore[assignment]
 
     plan_halt = _validate_plan_consumption(plan)
     if plan_halt is not None:
@@ -3376,6 +3445,32 @@ def execute_demo_one_order_lifecycle(
         )
         if contract_halt is not None:
             return None, contract_halt, SendOutcome.DEFINITELY_NOT_SENT_PRE_SEND
+        if request.operation in _NORMAL_WRITE_OPERATIONS:
+            if normal_write_authorizer is None:
+                return None, LifecycleHaltCode.TRANSPORT_PRE_SEND_FAILURE, SendOutcome.DEFINITELY_NOT_SENT_PRE_SEND
+            try:
+                adapter, permit = normal_write_authorizer.authorize_normal_write(request)
+            except Exception:
+                return None, LifecycleHaltCode.TRANSPORT_PRE_SEND_FAILURE, SendOutcome.DEFINITELY_NOT_SENT_PRE_SEND
+
+            class _PermitBoundSender:
+                __slots__ = ("adapter", "permit")
+
+                def __init__(self, bound_adapter: object, bound_permit: object) -> None:
+                    self.adapter = bound_adapter
+                    self.permit = bound_permit
+
+                def send(self, bound_request: PreparedRequest) -> object:
+                    try:
+                        return invoke_permit_required_normal_write(self.adapter, self.permit, bound_request)
+                    except Exception as exc:
+                        from arb.venues.kalshi.risk_control import RiskControlError
+
+                        if isinstance(exc, RiskControlError):
+                            raise LifecycleTransportPreSendError() from exc
+                        raise
+
+            return _send_and_validate(_PermitBoundSender(adapter, permit), request, monotonic_clock=monotonic_clock)
         return _send_and_validate(transport, request, monotonic_clock=monotonic_clock)
 
     if deadline.is_expired(monotonic_clock()):

@@ -9,9 +9,12 @@ import sqlite3
 import tempfile
 import unittest
 import uuid
+from dataclasses import replace
 from datetime import datetime, timedelta, timezone
 from decimal import Decimal
 from pathlib import Path
+from types import SimpleNamespace
+from typing import Mapping
 
 import arb.execution_ledger as ledger
 from arb.execution_ledger import (
@@ -42,11 +45,49 @@ from arb.venues.kalshi.ledger_binding import (
     EvidenceExpectation,
     LegacyIncidentContract,
     LegacyImportStatus,
+    ReleaseAssessmentV1,
+    ReleaseEvaluationStateV1,
+    ReleaseReconciliationSnapshotV1,
+    ReleaseRiskSnapshotV1,
+    VenueDefenseEvidenceV1,
     append_authority_anchored_send_gate,
+    acquire_emergency_control_only,
     acquire_legacy_import_only,
     acquire_normal_writer_state,
+    acquire_release_only,
     canonical_kalshi_fill_payload,
     validate_legacy_evidence,
+    validate_venue_defense_evidence,
+)
+from arb.venues.kalshi.emergency_cancel import (
+    AuthoritativeCancelTargetV1,
+    EmergencyActionId,
+    EmergencyCancelAdapter,
+    EmergencyCancelCode,
+    EmergencyCancelError,
+    EmergencyCancelGate,
+    EmergencyRateConfigV1,
+    EmergencyRateLane,
+)
+from arb.venues.kalshi.risk_control import (
+    AccountRiskLimits,
+    EconomicFillV1,
+    FlowRiskLimits,
+    FreshnessStampV1,
+    HISTORICAL_INCIDENT_CANCEL_TARGET,
+    HISTORICAL_INCIDENT_WRITER_RELEASE_ELIGIBLE,
+    HISTORICAL_UNRESOLVED_EXPOSURE,
+    NormalWriteAdapter,
+    PerMarketRiskLimits,
+    PerOrderRiskLimits,
+    PermitStage,
+    RiskControlError,
+    RiskLimitConfigV1,
+    StateIntegrityLimits,
+    VenueDefensePolicy,
+    WorkingOrderV1,
+    WriterEligibilityAssessment,
+    WriterEligibilityGate,
 )
 
 
@@ -54,6 +95,7 @@ class DeterministicInputs:
     def __init__(self) -> None:
         self.instant = datetime(2026, 8, 13, 13, 0, 0, tzinfo=timezone.utc)
         self.number = 101
+        self.monotonic_value = 1_000_000_000
 
     def clock(self) -> datetime:
         value = self.instant
@@ -65,6 +107,48 @@ class DeterministicInputs:
         self.number += 1
         return value
 
+    def monotonic_ns(self) -> int:
+        value = self.monotonic_value
+        self.monotonic_value += 1
+        return value
+
+    def advance_ms(self, milliseconds: int) -> None:
+        self.monotonic_value += milliseconds * 1_000_000
+
+
+class _ArmableReleaseFault:
+    def __init__(self, stage: str, *, unknown: bool = False) -> None:
+        self.stage = stage
+        self.unknown = unknown
+        self.armed = False
+
+    def __call__(self, stage: str) -> None:
+        if not self.armed or stage != self.stage:
+            return
+        self.armed = False
+        if self.unknown:
+            raise CommitResultUnknown(FailureCode.AUTHORITY_ANCHOR_COMMIT_RESULT_UNKNOWN)
+        raise LedgerError(FailureCode.LEDGER_COMMIT_FAILURE)
+
+
+class _PermitLocked:
+    """Minimal locked-state fake used only to mint a genuine normal permit."""
+
+    def __init__(self, config_hash: str) -> None:
+        self.conflict_domain_ref = CURRENT_CONFLICT_DOMAIN_REF
+        self.events = [SimpleNamespace(sequence=10, event_hash="1" * 64)]
+        self.authority_row = SimpleNamespace(
+            trusted_sequence=10, trusted_event_hash="1" * 64,
+        )
+        self._config_hash = config_hash
+
+    def projection(self):
+        return SimpleNamespace(
+            active_writer_session_id="ws_" + "1" * 32,
+            risk_control_state="WRITER_ELIGIBLE",
+            risk_state_epoch=7,
+            active_risk_config_sha256=self._config_hash,
+        )
 
 class KalshiLedgerBindingTestCase(unittest.TestCase):
     def setUp(self) -> None:
@@ -307,6 +391,550 @@ class KalshiLedgerBindingTestCase(unittest.TestCase):
             fault_hook=fault_hook,
         )
 
+    def _build_synthetic_safe_held(
+        self, *, venue_policy: VenueDefensePolicy | None = None,
+    ):
+        """Create genuinely evaluated, non-legacy release inputs and state."""
+
+        self.initialize()
+        config = RiskLimitConfigV1(
+            1, self.contract.conflict_domain_ref, "USD",
+            PerOrderRiskLimits(Decimal("10"), Decimal("10"), True, Decimal("0.10"), 1_000),
+            PerMarketRiskLimits(Decimal("20"), Decimal("20"), 10, Decimal("20"), Decimal("20")),
+            AccountRiskLimits(Decimal("100"), 50, Decimal("100"), 0, Decimal("0")),
+            FlowRiskLimits(1, 1_000, 1, 1_000, 1, 1_000, 1, 1_000, 2, 1_000, 1, 500, 1, 10, 100),
+            StateIntegrityLimits(1_000, 1_000, 10, 1, 500, 10, 100),
+            venue_policy or VenueDefensePolicy(
+                "NOT_REQUIRED", None, True,
+                "NO_SAFETY_CREDIT", "NO_SAFETY_CREDIT",
+            ),
+        )
+        emergency = acquire_emergency_control_only(
+            self.binding,
+            canonical_repository_root=str(self.repository_root),
+            contract=self.contract,
+            expected_ledger_path=str(self.ledger_path),
+            clock=self.inputs.clock,
+            uuid_factory=self.inputs.uuid,
+        )
+        self.assertIsNotNone(emergency.handle)
+        handle = emergency.handle
+        assert handle is not None
+        incident_id = "SYNTHETIC_RELEASE_INCIDENT"
+        proof_id = "SYNTHETIC_RELEASE_PROOF"
+        canonical_order = {
+            "order_id": "synthetic-order-1", "status": "resting",
+            "remaining_count_fp": "1.00", "market": "SYNTHETIC",
+            "outcome_side": "YES", "yes_price": Decimal("0.50"),
+            "cancel_order_on_pause": True,
+        }
+        order_event = handle.record_order_observation({
+            "venue_order_id": "synthetic-order-1",
+            "client_order_id": "synthetic-client-order-1",
+            "source_request_id": "synthetic-release-order-read",
+            "source_operation": "GET_ORDER_V2",
+            "venue_payload_schema_id": "synthetic-order-v1",
+            "canonical_venue_payload": canonical_order,
+            "canonical_venue_payload_sha256": hashlib.sha256(canonical_json_bytes(canonical_order)).hexdigest(),
+            "observation_semantic_class": "AUTHORITATIVE_ACTIVE_ORDER",
+        }).events[-1]
+        canonical_fill = canonical_kalshi_fill_payload(
+            fill_id="synthetic-fill-1", order_id="synthetic-order-1",
+            price=Decimal("0.40"), quantity=Decimal("1.00"), fee=Decimal("0.01"),
+            additional_fields={
+                "market": "SYNTHETIC", "outcome_side": "YES",
+                "authoritative_created_time_utc": "2026-08-13T13:00:00.000000Z",
+            },
+        )
+        fill_event = handle.record_fill_observation({
+            "canonical_venue_payload": canonical_fill,
+            "canonical_venue_payload_sha256": hashlib.sha256(canonical_json_bytes(canonical_fill)).hexdigest(),
+            "client_order_id": "synthetic-client-order-1",
+            "source_operation": "SYNTHETIC_FILL_READ",
+            "source_request_id": "synthetic-release-fill-read",
+            "venue_fill_id": "synthetic-fill-1",
+            "venue_order_id": "synthetic-order-1",
+            "venue_payload_schema_id": "synthetic-fill-v1",
+        }).events[-1]
+        handle.record_writer_proof_held({
+            "writer_proof_id": proof_id,
+            "conflict_domain_ref": self.contract.conflict_domain_ref,
+            "held_reason": "SYNTHETIC_PREDECESSOR_HOLD",
+            "protected_unresolved_write_event_ids": [],
+        }, incident_id=incident_id)
+        handle.record_reconciliation({
+            "incident_id": incident_id,
+            "disposition": "SYNTHETIC_AUTHORITATIVE_SAFE",
+            "write_closure_class": "AUTHORITATIVE_RESULT_CLOSED",
+            "bound_order_id": None,
+            "created_order_upper_bound": 0,
+            "active_order_upper_bound": 0,
+            "unknown_result": False,
+            "writer_proof_release_eligible": True,
+            "basis_event_ids": [],
+            "adapter_reconciliation_schema_id": "SYNTHETIC_RECONCILIATION_V1",
+        }, incident_id=incident_id)
+        before = handle.inspect_validated_projection()
+        # The narrow handle intentionally exposes projection but not raw append;
+        # the current tail is the projection tail and the preceding state event is absent.
+        state_payload = {
+            "previous_state": "BOOT_HOLD",
+            "new_state": "SAFE_HELD",
+            "cause": "REPLAY_ALL_SAFETY_PREDICATES_PASS",
+            "risk_state_epoch_before": 0,
+            "risk_state_epoch_after": 1,
+            "risk_config_sha256": config.sha256,
+            "related_emergency_action_id": None,
+            "related_release_id": None,
+            "predecessor_state_event_id": None,
+            "observed_authority_trusted_sequence": before.last_sequence,
+            "observed_authority_trusted_hash": before.terminal_event_hash,
+            "observed_ledger_terminal_sequence": before.last_sequence,
+            "observed_ledger_terminal_hash": before.terminal_event_hash,
+        }
+        safe_result = handle.record_risk_control_state_changed(state_payload)
+        safe_event = safe_result.events[-1]
+        projection = handle.inspect_validated_projection()
+        self.assertEqual(projection.risk_control_state, "SAFE_HELD")
+        self.assertEqual(projection.writer_proof_state_by_proof_id[proof_id], "HELD")
+        self.assertTrue(projection.writer_proof_release_eligible_by_proof_id[proof_id])
+        self.assertEqual(projection.protected_unresolved_legacy_write_count, 0)
+        normal_gate = WriterEligibilityGate(
+            monotonic_clock_ns=self.inputs.monotonic_ns,
+            wall_clock=self.inputs.clock,
+            uuid_factory=self.inputs.uuid,
+        )
+        lane = EmergencyRateLane(EmergencyRateConfigV1(2, 1_000, 1, 500, 1, 10, 100))
+        emergency_gate = EmergencyCancelGate(
+            handle=handle,
+            rate_lane=lane,
+            process_instance_id=normal_gate.process_instance_id,
+            monotonic_clock_ns=self.inputs.monotonic_ns,
+            wall_clock=self.inputs.clock,
+            uuid_factory=self.inputs.uuid,
+        )
+        handle.close()
+        market_data = {"ticker": "SYNTHETIC", "reference_yes_price": Decimal("0.50")}
+        risk_snapshot = ReleaseRiskSnapshotV1(
+            fills=(EconomicFillV1(
+                "SYNTHETIC", "synthetic-fill-1", "YES", Decimal("1.00"),
+                Decimal("0.40"), "2026-08-13T13:00:00.000000Z",
+            ),),
+            working_orders=(WorkingOrderV1(
+                "SYNTHETIC", "synthetic-order-1", "YES", Decimal("1.00"), Decimal("0.50"),
+            ),),
+            unresolved_write_count=0,
+            unresolved_write_exposure_usd=Decimal("0"),
+            market_data_snapshot=market_data,
+        )
+        reconciliation = ReleaseReconciliationSnapshotV1(
+            ("synthetic-order-1",), ("synthetic-order-1",), ("synthetic-fill-1",),
+            (), (), (("synthetic-order-1", order_event.event_id),),
+            (("synthetic-fill-1", fill_event.event_id),),
+        )
+        received_ns = self.inputs.monotonic_value
+        received_at = ledger.canonical_timestamp(self.inputs.instant)
+        market_stamp = FreshnessStampV1(
+            normal_gate.process_instance_id, received_at, received_ns, "NONE", None,
+            risk_snapshot.market_data_sha256,
+        )
+        reconciliation_stamp = FreshnessStampV1(
+            normal_gate.process_instance_id, received_at, received_ns, "NONE", None,
+            reconciliation.sha256,
+        )
+        state = ReleaseEvaluationStateV1(
+            process_instance_id=normal_gate.process_instance_id,
+            incident_id=incident_id,
+            writer_proof_id=proof_id,
+            risk_config=config,
+            risk_snapshot=risk_snapshot,
+            reconciliation_snapshot=reconciliation,
+            market_freshness=market_stamp,
+            reconciliation_freshness=reconciliation_stamp,
+            venue_defense_evidence=None,
+            normal_gate=normal_gate,
+            emergency_gate=emergency_gate,
+        )
+        return proof_id, incident_id, safe_event, state, lane, normal_gate, emergency_gate
+
+    def _begin_evaluated_release(self):
+        (
+            proof_id, incident_id, safe_event, state, lane, normal_gate,
+            emergency_gate,
+        ) = self._build_synthetic_safe_held()
+        acquisition = acquire_release_only(
+            self.binding,
+            canonical_repository_root=str(self.repository_root),
+            contract=self.contract,
+            expected_ledger_path=str(self.ledger_path),
+            clock=self.inputs.clock,
+            uuid_factory=self.inputs.uuid,
+            monotonic_clock_ns=self.inputs.monotonic_ns,
+            release_wall_clock=self.inputs.clock,
+        )
+        self.assertIsNotNone(acquisition.handle)
+        handle = acquisition.handle
+        assert handle is not None
+        assessment = handle.evaluate_release(state)
+        return (
+            handle, assessment, state, lane, normal_gate, emergency_gate,
+            proof_id, incident_id, safe_event,
+        )
+
+    def _acquire_release_for_state(self, state: ReleaseEvaluationStateV1):
+        acquisition = acquire_release_only(
+            self.binding,
+            canonical_repository_root=str(self.repository_root),
+            contract=self.contract,
+            expected_ledger_path=str(self.ledger_path),
+            clock=self.inputs.clock,
+            uuid_factory=self.inputs.uuid,
+            monotonic_clock_ns=self.inputs.monotonic_ns,
+            release_wall_clock=self.inputs.clock,
+        )
+        self.assertIsNotNone(acquisition.handle)
+        handle = acquisition.handle
+        assert handle is not None
+        return handle
+
+    def _append_trusted_order(
+        self, order_id: str, canonical_order: Mapping[str, object],
+    ):
+        acquisition = acquire_emergency_control_only(
+            self.binding,
+            canonical_repository_root=str(self.repository_root),
+            contract=self.contract,
+            expected_ledger_path=str(self.ledger_path),
+            clock=self.inputs.clock,
+            uuid_factory=self.inputs.uuid,
+        )
+        self.assertIsNotNone(acquisition.handle)
+        handle = acquisition.handle
+        assert handle is not None
+        event = handle.record_order_observation({
+            "venue_order_id": order_id,
+            "client_order_id": f"synthetic-client-{order_id}",
+            "source_request_id": f"synthetic-order-read-{order_id}-{self.inputs.uuid().hex}",
+            "source_operation": "GET_ORDER_V2",
+            "venue_payload_schema_id": "synthetic-order-v1",
+            "canonical_venue_payload": dict(canonical_order),
+            "canonical_venue_payload_sha256": hashlib.sha256(
+                canonical_json_bytes(dict(canonical_order))
+            ).hexdigest(),
+            "observation_semantic_class": "AUTHORITATIVE_ORDER_STATE",
+        }).events[-1]
+        handle.close()
+        return event
+
+    def _append_trusted_fill(
+        self,
+        *,
+        fill_id: str,
+        order_id: str,
+        quantity: Decimal,
+        yes_price: Decimal,
+        outcome_side: str = "YES",
+        market: str = "SYNTHETIC",
+        created_at: str = "2026-08-13T13:00:01.000000Z",
+    ):
+        acquisition = acquire_emergency_control_only(
+            self.binding,
+            canonical_repository_root=str(self.repository_root),
+            contract=self.contract,
+            expected_ledger_path=str(self.ledger_path),
+            clock=self.inputs.clock,
+            uuid_factory=self.inputs.uuid,
+        )
+        self.assertIsNotNone(acquisition.handle)
+        handle = acquisition.handle
+        assert handle is not None
+        canonical_fill = canonical_kalshi_fill_payload(
+            fill_id=fill_id, order_id=order_id, price=yes_price,
+            quantity=quantity, fee=Decimal("0.01"),
+            additional_fields={
+                "market": market, "outcome_side": outcome_side,
+                "authoritative_created_time_utc": created_at,
+            },
+        )
+        event = handle.record_fill_observation({
+            "canonical_venue_payload": canonical_fill,
+            "canonical_venue_payload_sha256": hashlib.sha256(
+                canonical_json_bytes(canonical_fill)
+            ).hexdigest(),
+            "client_order_id": f"synthetic-client-{order_id}",
+            "source_operation": "SYNTHETIC_FILL_READ",
+            "source_request_id": f"synthetic-fill-read-{fill_id}-{self.inputs.uuid().hex}",
+            "venue_fill_id": fill_id,
+            "venue_order_id": order_id,
+            "venue_payload_schema_id": "synthetic-fill-v1",
+        }).events[-1]
+        handle.close()
+        return event
+
+    def _venue_proof_for_state(
+        self,
+        state: ReleaseEvaluationStateV1,
+        *,
+        group_id: str | None,
+        group_state: str,
+        member_order_ids: tuple[str, ...],
+        cancel_order_on_pause_order_ids: tuple[str, ...],
+        conflict_order_ids: tuple[str, ...] = (),
+        process_instance_id: str | None = None,
+        received_monotonic_ns: int | None = None,
+        received_at_utc: str | None = None,
+    ) -> VenueDefenseEvidenceV1:
+        snapshot = state._snapshot()
+        process = process_instance_id or snapshot[2]
+        reconciliation = snapshot[7]
+        assert type(process) is str
+        assert type(reconciliation) is ReleaseReconciliationSnapshotV1
+        observation = {
+            "observation_schema_id": "KALSHI_VENUE_DEFENSE_OBSERVATION_V1",
+            "order_group_id": group_id,
+            "order_group_state": group_state,
+            "member_order_ids": list(member_order_ids),
+            "cancel_order_on_pause_order_ids": list(cancel_order_on_pause_order_ids),
+            "membership_conflict_order_ids": list(conflict_order_ids),
+        }
+        observation_hash = hashlib.sha256(canonical_json_bytes(observation)).hexdigest()
+        stamp = FreshnessStampV1(
+            process,
+            received_at_utc or ledger.canonical_timestamp(self.inputs.instant),
+            self.inputs.monotonic_value if received_monotonic_ns is None else received_monotonic_ns,
+            "NONE", None, observation_hash,
+        )
+        return validate_venue_defense_evidence(
+            process_instance_id=process,
+            canonical_observation=observation,
+            canonical_observation_sha256=observation_hash,
+            reconciliation_snapshot_sha256=reconciliation.sha256,
+            freshness=stamp,
+        )
+
+    def _replace_complete_release_universe(
+        self,
+        state: ReleaseEvaluationStateV1,
+        *,
+        working_orders: tuple[WorkingOrderV1, ...],
+        fills: tuple[EconomicFillV1, ...],
+        order_event_ids: Mapping[str, str],
+        fill_event_ids: Mapping[str, str],
+    ) -> None:
+        prior = state._snapshot()
+        process = prior[2]
+        config = prior[5]
+        risk = prior[6]
+        old_reconciliation = prior[7]
+        assert type(process) is str
+        assert type(config) is RiskLimitConfigV1
+        assert type(risk) is ReleaseRiskSnapshotV1
+        assert type(old_reconciliation) is ReleaseReconciliationSnapshotV1
+        active_ids = tuple(sorted(item.order_id for item in working_orders))
+        fill_ids = tuple(sorted(item.fill_id for item in fills))
+        new_risk = ReleaseRiskSnapshotV1(
+            fills=fills, working_orders=working_orders,
+            unresolved_write_count=risk.unresolved_write_count,
+            unresolved_write_exposure_usd=risk.unresolved_write_exposure_usd,
+            market_data_snapshot=dict(risk.market_data_snapshot),
+        )
+        new_reconciliation = ReleaseReconciliationSnapshotV1(
+            active_ids, active_ids, fill_ids, (), (),
+            tuple((identity, order_event_ids[identity]) for identity in active_ids),
+            tuple((identity, fill_event_ids[identity]) for identity in fill_ids),
+        )
+        received_at = ledger.canonical_timestamp(self.inputs.instant)
+        received_ns = self.inputs.monotonic_value
+        market_stamp = FreshnessStampV1(
+            process, received_at, received_ns, "NONE", None,
+            new_risk.market_data_sha256,
+        )
+        reconciliation_stamp = FreshnessStampV1(
+            process, received_at, received_ns, "NONE", None,
+            new_reconciliation.sha256,
+        )
+        state.replace(
+            risk_snapshot=new_risk,
+            reconciliation_snapshot=new_reconciliation,
+            market_freshness=market_stamp,
+            reconciliation_freshness=reconciliation_stamp,
+        )
+
+    @staticmethod
+    def _risk_variant(state: ReleaseEvaluationStateV1, **changes) -> ReleaseRiskSnapshotV1:
+        risk = state._snapshot()[6]
+        assert type(risk) is ReleaseRiskSnapshotV1
+        values = {
+            "fills": risk.fills,
+            "working_orders": risk.working_orders,
+            "unresolved_write_count": risk.unresolved_write_count,
+            "unresolved_write_exposure_usd": risk.unresolved_write_exposure_usd,
+            "market_data_snapshot": dict(risk.market_data_snapshot),
+        }
+        values.update(changes)
+        return ReleaseRiskSnapshotV1(**values)
+
+    @staticmethod
+    def _reconciliation_variant(
+        state: ReleaseEvaluationStateV1, **changes,
+    ) -> ReleaseReconciliationSnapshotV1:
+        reconciliation = state._snapshot()[7]
+        assert type(reconciliation) is ReleaseReconciliationSnapshotV1
+        values = {
+            field.name: getattr(reconciliation, field.name)
+            for field in reconciliation.__dataclass_fields__.values()
+        }
+        values.update(changes)
+        return ReleaseReconciliationSnapshotV1(**values)
+
+    def _assert_release_denied_after_change(self, change, predicate: str) -> None:
+        handle, _initial, state, lane, normal_gate, emergency_gate, *_ = self._begin_evaluated_release()
+        change(state, lane, normal_gate, emergency_gate)
+        assessment = handle.evaluate_release(state)
+        self.assertIs(assessment.predicate_vector[predicate], False)
+        before = handle.inspect_validated_projection().last_sequence
+        with self.assertRaises(LedgerError):
+            handle.record_risk_release(assessment)
+        self.assertEqual(handle.inspect_validated_projection().last_sequence, before)
+        handle.close()
+
+    def _assert_proof_blocked_after_change(self, change) -> None:
+        handle, assessment, state, lane, normal_gate, emergency_gate, proof_id, *_ = self._begin_evaluated_release()
+        handle.record_risk_release(assessment)
+        change(state, lane, normal_gate, emergency_gate)
+        with self.assertRaises(LedgerError):
+            handle.release_writer_proof(assessment)
+        projection = handle.inspect_validated_projection()
+        self.assertEqual(projection.writer_proof_state_by_proof_id[proof_id], "HELD")
+        handle.close()
+
+    def _assert_final_blocked_after_change(self, change) -> None:
+        handle, assessment, state, lane, normal_gate, emergency_gate, *_ = self._begin_evaluated_release()
+        handle.record_risk_release(assessment)
+        handle.release_writer_proof(assessment)
+        change(state, lane, normal_gate, emergency_gate)
+        with self.assertRaises(LedgerError):
+            handle.record_writer_eligible(assessment)
+        self.assertEqual(handle.inspect_validated_projection().risk_control_state, "SAFE_HELD")
+        handle.close()
+
+    def _assert_release_fault_prefix(
+        self,
+        *,
+        target: str,
+        stage: str,
+        unknown: bool,
+        expected_release: bool,
+        expected_proof: str,
+        expected_state: str,
+        expected_end: bool = False,
+    ) -> None:
+        proof_id, incident_id, safe_event, release_state, _lane, *_gates = self._build_synthetic_safe_held()
+        fault = _ArmableReleaseFault(stage, unknown=unknown)
+        acquisition = acquire_release_only(
+            self.binding,
+            canonical_repository_root=str(self.repository_root),
+            contract=self.contract,
+            expected_ledger_path=str(self.ledger_path),
+            clock=self.inputs.clock,
+            uuid_factory=self.inputs.uuid,
+            fault_hook=fault,
+            monotonic_clock_ns=self.inputs.monotonic_ns,
+            release_wall_clock=self.inputs.clock,
+        )
+        self.assertIsNotNone(acquisition.handle)
+        handle = acquisition.handle
+        assert handle is not None
+        assessment = handle.evaluate_release(release_state)
+        self.assertTrue(all(assessment.predicate_vector.values()), assessment.predicate_vector)
+        release_event = None
+        proof_event = None
+
+        try:
+            if target == "release":
+                fault.armed = True
+            release_event = handle.record_risk_release(assessment).events[-1]
+            if target == "proof":
+                fault.armed = True
+            proof_event = handle.release_writer_proof(assessment).events[-1]
+            projection = handle.inspect_validated_projection()
+            if target == "state":
+                fault.armed = True
+            handle.record_writer_eligible(assessment)
+            if target == "end":
+                fault.armed = True
+            handle.close()
+            self.fail("fault injection did not stop the release sequence")
+        except LedgerError:
+            pass
+        finally:
+            # Crash simulation: close the internal SQLite handles without
+            # fabricating a later RESTRICTED_SESSION_ENDED event.
+            locked = getattr(handle, "_ReleaseLedgerHandle__locked")
+            if not locked.closed:
+                locked.close()
+
+        reopened = ledger._open_locked(
+            self.binding,
+            conflict_domain_ref=self.contract.conflict_domain_ref,
+            expected_environment=self.contract.environment,
+            canonical_repository_root=self.repository_root,
+            expected_ledger_path=self.ledger_path,
+            clock=self.inputs.clock,
+            uuid_factory=self.inputs.uuid,
+        )
+        projection = reopened.projection()
+        self.assertEqual(assessment.release_id in projection.release_records_by_id, expected_release)
+        self.assertEqual(projection.writer_proof_state_by_proof_id[proof_id], expected_proof)
+        self.assertEqual(projection.risk_control_state, expected_state)
+        self.assertEqual(projection.active_restricted_session_id is None, expected_end)
+        self.assertEqual(projection.unresolved_write_request_ids, ())
+        reopened.close()
+
+    def _prepare_case_a_live_writer(self, *, fault_hook=ledger._noop_fault_hook):
+        # Reuse the exact positive release path to establish the only durable
+        # predecessor state from which a normal ws_ may be opened.
+        self.test_fully_eligible_synthetic_durable_release_reaches_writer_eligible()
+        locked = ledger._open_locked(
+            self.binding,
+            conflict_domain_ref=self.contract.conflict_domain_ref,
+            expected_environment=self.contract.environment,
+            canonical_repository_root=self.repository_root,
+            expected_ledger_path=self.ledger_path,
+            clock=self.inputs.clock,
+            uuid_factory=self.inputs.uuid,
+            fault_hook=fault_hook,
+        )
+        session_id = start_writer_session(locked, prior_session_state="CLEAN")
+        monotonic = 1_000_000_000
+
+        def tick() -> int:
+            nonlocal monotonic
+            monotonic += 1
+            return monotonic
+
+        gate = WriterEligibilityGate(
+            monotonic_clock_ns=tick,
+            wall_clock=lambda: datetime(2026, 8, 13, 14, tzinfo=timezone.utc),
+            uuid_factory=self.inputs.uuid,
+        )
+        permit = gate.issue_permit(
+            locked=locked,
+            normal_writer_session_id=session_id,
+            assessment=WriterEligibilityAssessment(
+                "ra_" + "1" * 32, "CREATE_ORDER_V2", "req_" + "2" * 32,
+                "a" * 64, "b" * 64, "a" * 64, "d" * 64, "e" * 64,
+                "f" * 64, "0" * 64, 2, 2_000_000_000, True,
+            ),
+            intent_payload={"request_id": "req_" + "2" * 32},
+            prepared_payload={
+                "request_id": "req_" + "2" * 32,
+                "operation_name": "CREATE_ORDER_V2",
+                "prepared_request_sha256": "a" * 64,
+            },
+        )
+        return locked, session_id, gate, permit
+
     def test_production_evidence_identities_are_frozen(self) -> None:
         self.assertEqual(
             [(item.raw_bytes, item.sha256) for item in PRODUCTION_EVIDENCE_EXPECTATIONS],
@@ -502,6 +1130,1455 @@ class KalshiLedgerBindingTestCase(unittest.TestCase):
             FailureCode.LEGACY_IMPORT_ONLY_ACQUISITION_REJECTED,
         )
         acquisition.handle.close()
+
+    def test_emergency_and_release_acquisitions_are_narrow_sequential_and_replayable(self) -> None:
+        self.initialize()
+        imported = self.acquire_import()
+        imported.handle.commit_exact_legacy_import(
+            imported.handle.validate_legacy_evidence(self.evidence)
+        )
+        imported.handle.close()
+
+        emergency = acquire_emergency_control_only(
+            self.binding,
+            canonical_repository_root=str(self.repository_root),
+            contract=self.contract,
+            expected_ledger_path=str(self.ledger_path),
+            clock=self.inputs.clock,
+            uuid_factory=self.inputs.uuid,
+        )
+        self.assertIsNotNone(emergency.handle)
+        self.assertTrue(emergency.handle.restricted_session_id.startswith("rs_"))
+        self.assertEqual(
+            {name for name in dir(emergency.handle) if not name.startswith("_")},
+            {
+                "close", "inspect_validated_projection", "open_emergency_action",
+                "record_cancel_intent", "record_cancel_result", "record_cancel_send_boundary",
+                "record_execution_halt", "record_fill_observation", "record_order_observation",
+                "record_reconciliation", "record_risk_control_state_changed",
+                "record_writer_proof_held", "restricted_session_id",
+            },
+        )
+        for prohibited in ("append_batch", "send", "sign", "credentials", "release_writer_proof"):
+            self.assertFalse(hasattr(emergency.handle, prohibited))
+        concurrent = acquire_release_only(
+            self.binding,
+            canonical_repository_root=str(self.repository_root),
+            contract=self.contract,
+            expected_ledger_path=str(self.ledger_path),
+        )
+        self.assertIsNone(concurrent.handle)
+        emergency.handle.close()
+
+        release = acquire_release_only(
+            self.binding,
+            canonical_repository_root=str(self.repository_root),
+            contract=self.contract,
+            expected_ledger_path=str(self.ledger_path),
+            clock=self.inputs.clock,
+            uuid_factory=self.inputs.uuid,
+        )
+        self.assertIsNotNone(release.handle)
+        self.assertEqual(
+            {name for name in dir(release.handle) if not name.startswith("_")},
+            {"close", "evaluate_release", "inspect_validated_projection", "record_risk_release", "record_writer_eligible", "release_writer_proof", "restricted_session_id"},
+        )
+        for prohibited in ("append_batch", "send", "cancel", "record_cancel_intent", "record_order_observation"):
+            self.assertFalse(hasattr(release.handle, prohibited))
+        with self.assertRaises(LedgerError) as historical_release:
+            release.handle.record_risk_release({})
+        self.assertEqual(
+            historical_release.exception.code,
+            FailureCode.RELEASE_PREDICATE_FAILED,
+        )
+        release.handle.close()
+
+        replay = acquire_emergency_control_only(
+            self.binding,
+            canonical_repository_root=str(self.repository_root),
+            contract=self.contract,
+            expected_ledger_path=str(self.ledger_path),
+            clock=self.inputs.clock,
+            uuid_factory=self.inputs.uuid,
+        )
+        self.assertIsNotNone(replay.handle)
+        projection = replay.handle.inspect_validated_projection()
+        self.assertEqual(projection.active_restricted_session_id, replay.handle.restricted_session_id)
+        replay.handle.close()
+
+    def test_fully_eligible_synthetic_durable_release_reaches_writer_eligible(self) -> None:
+        proof_id, incident_id, safe_event, release_state, _lane, *_gates = self._build_synthetic_safe_held()
+        release = acquire_release_only(
+            self.binding,
+            canonical_repository_root=str(self.repository_root),
+            contract=self.contract,
+            expected_ledger_path=str(self.ledger_path),
+            clock=self.inputs.clock,
+            uuid_factory=self.inputs.uuid,
+            monotonic_clock_ns=self.inputs.monotonic_ns,
+            release_wall_clock=self.inputs.clock,
+        )
+        self.assertIsNotNone(release.handle)
+        handle = release.handle
+        assert handle is not None
+        assessment = handle.evaluate_release(release_state)
+        self.assertEqual(len(assessment.predicate_vector), 19)
+        self.assertTrue(all(assessment.predicate_vector.values()), assessment.predicate_vector)
+        release_result = handle.record_risk_release(assessment)
+        release_event = release_result.events[-1]
+        self.assertEqual(release_event.payload["predicate_vector"], dict(assessment.predicate_vector))
+        self.assertEqual(release_event.payload["risk_snapshot_sha256"], assessment.risk_snapshot_sha256)
+        self.assertEqual(
+            release_event.payload["reconciliation_snapshot_sha256"],
+            assessment.reconciliation_snapshot_sha256,
+        )
+        projection = handle.inspect_validated_projection()
+        self.assertEqual(projection.writer_proof_state_by_proof_id[proof_id], "HELD")
+        self.assertEqual(projection.risk_control_state, "SAFE_HELD")
+
+        proof_result = handle.release_writer_proof(assessment)
+        proof_event = proof_result.events[-1]
+        projection = handle.inspect_validated_projection()
+        self.assertEqual(projection.writer_proof_state_by_proof_id[proof_id], "RELEASED")
+        self.assertEqual(projection.risk_control_state, "SAFE_HELD")
+
+        eligible_result = handle.record_writer_eligible(assessment)
+        self.assertGreater(eligible_result.events[-1].sequence, proof_event.sequence)
+        self.assertEqual(handle.inspect_validated_projection().risk_control_state, "WRITER_ELIGIBLE")
+        handle.close()
+
+        reopened = ledger._open_locked(
+            self.binding,
+            conflict_domain_ref=self.contract.conflict_domain_ref,
+            expected_environment=self.contract.environment,
+            canonical_repository_root=self.repository_root,
+            expected_ledger_path=self.ledger_path,
+            clock=self.inputs.clock,
+            uuid_factory=self.inputs.uuid,
+        )
+        final = reopened.projection()
+        self.assertEqual(final.risk_control_state, "WRITER_ELIGIBLE")
+        self.assertEqual(final.writer_proof_state_by_proof_id[proof_id], "RELEASED")
+        self.assertIsNone(final.active_restricted_session_id)
+        reopened.close()
+
+    def test_rel_assess_01_caller_vector_rejected_before_append(self) -> None:
+        handle, assessment, *_ = self._begin_evaluated_release()
+        caller_vector = {key: True for key in assessment.predicate_vector}
+        before = handle.inspect_validated_projection().last_sequence
+        with self.assertRaises(LedgerError):
+            handle.record_risk_release({"predicate_vector": caller_vector})  # type: ignore[arg-type]
+        self.assertEqual(handle.inspect_validated_projection().last_sequence, before)
+        handle.close()
+
+    def test_rel_assess_02_arbitrary_snapshot_hashes_rejected_before_append(self) -> None:
+        handle, assessment, *_ = self._begin_evaluated_release()
+        before = handle.inspect_validated_projection().last_sequence
+        with self.assertRaises(TypeError):
+            handle.record_risk_release(
+                assessment,
+                risk_snapshot_sha256="c" * 64,
+                reconciliation_snapshot_sha256="b" * 64,
+            )
+        self.assertEqual(handle.inspect_validated_projection().last_sequence, before)
+        handle.close()
+
+    def test_rel_assess_03_valid_assessment_is_opaque_derived_and_nonserializable(self) -> None:
+        handle, assessment, *_ = self._begin_evaluated_release()
+        self.assertTrue(all(assessment.predicate_vector.values()))
+        with self.assertRaises(LedgerError):
+            ReleaseAssessmentV1(object())
+        for operation in (copy.copy, copy.deepcopy):
+            with self.assertRaises(TypeError):
+                operation(assessment)
+        event = handle.record_risk_release(assessment).events[-1]
+        self.assertEqual(event.payload["predicate_vector"], dict(assessment.predicate_vector))
+        self.assertEqual(event.payload["risk_snapshot_sha256"], assessment.risk_snapshot_sha256)
+        self.assertEqual(
+            event.payload["reconciliation_snapshot_sha256"],
+            assessment.reconciliation_snapshot_sha256,
+        )
+        handle.close()
+
+    def test_rel_assess_04_missing_risk_config_denied(self) -> None:
+        self._assert_release_denied_after_change(
+            lambda state, *_: state.replace(risk_config=None),
+            "risk_config_complete_valid",
+        )
+
+    def test_rel_assess_05_config_hash_mismatch_denied(self) -> None:
+        def change(state, *_):
+            config = state._snapshot()[5]
+            assert type(config) is RiskLimitConfigV1
+            state.replace(
+                risk_config=replace(
+                    config,
+                    per_order=replace(config.per_order, max_contracts=Decimal("11")),
+                )
+            )
+        self._assert_release_denied_after_change(change, "risk_config_complete_valid")
+
+    def test_rel_assess_06_unknown_unbounded_exposure_denied(self) -> None:
+        self._assert_release_denied_after_change(
+            lambda state, *_: state.replace(
+                risk_snapshot=self._risk_variant(
+                    state, unresolved_write_exposure_usd="UNKNOWN_UNBOUNDED",
+                )
+            ),
+            "conservative_exposure_finite_and_within_limits",
+        )
+
+    def test_rel_assess_07_one_decimal_quantum_over_limit_denied(self) -> None:
+        def change(state, *_):
+            risk = self._risk_variant(state)
+            over = replace(
+                risk.fills[0], quantity=Decimal("20.01"), yes_price=Decimal("1.0000"),
+            )
+            state.replace(risk_snapshot=self._risk_variant(state, fills=(over,)))
+        self._assert_release_denied_after_change(
+            change, "conservative_exposure_finite_and_within_limits",
+        )
+
+    def test_rel_assess_08_market_freshness_boundary_then_stale_denied(self) -> None:
+        handle, initial, state, *_ = self._begin_evaluated_release()
+        self.assertTrue(initial.predicate_vector["market_data_fresh"])
+        self.inputs.advance_ms(1_001)
+        stale = handle.evaluate_release(state)
+        self.assertFalse(stale.predicate_vector["market_data_fresh"])
+        with self.assertRaises(LedgerError):
+            handle.record_risk_release(stale)
+        handle.close()
+
+    def test_rel_assess_09_stale_reconciliation_denied(self) -> None:
+        self._assert_release_denied_after_change(
+            lambda _state, *_: self.inputs.advance_ms(1_001),
+            "reconciliation_fresh",
+        )
+
+    def test_rel_assess_10_wrong_process_freshness_denied(self) -> None:
+        def change(state, *_):
+            snapshot = state._snapshot()
+            market = snapshot[8]
+            reconciliation = snapshot[9]
+            assert type(market) is FreshnessStampV1
+            assert type(reconciliation) is FreshnessStampV1
+            state.replace(
+                market_freshness=replace(market, process_instance_id="proc_" + "9" * 32),
+                reconciliation_freshness=replace(
+                    reconciliation, process_instance_id="proc_" + "9" * 32,
+                ),
+            )
+        self._assert_release_denied_after_change(change, "market_data_fresh")
+
+    def test_rel_assess_11_unreconciled_known_active_order_denied(self) -> None:
+        self._assert_release_denied_after_change(
+            lambda state, *_: state.replace(
+                reconciliation_snapshot=self._reconciliation_variant(
+                    state, reconciled_order_ids=(),
+                )
+            ),
+            "known_active_orders_reconciled",
+        )
+
+    def test_rel_assess_12_unreconciled_fill_denied(self) -> None:
+        self._assert_release_denied_after_change(
+            lambda state, *_: state.replace(
+                reconciliation_snapshot=self._reconciliation_variant(
+                    state, reconciled_fill_ids=(),
+                )
+            ),
+            "fills_reconciled",
+        )
+
+    def test_rel_assess_13_identity_conflict_denied(self) -> None:
+        self._assert_release_denied_after_change(
+            lambda state, *_: state.replace(
+                reconciliation_snapshot=self._reconciliation_variant(
+                    state, identity_conflict_ids=("synthetic-conflict",),
+                )
+            ),
+            "zero_identity_conflicts",
+        )
+
+    def test_rel_assess_14_unresolved_emergency_cancel_denied(self) -> None:
+        self._assert_release_denied_after_change(
+            lambda state, *_: state.replace(
+                reconciliation_snapshot=self._reconciliation_variant(
+                    state, unresolved_emergency_cancel_attempt_ids=("ca_" + "1" * 32,),
+                )
+            ),
+            "no_unresolved_emergency_cancel",
+        )
+
+    def test_rel_assess_15_venue_defense_failure_denied(self) -> None:
+        def change(state, *_):
+            config = state._snapshot()[5]
+            assert type(config) is RiskLimitConfigV1
+            state.replace(risk_config=replace(
+                config, venue_defense=self._required_defense_policy(),
+            ))
+
+        self._assert_release_denied_after_change(
+            change,
+            "venue_defense_pass",
+        )
+
+    def test_rel_assess_16_genuine_outstanding_normal_permit_denied(self) -> None:
+        def change(state, _lane, normal_gate, _emergency_gate):
+            config = state._snapshot()[5]
+            assert type(config) is RiskLimitConfigV1
+            assessment = WriterEligibilityAssessment(
+                "ra_" + "1" * 32, "CREATE_ORDER_V2", "req_" + "2" * 32,
+                "a" * 64, "b" * 64, config.sha256, "d" * 64, "e" * 64,
+                "f" * 64, "0" * 64, 7, self.inputs.monotonic_value + 1_000_000_000, True,
+            )
+            normal_gate.issue_permit(
+                locked=_PermitLocked(config.sha256),
+                normal_writer_session_id="ws_" + "1" * 32,
+                assessment=assessment,
+                intent_payload={"request_id": "req_" + "2" * 32},
+                prepared_payload={
+                    "request_id": "req_" + "2" * 32,
+                    "operation_name": "CREATE_ORDER_V2",
+                    "prepared_request_sha256": "a" * 64,
+                },
+            )
+        self._assert_release_denied_after_change(change, "no_outstanding_permits")
+
+    def test_rel_assess_17_genuine_outstanding_emergency_action_denied(self) -> None:
+        self._assert_release_denied_after_change(
+            lambda _state, lane, *_: lane.reserve(
+                "ea_" + "1" * 32, "synthetic-order-1", self.inputs.monotonic_value // 1_000_000,
+            ),
+            "no_outstanding_permits",
+        )
+
+    def test_rel_assess_18_historical_incident_remains_denied_and_unbounded(self) -> None:
+        self.initialize()
+        imported = self.acquire_import()
+        imported.handle.commit_exact_legacy_import(
+            imported.handle.validate_legacy_evidence(self.evidence)
+        )
+        imported.handle.close()
+        emergency = acquire_emergency_control_only(
+            self.binding,
+            canonical_repository_root=str(self.repository_root),
+            contract=self.contract,
+            expected_ledger_path=str(self.ledger_path),
+            clock=self.inputs.clock,
+            uuid_factory=self.inputs.uuid,
+        )
+        normal_gate = WriterEligibilityGate(
+            monotonic_clock_ns=self.inputs.monotonic_ns,
+            wall_clock=self.inputs.clock,
+            uuid_factory=self.inputs.uuid,
+        )
+        lane = EmergencyRateLane(EmergencyRateConfigV1(2, 1_000, 1, 500, 1, 10, 100))
+        emergency_gate = EmergencyCancelGate(
+            handle=emergency.handle,
+            rate_lane=lane,
+            process_instance_id=normal_gate.process_instance_id,
+            monotonic_clock_ns=self.inputs.monotonic_ns,
+            wall_clock=self.inputs.clock,
+            uuid_factory=self.inputs.uuid,
+        )
+        emergency.handle.close()
+        risk = ReleaseRiskSnapshotV1((), (), 1, "UNKNOWN_UNBOUNDED", {"historical": True})
+        reconciliation = ReleaseReconciliationSnapshotV1((), (), (), (), (), (), ())
+        state = ReleaseEvaluationStateV1(
+            process_instance_id=normal_gate.process_instance_id,
+            incident_id=CURRENT_INCIDENT_ID,
+            writer_proof_id=CURRENT_WRITER_PROOF_ID,
+            risk_config=None,
+            risk_snapshot=risk,
+            reconciliation_snapshot=reconciliation,
+            market_freshness=None,
+            reconciliation_freshness=None,
+            venue_defense_evidence=None,
+            normal_gate=normal_gate,
+            emergency_gate=emergency_gate,
+        )
+        release = acquire_release_only(
+            self.binding,
+            canonical_repository_root=str(self.repository_root),
+            contract=self.contract,
+            expected_ledger_path=str(self.ledger_path),
+            clock=self.inputs.clock,
+            uuid_factory=self.inputs.uuid,
+            monotonic_clock_ns=self.inputs.monotonic_ns,
+            release_wall_clock=self.inputs.clock,
+        )
+        assessment = release.handle.evaluate_release(state)
+        self.assertFalse(assessment.predicate_vector["writer_proof_release_eligible"])
+        self.assertFalse(assessment.predicate_vector["protected_unresolved_legacy_write_count_zero"])
+        self.assertFalse(assessment.predicate_vector["conservative_exposure_finite_and_within_limits"])
+        self.assertIsNone(HISTORICAL_INCIDENT_CANCEL_TARGET)
+        self.assertFalse(HISTORICAL_INCIDENT_WRITER_RELEASE_ELIGIBLE)
+        self.assertEqual(HISTORICAL_UNRESOLVED_EXPOSURE, "UNKNOWN_UNBOUNDED")
+        with self.assertRaises(LedgerError):
+            release.handle.record_risk_release(assessment)
+        release.handle.close()
+
+    def test_rel_change_01_market_stale_after_release_blocks_proof(self) -> None:
+        self._assert_proof_blocked_after_change(
+            lambda _state, *_: self.inputs.advance_ms(1_001)
+        )
+
+    def test_rel_change_02_reconciliation_stale_after_release_blocks_proof(self) -> None:
+        self._assert_proof_blocked_after_change(
+            lambda _state, *_: self.inputs.advance_ms(1_001)
+        )
+
+    def test_rel_change_03_config_identity_change_after_release_blocks_proof(self) -> None:
+        self._assert_proof_blocked_after_change(
+            lambda state, *_: state.replace(risk_config=None)
+        )
+
+    def test_rel_change_04_exposure_above_limit_after_release_blocks_proof(self) -> None:
+        def change(state, *_):
+            risk = self._risk_variant(state)
+            state.replace(risk_snapshot=self._risk_variant(
+                state,
+                fills=(replace(risk.fills[0], quantity=Decimal("20.01"), yes_price=Decimal("1.0000")),),
+            ))
+        self._assert_proof_blocked_after_change(change)
+
+    def test_rel_change_05_new_unresolved_emergency_after_release_blocks_proof(self) -> None:
+        self._assert_proof_blocked_after_change(
+            lambda state, *_: state.replace(
+                reconciliation_snapshot=self._reconciliation_variant(
+                    state, unresolved_emergency_cancel_attempt_ids=("ca_" + "2" * 32,),
+                )
+            )
+        )
+
+    def test_rel_change_06_new_outstanding_permit_after_release_blocks_proof(self) -> None:
+        self._assert_proof_blocked_after_change(
+            lambda _state, lane, *_: lane.reserve(
+                "ea_" + "2" * 32, "synthetic-order-1", self.inputs.monotonic_value // 1_000_000,
+            )
+        )
+
+    def test_rel_change_07_market_stale_after_proof_blocks_writer_eligible(self) -> None:
+        self._assert_final_blocked_after_change(
+            lambda _state, *_: self.inputs.advance_ms(1_001)
+        )
+
+    def test_rel_change_08_reconciliation_identity_change_after_proof_blocks_final(self) -> None:
+        self._assert_final_blocked_after_change(
+            lambda state, *_: state.replace(
+                reconciliation_snapshot=self._reconciliation_variant(
+                    state, reconciled_fill_ids=(),
+                )
+            )
+        )
+
+    def test_rel_change_09_config_change_after_proof_blocks_final(self) -> None:
+        self._assert_final_blocked_after_change(
+            lambda state, *_: state.replace(risk_config=None)
+        )
+
+    def test_rel_change_10_new_unresolved_emergency_after_proof_blocks_final(self) -> None:
+        self._assert_final_blocked_after_change(
+            lambda state, *_: state.replace(
+                reconciliation_snapshot=self._reconciliation_variant(
+                    state, unresolved_emergency_cancel_attempt_ids=("ca_" + "3" * 32,),
+                )
+            )
+        )
+
+    def _assert_current_state_denied(
+        self, state: ReleaseEvaluationStateV1, predicate: str,
+    ) -> None:
+        handle = self._acquire_release_for_state(state)
+        assessment = handle.evaluate_release(state)
+        self.assertFalse(assessment.predicate_vector[predicate])
+        before = handle.inspect_validated_projection().last_sequence
+        with self.assertRaises(LedgerError):
+            handle.record_risk_release(assessment)
+        self.assertEqual(handle.inspect_validated_projection().last_sequence, before)
+        handle.close()
+
+    def test_rel_truth_01_omitted_active_order_denied(self) -> None:
+        *_, state, _lane, _normal, _emergency = self._build_synthetic_safe_held()
+        self._append_trusted_order("synthetic-order-2", {
+            "order_id": "synthetic-order-2", "status": "resting",
+            "remaining_count_fp": "1.00", "market": "SYNTHETIC",
+            "outcome_side": "YES", "yes_price": Decimal("0.60"),
+            "cancel_order_on_pause": True,
+        })
+        self._assert_current_state_denied(state, "known_active_orders_reconciled")
+
+    def test_rel_truth_02_omitted_canonical_fill_denied(self) -> None:
+        *_, state, _lane, _normal, _emergency = self._build_synthetic_safe_held()
+        self._append_trusted_fill(
+            fill_id="synthetic-fill-2", order_id="synthetic-order-1",
+            quantity=Decimal("1.00"), yes_price=Decimal("0.30"),
+        )
+        self._assert_current_state_denied(state, "fills_reconciled")
+
+    def test_rel_truth_03_omitted_order_cannot_hide_over_limit_exposure(self) -> None:
+        *_, state, _lane, _normal, _emergency = self._build_synthetic_safe_held()
+        self._append_trusted_order("synthetic-order-2", {
+            "order_id": "synthetic-order-2", "status": "resting",
+            "remaining_count_fp": "10.01", "market": "SYNTHETIC",
+            "outcome_side": "YES", "yes_price": Decimal("1.00"),
+            "cancel_order_on_pause": True,
+        })
+        handle = self._acquire_release_for_state(state)
+        assessment = handle.evaluate_release(state)
+        self.assertFalse(assessment.predicate_vector["known_active_orders_reconciled"])
+        self.assertFalse(
+            assessment.predicate_vector[
+                "conservative_exposure_finite_and_within_limits"
+            ]
+        )
+        with self.assertRaises(LedgerError):
+            handle.record_risk_release(assessment)
+        handle.close()
+
+    def test_rel_truth_04_omitted_fill_cannot_hide_over_limit_exposure(self) -> None:
+        *_, state, _lane, _normal, _emergency = self._build_synthetic_safe_held()
+        self._append_trusted_fill(
+            fill_id="synthetic-fill-2", order_id="synthetic-order-1",
+            quantity=Decimal("21.00"), yes_price=Decimal("1.00"),
+        )
+        handle = self._acquire_release_for_state(state)
+        assessment = handle.evaluate_release(state)
+        self.assertFalse(assessment.predicate_vector["fills_reconciled"])
+        self.assertFalse(
+            assessment.predicate_vector[
+                "conservative_exposure_finite_and_within_limits"
+            ]
+        )
+        with self.assertRaises(LedgerError):
+            handle.record_risk_release(assessment)
+        handle.close()
+
+    def test_rel_truth_05_phantom_order_denied(self) -> None:
+        *_, state, _lane, _normal, _emergency = self._build_synthetic_safe_held()
+        risk = state._snapshot()[6]
+        reconciliation = state._snapshot()[7]
+        assert type(risk) is ReleaseRiskSnapshotV1
+        assert type(reconciliation) is ReleaseReconciliationSnapshotV1
+        phantom = WorkingOrderV1(
+            "SYNTHETIC", "phantom-order", "YES", Decimal("1.00"), Decimal("0.50"),
+        )
+        refs = dict(reconciliation.order_evidence_event_ids)
+        refs[phantom.order_id] = "evt_" + "9" * 64
+        self._replace_complete_release_universe(
+            state, working_orders=risk.working_orders + (phantom,), fills=risk.fills,
+            order_event_ids=refs,
+            fill_event_ids=dict(reconciliation.fill_evidence_event_ids),
+        )
+        self._assert_current_state_denied(state, "known_active_orders_reconciled")
+
+    def test_rel_truth_06_phantom_fill_denied(self) -> None:
+        *_, state, _lane, _normal, _emergency = self._build_synthetic_safe_held()
+        risk = state._snapshot()[6]
+        reconciliation = state._snapshot()[7]
+        assert type(risk) is ReleaseRiskSnapshotV1
+        assert type(reconciliation) is ReleaseReconciliationSnapshotV1
+        phantom = EconomicFillV1(
+            "SYNTHETIC", "phantom-fill", "YES", Decimal("1.00"),
+            Decimal("0.50"), "2026-08-13T13:00:02.000000Z",
+        )
+        refs = dict(reconciliation.fill_evidence_event_ids)
+        refs[phantom.fill_id] = "evt_" + "8" * 64
+        self._replace_complete_release_universe(
+            state, working_orders=risk.working_orders, fills=risk.fills + (phantom,),
+            order_event_ids=dict(reconciliation.order_evidence_event_ids),
+            fill_event_ids=refs,
+        )
+        self._assert_current_state_denied(state, "fills_reconciled")
+
+    def test_rel_truth_07_earlier_resting_later_terminal_is_not_active(self) -> None:
+        *_, state, _lane, _normal, _emergency = self._build_synthetic_safe_held()
+        self._append_trusted_order("synthetic-order-1", {
+            "order_id": "synthetic-order-1", "status": "canceled",
+            "remaining_count_fp": "0.00", "market": "SYNTHETIC",
+            "outcome_side": "YES", "yes_price": Decimal("0.50"),
+            "cancel_order_on_pause": True,
+        })
+        risk = state._snapshot()[6]
+        reconciliation = state._snapshot()[7]
+        assert type(risk) is ReleaseRiskSnapshotV1
+        assert type(reconciliation) is ReleaseReconciliationSnapshotV1
+        self._replace_complete_release_universe(
+            state, working_orders=(), fills=risk.fills, order_event_ids={},
+            fill_event_ids=dict(reconciliation.fill_evidence_event_ids),
+        )
+        handle = self._acquire_release_for_state(state)
+        assessment = handle.evaluate_release(state)
+        self.assertTrue(assessment.predicate_vector["known_active_orders_reconciled"])
+        self.assertTrue(
+            assessment.predicate_vector[
+                "conservative_exposure_finite_and_within_limits"
+            ]
+        )
+        handle.close()
+
+    def test_rel_truth_08_latest_resting_remains_active_and_economic(self) -> None:
+        handle, assessment, state, *_ = self._begin_evaluated_release()
+        reconciliation = state._snapshot()[7]
+        risk = state._snapshot()[6]
+        assert type(reconciliation) is ReleaseReconciliationSnapshotV1
+        assert type(risk) is ReleaseRiskSnapshotV1
+        self.assertEqual(
+            reconciliation.authoritative_known_active_order_ids,
+            ("synthetic-order-1",),
+        )
+        self.assertEqual(tuple(item.order_id for item in risk.working_orders), (
+            "synthetic-order-1",
+        ))
+        self.assertTrue(assessment.predicate_vector["known_active_orders_reconciled"])
+        self.assertTrue(
+            assessment.predicate_vector[
+                "conservative_exposure_finite_and_within_limits"
+            ]
+        )
+        handle.close()
+
+    def test_rel_truth_09_conflicting_trusted_order_identity_denied(self) -> None:
+        *_, state, _lane, _normal, _emergency = self._build_synthetic_safe_held()
+        self._append_trusted_order("synthetic-order-1", {
+            "order_id": "different-order", "status": "resting",
+            "remaining_count_fp": "1.00", "market": "SYNTHETIC",
+            "outcome_side": "YES", "yes_price": Decimal("0.50"),
+            "cancel_order_on_pause": True,
+        })
+        self._assert_current_state_denied(state, "zero_identity_conflicts")
+
+    def test_rel_truth_10_complete_exact_authoritative_universe_succeeds(self) -> None:
+        *_, state, _lane, _normal, _emergency = self._build_synthetic_safe_held()
+        order_event = self._append_trusted_order("synthetic-order-2", {
+            "order_id": "synthetic-order-2", "status": "resting",
+            "remaining_count_fp": "1.00", "market": "SYNTHETIC",
+            "outcome_side": "NO", "yes_price": Decimal("0.60"),
+            "cancel_order_on_pause": True,
+        })
+        fill_event = self._append_trusted_fill(
+            fill_id="synthetic-fill-2", order_id="synthetic-order-2",
+            quantity=Decimal("1.00"), yes_price=Decimal("0.30"),
+            outcome_side="NO",
+        )
+        risk = state._snapshot()[6]
+        reconciliation = state._snapshot()[7]
+        assert type(risk) is ReleaseRiskSnapshotV1
+        assert type(reconciliation) is ReleaseReconciliationSnapshotV1
+        order_two = WorkingOrderV1(
+            "SYNTHETIC", "synthetic-order-2", "NO", Decimal("1.00"), Decimal("0.60"),
+        )
+        fill_two = EconomicFillV1(
+            "SYNTHETIC", "synthetic-fill-2", "NO", Decimal("1.00"),
+            Decimal("0.30"), "2026-08-13T13:00:01.000000Z",
+        )
+        order_refs = dict(reconciliation.order_evidence_event_ids)
+        order_refs[order_two.order_id] = order_event.event_id
+        fill_refs = dict(reconciliation.fill_evidence_event_ids)
+        fill_refs[fill_two.fill_id] = fill_event.event_id
+        self._replace_complete_release_universe(
+            state, working_orders=risk.working_orders + (order_two,),
+            fills=risk.fills + (fill_two,), order_event_ids=order_refs,
+            fill_event_ids=fill_refs,
+        )
+        handle = self._acquire_release_for_state(state)
+        assessment = handle.evaluate_release(state)
+        for predicate in (
+            "known_active_orders_reconciled", "fills_reconciled",
+            "conservative_exposure_finite_and_within_limits", "venue_defense_pass",
+        ):
+            self.assertTrue(assessment.predicate_vector[predicate], predicate)
+        handle.close()
+
+    @staticmethod
+    def _required_defense_policy() -> VenueDefensePolicy:
+        return VenueDefensePolicy(
+            "REQUIRED_FOR_EXPERIMENT", "synthetic-group-G", True,
+            "NO_SAFETY_CREDIT", "NO_SAFETY_CREDIT",
+        )
+
+    def test_rel_defense_01_forged_required_mode_object_denied(self) -> None:
+        *_, state, _lane, _normal, _emergency = self._build_synthetic_safe_held(
+            venue_policy=self._required_defense_policy(),
+        )
+        valid = self._venue_proof_for_state(
+            state, group_id="synthetic-group-G", group_state="ACTIVE",
+            member_order_ids=("synthetic-order-1",),
+            cancel_order_on_pause_order_ids=("synthetic-order-1",),
+        )
+        assert type(valid) is VenueDefenseEvidenceV1
+        forged_fields = {
+            field.name: getattr(valid, field.name)
+            for field in valid.__dataclass_fields__.values()
+        }
+        with self.assertRaises(LedgerError):
+            VenueDefenseEvidenceV1(object(), **forged_fields)
+        state.replace(venue_defense_evidence=None)
+        self._assert_current_state_denied(state, "venue_defense_pass")
+
+    def test_rel_defense_02_validated_wrong_group_denied(self) -> None:
+        *_, state, _lane, _normal, _emergency = self._build_synthetic_safe_held(
+            venue_policy=self._required_defense_policy(),
+        )
+        state.replace(venue_defense_evidence=self._venue_proof_for_state(
+            state, group_id="synthetic-group-H", group_state="ACTIVE",
+            member_order_ids=("synthetic-order-1",),
+            cancel_order_on_pause_order_ids=("synthetic-order-1",),
+        ))
+        self._assert_current_state_denied(state, "venue_defense_pass")
+
+    def test_rel_defense_03_missing_active_order_membership_denied(self) -> None:
+        *_, state, _lane, _normal, _emergency = self._build_synthetic_safe_held(
+            venue_policy=self._required_defense_policy(),
+        )
+        state.replace(venue_defense_evidence=self._venue_proof_for_state(
+            state, group_id="synthetic-group-G", group_state="ACTIVE",
+            member_order_ids=(),
+            cancel_order_on_pause_order_ids=("synthetic-order-1",),
+        ))
+        self._assert_current_state_denied(state, "venue_defense_pass")
+
+    def test_rel_defense_04_conflicting_membership_denied_and_held(self) -> None:
+        *_, state, _lane, _normal, _emergency = self._build_synthetic_safe_held(
+            venue_policy=self._required_defense_policy(),
+        )
+        state.replace(venue_defense_evidence=self._venue_proof_for_state(
+            state, group_id="synthetic-group-G", group_state="ACTIVE",
+            member_order_ids=("synthetic-order-1",),
+            cancel_order_on_pause_order_ids=("synthetic-order-1",),
+            conflict_order_ids=("synthetic-order-1",),
+        ))
+        handle = self._acquire_release_for_state(state)
+        assessment = handle.evaluate_release(state)
+        self.assertFalse(assessment.predicate_vector["venue_defense_pass"])
+        self.assertFalse(assessment.predicate_vector["zero_identity_conflicts"])
+        with self.assertRaises(LedgerError):
+            handle.record_risk_release(assessment)
+        handle.close()
+
+    def test_rel_defense_05_stale_validated_proof_denied(self) -> None:
+        *_, state, _lane, _normal, _emergency = self._build_synthetic_safe_held(
+            venue_policy=self._required_defense_policy(),
+        )
+        self.inputs.advance_ms(1_001)
+        snapshot = state._snapshot()
+        process, risk, reconciliation = snapshot[2], snapshot[6], snapshot[7]
+        assert type(process) is str
+        assert type(risk) is ReleaseRiskSnapshotV1
+        assert type(reconciliation) is ReleaseReconciliationSnapshotV1
+        now = ledger.canonical_timestamp(self.inputs.instant)
+        state.replace(
+            market_freshness=FreshnessStampV1(
+                process, now, self.inputs.monotonic_value, "NONE", None,
+                risk.market_data_sha256,
+            ),
+            reconciliation_freshness=FreshnessStampV1(
+                process, now, self.inputs.monotonic_value, "NONE", None,
+                reconciliation.sha256,
+            ),
+        )
+        handle = self._acquire_release_for_state(state)
+        assessment = handle.evaluate_release(state)
+        self.assertTrue(assessment.predicate_vector["market_data_fresh"])
+        self.assertTrue(assessment.predicate_vector["reconciliation_fresh"])
+        self.assertFalse(assessment.predicate_vector["venue_defense_pass"])
+        handle.close()
+
+    def test_rel_defense_06_validated_required_mode_assertion_still_denied(self) -> None:
+        *_, state, _lane, _normal, _emergency = self._build_synthetic_safe_held(
+            venue_policy=self._required_defense_policy(),
+        )
+        state.replace(venue_defense_evidence=self._venue_proof_for_state(
+            state, group_id="synthetic-group-G", group_state="ACTIVE",
+            member_order_ids=("synthetic-order-1",),
+            cancel_order_on_pause_order_ids=("synthetic-order-1",),
+        ))
+        handle = self._acquire_release_for_state(state)
+        assessment = handle.evaluate_release(state)
+        self.assertFalse(assessment.predicate_vector["venue_defense_pass"])
+        handle.close()
+
+    def test_rel_defense_07_not_required_passes_without_group_proof(self) -> None:
+        handle, assessment, *_ = self._begin_evaluated_release()
+        self.assertTrue(assessment.predicate_vector["venue_defense_pass"])
+        handle.close()
+
+    def test_rel_defense_08_intended_membership_without_proof_denied(self) -> None:
+        *_, state, _lane, _normal, _emergency = self._build_synthetic_safe_held(
+            venue_policy=self._required_defense_policy(),
+        )
+        # The durable order payload may express intended group membership, but
+        # no validated authoritative group observation is present here.
+        state.replace(venue_defense_evidence=None)
+        self._assert_current_state_denied(state, "venue_defense_pass")
+
+    def test_rel_defense_09_prior_process_proof_denied_after_restart(self) -> None:
+        *_, state, _lane, _normal, _emergency = self._build_synthetic_safe_held(
+            venue_policy=self._required_defense_policy(),
+        )
+        state.replace(venue_defense_evidence=self._venue_proof_for_state(
+            state, group_id="synthetic-group-G", group_state="ACTIVE",
+            member_order_ids=("synthetic-order-1",),
+            cancel_order_on_pause_order_ids=("synthetic-order-1",),
+            process_instance_id="proc_" + "9" * 32,
+        ))
+        self._assert_current_state_denied(state, "venue_defense_pass")
+
+    def test_def_prov_01_exact_former_bypass_denied_without_release_record(self) -> None:
+        *_, state, _lane, _normal, _emergency = self._build_synthetic_safe_held(
+            venue_policy=self._required_defense_policy(),
+        )
+        state.replace(venue_defense_evidence=self._venue_proof_for_state(
+            state, group_id="synthetic-group-G", group_state="ACTIVE",
+            member_order_ids=("synthetic-order-1",),
+            cancel_order_on_pause_order_ids=("synthetic-order-1",),
+        ))
+        self._assert_current_state_denied(state, "venue_defense_pass")
+
+    def test_def_prov_02_direct_evidence_constructor_cannot_create_proof(self) -> None:
+        *_, state, _lane, _normal, _emergency = self._build_synthetic_safe_held(
+            venue_policy=self._required_defense_policy(),
+        )
+        dormant = self._venue_proof_for_state(
+            state, group_id="synthetic-group-G", group_state="ACTIVE",
+            member_order_ids=("synthetic-order-1",),
+            cancel_order_on_pause_order_ids=("synthetic-order-1",),
+        )
+        values = {
+            field.name: getattr(dormant, field.name)
+            for field in dormant.__dataclass_fields__.values()
+        }
+        with self.assertRaises(LedgerError):
+            VenueDefenseEvidenceV1(object(), **values)
+        state.replace(venue_defense_evidence=dormant)
+        self._assert_current_state_denied(state, "venue_defense_pass")
+
+    def test_def_prov_03_intended_create_membership_is_not_group_proof(self) -> None:
+        *_, state, _lane, _normal, _emergency = self._build_synthetic_safe_held(
+            venue_policy=self._required_defense_policy(),
+        )
+        self._append_trusted_order("synthetic-order-1", {
+            "order_id": "synthetic-order-1", "status": "resting",
+            "remaining_count_fp": "1.00", "market": "SYNTHETIC",
+            "outcome_side": "YES", "yes_price": Decimal("0.50"),
+            "cancel_order_on_pause": True,
+            "order_group_id": "synthetic-group-G",
+        })
+        self._assert_current_state_denied(state, "venue_defense_pass")
+
+    def test_def_prov_04_exact_active_ids_do_not_substitute_for_group_proof(self) -> None:
+        *_, state, _lane, _normal, _emergency = self._build_synthetic_safe_held(
+            venue_policy=self._required_defense_policy(),
+        )
+        state.replace(venue_defense_evidence=self._venue_proof_for_state(
+            state, group_id="synthetic-group-G", group_state="ACTIVE",
+            member_order_ids=state._snapshot()[7].authoritative_known_active_order_ids,
+            cancel_order_on_pause_order_ids=("synthetic-order-1",),
+        ))
+        self._assert_current_state_denied(state, "venue_defense_pass")
+
+    def test_def_prov_05_hash_self_consistency_is_not_provenance(self) -> None:
+        *_, state, _lane, _normal, _emergency = self._build_synthetic_safe_held(
+            venue_policy=self._required_defense_policy(),
+        )
+        dormant = self._venue_proof_for_state(
+            state, group_id="synthetic-group-G", group_state="ACTIVE",
+            member_order_ids=("synthetic-order-1",),
+            cancel_order_on_pause_order_ids=("synthetic-order-1",),
+        )
+        self.assertEqual(
+            dormant.canonical_observation_sha256,
+            dormant.freshness.snapshot_sha256,
+        )
+        state.replace(venue_defense_evidence=dormant)
+        self._assert_current_state_denied(state, "venue_defense_pass")
+
+    def test_def_prov_06_required_mode_has_no_supported_positive_path(self) -> None:
+        supported_surface = (
+            VenueDefenseEvidenceV1.__name__, validate_venue_defense_evidence.__name__,
+        )
+        self.assertEqual(
+            supported_surface,
+            ("VenueDefenseEvidenceV1", "validate_venue_defense_evidence"),
+        )
+        *_, state, _lane, _normal, _emergency = self._build_synthetic_safe_held(
+            venue_policy=self._required_defense_policy(),
+        )
+        self._assert_current_state_denied(state, "venue_defense_pass")
+        state.replace(venue_defense_evidence=self._venue_proof_for_state(
+            state, group_id="synthetic-group-G", group_state="ACTIVE",
+            member_order_ids=("synthetic-order-1",),
+            cancel_order_on_pause_order_ids=("synthetic-order-1",),
+        ))
+        self._assert_current_state_denied(state, "venue_defense_pass")
+
+    def test_def_prov_07_not_required_needs_no_group_proof(self) -> None:
+        policy = VenueDefensePolicy(
+            "NOT_REQUIRED", None, False, "NO_SAFETY_CREDIT", "NO_SAFETY_CREDIT",
+        )
+        *_, state, _lane, _normal, _emergency = self._build_synthetic_safe_held(
+            venue_policy=policy,
+        )
+        self.assertIsNone(state._snapshot()[10])
+        handle = self._acquire_release_for_state(state)
+        assessment = handle.evaluate_release(state)
+        self.assertTrue(assessment.predicate_vector["venue_defense_pass"])
+        self.assertTrue(all(assessment.predicate_vector.values()), assessment.predicate_vector)
+        handle.close()
+
+    def test_def_prov_08_authoritative_cancel_on_pause_pass(self) -> None:
+        *_, state, _lane, _normal, _emergency = self._build_synthetic_safe_held()
+        self.assertIsNone(state._snapshot()[10])
+        handle = self._acquire_release_for_state(state)
+        assessment = handle.evaluate_release(state)
+        self.assertTrue(assessment.predicate_vector["venue_defense_pass"])
+        handle.close()
+
+    def test_def_prov_09_authoritative_cancel_on_pause_fail(self) -> None:
+        *_, state, _lane, _normal, _emergency = self._build_synthetic_safe_held()
+        self._append_trusted_order("synthetic-order-1", {
+            "order_id": "synthetic-order-1", "status": "resting",
+            "remaining_count_fp": "1.00", "market": "SYNTHETIC",
+            "outcome_side": "YES", "yes_price": Decimal("0.50"),
+            "cancel_order_on_pause": False,
+        })
+        self._assert_current_state_denied(state, "venue_defense_pass")
+
+    def test_def_prov_10_caller_cancel_assertion_cannot_override_replay(self) -> None:
+        *_, state, _lane, _normal, _emergency = self._build_synthetic_safe_held()
+        self._append_trusted_order("synthetic-order-1", {
+            "order_id": "synthetic-order-1", "status": "resting",
+            "remaining_count_fp": "1.00", "market": "SYNTHETIC",
+            "outcome_side": "YES", "yes_price": Decimal("0.50"),
+            "cancel_order_on_pause": False,
+        })
+        state.replace(venue_defense_evidence=self._venue_proof_for_state(
+            state, group_id=None, group_state="NOT_APPLICABLE",
+            member_order_ids=(),
+            cancel_order_on_pause_order_ids=("synthetic-order-1",),
+        ))
+        self._assert_current_state_denied(state, "venue_defense_pass")
+
+    def test_def_change_01_required_mode_after_release_blocks_proof(self) -> None:
+        handle, assessment, state, *_ = self._begin_evaluated_release()
+        handle.record_risk_release(assessment)
+        config = state._snapshot()[5]
+        assert type(config) is RiskLimitConfigV1
+        state.replace(risk_config=replace(
+            config, venue_defense=self._required_defense_policy(),
+        ))
+        with self.assertRaises(LedgerError):
+            handle.release_writer_proof(assessment)
+        handle.close()
+
+    def test_def_change_02_required_mode_after_proof_blocks_final(self) -> None:
+        handle, assessment, state, *_ = self._begin_evaluated_release()
+        handle.record_risk_release(assessment)
+        handle.release_writer_proof(assessment)
+        config = state._snapshot()[5]
+        assert type(config) is RiskLimitConfigV1
+        state.replace(risk_config=replace(
+            config, venue_defense=self._required_defense_policy(),
+        ))
+        with self.assertRaises(LedgerError):
+            handle.record_writer_eligible(assessment)
+        self.assertEqual(handle.inspect_validated_projection().risk_control_state, "SAFE_HELD")
+        handle.close()
+
+    def test_def_change_03_cancel_pause_false_after_release_blocks_proof(self) -> None:
+        handle, assessment, state, *_ = self._begin_evaluated_release()
+        handle.record_risk_release(assessment)
+        handle.close()
+        self._append_trusted_order("synthetic-order-1", {
+            "order_id": "synthetic-order-1", "status": "resting",
+            "remaining_count_fp": "1.00", "market": "SYNTHETIC",
+            "outcome_side": "YES", "yes_price": Decimal("0.50"),
+            "cancel_order_on_pause": False,
+        })
+        handle = self._acquire_release_for_state(state)
+        self.assertFalse(
+            handle.evaluate_release(state).predicate_vector["venue_defense_pass"]
+        )
+        with self.assertRaises(LedgerError):
+            handle.release_writer_proof(assessment)
+        handle.close()
+
+    def test_def_change_04_cancel_pause_false_after_proof_blocks_final(self) -> None:
+        handle, assessment, state, *_ = self._begin_evaluated_release()
+        handle.record_risk_release(assessment)
+        handle.release_writer_proof(assessment)
+        handle.close()
+        self._append_trusted_order("synthetic-order-1", {
+            "order_id": "synthetic-order-1", "status": "resting",
+            "remaining_count_fp": "1.00", "market": "SYNTHETIC",
+            "outcome_side": "YES", "yes_price": Decimal("0.50"),
+            "cancel_order_on_pause": False,
+        })
+        handle = self._acquire_release_for_state(state)
+        self.assertFalse(
+            handle.evaluate_release(state).predicate_vector["venue_defense_pass"]
+        )
+        with self.assertRaises(LedgerError):
+            handle.record_writer_eligible(assessment)
+        self.assertEqual(handle.inspect_validated_projection().risk_control_state, "SAFE_HELD")
+        handle.close()
+
+    def test_rel_change_11_new_universe_truth_after_release_blocks_proof(self) -> None:
+        handle, assessment, state, *_ = self._begin_evaluated_release()
+        handle.record_risk_release(assessment)
+        risk = state._snapshot()[6]
+        reconciliation = state._snapshot()[7]
+        assert type(risk) is ReleaseRiskSnapshotV1
+        assert type(reconciliation) is ReleaseReconciliationSnapshotV1
+        phantom = EconomicFillV1(
+            "SYNTHETIC", "new-fill", "YES", Decimal("1.00"), Decimal("0.50"),
+            "2026-08-13T13:00:03.000000Z",
+        )
+        refs = dict(reconciliation.fill_evidence_event_ids)
+        refs[phantom.fill_id] = "evt_" + "7" * 64
+        self._replace_complete_release_universe(
+            state, working_orders=risk.working_orders, fills=risk.fills + (phantom,),
+            order_event_ids=dict(reconciliation.order_evidence_event_ids),
+            fill_event_ids=refs,
+        )
+        with self.assertRaises(LedgerError):
+            handle.release_writer_proof(assessment)
+        handle.close()
+
+    def test_rel_change_12_authoritative_cancel_pause_failure_blocks_proof_release(self) -> None:
+        handle, assessment, state, *_ = self._begin_evaluated_release()
+        handle.record_risk_release(assessment)
+        handle.close()
+        self._append_trusted_order("synthetic-order-1", {
+            "order_id": "synthetic-order-1", "status": "resting",
+            "remaining_count_fp": "1.00", "market": "SYNTHETIC",
+            "outcome_side": "YES", "yes_price": Decimal("0.50"),
+            "cancel_order_on_pause": False,
+        })
+        handle = self._acquire_release_for_state(state)
+        self.assertFalse(
+            handle.evaluate_release(state).predicate_vector["venue_defense_pass"]
+        )
+        with self.assertRaises(LedgerError):
+            handle.release_writer_proof(assessment)
+        handle.close()
+
+    def test_rel_change_13_new_universe_truth_after_proof_blocks_final(self) -> None:
+        handle, assessment, state, *_ = self._begin_evaluated_release()
+        handle.record_risk_release(assessment)
+        handle.release_writer_proof(assessment)
+        risk = state._snapshot()[6]
+        reconciliation = state._snapshot()[7]
+        assert type(risk) is ReleaseRiskSnapshotV1
+        assert type(reconciliation) is ReleaseReconciliationSnapshotV1
+        phantom = WorkingOrderV1(
+            "SYNTHETIC", "new-order", "YES", Decimal("1.00"), Decimal("0.50"),
+        )
+        refs = dict(reconciliation.order_evidence_event_ids)
+        refs[phantom.order_id] = "evt_" + "6" * 64
+        self._replace_complete_release_universe(
+            state, working_orders=risk.working_orders + (phantom,), fills=risk.fills,
+            order_event_ids=refs,
+            fill_event_ids=dict(reconciliation.fill_evidence_event_ids),
+        )
+        with self.assertRaises(LedgerError):
+            handle.record_writer_eligible(assessment)
+        self.assertEqual(handle.inspect_validated_projection().risk_control_state, "SAFE_HELD")
+        handle.close()
+
+    def test_rel_change_14_authoritative_cancel_pause_failure_blocks_final(self) -> None:
+        handle, assessment, state, *_ = self._begin_evaluated_release()
+        handle.record_risk_release(assessment)
+        handle.release_writer_proof(assessment)
+        handle.close()
+        self._append_trusted_order("synthetic-order-1", {
+            "order_id": "synthetic-order-1", "status": "resting",
+            "remaining_count_fp": "1.00", "market": "SYNTHETIC",
+            "outcome_side": "YES", "yes_price": Decimal("0.50"),
+            "cancel_order_on_pause": False,
+        })
+        handle = self._acquire_release_for_state(state)
+        self.assertFalse(
+            handle.evaluate_release(state).predicate_vector["venue_defense_pass"]
+        )
+        with self.assertRaises(LedgerError):
+            handle.record_writer_eligible(assessment)
+        self.assertEqual(handle.inspect_validated_projection().risk_control_state, "SAFE_HELD")
+        handle.close()
+
+    def test_release_fault_a_record_before_commit(self) -> None:
+        self._assert_release_fault_prefix(
+            target="release", stage="before_ledger_commit", unknown=False,
+            expected_release=False, expected_proof="HELD", expected_state="SAFE_HELD",
+        )
+
+    def test_release_fault_b_record_ledger_commit_authority_failure(self) -> None:
+        self._assert_release_fault_prefix(
+            target="release", stage="before_authority_commit", unknown=False,
+            expected_release=True, expected_proof="HELD", expected_state="SAFE_HELD",
+        )
+
+    def test_release_fault_c_record_authority_unknown(self) -> None:
+        self._assert_release_fault_prefix(
+            target="release", stage="after_authority_commit", unknown=True,
+            expected_release=True, expected_proof="HELD", expected_state="SAFE_HELD",
+        )
+
+    def test_release_fault_d_proof_before_commit(self) -> None:
+        self._assert_release_fault_prefix(
+            target="proof", stage="before_ledger_commit", unknown=False,
+            expected_release=True, expected_proof="HELD", expected_state="SAFE_HELD",
+        )
+
+    def test_release_fault_e1_proof_authority_failure(self) -> None:
+        self._assert_release_fault_prefix(
+            target="proof", stage="before_authority_commit", unknown=False,
+            expected_release=True, expected_proof="RELEASED", expected_state="SAFE_HELD",
+        )
+
+    def test_release_fault_e2_proof_authority_unknown(self) -> None:
+        self._assert_release_fault_prefix(
+            target="proof", stage="after_authority_commit", unknown=True,
+            expected_release=True, expected_proof="RELEASED", expected_state="SAFE_HELD",
+        )
+
+    def test_release_fault_f_final_state_before_commit(self) -> None:
+        self._assert_release_fault_prefix(
+            target="state", stage="before_ledger_commit", unknown=False,
+            expected_release=True, expected_proof="RELEASED", expected_state="SAFE_HELD",
+        )
+
+    def test_release_fault_g1_final_state_authority_failure(self) -> None:
+        self._assert_release_fault_prefix(
+            target="state", stage="before_authority_commit", unknown=False,
+            expected_release=True, expected_proof="RELEASED", expected_state="WRITER_ELIGIBLE",
+        )
+
+    def test_release_fault_g2_final_state_authority_unknown(self) -> None:
+        self._assert_release_fault_prefix(
+            target="state", stage="after_authority_commit", unknown=True,
+            expected_release=True, expected_proof="RELEASED", expected_state="WRITER_ELIGIBLE",
+        )
+
+    def test_release_fault_h1_restricted_end_before_commit(self) -> None:
+        self._assert_release_fault_prefix(
+            target="end", stage="before_ledger_commit", unknown=False,
+            expected_release=True, expected_proof="RELEASED", expected_state="WRITER_ELIGIBLE",
+            expected_end=False,
+        )
+
+    def test_release_fault_h2_restricted_end_authority_unknown(self) -> None:
+        self._assert_release_fault_prefix(
+            target="end", stage="after_authority_commit", unknown=True,
+            expected_release=True, expected_proof="RELEASED", expected_state="WRITER_ELIGIBLE",
+            expected_end=True,
+        )
+
+    def test_halt_own_01_live_normal_owner_persists_trusted_halt(self) -> None:
+        locked, session_id, gate, permit = self._prepare_case_a_live_writer()
+        calls: list[object] = []
+        result = gate.persist_case_a_halt(
+            locked=locked,
+            normal_writer_session_id=session_id,
+            risk_config_sha256="a" * 64,
+        )
+        self.assertTrue(result["locks_released"])
+        self.assertEqual(gate.progress_snapshot(permit)["stage"], PermitStage.INVALIDATED)
+        with self.assertRaises(RiskControlError):
+            NormalWriteAdapter(gate, lambda request: calls.append(request)).invoke(permit, object())
+        self.assertEqual(calls, [])
+        reopened = ledger._open_locked(
+            self.binding, conflict_domain_ref=self.contract.conflict_domain_ref,
+            expected_environment=self.contract.environment,
+            canonical_repository_root=self.repository_root,
+            expected_ledger_path=self.ledger_path,
+        )
+        self.assertEqual(reopened.projection().risk_control_state, "HALTED")
+        self.assertEqual(reopened.authority_row.trusted_sequence, reopened.events[-1].sequence)
+        reopened.close()
+
+    def test_halt_own_02_restricted_constructor_not_invoked_before_release(self) -> None:
+        locked, session_id, _, _ = self._prepare_case_a_live_writer()
+        before = tuple((event.sequence, event.event_hash) for event in locked.events)
+        attempted = acquire_emergency_control_only(
+            self.binding,
+            canonical_repository_root=str(self.repository_root),
+            contract=self.contract,
+            expected_ledger_path=str(self.ledger_path),
+        )
+        self.assertIsNone(attempted.handle)
+        self.assertEqual(tuple((event.sequence, event.event_hash) for event in locked.events), before)
+        self.assertFalse(any(event.event_type is EventType.WRITER_SESSION_ABANDONED for event in locked.events[-1:]))
+        ledger.end_writer_session(locked, writer_session_id=session_id)
+
+    def test_halt_own_03_exact_successful_ownership_sequence(self) -> None:
+        locked, session_id, gate, _ = self._prepare_case_a_live_writer()
+        gate.persist_case_a_halt(
+            locked=locked, normal_writer_session_id=session_id,
+            risk_config_sha256="a" * 64,
+        )
+        emergency = acquire_emergency_control_only(
+            self.binding,
+            canonical_repository_root=str(self.repository_root),
+            contract=self.contract,
+            expected_ledger_path=str(self.ledger_path),
+            clock=self.inputs.clock,
+            uuid_factory=self.inputs.uuid,
+        )
+        self.assertIsNotNone(emergency.handle)
+        handle = emergency.handle
+        assert handle is not None
+        self.assertTrue(handle.restricted_session_id.startswith("rs_"))
+        private_locked = getattr(handle, "_EmergencyControlLedgerHandle__locked")
+        tail_types = [event.event_type for event in private_locked.events]
+        halt_index = max(i for i, event in enumerate(private_locked.events) if event.event_type is EventType.RISK_CONTROL_STATE_CHANGED and event.payload.get("cause") == "HARD_SAFETY_VIOLATION")
+        self.assertEqual(tail_types[halt_index:halt_index + 3], [
+            EventType.RISK_CONTROL_STATE_CHANGED,
+            EventType.WRITER_SESSION_ENDED,
+            EventType.RESTRICTED_SESSION_STARTED,
+        ])
+        self.assertNotIn(EventType.WRITER_SESSION_ABANDONED, tail_types[halt_index:])
+        self.assertEqual(sum(event.payload.get("cause") == "HARD_SAFETY_VIOLATION" for event in private_locked.events), 1)
+        handle.close()
+
+    def test_halt_own_04_halt_ledger_failure_before_commit(self) -> None:
+        fault = _ArmableReleaseFault("before_ledger_commit")
+        locked, session_id, gate, permit = self._prepare_case_a_live_writer(fault_hook=fault)
+        fault.armed = True
+        with self.assertRaises(RiskControlError):
+            gate.persist_case_a_halt(
+                locked=locked, normal_writer_session_id=session_id,
+                risk_config_sha256="a" * 64,
+            )
+        self.assertEqual(gate.progress_snapshot(permit)["stage"], PermitStage.INVALIDATED)
+        self.assertEqual(locked.projection().risk_control_state, "WRITER_ELIGIBLE")
+        self.assertIsNone(acquire_emergency_control_only(
+            self.binding, canonical_repository_root=str(self.repository_root),
+            contract=self.contract, expected_ledger_path=str(self.ledger_path),
+        ).handle)
+        locked.close()
+        normal = acquire_normal_writer_state(
+            self.binding, canonical_repository_root=str(self.repository_root),
+            contract=self.contract, expected_ledger_path=str(self.ledger_path),
+        )
+        self.assertIsNone(normal.handle)
+
+    def _assert_halt_authority_recovery(self, *, unknown: bool) -> None:
+        stage = "after_authority_commit" if unknown else "before_authority_commit"
+        fault = _ArmableReleaseFault(stage, unknown=unknown)
+        locked, session_id, gate, permit = self._prepare_case_a_live_writer(fault_hook=fault)
+        fault.armed = True
+        with self.assertRaises(RiskControlError):
+            gate.persist_case_a_halt(
+                locked=locked, normal_writer_session_id=session_id,
+                risk_config_sha256="a" * 64,
+            )
+        self.assertEqual(gate.progress_snapshot(permit)["stage"], PermitStage.INVALIDATED)
+        emergency = acquire_emergency_control_only(
+            self.binding,
+            canonical_repository_root=str(self.repository_root),
+            contract=self.contract,
+            expected_ledger_path=str(self.ledger_path),
+            clock=self.inputs.clock,
+            uuid_factory=self.inputs.uuid,
+        )
+        self.assertIsNotNone(emergency.handle)
+        handle = emergency.handle
+        assert handle is not None
+        private_locked = getattr(handle, "_EmergencyControlLedgerHandle__locked")
+        halts = [event for event in private_locked.events if event.event_type is EventType.RISK_CONTROL_STATE_CHANGED and event.payload.get("cause") == "HARD_SAFETY_VIOLATION"]
+        self.assertEqual(len(halts), 1)
+        self.assertEqual(private_locked.projection().risk_control_state, "HALTED")
+        self.assertIn(EventType.WRITER_SESSION_ABANDONED, [event.event_type for event in private_locked.events])
+        handle.close()
+
+    def test_halt_own_05_ledger_commit_authority_failure_catches_forward(self) -> None:
+        self._assert_halt_authority_recovery(unknown=False)
+
+    def test_halt_own_06_authority_commit_unknown_replays_without_duplicate(self) -> None:
+        self._assert_halt_authority_recovery(unknown=True)
+
+    def test_halt_own_07_no_live_normal_owner_starts_fresh_restricted_session(self) -> None:
+        self.initialize()
+        emergency = acquire_emergency_control_only(
+            self.binding,
+            canonical_repository_root=str(self.repository_root),
+            contract=self.contract,
+            expected_ledger_path=str(self.ledger_path),
+            clock=self.inputs.clock,
+            uuid_factory=self.inputs.uuid,
+        )
+        self.assertIsNotNone(emergency.handle)
+        handle = emergency.handle
+        assert handle is not None
+        private_locked = getattr(handle, "_EmergencyControlLedgerHandle__locked")
+        self.assertEqual(private_locked.events[-1].event_type, EventType.RESTRICTED_SESSION_STARTED)
+        self.assertFalse(any(event.event_type is EventType.WRITER_SESSION_STARTED for event in private_locked.events))
+        handle.close()
+
+    def test_halt_own_09_invalidated_permit_cannot_cross_to_later_rs(self) -> None:
+        locked, session_id, gate, permit = self._prepare_case_a_live_writer()
+        gate.persist_case_a_halt(
+            locked=locked, normal_writer_session_id=session_id,
+            risk_config_sha256="a" * 64,
+        )
+        emergency = acquire_emergency_control_only(
+            self.binding, canonical_repository_root=str(self.repository_root),
+            contract=self.contract, expected_ledger_path=str(self.ledger_path),
+            clock=self.inputs.clock, uuid_factory=self.inputs.uuid,
+        )
+        self.assertIsNotNone(emergency.handle)
+        calls: list[object] = []
+        with self.assertRaises(RiskControlError):
+            NormalWriteAdapter(gate, lambda request: calls.append(request)).invoke(permit, object())
+        self.assertEqual(calls, [])
+        self.assertEqual(
+            {name for name in dir(emergency.handle) if not name.startswith("_")},
+            {
+                "close", "inspect_validated_projection", "open_emergency_action",
+                "record_cancel_intent", "record_cancel_result", "record_cancel_send_boundary",
+                "record_execution_halt", "record_fill_observation", "record_order_observation",
+                "record_reconciliation", "record_risk_control_state_changed",
+                "record_writer_proof_held", "restricted_session_id",
+            },
+        )
+        emergency.handle.close()
+
+    def test_abnormal_restricted_session_is_abandoned_only_after_fresh_lock_acquisition(self) -> None:
+        self.initialize()
+        first = acquire_emergency_control_only(
+            self.binding,
+            canonical_repository_root=str(self.repository_root),
+            contract=self.contract,
+            expected_ledger_path=str(self.ledger_path),
+            clock=self.inputs.clock,
+            uuid_factory=self.inputs.uuid,
+        )
+        old_session = first.handle.restricted_session_id
+        # Simulate process death: OS locks disappear without a clean end event.
+        first.handle._EmergencyControlLedgerHandle__locked.close()
+
+        recovered = acquire_emergency_control_only(
+            self.binding,
+            canonical_repository_root=str(self.repository_root),
+            contract=self.contract,
+            expected_ledger_path=str(self.ledger_path),
+            clock=self.inputs.clock,
+            uuid_factory=self.inputs.uuid,
+        )
+        self.assertIsNotNone(recovered.handle)
+        events = recovered.handle._EmergencyControlLedgerHandle__locked.events
+        abandoned = [event for event in events if event.event_type is EventType.RESTRICTED_SESSION_ABANDONED]
+        self.assertEqual(len(abandoned), 1)
+        self.assertEqual(abandoned[0].payload["abandoned_restricted_session_id"], old_session)
+        self.assertNotEqual(recovered.handle.restricted_session_id, old_session)
+        recovered.handle.close()
+
+    def test_emergency_cancel_intent_and_boundary_anchor_before_one_exact_transport_entry(self) -> None:
+        self.initialize()
+        acquired = acquire_emergency_control_only(
+            self.binding,
+            canonical_repository_root=str(self.repository_root),
+            contract=self.contract,
+            expected_ledger_path=str(self.ledger_path),
+            clock=self.inputs.clock,
+            uuid_factory=self.inputs.uuid,
+        )
+        handle = acquired.handle
+        prior = handle.inspect_validated_projection()
+        config_hash = "a" * 64
+        handle.record_risk_control_state_changed({
+            "previous_state": "BOOT_HOLD", "new_state": "HALTED",
+            "cause": "REPLAY_OR_CURRENT_HARD_VIOLATION",
+            "risk_state_epoch_before": 0, "risk_state_epoch_after": 1,
+            "risk_config_sha256": config_hash,
+            "related_emergency_action_id": None, "related_release_id": None,
+            "predecessor_state_event_id": None,
+            "observed_authority_trusted_sequence": prior.trusted_sequence,
+            "observed_authority_trusted_hash": prior.trusted_event_hash,
+            "observed_ledger_terminal_sequence": prior.last_sequence,
+            "observed_ledger_terminal_hash": prior.terminal_event_hash,
+        })
+        canonical_order = {"order_id": "order-1", "status": "resting", "remaining_count_fp": "2.00"}
+        observed = handle.record_order_observation({
+            "venue_order_id": "order-1", "client_order_id": CURRENT_CLIENT_ORDER_ID,
+            "source_request_id": "synthetic-emergency-read", "source_operation": "GET_ORDER_V2",
+            "venue_payload_schema_id": "synthetic-order-v1",
+            "canonical_venue_payload": canonical_order,
+            "canonical_venue_payload_sha256": hashlib.sha256(canonical_json_bytes(canonical_order)).hexdigest(),
+            "observation_semantic_class": "AUTHORITATIVE_ACTIVE_ORDER",
+        }).events[-1]
+        action_id = EmergencyActionId.mint(self.inputs.uuid)
+        action_time = ledger.canonical_timestamp(self.inputs.clock())
+        before_action = handle.inspect_validated_projection()
+        targets = ["order-1"]
+        target_hash = hashlib.sha256(canonical_json_bytes(targets)).hexdigest()
+        dedup_object = {
+            "conflict_domain_ref": self.contract.conflict_domain_ref,
+            "risk_state_epoch": 1,
+            "cause": "HARD_RISK_HALT",
+            "target_set_sha256": target_hash,
+        }
+        action_event = handle.open_emergency_action({
+            "emergency_action_id": action_id.value,
+            "conflict_domain_ref": self.contract.conflict_domain_ref,
+            "cause": "HARD_RISK_HALT", "starting_control_state": "HALTED",
+            "target_set_kind": "EXACT_ORDER_ID_SET", "target_order_ids": targets,
+            "target_set_sha256": target_hash, "risk_config_sha256": config_hash,
+            "risk_state_epoch": 1,
+            "authority_trusted_sequence": before_action.trusted_sequence,
+            "authority_trusted_hash": before_action.trusted_event_hash,
+            "ledger_terminal_sequence": before_action.last_sequence,
+            "ledger_terminal_hash": before_action.terminal_event_hash,
+            "opened_at_utc": action_time,
+            "deduplication_key_sha256": hashlib.sha256(canonical_json_bytes(dedup_object)).hexdigest(),
+        }, recorded_at_utc=action_time).events[-1]
+        before_canceling = handle.inspect_validated_projection()
+        halt_state_event = next(
+            event for event in reversed(handle._EmergencyControlLedgerHandle__locked.events)
+            if event.event_type is EventType.RISK_CONTROL_STATE_CHANGED
+        )
+        handle.record_risk_control_state_changed({
+            "previous_state": "HALTED", "new_state": "EMERGENCY_CANCELING",
+            "cause": "EXACT_CANCEL_TARGET_SET_OPENED",
+            "risk_state_epoch_before": 1, "risk_state_epoch_after": 2,
+            "risk_config_sha256": config_hash,
+            "related_emergency_action_id": action_id.value, "related_release_id": None,
+            "predecessor_state_event_id": halt_state_event.event_id,
+            "observed_authority_trusted_sequence": before_canceling.trusted_sequence,
+            "observed_authority_trusted_hash": before_canceling.trusted_event_hash,
+            "observed_ledger_terminal_sequence": before_canceling.last_sequence,
+            "observed_ledger_terminal_hash": before_canceling.terminal_event_hash,
+        })
+        authoritative_target = AuthoritativeCancelTargetV1(
+            "order-1", self.contract.conflict_domain_ref, 0, 0,
+            observed.event_id, observed.event_hash, Decimal("2.00"), "resting",
+        )
+        monotonic_values = iter((1_000_000_000, 1_000_000_001, 1_000_000_002))
+        gate = EmergencyCancelGate(
+            handle=handle,
+            rate_lane=EmergencyRateLane(EmergencyRateConfigV1(2, 1_000, 1, 500, 0, 10, 100)),
+            process_instance_id="proc_" + "1" * 32,
+            monotonic_clock_ns=lambda: next(monotonic_values),
+            wall_clock=self.inputs.clock,
+            uuid_factory=self.inputs.uuid,
+        )
+        prepared, permit = gate.persist_intent_and_boundary(
+            action_id=action_id, target=authoritative_target,
+            risk_config_sha256=config_hash, attempt_ordinal=1, deadline_budget_ms=500,
+        )
+        calls = []
+        adapter = EmergencyCancelAdapter(gate, lambda request: calls.append(request) or {"status": 200})
+        self.assertEqual(adapter.cancel(permit, prepared), {"status": 200})
+        self.assertEqual(calls, [prepared])
+        with self.assertRaises(EmergencyCancelError) as reused:
+            adapter.cancel(permit, prepared)
+        self.assertEqual(reused.exception.code, EmergencyCancelCode.EMERGENCY_CANCEL_PERMIT_CONSUMED)
+        projected = handle.inspect_validated_projection()
+        self.assertTrue(projected.cancel_send_may_have_been_sent_by_attempt[permit.cancel_attempt_id])
+        self.assertEqual(projected.risk_control_state, "EMERGENCY_CANCELING")
+        handle.close()
 
     def test_send_gate_rejects_incomplete_history_before_any_mutation(self) -> None:
         self.initialize()

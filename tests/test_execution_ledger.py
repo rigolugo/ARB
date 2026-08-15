@@ -27,7 +27,9 @@ from arb.execution_ledger import (
     acquire_local_state,
     assert_secret_safe,
     canonical_json_bytes,
+    deterministic_event_id,
     deterministic_review_export,
+    end_restricted_session,
     end_writer_session,
     initialize_authority_namespace,
     initialize_ledger_binding,
@@ -137,6 +139,106 @@ class ExecutionLedgerTestCase(unittest.TestCase):
             b'{"a":[{"$decimal":"1"},{"$decimal":"0.01"},{"$decimal":"0"}],"b":"ascii"}',
         )
         self.assertNotIn(b"\n", canonical_json_bytes(value))
+
+    def test_spec03_restricted_session_state_event_is_deterministic_replayable_and_closed(self) -> None:
+        self.initialize()
+        opened = ledger._acquire_restricted_state(
+            self.binding,
+            conflict_domain_ref="test-conflict-domain",
+            expected_environment="KALSHI_DEMO",
+            canonical_repository_root=self.repository_root,
+            acquisition_mode=AcquisitionMode.EMERGENCY_CONTROL_ONLY,
+            expected_ledger_path=self.ledger_path,
+            clock=self.inputs.clock,
+            uuid_factory=self.inputs.uuid,
+        )
+        locked = opened.locked
+        session_id = opened.restricted_session_id
+        self.assertIsNotNone(locked)
+        self.assertIsNotNone(session_id)
+        assert locked is not None and session_id is not None
+        self.assertTrue(session_id.startswith("rs_"))
+        previous = locked.events[-1]
+        payload = {
+            "previous_state": "BOOT_HOLD",
+            "new_state": "SAFE_HELD",
+            "cause": "REPLAY_ALL_SAFETY_PREDICATES_PASS",
+            "risk_state_epoch_before": 0,
+            "risk_state_epoch_after": 1,
+            "risk_config_sha256": "a" * 64,
+            "related_emergency_action_id": None,
+            "related_release_id": None,
+            "predecessor_state_event_id": None,
+            "observed_authority_trusted_sequence": previous.sequence,
+            "observed_authority_trusted_hash": previous.event_hash,
+            "observed_ledger_terminal_sequence": previous.sequence,
+            "observed_ledger_terminal_hash": previous.event_hash,
+        }
+        expected_id = deterministic_event_id(EventType.RISK_CONTROL_STATE_CHANGED, payload)
+        result = locked.append_batch((EventInput(
+            EventType.RISK_CONTROL_STATE_CHANGED, payload, session_id
+        ),))
+        self.assertEqual(result.events[-1].event_id, expected_id)
+        projection = locked.projection()
+        self.assertEqual((projection.risk_control_state, projection.risk_state_epoch), ("SAFE_HELD", 1))
+        self.assertEqual(projection.active_restricted_session_id, session_id)
+
+        before = (projection.last_sequence, projection.terminal_event_hash)
+        with self.assertRaises(LedgerError) as wrong_mode:
+            locked.append_batch((EventInput(EventType.RISK_RELEASE_RECORDED, {}, session_id),))
+        self.assertEqual(
+            wrong_mode.exception.code,
+            FailureCode.RESTRICTED_SESSION_EVENT_NOT_PERMITTED,
+        )
+        self.assertEqual(
+            (locked.projection().last_sequence, locked.projection().terminal_event_hash), before
+        )
+        end_restricted_session(
+            locked,
+            restricted_session_id=session_id,
+            acquisition_mode=AcquisitionMode.EMERGENCY_CONTROL_ONLY,
+        )
+        reopened = self.locked()
+        self.assertIsNone(reopened.projection().active_restricted_session_id)
+        self.assertEqual(reopened.projection().risk_control_state, "SAFE_HELD")
+        reopened.close()
+
+    def test_spec03_new_event_id_cannot_be_supplied_with_conflicting_content_identity(self) -> None:
+        self.initialize()
+        opened = ledger._acquire_restricted_state(
+            self.binding,
+            conflict_domain_ref="test-conflict-domain",
+            expected_environment="KALSHI_DEMO",
+            canonical_repository_root=self.repository_root,
+            acquisition_mode=AcquisitionMode.EMERGENCY_CONTROL_ONLY,
+            expected_ledger_path=self.ledger_path,
+            clock=self.inputs.clock,
+            uuid_factory=self.inputs.uuid,
+        )
+        locked = opened.locked
+        session_id = opened.restricted_session_id
+        self.assertIsNotNone(locked)
+        self.assertIsNotNone(session_id)
+        assert locked is not None and session_id is not None
+        previous = locked.events[-1]
+        payload = {
+            "previous_state": "BOOT_HOLD", "new_state": "SAFE_HELD",
+            "cause": "REPLAY_ALL_SAFETY_PREDICATES_PASS",
+            "risk_state_epoch_before": 0, "risk_state_epoch_after": 1,
+            "risk_config_sha256": None, "related_emergency_action_id": None,
+            "related_release_id": None, "predecessor_state_event_id": None,
+            "observed_authority_trusted_sequence": previous.sequence,
+            "observed_authority_trusted_hash": previous.event_hash,
+            "observed_ledger_terminal_sequence": previous.sequence,
+            "observed_ledger_terminal_hash": previous.event_hash,
+        }
+        with self.assertRaises(LedgerError) as caught:
+            locked.append_batch((EventInput(
+                EventType.RISK_CONTROL_STATE_CHANGED, payload, session_id,
+                event_id="evt_" + "f" * 32,
+            ),))
+        self.assertEqual(caught.exception.code, FailureCode.EVENT_ID_CONTENT_CONFLICT)
+        locked.close()
 
     def test_canonical_json_rejects_float_reserved_key_and_non_nfc(self) -> None:
         with self.assertRaisesRegex(LedgerError, FailureCode.LEDGER_CANONICAL_ENCODING_FAILURE.value):
@@ -913,7 +1015,7 @@ class ExecutionLedgerTestCase(unittest.TestCase):
                 "release_contract_id": "synthetic-contract",
                 "writer_proof_id": "synthetic-proof",
             }, session, "synthetic-incident"),))
-        self.assertEqual(caught.exception.code, FailureCode.EVENT_REQUIRED_PARENT_MISSING)
+        self.assertEqual(caught.exception.code, FailureCode.RELEASE_PREDICATE_CHANGED)
         locked.close()
 
     def test_unknown_event_type_is_schema_unsupported(self) -> None:

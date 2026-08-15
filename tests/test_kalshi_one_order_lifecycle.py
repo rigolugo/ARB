@@ -24,14 +24,18 @@ import hashlib
 import inspect
 import json
 import unittest
+import uuid
 from dataclasses import dataclass, field, replace
+from datetime import datetime, timezone
 from decimal import Decimal
+from types import SimpleNamespace
 from typing import Dict, List, Mapping, Optional, Tuple, Union
 
 from cryptography.hazmat.primitives import hashes
 from cryptography.hazmat.primitives.asymmetric import padding, rsa
 
 from arb.venues.kalshi import order_lifecycle as ol
+from arb.venues.kalshi import risk_control as rc
 from arb.venues.kalshi import validation as kalshi_validation
 from arb.venues.kalshi.models import (
     AuthorizationValue,
@@ -451,6 +455,56 @@ class _FakeTransport:
 
     responses: Dict[ol.LifecycleOperation, List[object]] = field(default_factory=dict)
     calls: List[ol.PreparedRequest] = field(default_factory=list)
+    _gate: rc.WriterEligibilityGate = field(init=False, repr=False)
+    _locked: object = field(init=False, repr=False)
+    _counter: int = field(default=1000, init=False, repr=False)
+
+    def __post_init__(self) -> None:
+        owner = self
+
+        class _SyntheticLockedLedger:
+            def __init__(self) -> None:
+                self.conflict_domain_ref = "KALSHI|KALSHI_DEMO|SYNTHETIC|SUBACCOUNT=0"
+                self.events = [SimpleNamespace(sequence=10, event_hash="1" * 64)]
+                self.authority_row = SimpleNamespace(trusted_sequence=10, trusted_event_hash="1" * 64)
+                self.closed = False
+
+            def projection(self):
+                return SimpleNamespace(
+                    active_writer_session_id="ws_" + "1" * 32,
+                    risk_control_state="WRITER_ELIGIBLE",
+                    risk_state_epoch=7,
+                    active_risk_config_sha256="c" * 64,
+                )
+
+            def append_batch(self, inputs):
+                item = inputs[0]
+                event = SimpleNamespace(
+                    sequence=self.events[-1].sequence + 1,
+                    previous_event_hash=self.events[-1].event_hash,
+                    event_hash=f"{self.events[-1].sequence + 1:064x}",
+                    event_id=item.event_id,
+                )
+                self.events.append(event)
+                self.authority_row.trusted_sequence = event.sequence
+                self.authority_row.trusted_event_hash = event.event_hash
+                return SimpleNamespace(events=(event,))
+
+        self._locked = _SyntheticLockedLedger()
+
+        def tick() -> int:
+            owner._counter += 1
+            return 1_000_000_000 + owner._counter
+
+        def mint() -> uuid.UUID:
+            owner._counter += 1
+            return uuid.UUID(int=owner._counter, version=4)
+
+        self._gate = rc.WriterEligibilityGate(
+            monotonic_clock_ns=tick,
+            wall_clock=lambda: datetime(2026, 8, 13, 20, tzinfo=timezone.utc),
+            uuid_factory=mint,
+        )
 
     def send(self, request: ol.PreparedRequest) -> ol.RawHttpResponse:
         self.calls.append(request)
@@ -464,6 +518,79 @@ class _FakeTransport:
 
     def calls_for(self, operation: ol.LifecycleOperation) -> List[ol.PreparedRequest]:
         return [c for c in self.calls if c.operation == operation]
+
+    def authorize_normal_write(self, request: ol.PreparedRequest) -> Tuple[object, object]:
+        operation_name = {
+            ol.LifecycleOperation.CREATE: "CREATE_ORDER_V2",
+            ol.LifecycleOperation.CANCEL: "CANCEL_ORDER_V2",
+        }[request.operation]
+        self._counter += 1
+        request_id = f"req_{self._counter:032x}"
+        assessment = rc.WriterEligibilityAssessment(
+            f"ra_{self._counter:032x}", operation_name, request_id,
+            ol.lifecycle_request_sha256(request), "b" * 64, "c" * 64,
+            "d" * 64, "e" * 64, "f" * 64, "0" * 64, 7,
+            2_000_000_000, True,
+        )
+        permit = self._gate.issue_permit(
+            locked=self._locked,  # type: ignore[arg-type]
+            normal_writer_session_id="ws_" + "1" * 32,
+            assessment=assessment,
+            intent_payload={"request_id": request_id},
+            prepared_payload={
+                "request_id": request_id,
+                "operation_name": operation_name,
+                "prepared_request_sha256": assessment.candidate_request_sha256,
+            },
+        )
+        self._gate.persist_intent(permit, self._locked)  # type: ignore[arg-type]
+        self._gate.persist_prepared(permit, self._locked)  # type: ignore[arg-type]
+        self._gate.persist_send_boundary(permit, self._locked)  # type: ignore[arg-type]
+        return rc.NormalWriteAdapter(self._gate, self.send), permit
+
+
+class _RawOnlyTransport:
+    """Possesses a fake raw send callable but no normal-write authority."""
+
+    def __init__(self, delegate: _FakeTransport) -> None:
+        self.delegate = delegate
+
+    @property
+    def calls(self):
+        return self.delegate.calls
+
+    def calls_for(self, operation: ol.LifecycleOperation):
+        return self.delegate.calls_for(operation)
+
+    def send(self, request: ol.PreparedRequest) -> ol.RawHttpResponse:
+        return self.delegate.send(request)
+
+
+class _ForgedAuthorizationTransport(_RawOnlyTransport):
+    def authorize_normal_write(self, request: ol.PreparedRequest) -> Tuple[object, object]:
+        del request
+        return object(), object()
+
+
+class _UnreadBackT3Transport(_FakeTransport):
+    def authorize_normal_write(self, request: ol.PreparedRequest) -> Tuple[object, object]:
+        adapter, permit = super().authorize_normal_write(request)
+        self._locked.authority_row.trusted_event_hash = "f" * 64  # type: ignore[attr-defined]
+        return adapter, permit
+
+
+class _HaltedBeforeEntryTransport(_FakeTransport):
+    def authorize_normal_write(self, request: ol.PreparedRequest) -> Tuple[object, object]:
+        adapter, permit = super().authorize_normal_write(request)
+        self._gate.latch_hard_halt()
+        return adapter, permit
+
+
+class _RejectCancelAuthorizationTransport(_FakeTransport):
+    def authorize_normal_write(self, request: ol.PreparedRequest) -> Tuple[object, object]:
+        if request.operation is ol.LifecycleOperation.CANCEL:
+            return object(), object()
+        return super().authorize_normal_write(request)
 
 
 def _ok_pre_create() -> ol.RawHttpResponse:
@@ -562,6 +689,7 @@ def plan_and_execute(
     return ol.execute_demo_one_order_lifecycle(
         plan_result,
         transport,
+        normal_write_authorizer=transport,
         monotonic_clock=clock.monotonic,
         _wall_clock=clock.wall,
     )
@@ -3439,6 +3567,98 @@ class TestResponseTransportEvidence(unittest.TestCase):
 # Full lifecycle integration
 # ---------------------------------------------------------------------------
 
+class TestImplementation02NormalWriteNonBypass(unittest.TestCase):
+    def test_01_raw_transport_without_permit_cannot_create(self) -> None:
+        transport = _RawOnlyTransport(full_happy_path_transport())
+        result = plan_and_execute(transport, clock=_FixedClock())  # type: ignore[arg-type]
+        self.assertEqual(result.halt_code, ol.LifecycleHaltCode.TRANSPORT_PRE_SEND_FAILURE)
+        self.assertEqual(len(transport.calls_for(ol.LifecycleOperation.CREATE)), 0)
+
+    def test_02_forged_permit_cannot_create(self) -> None:
+        transport = _ForgedAuthorizationTransport(full_happy_path_transport())
+        result = plan_and_execute(transport, clock=_FixedClock())  # type: ignore[arg-type]
+        self.assertEqual(result.halt_code, ol.LifecycleHaltCode.TRANSPORT_PRE_SEND_FAILURE)
+        self.assertEqual(len(transport.calls_for(ol.LifecycleOperation.CREATE)), 0)
+
+    def test_03_t3_without_positive_authority_readback_cannot_create(self) -> None:
+        transport = _UnreadBackT3Transport(responses=full_happy_path_transport().responses)
+        result = plan_and_execute(transport, clock=_FixedClock())
+        self.assertEqual(result.halt_code, ol.LifecycleHaltCode.TRANSPORT_PRE_SEND_FAILURE)
+        self.assertEqual(len(transport.calls_for(ol.LifecycleOperation.CREATE)), 0)
+
+    def test_04_exact_t3_originating_gate_invokes_once(self) -> None:
+        transport = full_happy_path_transport()
+        result = plan_and_execute(transport, clock=_FixedClock())
+        self.assertIsInstance(result, ol.OneOrderLifecycleResult)
+        self.assertEqual(len(transport.calls_for(ol.LifecycleOperation.CREATE)), 1)
+        self.assertEqual(len(transport.calls_for(ol.LifecycleOperation.CANCEL)), 1)
+
+    def test_05_gate_permit_is_one_shot(self) -> None:
+        transport = full_happy_path_transport()
+        request = ol.PreparedRequest(
+            operation=ol.LifecycleOperation.CREATE,
+            method="POST",
+            path="/trade-api/v2/portfolio/events/orders",
+            query={},
+            body={"synthetic": "request"},
+            effective_deadline_monotonic=100.0,
+        )
+        adapter, permit = transport.authorize_normal_write(request)
+        self.assertIsInstance(ol.invoke_permit_required_normal_write(adapter, permit, request), ol.RawHttpResponse)
+        before = len(transport.calls_for(ol.LifecycleOperation.CREATE))
+        with self.assertRaises(rc.RiskControlError):
+            ol.invoke_permit_required_normal_write(adapter, permit, request)
+        self.assertEqual(len(transport.calls_for(ol.LifecycleOperation.CREATE)), before)
+
+    def test_06_hard_halt_before_adapter_entry_keeps_create_zero(self) -> None:
+        transport = _HaltedBeforeEntryTransport(responses=full_happy_path_transport().responses)
+        result = plan_and_execute(transport, clock=_FixedClock())
+        self.assertEqual(result.halt_code, ol.LifecycleHaltCode.TRANSPORT_PRE_SEND_FAILURE)
+        self.assertEqual(len(transport.calls_for(ol.LifecycleOperation.CREATE)), 0)
+
+    def test_08_adapter_exposes_no_public_raw_write_callable(self) -> None:
+        transport = full_happy_path_transport()
+        request = ol.PreparedRequest(
+            ol.LifecycleOperation.CREATE, "POST",
+            "/trade-api/v2/portfolio/events/orders", {}, {}, 100.0,
+        )
+        adapter, _ = transport.authorize_normal_write(request)
+        self.assertEqual({name for name in dir(adapter) if not name.startswith("_")}, {"invoke"})
+
+    def test_09_direct_adapter_without_originating_permit_stops_before_send(self) -> None:
+        calls: list[object] = []
+        gate = rc.WriterEligibilityGate(
+            monotonic_clock_ns=lambda: 1,
+            wall_clock=lambda: datetime(2026, 8, 13, tzinfo=timezone.utc),
+        )
+        adapter = rc.NormalWriteAdapter(gate, lambda request: calls.append(request))
+        with self.assertRaises(rc.RiskControlError):
+            adapter.invoke(object(), object())  # type: ignore[arg-type]
+        self.assertEqual(calls, [])
+
+    def test_10_all_supported_send_capable_operations_are_enumerated_and_gated(self) -> None:
+        statically_send_capable = frozenset(
+            operation
+            for operation, (method, _) in ol._LIFECYCLE_SIGNING_CONTRACT.items()
+            if method in {"POST", "PUT", "PATCH", "DELETE"}
+        )
+        self.assertEqual(statically_send_capable, ol._NORMAL_WRITE_OPERATIONS)
+        self.assertEqual(statically_send_capable, {
+            ol.LifecycleOperation.CREATE, ol.LifecycleOperation.CANCEL,
+        })
+
+        create_denied = _RawOnlyTransport(full_happy_path_transport())
+        plan_and_execute(create_denied, clock=_FixedClock())  # type: ignore[arg-type]
+        self.assertEqual(create_denied.calls_for(ol.LifecycleOperation.CREATE), [])
+
+        cancel_denied = _RejectCancelAuthorizationTransport(
+            responses=full_happy_path_transport().responses
+        )
+        result = plan_and_execute(cancel_denied, clock=_FixedClock())
+        self.assertEqual(result.halt_code, ol.LifecycleHaltCode.TRANSPORT_PRE_SEND_FAILURE)
+        self.assertEqual(len(cancel_denied.calls_for(ol.LifecycleOperation.CREATE)), 1)
+        self.assertEqual(cancel_denied.calls_for(ol.LifecycleOperation.CANCEL), [])
+
 class TestFullLifecycleHappyPath(unittest.TestCase):
     def test_zero_fill_full_cancel_lifecycle(self) -> None:
         clock = _FixedClock()
@@ -4297,6 +4517,27 @@ class TestCorrection04TransportEvidenceFailClosed(unittest.TestCase):
         self.assertEqual(result.halt_code, ol.LifecycleHaltCode.DEADLINE_EXCEEDED)
         self.assertEqual(len(transport.calls), 1)
         self.assertEqual(len(transport.calls_for(ol.LifecycleOperation.CREATE)), 0)
+
+
+class TestSpec03PermitRequiredWriteBridge(unittest.TestCase):
+    def test_raw_callable_and_forged_permit_are_rejected_before_invocation(self) -> None:
+        from arb.venues.kalshi.risk_control import RiskControlCode, RiskControlError
+
+        calls = []
+
+        def raw_transport(request):
+            calls.append(request)
+            return object()
+
+        with self.assertRaises(RiskControlError) as caught:
+            ol.invoke_permit_required_normal_write(raw_transport, object(), object())
+        self.assertEqual(caught.exception.code, RiskControlCode.NORMAL_WRITER_PERMIT_INVALID)
+        self.assertEqual(calls, [])
+
+    def test_bridge_is_exported_but_lifecycle_transport_does_not_mint_permits(self) -> None:
+        self.assertIn("invoke_permit_required_normal_write", ol.__all__)
+        self.assertFalse(hasattr(ol.LifecycleTransport, "issue_permit"))
+        self.assertFalse(hasattr(ol.LifecycleTransport, "latch_hard_halt"))
 
 
 if __name__ == "__main__":
