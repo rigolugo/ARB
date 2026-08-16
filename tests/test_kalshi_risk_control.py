@@ -201,6 +201,7 @@ class _FakeLocked:
             previous_event_hash=self.events[-1].event_hash,
             event_hash=str(self.events[-1].sequence + 1).zfill(64),
             event_id=item.event_id,
+            execution_attempt_id=item.execution_attempt_id,
         )
         self.events.append(event)
         self.authority_row.trusted_sequence = event.sequence
@@ -239,7 +240,10 @@ def test_normal_permit_t0_through_t3_is_ordered_one_shot_and_nonserializable() -
     permit = gate.issue_permit(
         locked=locked, normal_writer_session_id="ws_" + "1" * 32,
         assessment=_assessment(),
-        intent_payload={"request_id": "req_" + "2" * 32},
+        intent_payload={
+            "execution_attempt_id": "ea_" + "3" * 32,
+            "intent_payload": {"request_id": "req_" + "2" * 32},
+        },
         prepared_payload={
             "request_id": "req_" + "2" * 32,
             "operation_name": "CREATE_ORDER_V2",
@@ -276,7 +280,10 @@ def test_hard_halt_latch_wins_before_adapter_entry_and_invalidates_unused_permit
     locked = _FakeLocked()
     permit = gate.issue_permit(
         locked=locked, normal_writer_session_id="ws_" + "1" * 32,
-        assessment=_assessment(), intent_payload={"request_id": "req_" + "2" * 32},
+        assessment=_assessment(), intent_payload={
+            "execution_attempt_id": "ea_" + "3" * 32,
+            "intent_payload": {"request_id": "req_" + "2" * 32},
+        },
         prepared_payload={"request_id": "req_" + "2" * 32, "operation_name": "CREATE_ORDER_V2", "prepared_request_sha256": "a" * 64},
     )
     gate.persist_intent(permit, locked)
@@ -306,7 +313,10 @@ def _consumed_permit_gate():
     locked = _FakeLocked()
     permit = gate.issue_permit(
         locked=locked, normal_writer_session_id="ws_" + "1" * 32,
-        assessment=_assessment(), intent_payload={"request_id": "req_" + "2" * 32},
+        assessment=_assessment(), intent_payload={
+            "execution_attempt_id": "ea_" + "3" * 32,
+            "intent_payload": {"request_id": "req_" + "2" * 32},
+        },
         prepared_payload={
             "request_id": "req_" + "2" * 32,
             "operation_name": "CREATE_ORDER_V2",
@@ -392,7 +402,10 @@ def test_correction02_07_unrelated_tail_movement_before_each_stage_blocks_transp
     locked = _FakeLocked()
     permit = gate.issue_permit(
         locked=locked, normal_writer_session_id="ws_" + "1" * 32,
-        assessment=_assessment(), intent_payload={"request_id": "req_" + "2" * 32},
+        assessment=_assessment(), intent_payload={
+            "execution_attempt_id": "ea_" + "3" * 32,
+            "intent_payload": {"request_id": "req_" + "2" * 32},
+        },
         prepared_payload={
             "request_id": "req_" + "2" * 32,
             "operation_name": "CREATE_ORDER_V2",

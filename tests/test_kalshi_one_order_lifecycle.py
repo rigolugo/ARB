@@ -484,6 +484,7 @@ class _FakeTransport:
                     previous_event_hash=self.events[-1].event_hash,
                     event_hash=f"{self.events[-1].sequence + 1:064x}",
                     event_id=item.event_id,
+                    execution_attempt_id=item.execution_attempt_id,
                 )
                 self.events.append(event)
                 self.authority_row.trusted_sequence = event.sequence
@@ -532,11 +533,35 @@ class _FakeTransport:
             "d" * 64, "e" * 64, "f" * 64, "0" * 64, 7,
             2_000_000_000, True,
         )
+        client_order_id = None
+        if request.body is not None:
+            candidate = request.body.get("client_order_id")
+            if isinstance(candidate, str) and candidate:
+                client_order_id = candidate
+        if client_order_id is None:
+            client_order_id = f"one-order-lifecycle-test-client-order-{self._counter:032x}"
         permit = self._gate.issue_permit(
             locked=self._locked,  # type: ignore[arg-type]
             normal_writer_session_id="ws_" + "1" * 32,
             assessment=assessment,
-            intent_payload={"request_id": request_id},
+            # Ledger-valid outer EXECUTION_INTENT_RECORDED envelope for this
+            # (non-market-maker) one-order-lifecycle scenario: the shared gate
+            # requires the exact canonical outer key set and a nested
+            # request_id, plus a distinct execution_attempt_id. This is test
+            # fixture/caller migration only (Revision-04 MM-FIXTURE-002); it
+            # does not relabel the scenario as a market-maker intent.
+            intent_payload={
+                "execution_attempt_id": f"ea_{self._counter:032x}",
+                "venue": "KALSHI",
+                "environment": "KALSHI_DEMO",
+                "conflict_domain_ref": "kalshi-demo:portfolio:0",
+                "incident_id": "SYNTHETIC_ONE_ORDER_LIFECYCLE_TEST_INCIDENT",
+                "operation_family": "KALSHI_DEMO_ONE_ORDER_LIFECYCLE_TEST",
+                "client_order_id": client_order_id,
+                "capability_reference_id": f"cap_{self._counter:032x}",
+                "intent_payload_schema_id": "ONE_ORDER_LIFECYCLE_TEST_INTENT_V1",
+                "intent_payload": {"request_id": request_id},
+            },
             prepared_payload={
                 "request_id": request_id,
                 "operation_name": operation_name,

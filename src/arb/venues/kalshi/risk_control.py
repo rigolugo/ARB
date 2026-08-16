@@ -11,6 +11,7 @@ import copy
 import enum
 import re
 import threading
+import unicodedata
 import uuid
 from collections import deque
 from dataclasses import dataclass, fields
@@ -642,6 +643,7 @@ class _PermitContext:
     locked: LockedLedger
     intent_payload: Mapping[str, object]
     prepared_payload: Mapping[str, object]
+    execution_attempt_id: str
 
 
 class WriterEligibilityGate:
@@ -693,14 +695,21 @@ class WriterEligibilityGate:
         prepared_payload: Mapping[str, object],
     ) -> NormalWriterPermit:
         with self.__mutex:
+            nested_intent_payload = intent_payload.get("intent_payload")
+            execution_attempt_id = intent_payload.get("execution_attempt_id")
             if (
                 self.__hard_halt_requested
                 or type(assessment) is not WriterEligibilityAssessment
                 or assessment.eligible is not True
-                or intent_payload.get("request_id") != assessment.request_id
+                or not isinstance(nested_intent_payload, Mapping)
+                or nested_intent_payload.get("request_id") != assessment.request_id
                 or prepared_payload.get("request_id") != assessment.request_id
                 or prepared_payload.get("operation_name") != assessment.operation_kind
                 or prepared_payload.get("prepared_request_sha256") != assessment.candidate_request_sha256
+                or type(execution_attempt_id) is not str
+                or not execution_attempt_id
+                or unicodedata.normalize("NFC", execution_attempt_id) != execution_attempt_id
+                or execution_attempt_id in (assessment.request_id, prepared_payload.get("client_order_id"))
             ):
                 raise RiskControlError(RiskControlCode.NORMAL_WRITER_PERMIT_INVALID)
             projection = locked.projection()
@@ -736,7 +745,7 @@ class WriterEligibilityGate:
             progress = NormalWriterPermitProgress(permit_id, PermitStage.INTENT, tail.sequence, tail.event_hash, tail.sequence, tail.event_hash, now, 0)
             self.__contexts[permit_id] = _PermitContext(
                 permit, progress, locked, MappingProxyType(dict(intent_payload)),
-                MappingProxyType(dict(prepared_payload)),
+                MappingProxyType(dict(prepared_payload)), execution_attempt_id,
             )
             return permit
 
@@ -753,7 +762,18 @@ class WriterEligibilityGate:
             progress = self._context(permit).progress
             return MappingProxyType({field.name: getattr(progress, field.name) for field in fields(progress)})
 
-    def _advance(self, permit: NormalWriterPermit, locked: LockedLedger, expected_stage: PermitStage, event_type: EventType, payload: Mapping[str, object], event_id: str, next_stage: PermitStage) -> None:
+    def _advance(
+        self,
+        permit: NormalWriterPermit,
+        locked: LockedLedger,
+        expected_stage: PermitStage,
+        event_type: EventType,
+        payload: Mapping[str, object],
+        event_id: str,
+        next_stage: PermitStage,
+        *,
+        execution_attempt_id: str | None,
+    ) -> None:
         with self.__mutex:
             context = self._context(permit)
             progress = context.progress
@@ -772,9 +792,14 @@ class WriterEligibilityGate:
                 progress.stage = PermitStage.INVALIDATED
                 raise RiskControlError(RiskControlCode.NORMAL_WRITER_PERMIT_UNEXPECTED_TAIL)
             timestamp = canonical_timestamp(self.__wall())
-            result = locked.append_batch((EventInput(event_type, payload, permit.normal_writer_session_id, payload.get("incident_id") if type(payload.get("incident_id")) is str else None, payload.get("execution_attempt_id") if type(payload.get("execution_attempt_id")) is str else None, event_id=event_id, recorded_at_utc=timestamp),))
+            result = locked.append_batch((EventInput(event_type, payload, permit.normal_writer_session_id, payload.get("incident_id") if type(payload.get("incident_id")) is str else None, execution_attempt_id, event_id=event_id, recorded_at_utc=timestamp),))
             persisted = result.events[-1]
-            if persisted.sequence != tail.sequence + 1 or persisted.previous_event_hash != tail.event_hash or persisted.event_id != event_id:
+            if (
+                persisted.sequence != tail.sequence + 1
+                or persisted.previous_event_hash != tail.event_hash
+                or persisted.event_id != event_id
+                or persisted.execution_attempt_id != execution_attempt_id
+            ):
                 progress.stage = PermitStage.INVALIDATED
                 raise RiskControlError(RiskControlCode.NORMAL_WRITER_PERMIT_UNEXPECTED_TAIL)
             progress.stage = next_stage
@@ -786,11 +811,17 @@ class WriterEligibilityGate:
 
     def persist_intent(self, permit: NormalWriterPermit, locked: LockedLedger) -> None:
         context = self._context(permit)
-        self._advance(permit, locked, PermitStage.INTENT, EventType.EXECUTION_INTENT_RECORDED, context.intent_payload, permit.intent_event_id, PermitStage.PREPARED)
+        self._advance(
+            permit, locked, PermitStage.INTENT, EventType.EXECUTION_INTENT_RECORDED, context.intent_payload,
+            permit.intent_event_id, PermitStage.PREPARED, execution_attempt_id=context.execution_attempt_id,
+        )
 
     def persist_prepared(self, permit: NormalWriterPermit, locked: LockedLedger) -> None:
         context = self._context(permit)
-        self._advance(permit, locked, PermitStage.PREPARED, EventType.REQUEST_PREPARED, context.prepared_payload, permit.prepared_event_id, PermitStage.SEND_BOUNDARY)
+        self._advance(
+            permit, locked, PermitStage.PREPARED, EventType.REQUEST_PREPARED, context.prepared_payload,
+            permit.prepared_event_id, PermitStage.SEND_BOUNDARY, execution_attempt_id=context.execution_attempt_id,
+        )
 
     def persist_send_boundary(self, permit: NormalWriterPermit, locked: LockedLedger) -> None:
         context = self._context(permit)
@@ -800,7 +831,10 @@ class WriterEligibilityGate:
             "prepared_request_sha256": context.prepared_payload["prepared_request_sha256"],
             "write_ambiguity_rule": "WRITE_MAY_HAVE_BEEN_SENT_AFTER_THIS_COMMIT",
         }
-        self._advance(permit, locked, PermitStage.SEND_BOUNDARY, EventType.WRITE_SEND_BOUNDARY_ENTERED, boundary, permit.send_boundary_event_id, PermitStage.CONSUMED)
+        self._advance(
+            permit, locked, PermitStage.SEND_BOUNDARY, EventType.WRITE_SEND_BOUNDARY_ENTERED, boundary,
+            permit.send_boundary_event_id, PermitStage.CONSUMED, execution_attempt_id=None,
+        )
 
     def invoke_transport(self, permit: NormalWriterPermit, transport: Callable[[object], object], request: object) -> object:
         with self.__mutex:
