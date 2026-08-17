@@ -118,6 +118,12 @@ class FailureCode(enum.StrEnum):
     CANCEL_RESULT_REVISION_CONFLICT = "CANCEL_RESULT_REVISION_CONFLICT"
     RELEASE_PREDICATE_FAILED = "RELEASE_PREDICATE_FAILED"
     RELEASE_PREDICATE_CHANGED = "RELEASE_PREDICATE_CHANGED"
+    NORMAL_WRITER_ACQUISITION_REJECTED = "NORMAL_WRITER_ACQUISITION_REJECTED"
+    CURRENT_PROCESS_RELEASE_COMPLETION_REQUIRED = "CURRENT_PROCESS_RELEASE_COMPLETION_REQUIRED"
+    CURRENT_PROCESS_RELEASE_COMPLETION_INVALID = "CURRENT_PROCESS_RELEASE_COMPLETION_INVALID"
+    CURRENT_PROCESS_RELEASE_COMPLETION_PROCESS_MISMATCH = "CURRENT_PROCESS_RELEASE_COMPLETION_PROCESS_MISMATCH"
+    CURRENT_PROCESS_RELEASE_COMPLETION_STALE = "CURRENT_PROCESS_RELEASE_COMPLETION_STALE"
+    CURRENT_PROCESS_RELEASE_COMPLETION_NOT_ISSUED = "CURRENT_PROCESS_RELEASE_COMPLETION_NOT_ISSUED"
 
 
 class RestartClassification(enum.StrEnum):
@@ -2233,7 +2239,7 @@ def replay_projection(authority_meta: AuthorityMeta, authority_row: AuthorityRow
     proofs: dict[str, str] = {}
     proof_eligible: dict[str, bool] = {}
     proof_incident: dict[str, str | None] = {}
-    legacy_count = 0
+    imported_incident_ids: set[str] = set()
     restricted_sessions: list[str] = []
     restricted_modes: dict[str, AcquisitionMode] = {}
     open_restricted: set[str] = set()
@@ -2299,7 +2305,7 @@ def replay_projection(authority_meta: AuthorityMeta, authority_row: AuthorityRow
         elif event.event_type is EventType.WRITER_PROOF_RELEASED:
             proof = str(payload["writer_proof_id"]); proofs[proof] = "RELEASED"; proof_eligible[proof] = True
         elif event.event_type is EventType.LEGACY_INCIDENT_IMPORTED:
-            legacy_count += 1
+            imported_incident_ids.add(str(payload["incident_id"]))
             reconciliation[str(payload["incident_id"])] = str(payload["final_disposition"])
             legacy_states[str(payload["incident_id"])] = MappingProxyType({
                 "active_order_upper_bound": payload["active_order_upper_bound"],
@@ -2344,10 +2350,37 @@ def replay_projection(authority_meta: AuthorityMeta, authority_row: AuthorityRow
             release_records[str(payload["release_id"])] = payload
     if open_sessions:
         abnormal.extend(sorted(open_sessions))
-    history = "INCOMPLETE" if legacy_count == 0 else "COMPLETE_WITH_PROTECTED_UNRESOLVED_LEGACY_WRITE"
+    # ER-NW-002: for each imported legacy incident, proof association is
+    # derived only from the existing WRITER_PROOF_HELD event(s) whose
+    # incident_id equals that imported incident.  The imported incident
+    # contributes exactly one protected count unless there is exactly one
+    # such controlling proof and replay has derived
+    # writer_proof_release_eligible_by_proof_id[proof_id] == true from a
+    # qualifying RECONCILIATION_RECORDED event for the same incident.  No
+    # proof, more than one candidate controlling proof, an ineligible proof,
+    # or an unknown association remains protected.  This is intentionally
+    # conservative and does not rewrite historical events: it is a pure
+    # function of already-replayed proof/incident/eligibility facts.
+    protected_unresolved_legacy_write_count = 0
+    for imported_incident_id in imported_incident_ids:
+        candidate_proofs = {
+            proof for proof, held_incident in proof_incident.items()
+            if held_incident == imported_incident_id
+        }
+        if len(candidate_proofs) == 1:
+            (only_proof,) = candidate_proofs
+            if proof_eligible.get(only_proof) is True:
+                continue
+        protected_unresolved_legacy_write_count += 1
+    if not imported_incident_ids:
+        history = "INCOMPLETE"
+    elif protected_unresolved_legacy_write_count > 0:
+        history = "COMPLETE_WITH_PROTECTED_UNRESOLVED_LEGACY_WRITE"
+    else:
+        history = "COMPLETE"
     if history == "INCOMPLETE":
         restart = RestartClassification.LEGACY_HISTORY_INCOMPLETE
-    elif unresolved or legacy_count or any(state == "HELD" for state in proofs.values()):
+    elif unresolved or protected_unresolved_legacy_write_count or any(state == "HELD" for state in proofs.values()):
         restart = RestartClassification.UNRESOLVED_WRITE_HELD
     else:
         restart = RestartClassification.SAFE_NO_WRITE_CAPABILITY
@@ -2366,7 +2399,7 @@ def replay_projection(authority_meta: AuthorityMeta, authority_row: AuthorityRow
         MappingProxyType(dict(sorted(fills.items()))), tuple(sorted(fill_conflicts)),
         MappingProxyType(dict(sorted(reconciliation.items()))), MappingProxyType(dict(sorted(legacy_states.items()))),
         MappingProxyType(dict(sorted(proofs.items()))),
-        MappingProxyType(dict(sorted(proof_eligible.items()))), legacy_count, restart,
+        MappingProxyType(dict(sorted(proof_eligible.items()))), protected_unresolved_legacy_write_count, restart,
         sessions[-1] if sessions else None,
         tuple(restricted_sessions), MappingProxyType(dict(sorted(restricted_modes.items()))),
         sorted(open_restricted)[-1] if open_restricted else None,
@@ -2621,6 +2654,56 @@ def acquire_local_state(
         fault_hook=fault_hook,
         history_validator=history_validator,
     )
+
+
+def _acquire_normal_writer_candidate(
+    binding: AuthorityNamespaceBinding,
+    *,
+    conflict_domain_ref: str,
+    expected_environment: str,
+    canonical_repository_root: str | os.PathLike[str],
+    expected_ledger_path: str | os.PathLike[str] | None = None,
+    clock: Clock = _utc_now,
+    uuid_factory: UuidFactory = uuid.uuid4,
+    fault_hook: FaultHook = _noop_fault_hook,
+    history_validator: HistoryValidator | None = None,
+) -> OpenResult:
+    """Private normal-writer candidate bridge (ER-NW-001).
+
+    Not part of the public ``acquire_local_state`` surface: no generic
+    caller can obtain a live normal-writer-capable candidate through the
+    public API.  This bridge is consumed only by a venue binding (e.g.
+    ``arb.venues.kalshi.ledger_binding.acquire_normal_writer_state``), which
+    performs the full durable-eligibility and current-process continuity
+    validation required by that venue's exact acquisition theorem while the
+    same authority/ledger exclusive lock pair returned here remains held,
+    before ever starting a writer session.
+
+    This bridge itself evaluates only the venue-agnostic structural
+    predicates: authority-first/ledger-second exclusive locking, full
+    identity/schema/integrity validation, complete replay under the supplied
+    history validator, and an exactly-equal authority/ledger trusted tail.
+    A ledger-ahead relation exposes no candidate on this acquisition; the
+    caller must close and perform a fresh equal-tail reopen.  It does not
+    itself evaluate history completeness, risk/proof state, or any other
+    durable eligibility predicate, and it never starts a writer session.
+    """
+    try:
+        locked = _open_locked(
+            binding, conflict_domain_ref=conflict_domain_ref,
+            expected_environment=expected_environment,
+            canonical_repository_root=canonical_repository_root,
+            expected_ledger_path=expected_ledger_path, clock=clock,
+            uuid_factory=uuid_factory, fault_hook=fault_hook,
+            history_validator=history_validator,
+        )
+    except LedgerError as exc:
+        return OpenResult(None, _classify_error(exc), None, exc.code)
+    projection = locked.projection()
+    if locked.relation is not AuthorityLedgerRelation.EQUAL:
+        locked.close()
+        return OpenResult(projection, projection.restart_classification, None, None, locked.relation)
+    return OpenResult(projection, projection.restart_classification, locked, None, locked.relation)
 
 
 def _acquire_legacy_import_state(

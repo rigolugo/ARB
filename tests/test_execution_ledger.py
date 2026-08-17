@@ -1318,6 +1318,47 @@ class ExecutionLedgerTestCase(unittest.TestCase):
         finally:
             authority.close()
 
+    # ------------------------------------------------------------------
+    # GATE A IMPLEMENTATION 02, Correction 02 (ER-NW-001): the private
+    # normal-writer candidate bridge is venue-agnostic and structurally not
+    # part of the public acquire_local_state surface.
+    # ------------------------------------------------------------------
+    def test_private_normal_writer_candidate_exposes_equal_tail_fresh_ledger(self) -> None:
+        self.initialize()
+        candidate = ledger._acquire_normal_writer_candidate(
+            self.binding,
+            conflict_domain_ref="test-conflict-domain",
+            expected_environment="KALSHI_DEMO",
+            canonical_repository_root=self.repository_root,
+            expected_ledger_path=self.ledger_path,
+        )
+        # A structurally fresh ledger has an equal authority/ledger tail by
+        # construction: the bridge exposes the candidate (ER-NW-001 items
+        # 1-7), even though it is nowhere near durably eligible.  Durable
+        # eligibility (history completeness, risk/proof state, etc.) is
+        # exclusively the venue binding's concern (ER-NW-003), not this
+        # bridge's.
+        self.assertIsNotNone(candidate.handle)
+        self.assertEqual(candidate.authority_ledger_relation, ledger.AuthorityLedgerRelation.EQUAL)
+        self.assertEqual(candidate.projection.history_completeness, "INCOMPLETE")
+        self.assertIsNone(candidate.projection.active_writer_session_id)
+        candidate.handle.close()
+
+    def test_private_normal_writer_candidate_is_not_public_acquire_local_state(self) -> None:
+        # acquire_local_state is the only generic public entry point; the
+        # private candidate bridge must not be reachable through it under a
+        # different name, and must not appear in the module's public names.
+        self.assertNotIn("_acquire_normal_writer_candidate", ledger.__all__)
+        self.assertNotIn("acquire_normal_writer_candidate", dir(ledger))
+
+    def test_gate_a_implementation_02_failure_code_enum_values(self) -> None:
+        self.assertEqual(FailureCode.NORMAL_WRITER_ACQUISITION_REJECTED.value, "NORMAL_WRITER_ACQUISITION_REJECTED")
+        self.assertEqual(FailureCode.CURRENT_PROCESS_RELEASE_COMPLETION_REQUIRED.value, "CURRENT_PROCESS_RELEASE_COMPLETION_REQUIRED")
+        self.assertEqual(FailureCode.CURRENT_PROCESS_RELEASE_COMPLETION_INVALID.value, "CURRENT_PROCESS_RELEASE_COMPLETION_INVALID")
+        self.assertEqual(FailureCode.CURRENT_PROCESS_RELEASE_COMPLETION_PROCESS_MISMATCH.value, "CURRENT_PROCESS_RELEASE_COMPLETION_PROCESS_MISMATCH")
+        self.assertEqual(FailureCode.CURRENT_PROCESS_RELEASE_COMPLETION_STALE.value, "CURRENT_PROCESS_RELEASE_COMPLETION_STALE")
+        self.assertEqual(FailureCode.CURRENT_PROCESS_RELEASE_COMPLETION_NOT_ISSUED.value, "CURRENT_PROCESS_RELEASE_COMPLETION_NOT_ISSUED")
+
 
 if __name__ == "__main__":
     unittest.main()

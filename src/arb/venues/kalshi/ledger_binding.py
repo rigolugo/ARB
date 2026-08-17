@@ -34,6 +34,7 @@ from arb.execution_ledger import (
     RestartClassification,
     SafetyProjection,
     _acquire_legacy_import_state,
+    _acquire_normal_writer_candidate,
     _acquire_restricted_state,
     acquire_local_state,
     canonical_json_bytes,
@@ -41,6 +42,7 @@ from arb.execution_ledger import (
     end_restricted_session,
     parse_canonical_json,
     sha256_hex,
+    start_writer_session,
 )
 from arb.venues.kalshi.risk_control import (
     EconomicFillV1,
@@ -1246,6 +1248,8 @@ class _ReleaseProgress:
     release_event_hash: str | None = None
     proof_event_id: str | None = None
     proof_event_hash: str | None = None
+    state_changed_event_id: str | None = None
+    state_changed_event_hash: str | None = None
     last_monotonic_ns: int = 0
 
 
@@ -1257,6 +1261,181 @@ class _AuthoritativeReleaseUniverse:
     latest_order_event_ids: Mapping[str, str]
     fill_event_ids: Mapping[str, tuple[str, ...]]
     conflict_ids: tuple[str, ...]
+
+
+_CURRENT_PROCESS_RELEASE_COMPLETION_KEY = object()
+_current_process_release_completion_registry_lock = threading.Lock()
+
+
+@dataclass(frozen=True, slots=True)
+class _CurrentProcessReleaseCompletionIssuanceRecord:
+    """Independent issuance evidence, stored apart from the live token.
+
+    ``frozen=True`` on ``CurrentProcessReleaseCompletionV1`` only overrides
+    ordinary attribute assignment; ``object.__setattr__`` can still mutate a
+    field on the live object in the same process.  Object-identity
+    membership in the registry alone cannot detect that: the mutated object
+    is still the exact registered object.  This record captures an
+    immutable snapshot of every frozen field at the moment of issuance, kept
+    independently of the live token, so admission can prove each field still
+    equals its issuance-time value rather than merely comparing the token to
+    itself.
+    """
+
+    token: "CurrentProcessReleaseCompletionV1"
+    snapshot: Mapping[str, object]
+
+
+# Module-private issuance registry.  Keyed by object id for O(1) lookup, but
+# validity is never decided by key presence alone: every lookup re-compares
+# the registered VALUE to the candidate with ``is`` so a later object that
+# happens to be allocated at a freed/reused id can never be mistaken for a
+# still-registered token.  The dict holds a genuine strong reference to each
+# issued token for as long as it remains valid, which is what makes the
+# identity check meaningful (the original object cannot be garbage collected
+# and its id reused while it is still registered).  It also holds the
+# independent issuance snapshot used for exact-field validation.
+_current_process_release_completion_registry: dict[int, _CurrentProcessReleaseCompletionIssuanceRecord] = {}
+
+
+def _register_current_process_release_completion(token: "CurrentProcessReleaseCompletionV1") -> None:
+    snapshot = MappingProxyType({
+        field.name: getattr(token, field.name) for field in fields(type(token))
+    })
+    with _current_process_release_completion_registry_lock:
+        _current_process_release_completion_registry[id(token)] = (
+            _CurrentProcessReleaseCompletionIssuanceRecord(token, snapshot)
+        )
+
+
+def _is_registered_current_process_release_completion(token: object) -> bool:
+    with _current_process_release_completion_registry_lock:
+        record = _current_process_release_completion_registry.get(id(token))
+        return record is not None and record.token is token
+
+
+def _consume_current_process_release_completion(token: "CurrentProcessReleaseCompletionV1") -> None:
+    with _current_process_release_completion_registry_lock:
+        record = _current_process_release_completion_registry.get(id(token))
+        if record is not None and record.token is token:
+            del _current_process_release_completion_registry[id(token)]
+
+
+def _exact_field_equal(current: object, expected: object) -> bool:
+    """Type-aware equality: ``True == 1`` must not pass a ``schema_revision``
+    check bound to exact built-in ``int``, so plain ``==`` is insufficient.
+    """
+    return type(current) is type(expected) and current == expected
+
+
+def _is_exact_sha256_hex(value: object) -> bool:
+    return type(value) is str and len(value) == 64 and all(c in "0123456789abcdef" for c in value)
+
+
+def _is_exact_event_id(value: object) -> bool:
+    return type(value) is str and value.startswith("evt_") and len(value) == 36
+
+
+def _validate_current_process_release_completion_frozen_fields(
+    token: "CurrentProcessReleaseCompletionV1",
+) -> bool:
+    """Prove every frozen Spec-04 token field is still exact before admission.
+
+    Two independent checks, both required:
+
+    1. every field's current live value equals its independent
+       issuance-time snapshot value, compared with exact-type-aware
+       equality (catches any post-issuance ``object.__setattr__`` mutation,
+       including a same-value-but-wrong-type substitution such as
+       ``schema_revision = True``);
+    2. every field independently satisfies the frozen Spec-04 schema's exact
+       type/shape contract (authoritative source for what "exact" means,
+       not merely incidental to snapshot equality).
+
+    This is deliberately independent of -- and additional to -- the caller's
+    live-continuity ("stale") checks in ``acquire_normal_writer_state``,
+    which validate the token's bindings against *current* authoritative
+    ledger/process state.  This function validates the token's own frozen
+    fields against *itself at issuance*, which no amount of current-state
+    comparison can substitute for.
+    """
+    with _current_process_release_completion_registry_lock:
+        record = _current_process_release_completion_registry.get(id(token))
+    if record is None or record.token is not token:
+        return False
+    for field in fields(type(token)):
+        current = getattr(token, field.name)
+        expected = record.snapshot.get(field.name)
+        if not _exact_field_equal(current, expected):
+            return False
+    if (
+        type(token.schema_revision) is not int or token.schema_revision != 1
+        or type(token.process_instance_id) is not str or not token.process_instance_id
+        or type(token.release_id) is not str or not token.release_id.startswith("rel_")
+        or type(token.writer_proof_id) is not str or not token.writer_proof_id
+        or not _is_exact_sha256_hex(token.risk_config_sha256)
+        or type(token.resulting_risk_state_epoch) is not int or token.resulting_risk_state_epoch < 0
+        or not _is_exact_event_id(token.writer_eligible_state_event_id)
+        or not _is_exact_sha256_hex(token.writer_eligible_state_event_hash)
+        or type(token.authority_trusted_sequence) is not int or token.authority_trusted_sequence <= 0
+        or not _is_exact_sha256_hex(token.authority_trusted_event_hash)
+        or type(token.ledger_terminal_sequence) is not int or token.ledger_terminal_sequence <= 0
+        or not _is_exact_sha256_hex(token.ledger_terminal_event_hash)
+        or not _is_exact_event_id(token.release_session_ended_event_id)
+        or not _is_exact_sha256_hex(token.release_session_ended_event_hash)
+        or type(token.private_release_handle_identity) is not object
+        or type(token.private_release_source_identity) is not object
+    ):
+        return False
+    return True
+
+
+@dataclass(frozen=True, slots=True, init=False)
+class CurrentProcessReleaseCompletionV1:
+    """One-shot, process-local, non-forgeable normal-writer admission token.
+
+    Only ``ReleaseLedgerHandle.complete_release_and_issue_current_process_completion``
+    may construct and register an instance.  It is immutable, rejects
+    ``copy``/``deepcopy``/``pickle``/``reduce`` reconstruction, and a value
+    equal to a genuine instance in every public field is still invalid unless
+    it is the exact same registered object (validated by ``is``, never by
+    equality or by ``id()`` membership alone -- see the registry helpers
+    above).  Historical replay, ledger evidence, or a different Python
+    process can never reconstruct it: the registry is process-local memory
+    only and is destroyed by process termination.
+    """
+
+    schema_revision: int
+    process_instance_id: str
+    release_id: str
+    writer_proof_id: str
+    risk_config_sha256: str
+    resulting_risk_state_epoch: int
+    writer_eligible_state_event_id: str
+    writer_eligible_state_event_hash: str
+    authority_trusted_sequence: int
+    authority_trusted_event_hash: str
+    ledger_terminal_sequence: int
+    ledger_terminal_event_hash: str
+    release_session_ended_event_id: str
+    release_session_ended_event_hash: str
+    private_release_handle_identity: object
+    private_release_source_identity: object
+
+    def __init__(self, key: object, **values: object) -> None:
+        if key is not _CURRENT_PROCESS_RELEASE_COMPLETION_KEY:
+            raise LedgerError(FailureCode.CURRENT_PROCESS_RELEASE_COMPLETION_INVALID)
+        for field in fields(type(self)):
+            object.__setattr__(self, field.name, values[field.name])
+
+    def __copy__(self):
+        raise TypeError("CurrentProcessReleaseCompletionV1 cannot be copied")
+
+    __deepcopy__ = __copy__
+
+    def __reduce_ex__(self, protocol):
+        del protocol
+        raise TypeError("CurrentProcessReleaseCompletionV1 cannot be serialized")
 
 
 class ReleaseLedgerHandle:
@@ -1934,9 +2113,112 @@ class ReleaseLedgerHandle:
             "observed_ledger_terminal_sequence": prior.sequence,
             "observed_ledger_terminal_hash": prior.event_hash,
         }
-        return self.__locked.append_batch((EventInput(
+        result = self.__locked.append_batch((EventInput(
             EventType.RISK_CONTROL_STATE_CHANGED, payload, self.__session_id,
         ),))
+        event = result.events[-1]
+        progress.state_changed_event_id = event.event_id
+        progress.state_changed_event_hash = event.event_hash
+        return result
+
+    def complete_release_and_issue_current_process_completion(
+        self, assessment: ReleaseAssessmentV1,
+    ) -> "CurrentProcessReleaseCompletionV1":
+        """Issue the exact one-shot process-local normal-writer admission token.
+
+        Only reachable after ``record_risk_release``, ``release_writer_proof``,
+        and ``record_writer_eligible`` have already positively completed on
+        this exact assessment context (ER04-REL-CAP-004).  This method never
+        re-appends those three durable events; it only verifies they already
+        landed as the exact unmoved ledger tail, then anchors the closing
+        ``RESTRICTED_SESSION_ENDED`` readback before issuing the capability.
+        Any failure below -- including a tail that moved between steps --
+        leaves the capability ``NOT_ISSUED`` and never fabricates a
+        best-effort token.
+        """
+        if self.__closed:
+            raise LedgerError(FailureCode.CURRENT_PROCESS_RELEASE_COMPLETION_NOT_ISSUED)
+        progress = self._context(assessment)
+        if (
+            progress.release_event_id is None
+            or progress.proof_event_id is None
+            or progress.state_changed_event_id is None
+        ):
+            raise LedgerError(FailureCode.CURRENT_PROCESS_RELEASE_COMPLETION_NOT_ISSUED)
+        tail = self.__locked.events[-1]
+        projection = self.__locked.projection()
+        authority = self.__locked.authority_row
+        observed_tail = (tail.sequence, tail.event_hash)
+        process_instance_id = progress.source._snapshot()[2]
+        if (
+            tail.event_id != progress.state_changed_event_id
+            or tail.event_hash != progress.state_changed_event_hash
+            or tail.event_type is not EventType.RISK_CONTROL_STATE_CHANGED
+            or tail.payload.get("previous_state") != "SAFE_HELD"
+            or tail.payload.get("new_state") != "WRITER_ELIGIBLE"
+            or tail.payload.get("cause") != "DURABLE_RELEASE_COMPLETED"
+            or tail.payload.get("related_release_id") != assessment.release_id
+            or projection.risk_control_state != "WRITER_ELIGIBLE"
+            or projection.risk_state_epoch != assessment.risk_state_epoch + 1
+            or projection.active_risk_config_sha256 != assessment.risk_config_sha256
+            or projection.writer_proof_state_by_proof_id.get(assessment.writer_proof_id) != "RELEASED"
+            or projection.writer_proof_release_eligible_by_proof_id.get(assessment.writer_proof_id) is not True
+            or (authority.trusted_sequence, authority.trusted_event_hash) != observed_tail
+            or (projection.trusted_sequence, projection.trusted_event_hash) != observed_tail
+            or (projection.last_sequence, projection.terminal_event_hash) != observed_tail
+            or process_instance_id != assessment.process_instance_id
+        ):
+            raise LedgerError(FailureCode.CURRENT_PROCESS_RELEASE_COMPLETION_NOT_ISSUED)
+
+        session_id = self.__session_id
+        private_release_handle_identity = self.__identity
+        private_release_source_identity = assessment.private_source_identity
+        try:
+            end_restricted_session(
+                self.__locked, restricted_session_id=session_id,
+                acquisition_mode=AcquisitionMode.RELEASE_ONLY,
+            )
+        except LedgerError as exc:
+            raise LedgerError(FailureCode.CURRENT_PROCESS_RELEASE_COMPLETION_NOT_ISSUED) from exc
+        finally:
+            self.__closed = True
+
+        ended_tail = self.__locked.events[-1]
+        ended_authority = self.__locked.authority_row
+        ended_projection = self.__locked.projection()
+        ended_observed = (ended_tail.sequence, ended_tail.event_hash)
+        if (
+            ended_tail.event_type is not EventType.RESTRICTED_SESSION_ENDED
+            or ended_tail.payload.get("restricted_session_id") != session_id
+            or ended_tail.payload.get("acquisition_mode") != AcquisitionMode.RELEASE_ONLY.value
+            or (ended_authority.trusted_sequence, ended_authority.trusted_event_hash) != ended_observed
+            or (ended_projection.trusted_sequence, ended_projection.trusted_event_hash) != ended_observed
+            or (ended_projection.last_sequence, ended_projection.terminal_event_hash) != ended_observed
+            or ended_projection.active_restricted_session_id is not None
+        ):
+            raise LedgerError(FailureCode.CURRENT_PROCESS_RELEASE_COMPLETION_NOT_ISSUED)
+
+        token = CurrentProcessReleaseCompletionV1(
+            _CURRENT_PROCESS_RELEASE_COMPLETION_KEY,
+            schema_revision=1,
+            process_instance_id=assessment.process_instance_id,
+            release_id=assessment.release_id,
+            writer_proof_id=assessment.writer_proof_id,
+            risk_config_sha256=assessment.risk_config_sha256,
+            resulting_risk_state_epoch=assessment.risk_state_epoch + 1,
+            writer_eligible_state_event_id=tail.event_id,
+            writer_eligible_state_event_hash=tail.event_hash,
+            authority_trusted_sequence=ended_authority.trusted_sequence,
+            authority_trusted_event_hash=ended_authority.trusted_event_hash,
+            ledger_terminal_sequence=ended_tail.sequence,
+            ledger_terminal_event_hash=ended_tail.event_hash,
+            release_session_ended_event_id=ended_tail.event_id,
+            release_session_ended_event_hash=ended_tail.event_hash,
+            private_release_handle_identity=private_release_handle_identity,
+            private_release_source_identity=private_release_source_identity,
+        )
+        _register_current_process_release_completion(token)
+        return token
 
     def close(self) -> None:
         if self.__closed:
@@ -2044,26 +2326,197 @@ def acquire_release_only(
     )
 
 
+@dataclass(frozen=True, slots=True)
+class NormalWriterAcquisition:
+    """Exact ER-NW-003 acquisition result carrier."""
+
+    projection: SafetyProjection | None
+    restart_classification: RestartClassification
+    handle: LockedLedger | None
+    normal_writer_session_id: str | None
+    failure_code: FailureCode | None = None
+    authority_ledger_relation: AuthorityLedgerRelation | None = None
+
+
 def acquire_normal_writer_state(
     binding: AuthorityNamespaceBinding,
     *,
     canonical_repository_root: str,
+    risk_config: RiskLimitConfigV1,
+    process_instance_id: str,
+    current_process_release_completion: CurrentProcessReleaseCompletionV1 | None = None,
     contract: LegacyIncidentContract = CURRENT_LEGACY_INCIDENT_CONTRACT,
     expected_ledger_path: str | None = None,
-) -> OpenResult:
-    """Return local normal-writer eligibility; Revision 03 exposes no writer.
+    clock=None,
+    uuid_factory=None,
+    fault_hook=None,
+) -> NormalWriterAcquisition:
+    """Sole supported Kalshi normal-writer acquisition function (ER-NW-003).
 
-    Before import this returns LEGACY_HISTORY_INCOMPLETE; after the current
-    import it returns UNRESOLVED_WRITE_HELD.  In both cases ``handle`` is None.
+    A non-``None`` handle/session may be returned only if, while the
+    authority and ledger exclusive locks remain held, every durable
+    ER-NW-003 predicate holds (exact authority/ledger identity and tail
+    equality, ``history_completeness == COMPLETE``,
+    ``protected_unresolved_legacy_write_count == 0``, no unresolved write,
+    controlling writer proof ``RELEASED``/eligible, ``WRITER_ELIGIBLE``,
+    active risk config bound to ``risk_config``, no active restricted
+    session, no unresolved emergency cancel) AND the full current-process
+    release-completion continuity block (ER04-NW-003/004/005) holds:
+    ``current_process_release_completion`` is an exact, live-registered
+    ``CurrentProcessReleaseCompletionV1`` bound to this process, this
+    ``risk_config``, this replay epoch, its own bound writer-eligible and
+    restricted-session-end event identities, and the current unmoved
+    authority/ledger tail.
+
+    Storage/integrity/identity failures from the private candidate bridge
+    preserve their existing exact failure codes.  A pure durable
+    eligibility/config failure (reached only once the candidate bridge
+    itself opened cleanly) uses ``NORMAL_WRITER_ACQUISITION_REJECTED`` and
+    never mutates eligibility.  Token-specific failures retain their own
+    exact ``CURRENT_PROCESS_RELEASE_COMPLETION_*`` classifications.
+
+    For the exact current historical state (Section 6), this always returns
+    ``handle=None`` and ``normal_writer_session_id=None``: its protected
+    unresolved legacy write is never cleared by any supported event, so
+    ``history_completeness`` never reaches ``COMPLETE`` for that incident.
     """
-    return acquire_local_state(
+    kwargs: dict[str, object] = {}
+    if clock is not None:
+        kwargs["clock"] = clock
+    if uuid_factory is not None:
+        kwargs["uuid_factory"] = uuid_factory
+    if fault_hook is not None:
+        kwargs["fault_hook"] = fault_hook
+    opened = _acquire_normal_writer_candidate(
         binding,
         conflict_domain_ref=contract.conflict_domain_ref,
         expected_environment=contract.environment,
         canonical_repository_root=canonical_repository_root,
-        acquisition_mode=AcquisitionMode.NORMAL_WRITER,
         expected_ledger_path=expected_ledger_path,
         history_validator=lambda events: _validate_bound_legacy_history(events, contract),
+        **kwargs,
+    )
+    locked = opened.handle
+    if locked is None:
+        return NormalWriterAcquisition(
+            opened.projection, opened.restart_classification, None, None,
+            opened.failure_code, opened.authority_ledger_relation,
+        )
+
+    projection = locked.projection()
+    tail = locked.events[-1]
+    authority = locked.authority_row
+    observed_tail = (tail.sequence, tail.event_hash)
+    proof_state = projection.writer_proof_state_by_proof_id.get(contract.writer_proof_id)
+    proof_eligible = projection.writer_proof_release_eligible_by_proof_id.get(contract.writer_proof_id)
+    durable_eligible = (
+        projection.history_completeness == "COMPLETE"
+        and projection.protected_unresolved_legacy_write_count == 0
+        and not projection.unresolved_write_request_ids
+        and proof_state == "RELEASED"
+        and proof_eligible is True
+        and projection.risk_control_state == "WRITER_ELIGIBLE"
+        and projection.active_risk_config_sha256 is not None
+        and type(risk_config) is RiskLimitConfigV1
+        and risk_config.conflict_domain == contract.conflict_domain_ref
+        and risk_config.sha256 == projection.active_risk_config_sha256
+        and projection.active_restricted_session_id is None
+        and not any(projection.cancel_send_may_have_been_sent_by_attempt.values())
+        and (authority.trusted_sequence, authority.trusted_event_hash) == observed_tail
+        and (projection.trusted_sequence, projection.trusted_event_hash) == observed_tail
+        and (projection.last_sequence, projection.terminal_event_hash) == observed_tail
+    )
+    if not durable_eligible:
+        locked.close()
+        return NormalWriterAcquisition(
+            projection, projection.restart_classification, None, None,
+            FailureCode.NORMAL_WRITER_ACQUISITION_REJECTED, locked.relation,
+        )
+
+    if current_process_release_completion is None:
+        locked.close()
+        return NormalWriterAcquisition(
+            projection, projection.restart_classification, None, None,
+            FailureCode.CURRENT_PROCESS_RELEASE_COMPLETION_REQUIRED, locked.relation,
+        )
+    token = current_process_release_completion
+    if (
+        type(token) is not CurrentProcessReleaseCompletionV1
+        or not _is_registered_current_process_release_completion(token)
+    ):
+        locked.close()
+        return NormalWriterAcquisition(
+            projection, projection.restart_classification, None, None,
+            FailureCode.CURRENT_PROCESS_RELEASE_COMPLETION_INVALID, locked.relation,
+        )
+    # Object-identity registry membership alone does not prove every frozen
+    # field is still exact: ``object.__setattr__`` can mutate a field on the
+    # live (still-registered) object without changing its identity.  Every
+    # frozen field must independently equal its issuance-time snapshot value
+    # (exact-type-aware) and satisfy the frozen Spec-04 schema's exact
+    # type/shape contract before the token may be trusted further.
+    if not _validate_current_process_release_completion_frozen_fields(token):
+        locked.close()
+        return NormalWriterAcquisition(
+            projection, projection.restart_classification, None, None,
+            FailureCode.CURRENT_PROCESS_RELEASE_COMPLETION_INVALID, locked.relation,
+        )
+    if token.process_instance_id != process_instance_id:
+        locked.close()
+        return NormalWriterAcquisition(
+            projection, projection.restart_classification, None, None,
+            FailureCode.CURRENT_PROCESS_RELEASE_COMPLETION_PROCESS_MISMATCH, locked.relation,
+        )
+
+    events_by_id = {event.event_id: event for event in locked.events}
+    writer_eligible_event = events_by_id.get(token.writer_eligible_state_event_id)
+    session_ended_event = events_by_id.get(token.release_session_ended_event_id)
+    stale = (
+        token.writer_proof_id != contract.writer_proof_id
+        or token.risk_config_sha256 != risk_config.sha256
+        or projection.risk_state_epoch != token.resulting_risk_state_epoch
+        or writer_eligible_event is None
+        or writer_eligible_event.event_type is not EventType.RISK_CONTROL_STATE_CHANGED
+        or writer_eligible_event.event_hash != token.writer_eligible_state_event_hash
+        or writer_eligible_event.payload.get("previous_state") != "SAFE_HELD"
+        or writer_eligible_event.payload.get("new_state") != "WRITER_ELIGIBLE"
+        or writer_eligible_event.payload.get("cause") != "DURABLE_RELEASE_COMPLETED"
+        or writer_eligible_event.payload.get("related_release_id") != token.release_id
+        or session_ended_event is None
+        or session_ended_event.event_type is not EventType.RESTRICTED_SESSION_ENDED
+        or session_ended_event.event_hash != token.release_session_ended_event_hash
+        or (token.authority_trusted_sequence, token.authority_trusted_event_hash) != observed_tail
+        or (token.ledger_terminal_sequence, token.ledger_terminal_event_hash) != observed_tail
+    )
+    if stale:
+        locked.close()
+        return NormalWriterAcquisition(
+            projection, projection.restart_classification, None, None,
+            FailureCode.CURRENT_PROCESS_RELEASE_COMPLETION_STALE, locked.relation,
+        )
+
+    # Every durable and continuity predicate has now been validated while the
+    # authority/ledger locks are still held.  Consume the single-admission
+    # token immediately before the one permitted successor mutation.
+    _consume_current_process_release_completion(token)
+    relation = locked.relation
+    try:
+        session_id = start_writer_session(locked, prior_session_state="NONE")
+    except LedgerError as exc:
+        locked.close()
+        return NormalWriterAcquisition(
+            projection, projection.restart_classification, None, None, exc.code, relation,
+        )
+    final_projection = locked.projection()
+    if final_projection.active_writer_session_id != session_id:
+        locked.close()
+        return NormalWriterAcquisition(
+            final_projection, final_projection.restart_classification, None, None,
+            FailureCode.NORMAL_WRITER_ACQUISITION_REJECTED, relation,
+        )
+    return NormalWriterAcquisition(
+        final_projection, final_projection.restart_classification, locked, session_id,
+        None, relation,
     )
 
 
@@ -2155,6 +2608,7 @@ __all__ = [
     "CURRENT_WRITER_PROOF_ID", "EvidenceExpectation", "LegacyIncidentContract",
     "EmergencyControlLedgerHandle", "LegacyImportAcquisition", "LegacyImportOnlyHandle", "LegacyImportResult",
     "LegacyImportStatus", "PRODUCTION_EVIDENCE_EXPECTATIONS", "ValidatedLegacyEvidence",
+    "CurrentProcessReleaseCompletionV1", "NormalWriterAcquisition",
     "ReleaseAssessmentV1", "ReleaseEvaluationStateV1", "ReleaseLedgerHandle",
     "ReleaseReconciliationSnapshotV1", "ReleaseRiskSnapshotV1", "RestrictedAcquisition",
     "VenueDefenseEvidenceV1", "acquire_emergency_control_only",

@@ -5,11 +5,13 @@ from __future__ import annotations
 import copy
 import hashlib
 import json
+import pickle
 import sqlite3
+import sys
 import tempfile
 import unittest
 import uuid
-from dataclasses import replace
+from dataclasses import fields, replace
 from datetime import datetime, timedelta, timezone
 from decimal import Decimal
 from pathlib import Path
@@ -19,6 +21,7 @@ from typing import Mapping
 import arb.execution_ledger as ledger
 from arb.execution_ledger import (
     AcquisitionMode,
+    AuthorityLedgerRelation,
     AuthorityNamespaceBinding,
     CommitResultUnknown,
     EventInput,
@@ -42,9 +45,11 @@ from arb.venues.kalshi.ledger_binding import (
     CURRENT_TICKER,
     CURRENT_WRITER_PROOF_ID,
     PRODUCTION_EVIDENCE_EXPECTATIONS,
+    CurrentProcessReleaseCompletionV1,
     EvidenceExpectation,
     LegacyIncidentContract,
     LegacyImportStatus,
+    NormalWriterAcquisition,
     ReleaseAssessmentV1,
     ReleaseEvaluationStateV1,
     ReleaseReconciliationSnapshotV1,
@@ -58,6 +63,14 @@ from arb.venues.kalshi.ledger_binding import (
     canonical_kalshi_fill_payload,
     validate_legacy_evidence,
     validate_venue_defense_evidence,
+)
+from arb.venues.kalshi.ledger_binding import (
+    _CURRENT_PROCESS_RELEASE_COMPLETION_KEY,
+    _acquire_normal_writer_candidate,
+    _current_process_release_completion_registry,
+    _is_registered_current_process_release_completion,
+    _register_current_process_release_completion,
+    _consume_current_process_release_completion,
 )
 from arb.venues.kalshi.emergency_cancel import (
     AuthoritativeCancelTargetV1,
@@ -1090,6 +1103,8 @@ class KalshiLedgerBindingTestCase(unittest.TestCase):
         normal = acquire_normal_writer_state(
             self.binding,
             canonical_repository_root=str(self.repository_root),
+            risk_config=None,
+            process_instance_id="proc_" + "0" * 32,
             contract=self.contract,
             expected_ledger_path=str(self.ledger_path),
         )
@@ -1192,7 +1207,7 @@ class KalshiLedgerBindingTestCase(unittest.TestCase):
         self.assertIsNotNone(release.handle)
         self.assertEqual(
             {name for name in dir(release.handle) if not name.startswith("_")},
-            {"close", "evaluate_release", "inspect_validated_projection", "record_risk_release", "record_writer_eligible", "release_writer_proof", "restricted_session_id"},
+            {"close", "complete_release_and_issue_current_process_completion", "evaluate_release", "inspect_validated_projection", "record_risk_release", "record_writer_eligible", "release_writer_proof", "restricted_session_id"},
         )
         for prohibited in ("append_batch", "send", "cancel", "record_cancel_intent", "record_order_observation"):
             self.assertFalse(hasattr(release.handle, prohibited))
@@ -2382,6 +2397,7 @@ class KalshiLedgerBindingTestCase(unittest.TestCase):
         locked.close()
         normal = acquire_normal_writer_state(
             self.binding, canonical_repository_root=str(self.repository_root),
+            risk_config=None, process_instance_id="proc_" + "0" * 32,
             contract=self.contract, expected_ledger_path=str(self.ledger_path),
         )
         self.assertIsNone(normal.handle)
@@ -2709,6 +2725,8 @@ class KalshiLedgerBindingTestCase(unittest.TestCase):
         normal = acquire_normal_writer_state(
             self.binding,
             canonical_repository_root=str(self.repository_root),
+            risk_config=None,
+            process_instance_id="proc_" + "0" * 32,
             contract=self.contract,
             expected_ledger_path=str(self.ledger_path),
         )
@@ -3024,6 +3042,1223 @@ class KalshiLedgerBindingTestCase(unittest.TestCase):
         ).read_text(encoding="utf-8")
         for prohibited_import in ("import socket", "import requests", "import httpx", "import ssl"):
             self.assertNotIn(prohibited_import, source)
+
+
+class NormalWriterAcquisitionTestCase(KalshiLedgerBindingTestCase):
+    """GATE A IMPLEMENTATION 02: same-scope correction to Marco-blocked
+    Implementation 01 (candidate 0a38e7c2f7862f8b39e7543f657e4c83a1910e4f),
+    applying Correction 01 (ER-NW-002 exact replay-derived
+    history-completeness semantics), Correction 02 (ER-NW-001 module-private
+    normal-writer candidate bridge; no public generic bypass), and
+    Correction 03 (exact ER-NW-003 ``NormalWriterAcquisition`` acquisition
+    contract, exact returned ``normal_writer_session_id``, exact
+    ``NORMAL_WRITER_ACQUISITION_REJECTED`` classification) from
+    KALSHI_DEMO_MINIMAL_TWO_SIDED_MARKET_MAKER_EXPERIMENT_RUNNER_SPEC_03.md
+    (bytes=117449, sha256=09bdca72ea83c4b701ee8c743b06f384c7fe682f7fb5bf14459ab484dad81771),
+    incorporated unchanged by SPEC_04, plus SPEC_04's current-process
+    release-completion continuity additions (ER04-REL-CAP-*/ER04-NW-003..005).
+
+    Every positive-path fixture reaches ``history_completeness == COMPLETE``
+    only through the real ``commit_exact_legacy_import`` /
+    ``validate_legacy_evidence`` ceremony followed by one genuine qualifying
+    ``RECONCILIATION_RECORDED`` event (per ER-NW-002) -- never by skipping
+    legacy import, never by fabricating replay facts.  Per ER04-TEST-003,
+    white-box private-constructor access is used only to prove
+    rejection/non-forgeability of a deliberately wrong token, never to
+    manufacture a successful writer-admission fixture.
+    """
+
+    @staticmethod
+    def _synthetic_legacy_evidence_documents(
+        *, incident_id: str, writer_proof_id: str, legacy_writer_session_id: str,
+    ) -> dict[str, dict[str, object]]:
+        lifecycle = {
+            "task_id": incident_id,
+            "authorization_consumed": True,
+            "environment": CURRENT_ENVIRONMENT,
+            "ticker": CURRENT_TICKER,
+            "client_order_id": CURRENT_CLIENT_ORDER_ID,
+            "phase": "FAIL_CLOSED_HALT",
+            "halt_code": "RECOVERY_ZERO_MATCH",
+            "terminal_result": None,
+            "canonical_lifecycle_evidence": {
+                "environment": CURRENT_ENVIRONMENT,
+                "account_scope_ref": CURRENT_ACCOUNT_SCOPE_REF,
+                "subaccount": 0,
+                "ticker": CURRENT_TICKER,
+                "client_order_id": CURRENT_CLIENT_ORDER_ID,
+                "writer_session_id": legacy_writer_session_id,
+                "proof_id": writer_proof_id,
+                "proof_state": "HELD",
+                "proof_release_eligible": False,
+                "bound_order_id": None,
+                "created_order_upper_bound": 1,
+                "active_order_upper_bound": 1,
+                "unknown_result": True,
+                "create_send_may_have_begun": True,
+                "cancel_send_may_have_begun": False,
+                "halt_code": "RECOVERY_ZERO_MATCH",
+            },
+            "writer_proof": {
+                "id": writer_proof_id,
+                "account_scope_ref": CURRENT_ACCOUNT_SCOPE_REF,
+                "writer_session_id": legacy_writer_session_id,
+                "continuity_state": "HELD",
+            },
+            "reconciliation": {
+                "created_order_upper_bound": 1,
+                "active_order_upper_bound": 1,
+                "unknown_result": True,
+                "proof_release_eligible": False,
+            },
+            "authoritative_order_snapshots": [],
+            "canonical_fill_summary": None,
+        }
+        reconciliation = {
+            "task_id": "KALSHI_DEMO_POST_HALT_EXACT_WRITE_RESULT_RECONCILIATION_EXECUTION_01",
+            "authorization": {
+                "authorization_consumed": True,
+                "overall_execution_attempts_authorized": 1,
+            },
+            "canonical_result": {
+                "result_class": CURRENT_DISPOSITION,
+                "bound_order_id": None,
+                "created_order_upper_bound": 1,
+                "active_order_upper_bound": 1,
+                "unknown_result": True,
+                "writer_proof_release_eligible": False,
+                "exact_client_order_id_match_count": 0,
+                "canonical_fill_count": 0,
+                "evidence": {
+                    "task_id": "KALSHI_DEMO_POST_HALT_EXACT_WRITE_RESULT_RECONCILIATION_IMPLEMENTATION_01",
+                    "frozen_scope": {
+                        "environment": CURRENT_ENVIRONMENT,
+                        "account_scope_ref": CURRENT_ACCOUNT_SCOPE_REF,
+                        "subaccount": 0,
+                        "ticker": CURRENT_TICKER,
+                        "client_order_id": CURRENT_CLIENT_ORDER_ID,
+                        "writer_proof_id": writer_proof_id,
+                    },
+                    "terminal": {
+                        "result_class": CURRENT_DISPOSITION,
+                        "created_order_upper_bound": 1,
+                        "active_order_upper_bound": 1,
+                        "unknown_result": True,
+                        "writer_proof_release_eligible": False,
+                    },
+                    "order_match": {
+                        "bound_order_id": None,
+                        "exact_client_order_id_match_count": 0,
+                        "canonical_orders": [],
+                        "matched_order_ids": [],
+                    },
+                    "fills": {
+                        "canonical_fill_count": 0,
+                        "canonical_fill_identities": [],
+                        "order_fill_reconciliation_result": "UNRESOLVED_OR_NOT_REACHED",
+                    },
+                    "enumeration": {"records_retained": {"orders": 0, "fills": 0}},
+                },
+            },
+        }
+        fill_discovery = {
+            "task_id": "KALSHI_DEMO_POST_HALT_FILL_DISCOVERY_BINDING_FALLBACK_EXECUTION_01",
+            "authorization": {
+                "authorization_consumed": True,
+                "overall_execution_authorized": 1,
+                "rerun_permitted_under_this_authorization": False,
+            },
+            "canonical_result": {
+                "result_class": CURRENT_DISPOSITION,
+                "bound_order_id": None,
+                "created_order_upper_bound": 1,
+                "active_order_upper_bound": 1,
+                "unknown_result": True,
+                "writer_proof_release_eligible": False,
+                "candidate_order_id_count": 0,
+                "candidate_order_ids": [],
+                "canonical_fill_count": 0,
+                "validated_binding_count": 0,
+                "validated_binding_order_ids": [],
+                "prior_exact_client_order_id_match_count": 0,
+                "evidence": {
+                    "task_id": "KALSHI_DEMO_POST_HALT_FILL_DISCOVERY_BINDING_FALLBACK_IMPLEMENTATION_01",
+                    "frozen_scope": {
+                        "environment": CURRENT_ENVIRONMENT,
+                        "account_scope_ref": CURRENT_ACCOUNT_SCOPE_REF,
+                        "subaccount": 0,
+                        "ticker": CURRENT_TICKER,
+                        "client_order_id": CURRENT_CLIENT_ORDER_ID,
+                        "writer_proof_id": writer_proof_id,
+                    },
+                    "predecessor_result": {
+                        "result_class": CURRENT_DISPOSITION,
+                        "bound_order_id": None,
+                        "created_order_upper_bound": 1,
+                        "active_order_upper_bound": 1,
+                        "exact_client_order_id_match_count": 0,
+                        "unknown_result": True,
+                        "writer_proof_release_eligible": False,
+                    },
+                    "terminal": {
+                        "result_class": CURRENT_DISPOSITION,
+                        "bound_order_id": None,
+                        "created_order_upper_bound": 1,
+                        "active_order_upper_bound": 1,
+                        "unknown_result": True,
+                        "writer_proof_release_eligible": False,
+                        "candidate_order_id_count": 0,
+                        "candidate_order_ids": [],
+                        "canonical_fill_count": 0,
+                        "prior_exact_client_order_id_match_count": 0,
+                        "validated_binding_count": 0,
+                        "validated_binding_order_ids": [],
+                    },
+                    "bound_fill_reconciliation": {
+                        "bound_order_id": None,
+                        "bound_fills": [],
+                        "canonical_fill_count": 0,
+                    },
+                    "candidate_validation": {
+                        "results": [],
+                        "validated_binding_count": 0,
+                        "validated_binding_order_ids": [],
+                    },
+                    "discovery": {
+                        "candidate_order_id_count": 0,
+                        "candidate_order_id_set": [],
+                        "canonical_discovery_fills": [],
+                        "unique_fill_id_count": 0,
+                    },
+                },
+            },
+        }
+        return {
+            "execution_evidence.json": lifecycle,
+            "KALSHI_DEMO_POST_HALT_EXACT_WRITE_RESULT_RECONCILIATION_EVIDENCE_01.json": reconciliation,
+            "KALSHI_DEMO_POST_HALT_FILL_DISCOVERY_BINDING_FALLBACK_EXECUTION_EVIDENCE_01.json": fill_discovery,
+        }
+
+    def _build_legacy_completed_safe_held(self):
+        """Reach SAFE_HELD with genuine ``history_completeness == COMPLETE``.
+
+        Builds a synthetic legacy incident through the real
+        ``commit_exact_legacy_import``/``validate_legacy_evidence`` ceremony
+        (only the identity fields are parameterized; the imported
+        disposition/eligibility shape is frozen exactly as for the real
+        historical incident -- legacy import always begins protected), then
+        records one genuine qualifying ``RECONCILIATION_RECORDED`` event for
+        that same incident making its sole associated writer proof
+        release-eligible.  Per ER-NW-002 this is the only way
+        ``protected_unresolved_legacy_write_count`` can reach zero for an
+        imported incident, and thus the only way ``history_completeness``
+        can ever reach ``COMPLETE``.
+        """
+        self.initialize()
+        incident_id = "SYNTHETIC_LEGACY_RELEASE_INCIDENT"
+        proof_id = "SYNTHETIC_LEGACY_RELEASE_PROOF"
+        legacy_writer_session_id = "SYNTHETIC_LEGACY_RELEASE_LOCAL_RUNNER"
+        documents = self._synthetic_legacy_evidence_documents(
+            incident_id=incident_id, writer_proof_id=proof_id,
+            legacy_writer_session_id=legacy_writer_session_id,
+        )
+        evidence = self._encode_evidence_documents(documents)
+        contract = LegacyIncidentContract(
+            incident_id=incident_id, writer_proof_id=proof_id,
+            legacy_writer_session_id=legacy_writer_session_id,
+            evidence_expectations=self._expectations_for(evidence),
+        )
+        imported = acquire_legacy_import_only(
+            self.binding, canonical_repository_root=str(self.repository_root),
+            contract=contract, expected_ledger_path=str(self.ledger_path),
+            clock=self.inputs.clock, uuid_factory=self.inputs.uuid,
+        )
+        self.assertIsNotNone(imported.handle)
+        validated = imported.handle.validate_legacy_evidence(evidence)
+        imported.handle.commit_exact_legacy_import(validated)
+        imported.handle.close()
+
+        emergency = acquire_emergency_control_only(
+            self.binding, canonical_repository_root=str(self.repository_root),
+            contract=contract, expected_ledger_path=str(self.ledger_path),
+            clock=self.inputs.clock, uuid_factory=self.inputs.uuid,
+        )
+        self.assertIsNotNone(emergency.handle)
+        handle = emergency.handle
+        assert handle is not None
+        handle.record_reconciliation({
+            "incident_id": incident_id,
+            "disposition": "SYNTHETIC_QUALIFYING_RECONCILIATION_CLOSED",
+            "write_closure_class": "AUTHORITATIVE_RESULT_CLOSED",
+            "bound_order_id": None,
+            "created_order_upper_bound": 0,
+            "active_order_upper_bound": 0,
+            "unknown_result": False,
+            "writer_proof_release_eligible": True,
+            "basis_event_ids": [],
+            "adapter_reconciliation_schema_id": "SYNTHETIC_RECONCILIATION_V1",
+        }, incident_id=incident_id)
+        projection = handle.inspect_validated_projection()
+        self.assertEqual(projection.history_completeness, "COMPLETE")
+        self.assertEqual(projection.protected_unresolved_legacy_write_count, 0)
+        self.assertTrue(projection.writer_proof_release_eligible_by_proof_id[proof_id])
+        self.assertEqual(projection.writer_proof_state_by_proof_id[proof_id], "HELD")
+        # Restart classification remains UNRESOLVED_WRITE_HELD: the proof is
+        # eligible but not yet RELEASED (ER-NW-002's intentionally
+        # conservative two-stage gate).
+        self.assertEqual(projection.restart_classification, RestartClassification.UNRESOLVED_WRITE_HELD)
+
+        config = RiskLimitConfigV1(
+            1, contract.conflict_domain_ref, "USD",
+            PerOrderRiskLimits(Decimal("10"), Decimal("10"), True, Decimal("0.10"), 1_000),
+            PerMarketRiskLimits(Decimal("20"), Decimal("20"), 10, Decimal("20"), Decimal("20")),
+            AccountRiskLimits(Decimal("100"), 50, Decimal("100"), 0, Decimal("0")),
+            FlowRiskLimits(1, 1_000, 1, 1_000, 1, 1_000, 1, 1_000, 2, 1_000, 1, 500, 1, 10, 100),
+            StateIntegrityLimits(1_000, 1_000, 10, 1, 500, 10, 100),
+            VenueDefensePolicy("NOT_REQUIRED", None, True, "NO_SAFETY_CREDIT", "NO_SAFETY_CREDIT"),
+        )
+        canonical_order = {
+            "order_id": "synthetic-legacy-order-1", "status": "resting",
+            "remaining_count_fp": "1.00", "market": "SYNTHETIC",
+            "outcome_side": "YES", "yes_price": Decimal("0.50"),
+            "cancel_order_on_pause": True,
+        }
+        order_event = handle.record_order_observation({
+            "venue_order_id": "synthetic-legacy-order-1",
+            "client_order_id": "synthetic-legacy-client-order-1",
+            "source_request_id": "synthetic-legacy-release-order-read",
+            "source_operation": "GET_ORDER_V2",
+            "venue_payload_schema_id": "synthetic-order-v1",
+            "canonical_venue_payload": canonical_order,
+            "canonical_venue_payload_sha256": hashlib.sha256(canonical_json_bytes(canonical_order)).hexdigest(),
+            "observation_semantic_class": "AUTHORITATIVE_ACTIVE_ORDER",
+        }).events[-1]
+        canonical_fill = canonical_kalshi_fill_payload(
+            fill_id="synthetic-legacy-fill-1", order_id="synthetic-legacy-order-1",
+            price=Decimal("0.40"), quantity=Decimal("1.00"), fee=Decimal("0.01"),
+            additional_fields={
+                "market": "SYNTHETIC", "outcome_side": "YES",
+                "authoritative_created_time_utc": "2026-08-13T13:00:00.000000Z",
+            },
+        )
+        fill_event = handle.record_fill_observation({
+            "canonical_venue_payload": canonical_fill,
+            "canonical_venue_payload_sha256": hashlib.sha256(canonical_json_bytes(canonical_fill)).hexdigest(),
+            "client_order_id": "synthetic-legacy-client-order-1",
+            "source_operation": "SYNTHETIC_FILL_READ",
+            "source_request_id": "synthetic-legacy-release-fill-read",
+            "venue_fill_id": "synthetic-legacy-fill-1",
+            "venue_order_id": "synthetic-legacy-order-1",
+            "venue_payload_schema_id": "synthetic-fill-v1",
+        }).events[-1]
+        # No record_writer_proof_held here: the proof is already HELD via
+        # the legacy import above; re-holding it would be a duplicate/
+        # conflicting event, not a fresh predecessor hold.
+        before = handle.inspect_validated_projection()
+        state_payload = {
+            "previous_state": "BOOT_HOLD",
+            "new_state": "SAFE_HELD",
+            "cause": "REPLAY_ALL_SAFETY_PREDICATES_PASS",
+            "risk_state_epoch_before": 0,
+            "risk_state_epoch_after": 1,
+            "risk_config_sha256": config.sha256,
+            "related_emergency_action_id": None,
+            "related_release_id": None,
+            "predecessor_state_event_id": None,
+            "observed_authority_trusted_sequence": before.last_sequence,
+            "observed_authority_trusted_hash": before.terminal_event_hash,
+            "observed_ledger_terminal_sequence": before.last_sequence,
+            "observed_ledger_terminal_hash": before.terminal_event_hash,
+        }
+        handle.record_risk_control_state_changed(state_payload)
+        safe_projection = handle.inspect_validated_projection()
+        self.assertEqual(safe_projection.risk_control_state, "SAFE_HELD")
+        self.assertEqual(safe_projection.history_completeness, "COMPLETE")
+        self.assertEqual(safe_projection.protected_unresolved_legacy_write_count, 0)
+        normal_gate = WriterEligibilityGate(
+            monotonic_clock_ns=self.inputs.monotonic_ns,
+            wall_clock=self.inputs.clock,
+            uuid_factory=self.inputs.uuid,
+        )
+        lane = EmergencyRateLane(EmergencyRateConfigV1(2, 1_000, 1, 500, 1, 10, 100))
+        emergency_gate = EmergencyCancelGate(
+            handle=handle,
+            rate_lane=lane,
+            process_instance_id=normal_gate.process_instance_id,
+            monotonic_clock_ns=self.inputs.monotonic_ns,
+            wall_clock=self.inputs.clock,
+            uuid_factory=self.inputs.uuid,
+        )
+        handle.close()
+        market_data = {"ticker": "SYNTHETIC", "reference_yes_price": Decimal("0.50")}
+        risk_snapshot = ReleaseRiskSnapshotV1(
+            fills=(EconomicFillV1(
+                "SYNTHETIC", "synthetic-legacy-fill-1", "YES", Decimal("1.00"),
+                Decimal("0.40"), "2026-08-13T13:00:00.000000Z",
+            ),),
+            working_orders=(WorkingOrderV1(
+                "SYNTHETIC", "synthetic-legacy-order-1", "YES", Decimal("1.00"), Decimal("0.50"),
+            ),),
+            unresolved_write_count=0,
+            unresolved_write_exposure_usd=Decimal("0"),
+            market_data_snapshot=market_data,
+        )
+        reconciliation_snapshot = ReleaseReconciliationSnapshotV1(
+            ("synthetic-legacy-order-1",), ("synthetic-legacy-order-1",), ("synthetic-legacy-fill-1",),
+            (), (), (("synthetic-legacy-order-1", order_event.event_id),),
+            (("synthetic-legacy-fill-1", fill_event.event_id),),
+        )
+        received_ns = self.inputs.monotonic_value
+        received_at = ledger.canonical_timestamp(self.inputs.instant)
+        market_stamp = FreshnessStampV1(
+            normal_gate.process_instance_id, received_at, received_ns, "NONE", None,
+            risk_snapshot.market_data_sha256,
+        )
+        reconciliation_stamp = FreshnessStampV1(
+            normal_gate.process_instance_id, received_at, received_ns, "NONE", None,
+            reconciliation_snapshot.sha256,
+        )
+        state = ReleaseEvaluationStateV1(
+            process_instance_id=normal_gate.process_instance_id,
+            incident_id=incident_id,
+            writer_proof_id=proof_id,
+            risk_config=config,
+            risk_snapshot=risk_snapshot,
+            reconciliation_snapshot=reconciliation_snapshot,
+            market_freshness=market_stamp,
+            reconciliation_freshness=reconciliation_stamp,
+            venue_defense_evidence=None,
+            normal_gate=normal_gate,
+            emergency_gate=emergency_gate,
+        )
+        return contract, proof_id, incident_id, config, state, normal_gate, emergency_gate
+
+    def _begin_legacy_completed_release(self):
+        contract, proof_id, incident_id, config, state, normal_gate, emergency_gate = (
+            self._build_legacy_completed_safe_held()
+        )
+        acquisition = acquire_release_only(
+            self.binding,
+            canonical_repository_root=str(self.repository_root),
+            contract=contract,
+            expected_ledger_path=str(self.ledger_path),
+            clock=self.inputs.clock,
+            uuid_factory=self.inputs.uuid,
+            monotonic_clock_ns=self.inputs.monotonic_ns,
+            release_wall_clock=self.inputs.clock,
+        )
+        self.assertIsNotNone(acquisition.handle)
+        handle = acquisition.handle
+        assert handle is not None
+        assessment = handle.evaluate_release(state)
+        return handle, assessment, state, contract, proof_id, incident_id, config, normal_gate, emergency_gate
+
+    def _issue_genuine_token(self):
+        """Drive one full canonical RELEASE_ONLY sequence to a live token.
+
+        Returns (token, risk_config, process_instance_id, contract).
+        """
+        (
+            handle, assessment, state, contract, proof_id, incident_id, config,
+            normal_gate, emergency_gate,
+        ) = self._begin_legacy_completed_release()
+        handle.record_risk_release(assessment)
+        handle.release_writer_proof(assessment)
+        handle.record_writer_eligible(assessment)
+        token = handle.complete_release_and_issue_current_process_completion(assessment)
+        return token, config, normal_gate.process_instance_id, contract
+
+    # ------------------------------------------------------------------
+    # A01 -- historical durable WRITER_ELIGIBLE without current-process
+    # token cannot acquire NORMAL_WRITER, even though every other durable
+    # predicate (including the new history_completeness == COMPLETE gate)
+    # genuinely passes.
+    # ------------------------------------------------------------------
+    def test_a01_historical_writer_eligible_without_token_cannot_acquire(self) -> None:
+        (
+            handle, assessment, state, contract, proof_id, incident_id, config,
+            normal_gate, emergency_gate,
+        ) = self._begin_legacy_completed_release()
+        handle.record_risk_release(assessment)
+        handle.release_writer_proof(assessment)
+        handle.record_writer_eligible(assessment)
+        handle.close()  # durable WRITER_ELIGIBLE now exists; no token was ever issued.
+
+        result = acquire_normal_writer_state(
+            self.binding,
+            canonical_repository_root=str(self.repository_root),
+            risk_config=config,
+            process_instance_id=normal_gate.process_instance_id,
+            current_process_release_completion=None,
+            contract=contract,
+            expected_ledger_path=str(self.ledger_path),
+        )
+        self.assertIsInstance(result, NormalWriterAcquisition)
+        self.assertIsNone(result.handle)
+        self.assertIsNone(result.normal_writer_session_id)
+        self.assertEqual(result.failure_code, FailureCode.CURRENT_PROCESS_RELEASE_COMPLETION_REQUIRED)
+        self.assertIsNone(result.projection.active_writer_session_id)
+
+    # ------------------------------------------------------------------
+    # A02 -- exact NormalWriterAcquisition success: fresh ws_ session,
+    # exact returned normal_writer_session_id, history_completeness ==
+    # COMPLETE reached only through genuine legacy import + qualifying
+    # reconciliation.
+    # ------------------------------------------------------------------
+    def test_a02_same_process_release_finalizer_admits_fresh_writer(self) -> None:
+        token, config, process_instance_id, contract = self._issue_genuine_token()
+        self.assertTrue(_is_registered_current_process_release_completion(token))
+        result = acquire_normal_writer_state(
+            self.binding,
+            canonical_repository_root=str(self.repository_root),
+            risk_config=config,
+            process_instance_id=process_instance_id,
+            current_process_release_completion=token,
+            contract=contract,
+            expected_ledger_path=str(self.ledger_path),
+        )
+        self.assertIsInstance(result, NormalWriterAcquisition)
+        self.assertIsNotNone(result.handle)
+        self.assertIsNone(result.failure_code)
+        self.assertIsNotNone(result.normal_writer_session_id)
+        self.assertTrue(result.normal_writer_session_id.startswith("ws_"))
+        self.assertEqual(result.projection.active_writer_session_id, result.normal_writer_session_id)
+        self.assertEqual(result.projection.risk_control_state, "WRITER_ELIGIBLE")
+        self.assertEqual(result.handle.events[-1].event_type, EventType.WRITER_SESSION_STARTED)
+        result.handle.close()
+
+    # ------------------------------------------------------------------
+    # A03 -- wrong process rejects token.
+    # ------------------------------------------------------------------
+    def test_a03_wrong_process_rejects_token(self) -> None:
+        token, config, process_instance_id, contract = self._issue_genuine_token()
+        result = acquire_normal_writer_state(
+            self.binding,
+            canonical_repository_root=str(self.repository_root),
+            risk_config=config,
+            process_instance_id="proc_" + ("0" * 32),
+            current_process_release_completion=token,
+            contract=contract,
+            expected_ledger_path=str(self.ledger_path),
+        )
+        self.assertIsNone(result.handle)
+        self.assertIsNone(result.normal_writer_session_id)
+        self.assertEqual(result.failure_code, FailureCode.CURRENT_PROCESS_RELEASE_COMPLETION_PROCESS_MISMATCH)
+        self.assertTrue(_is_registered_current_process_release_completion(token))
+
+    # ------------------------------------------------------------------
+    # A04 -- wrong risk config rejects (pure durable/config rejection uses
+    # NORMAL_WRITER_ACQUISITION_REJECTED, since it is caught before the
+    # token-specific staleness block is ever reached).
+    # ------------------------------------------------------------------
+    def test_a04_wrong_risk_config_rejects(self) -> None:
+        token, config, process_instance_id, contract = self._issue_genuine_token()
+        wrong_per_market = replace(
+            config.per_market,
+            max_authoritative_working_orders=config.per_market.max_authoritative_working_orders + 1,
+        )
+        wrong_config = replace(config, per_market=wrong_per_market)
+        self.assertNotEqual(wrong_config.sha256, config.sha256)
+        result = acquire_normal_writer_state(
+            self.binding,
+            canonical_repository_root=str(self.repository_root),
+            risk_config=wrong_config,
+            process_instance_id=process_instance_id,
+            current_process_release_completion=token,
+            contract=contract,
+            expected_ledger_path=str(self.ledger_path),
+        )
+        self.assertIsNone(result.handle)
+        self.assertEqual(result.failure_code, FailureCode.NORMAL_WRITER_ACQUISITION_REJECTED)
+        self.assertTrue(_is_registered_current_process_release_completion(token))
+
+    # ------------------------------------------------------------------
+    # A05 -- wrong risk-state epoch rejects (white-box field substitution on
+    # a separately-registered token; the underlying durable state is
+    # unaffected, isolating exactly this staleness condition).
+    # ------------------------------------------------------------------
+    def test_a05_wrong_risk_state_epoch_rejects(self) -> None:
+        token, config, process_instance_id, contract = self._issue_genuine_token()
+        wrong_values = {field.name: getattr(token, field.name) for field in fields(type(token))}
+        wrong_values["resulting_risk_state_epoch"] = token.resulting_risk_state_epoch + 1
+        wrong_token = CurrentProcessReleaseCompletionV1(_CURRENT_PROCESS_RELEASE_COMPLETION_KEY, **wrong_values)
+        _register_current_process_release_completion(wrong_token)
+        try:
+            result = acquire_normal_writer_state(
+                self.binding,
+                canonical_repository_root=str(self.repository_root),
+                risk_config=config,
+                process_instance_id=process_instance_id,
+                current_process_release_completion=wrong_token,
+                contract=contract,
+                expected_ledger_path=str(self.ledger_path),
+            )
+            self.assertIsNone(result.handle)
+            self.assertEqual(result.failure_code, FailureCode.CURRENT_PROCESS_RELEASE_COMPLETION_STALE)
+        finally:
+            _consume_current_process_release_completion(wrong_token)
+        self.assertTrue(_is_registered_current_process_release_completion(token))
+
+    # ------------------------------------------------------------------
+    # A06 -- wrong writer-eligible-state-event identity rejects.
+    # ------------------------------------------------------------------
+    def test_a06_wrong_state_event_identity_rejects(self) -> None:
+        token, config, process_instance_id, contract = self._issue_genuine_token()
+        wrong_values = {field.name: getattr(token, field.name) for field in fields(type(token))}
+        wrong_values["writer_eligible_state_event_hash"] = "f" * 64
+        wrong_token = CurrentProcessReleaseCompletionV1(_CURRENT_PROCESS_RELEASE_COMPLETION_KEY, **wrong_values)
+        _register_current_process_release_completion(wrong_token)
+        try:
+            result = acquire_normal_writer_state(
+                self.binding,
+                canonical_repository_root=str(self.repository_root),
+                risk_config=config,
+                process_instance_id=process_instance_id,
+                current_process_release_completion=wrong_token,
+                contract=contract,
+                expected_ledger_path=str(self.ledger_path),
+            )
+            self.assertIsNone(result.handle)
+            self.assertEqual(result.failure_code, FailureCode.CURRENT_PROCESS_RELEASE_COMPLETION_STALE)
+        finally:
+            _consume_current_process_release_completion(wrong_token)
+
+    # ------------------------------------------------------------------
+    # A07 -- authority/ledger tail movement invalidates token (a pure
+    # tail-moving event that touches no risk-control-state transition).
+    # ------------------------------------------------------------------
+    def test_a07_authority_ledger_tail_movement_invalidates_token(self) -> None:
+        token, config, process_instance_id, contract = self._issue_genuine_token()
+        emergency = acquire_emergency_control_only(
+            self.binding,
+            canonical_repository_root=str(self.repository_root),
+            contract=contract,
+            expected_ledger_path=str(self.ledger_path),
+            clock=self.inputs.clock,
+            uuid_factory=self.inputs.uuid,
+        )
+        self.assertIsNotNone(emergency.handle)
+        stale_order = {
+            "venue_order_id": "post-issuance-order-1",
+            "client_order_id": "post-issuance-client-order-1",
+            "source_request_id": "post-issuance-order-read",
+            "source_operation": "GET_ORDER_V2",
+            "venue_payload_schema_id": "synthetic-order-v1",
+            "canonical_venue_payload": {
+                "order_id": "post-issuance-order-1", "status": "resting",
+                "remaining_count_fp": "1.00", "market": "SYNTHETIC",
+                "outcome_side": "YES", "yes_price": Decimal("0.50"),
+                "cancel_order_on_pause": True,
+            },
+            "canonical_venue_payload_sha256": hashlib.sha256(canonical_json_bytes({
+                "order_id": "post-issuance-order-1", "status": "resting",
+                "remaining_count_fp": "1.00", "market": "SYNTHETIC",
+                "outcome_side": "YES", "yes_price": Decimal("0.50"),
+                "cancel_order_on_pause": True,
+            })).hexdigest(),
+            "observation_semantic_class": "AUTHORITATIVE_ACTIVE_ORDER",
+        }
+        emergency.handle.record_order_observation(stale_order)
+        emergency.handle.close()
+
+        result = acquire_normal_writer_state(
+            self.binding,
+            canonical_repository_root=str(self.repository_root),
+            risk_config=config,
+            process_instance_id=process_instance_id,
+            current_process_release_completion=token,
+            contract=contract,
+            expected_ledger_path=str(self.ledger_path),
+        )
+        self.assertIsNone(result.handle)
+        self.assertEqual(result.failure_code, FailureCode.CURRENT_PROCESS_RELEASE_COMPLETION_STALE)
+        self.assertEqual(result.projection.risk_control_state, "WRITER_ELIGIBLE")
+        self.assertTrue(_is_registered_current_process_release_completion(token))
+
+    # ------------------------------------------------------------------
+    # A08/A09/A10 -- copy/deepcopy/pickle/reduce reconstruction rejected.
+    # ------------------------------------------------------------------
+    def test_a08_copy_rejected(self) -> None:
+        token, *_ = self._issue_genuine_token()
+        with self.assertRaises(TypeError):
+            copy.copy(token)
+
+    def test_a09_deepcopy_rejected(self) -> None:
+        token, *_ = self._issue_genuine_token()
+        with self.assertRaises(TypeError):
+            copy.deepcopy(token)
+
+    def test_a10_pickle_reduce_reconstruction_rejected(self) -> None:
+        token, *_ = self._issue_genuine_token()
+        with self.assertRaises(TypeError):
+            pickle.dumps(token)
+        with self.assertRaises(TypeError):
+            token.__reduce_ex__(4)
+
+    # ------------------------------------------------------------------
+    # A11 -- fabricated value-equal object rejected: identity, not equality.
+    # ------------------------------------------------------------------
+    def test_a11_fabricated_value_equal_object_rejected(self) -> None:
+        token, config, process_instance_id, contract = self._issue_genuine_token()
+        same_values = {field.name: getattr(token, field.name) for field in fields(type(token))}
+        fabricated = CurrentProcessReleaseCompletionV1(_CURRENT_PROCESS_RELEASE_COMPLETION_KEY, **same_values)
+        self.assertIsNot(fabricated, token)
+        self.assertEqual(fabricated, token)  # every public field matches...
+        self.assertFalse(_is_registered_current_process_release_completion(fabricated))  # ...but is not registered.
+
+        result = acquire_normal_writer_state(
+            self.binding,
+            canonical_repository_root=str(self.repository_root),
+            risk_config=config,
+            process_instance_id=process_instance_id,
+            current_process_release_completion=fabricated,
+            contract=contract,
+            expected_ledger_path=str(self.ledger_path),
+        )
+        self.assertIsNone(result.handle)
+        self.assertEqual(result.failure_code, FailureCode.CURRENT_PROCESS_RELEASE_COMPLETION_INVALID)
+        self.assertTrue(_is_registered_current_process_release_completion(token))
+
+        with self.assertRaises(LedgerError) as wrong_key:
+            CurrentProcessReleaseCompletionV1(object(), **same_values)
+        self.assertEqual(wrong_key.exception.code, FailureCode.CURRENT_PROCESS_RELEASE_COMPLETION_INVALID)
+
+    # ------------------------------------------------------------------
+    # A12 -- registry retains a strong reference while valid (deterministic
+    # refcount proof; never a probabilistic id-reuse loop).
+    # ------------------------------------------------------------------
+    def test_a12_registry_retains_strong_reference(self) -> None:
+        token, *_ = self._issue_genuine_token()
+        self.assertIn(id(token), _current_process_release_completion_registry)
+        # Scoped narrowly: holding a local reference to the record would
+        # itself keep the token's refcount elevated after consumption below,
+        # confounding the very thing this test measures.
+        expected_snapshot = {field.name: getattr(token, field.name) for field in fields(type(token))}
+        self.assertIs(_current_process_release_completion_registry[id(token)].token, token)
+        self.assertEqual(
+            dict(_current_process_release_completion_registry[id(token)].snapshot),
+            expected_snapshot,
+        )
+        registered_refcount = sys.getrefcount(token)
+        _consume_current_process_release_completion(token)
+        after_refcount = sys.getrefcount(token)
+        self.assertEqual(after_refcount, registered_refcount - 1)
+        self.assertNotIn(id(token), _current_process_release_completion_registry)
+
+    # ------------------------------------------------------------------
+    # GATE A IMPLEMENTATION 03: exact frozen-field validation.  Object-
+    # identity registry membership alone does not prove every field is
+    # still exact -- ``object.__setattr__`` can mutate a field on the live,
+    # still-registered token without changing its identity.  Each of these
+    # mutates one field on an otherwise genuine, still-registered token
+    # (bounded white-box mutation used only to prove rejection, never to
+    # manufacture a successful fixture) and restores it afterward.
+    # ------------------------------------------------------------------
+    def test_t01_wrong_schema_revision_rejects(self) -> None:
+        token, config, process_instance_id, contract = self._issue_genuine_token()
+        original = token.schema_revision
+        object.__setattr__(token, "schema_revision", 2)
+        try:
+            result = acquire_normal_writer_state(
+                self.binding,
+                canonical_repository_root=str(self.repository_root),
+                risk_config=config,
+                process_instance_id=process_instance_id,
+                current_process_release_completion=token,
+                contract=contract,
+                expected_ledger_path=str(self.ledger_path),
+            )
+            self.assertIsNone(result.handle)
+            self.assertIsNone(result.normal_writer_session_id)
+            self.assertEqual(result.failure_code, FailureCode.CURRENT_PROCESS_RELEASE_COMPLETION_INVALID)
+        finally:
+            object.__setattr__(token, "schema_revision", original)
+
+    def test_t01b_schema_revision_exact_type_bool_confusion_rejects(self) -> None:
+        # schema_revision's genuine value is exactly 1; True == 1 under
+        # plain ``==`` but type(True) is bool, not int.  A naive value-only
+        # check would wrongly accept this.
+        token, config, process_instance_id, contract = self._issue_genuine_token()
+        self.assertEqual(token.schema_revision, 1)
+        object.__setattr__(token, "schema_revision", True)
+        try:
+            self.assertEqual(token.schema_revision, 1)  # still true by plain ==
+            self.assertIsNot(type(token.schema_revision), int)  # but wrong exact type
+            result = acquire_normal_writer_state(
+                self.binding,
+                canonical_repository_root=str(self.repository_root),
+                risk_config=config,
+                process_instance_id=process_instance_id,
+                current_process_release_completion=token,
+                contract=contract,
+                expected_ledger_path=str(self.ledger_path),
+            )
+            self.assertIsNone(result.handle)
+            self.assertEqual(result.failure_code, FailureCode.CURRENT_PROCESS_RELEASE_COMPLETION_INVALID)
+        finally:
+            object.__setattr__(token, "schema_revision", 1)
+
+    def test_t02_wrong_private_release_handle_identity_rejects(self) -> None:
+        token, config, process_instance_id, contract = self._issue_genuine_token()
+        original = token.private_release_handle_identity
+        object.__setattr__(token, "private_release_handle_identity", object())
+        try:
+            result = acquire_normal_writer_state(
+                self.binding,
+                canonical_repository_root=str(self.repository_root),
+                risk_config=config,
+                process_instance_id=process_instance_id,
+                current_process_release_completion=token,
+                contract=contract,
+                expected_ledger_path=str(self.ledger_path),
+            )
+            self.assertIsNone(result.handle)
+            self.assertIsNone(result.normal_writer_session_id)
+            self.assertEqual(result.failure_code, FailureCode.CURRENT_PROCESS_RELEASE_COMPLETION_INVALID)
+            # Object identity in the registry is unaffected by the mutation.
+            self.assertTrue(_is_registered_current_process_release_completion(token))
+        finally:
+            object.__setattr__(token, "private_release_handle_identity", original)
+
+    def test_t03_wrong_private_release_source_identity_rejects(self) -> None:
+        token, config, process_instance_id, contract = self._issue_genuine_token()
+        original = token.private_release_source_identity
+        object.__setattr__(token, "private_release_source_identity", object())
+        try:
+            result = acquire_normal_writer_state(
+                self.binding,
+                canonical_repository_root=str(self.repository_root),
+                risk_config=config,
+                process_instance_id=process_instance_id,
+                current_process_release_completion=token,
+                contract=contract,
+                expected_ledger_path=str(self.ledger_path),
+            )
+            self.assertIsNone(result.handle)
+            self.assertIsNone(result.normal_writer_session_id)
+            self.assertEqual(result.failure_code, FailureCode.CURRENT_PROCESS_RELEASE_COMPLETION_INVALID)
+            self.assertTrue(_is_registered_current_process_release_completion(token))
+        finally:
+            object.__setattr__(token, "private_release_source_identity", original)
+
+    def test_t04_exact_type_contract_on_resulting_risk_state_epoch(self) -> None:
+        # A second load-bearing field (distinct from schema_revision) where
+        # the frozen schema requires exact built-in int; a wrong-typed
+        # substitution must be rejected even though it lives entirely
+        # outside the schema_revision-specific check.
+        token, config, process_instance_id, contract = self._issue_genuine_token()
+        original = token.resulting_risk_state_epoch
+        object.__setattr__(token, "resulting_risk_state_epoch", str(original))
+        try:
+            result = acquire_normal_writer_state(
+                self.binding,
+                canonical_repository_root=str(self.repository_root),
+                risk_config=config,
+                process_instance_id=process_instance_id,
+                current_process_release_completion=token,
+                contract=contract,
+                expected_ledger_path=str(self.ledger_path),
+            )
+            self.assertIsNone(result.handle)
+            self.assertEqual(result.failure_code, FailureCode.CURRENT_PROCESS_RELEASE_COMPLETION_INVALID)
+        finally:
+            object.__setattr__(token, "resulting_risk_state_epoch", original)
+
+    def test_t05_unmodified_genuine_token_still_admits_exactly_once(self) -> None:
+        # The correction must not make the legitimate path impossible.
+        token, config, process_instance_id, contract = self._issue_genuine_token()
+        result = acquire_normal_writer_state(
+            self.binding,
+            canonical_repository_root=str(self.repository_root),
+            risk_config=config,
+            process_instance_id=process_instance_id,
+            current_process_release_completion=token,
+            contract=contract,
+            expected_ledger_path=str(self.ledger_path),
+        )
+        self.assertIsNotNone(result.handle)
+        self.assertIsNotNone(result.normal_writer_session_id)
+        self.assertTrue(result.normal_writer_session_id.startswith("ws_"))
+        self.assertFalse(_is_registered_current_process_release_completion(token))
+        result.handle.close()
+
+    # ------------------------------------------------------------------
+    # A13/A14 -- single admission; second use of a consumed token fails.
+    # ------------------------------------------------------------------
+    def test_a13_genuine_token_admits_at_most_once(self) -> None:
+        token, config, process_instance_id, contract = self._issue_genuine_token()
+        result = acquire_normal_writer_state(
+            self.binding,
+            canonical_repository_root=str(self.repository_root),
+            risk_config=config,
+            process_instance_id=process_instance_id,
+            current_process_release_completion=token,
+            contract=contract,
+            expected_ledger_path=str(self.ledger_path),
+        )
+        self.assertIsNotNone(result.handle)
+        self.assertFalse(_is_registered_current_process_release_completion(token))
+        result.handle.close()
+
+    def test_a14_second_use_of_consumed_token_fails(self) -> None:
+        token, config, process_instance_id, contract = self._issue_genuine_token()
+        first = acquire_normal_writer_state(
+            self.binding,
+            canonical_repository_root=str(self.repository_root),
+            risk_config=config,
+            process_instance_id=process_instance_id,
+            current_process_release_completion=token,
+            contract=contract,
+            expected_ledger_path=str(self.ledger_path),
+        )
+        self.assertIsNotNone(first.handle)
+        first.handle.close()
+
+        second = acquire_normal_writer_state(
+            self.binding,
+            canonical_repository_root=str(self.repository_root),
+            risk_config=config,
+            process_instance_id=process_instance_id,
+            current_process_release_completion=token,
+            contract=contract,
+            expected_ledger_path=str(self.ledger_path),
+        )
+        self.assertIsNone(second.handle)
+        self.assertEqual(second.failure_code, FailureCode.CURRENT_PROCESS_RELEASE_COMPLETION_INVALID)
+
+    # ------------------------------------------------------------------
+    # A15/A16 -- restart destroys the process-local registry; durable
+    # replay alone (WRITER_ELIGIBLE plus COMPLETE history) cannot
+    # reconstruct token validity.
+    # ------------------------------------------------------------------
+    def test_a15_restart_clears_registry_and_invalidates_live_token(self) -> None:
+        token, config, process_instance_id, contract = self._issue_genuine_token()
+        self.assertTrue(_is_registered_current_process_release_completion(token))
+        saved = dict(_current_process_release_completion_registry)
+        _current_process_release_completion_registry.clear()
+        try:
+            self.assertFalse(_is_registered_current_process_release_completion(token))
+            result = acquire_normal_writer_state(
+                self.binding,
+                canonical_repository_root=str(self.repository_root),
+                risk_config=config,
+                process_instance_id=process_instance_id,
+                current_process_release_completion=token,
+                contract=contract,
+                expected_ledger_path=str(self.ledger_path),
+            )
+            self.assertIsNone(result.handle)
+            self.assertEqual(result.failure_code, FailureCode.CURRENT_PROCESS_RELEASE_COMPLETION_INVALID)
+        finally:
+            _current_process_release_completion_registry.clear()
+            _current_process_release_completion_registry.update(saved)
+
+    def test_a16_durable_replay_alone_cannot_recreate_token(self) -> None:
+        token, config, process_instance_id, contract = self._issue_genuine_token()
+        saved = dict(_current_process_release_completion_registry)
+        _current_process_release_completion_registry.clear()
+        try:
+            reopened = acquire_normal_writer_state(
+                self.binding,
+                canonical_repository_root=str(self.repository_root),
+                risk_config=config,
+                process_instance_id=process_instance_id,
+                current_process_release_completion=None,
+                contract=contract,
+                expected_ledger_path=str(self.ledger_path),
+            )
+            self.assertIsNone(reopened.handle)
+            self.assertEqual(reopened.failure_code, FailureCode.CURRENT_PROCESS_RELEASE_COMPLETION_REQUIRED)
+            self.assertEqual(reopened.projection.risk_control_state, "WRITER_ELIGIBLE")
+            self.assertEqual(reopened.projection.history_completeness, "COMPLETE")
+        finally:
+            _current_process_release_completion_registry.clear()
+            _current_process_release_completion_registry.update(saved)
+
+    # ------------------------------------------------------------------
+    # A17 -- alias of A07 (same intervening-event mechanism).
+    # ------------------------------------------------------------------
+    def test_a17_intervening_event_invalidates_token(self) -> None:
+        self.test_a07_authority_ledger_tail_movement_invalidates_token()
+
+    # ------------------------------------------------------------------
+    # A18 -- ER-NW-005: the exact current historical state remains blocked
+    # (protected forever: nothing ever records a qualifying reconciliation
+    # for CURRENT_INCIDENT_ID), before any secret/network activity.
+    # ------------------------------------------------------------------
+    def test_a18_current_historical_incident_blocks_before_secret_or_network(self) -> None:
+        self.initialize()
+        acquisition = self.acquire_import()
+        acquisition.handle.commit_exact_legacy_import(
+            acquisition.handle.validate_legacy_evidence(self.evidence)
+        )
+        acquisition.handle.close()
+
+        candidate = _acquire_normal_writer_candidate(
+            self.binding,
+            conflict_domain_ref=self.contract.conflict_domain_ref,
+            expected_environment=self.contract.environment,
+            canonical_repository_root=self.repository_root,
+            expected_ledger_path=self.ledger_path,
+        )
+        self.assertIsNotNone(candidate.handle)  # ER-NW-001 exposes the candidate...
+        self.assertEqual(candidate.projection.history_completeness, "COMPLETE_WITH_PROTECTED_UNRESOLVED_LEGACY_WRITE")
+        self.assertEqual(candidate.projection.protected_unresolved_legacy_write_count, 1)
+        candidate.handle.close()
+
+        # ...but the Kalshi binding's own durable-eligibility gate (ER-NW-003)
+        # rejects it before ever inspecting risk_config/token.
+        result = acquire_normal_writer_state(
+            self.binding,
+            canonical_repository_root=str(self.repository_root),
+            risk_config=object(),  # type: ignore[arg-type]
+            process_instance_id="proc_" + ("0" * 32),
+            current_process_release_completion=object(),  # type: ignore[arg-type]
+            contract=self.contract,
+            expected_ledger_path=str(self.ledger_path),
+        )
+        self.assertIsNone(result.handle)
+        self.assertIsNone(result.normal_writer_session_id)
+        self.assertEqual(result.failure_code, FailureCode.NORMAL_WRITER_ACQUISITION_REJECTED)
+        self.assertEqual(result.projection.protected_unresolved_legacy_write_count, 1)
+        self.assertEqual(result.projection.reconciliation_disposition_by_incident[CURRENT_INCIDENT_ID], CURRENT_DISPOSITION)
+        self.assertFalse(result.projection.writer_proof_release_eligible_by_proof_id[CURRENT_WRITER_PROOF_ID])
+
+    # ------------------------------------------------------------------
+    # A19 -- no clean-history bootstrap: an empty fresh ledger stays
+    # BOOT_HOLD/INCOMPLETE, never COMPLETE, merely by existing.
+    # ------------------------------------------------------------------
+    def test_a19_empty_fresh_ledger_cannot_bootstrap_writer_eligible(self) -> None:
+        self.initialize()
+        candidate = _acquire_normal_writer_candidate(
+            self.binding,
+            conflict_domain_ref=self.contract.conflict_domain_ref,
+            expected_environment=self.contract.environment,
+            canonical_repository_root=self.repository_root,
+            expected_ledger_path=self.ledger_path,
+        )
+        self.assertIsNotNone(candidate.handle)  # ER-NW-001 exposes any equal-tail candidate...
+        self.assertEqual(candidate.projection.history_completeness, "INCOMPLETE")
+        self.assertEqual(candidate.projection.risk_control_state, "BOOT_HOLD")
+        candidate.handle.close()
+
+        result = acquire_normal_writer_state(
+            self.binding,
+            canonical_repository_root=str(self.repository_root),
+            risk_config=None,
+            process_instance_id="proc_" + ("0" * 32),
+            current_process_release_completion=None,
+            contract=self.contract,
+            expected_ledger_path=str(self.ledger_path),
+        )
+        self.assertIsNone(result.handle)
+        self.assertEqual(result.failure_code, FailureCode.NORMAL_WRITER_ACQUISITION_REJECTED)
+
+    # ------------------------------------------------------------------
+    # A20 -- ER-NW-001/Correction 02: the public generic NORMAL_WRITER
+    # bridge exposes no live bypass handle, even for a domain that has
+    # genuinely reached durable WRITER_ELIGIBLE with COMPLETE history; only
+    # the private bridge (consumed exclusively by the Kalshi binding) does.
+    # ------------------------------------------------------------------
+    def test_a20_public_generic_bridge_exposes_no_bypass_handle(self) -> None:
+        (
+            handle, assessment, state, contract, proof_id, incident_id, config,
+            normal_gate, emergency_gate,
+        ) = self._begin_legacy_completed_release()
+        handle.record_risk_release(assessment)
+        handle.release_writer_proof(assessment)
+        handle.record_writer_eligible(assessment)
+        handle.close()
+
+        public = acquire_local_state(
+            self.binding,
+            conflict_domain_ref=contract.conflict_domain_ref,
+            expected_environment=contract.environment,
+            canonical_repository_root=self.repository_root,
+            acquisition_mode=AcquisitionMode.NORMAL_WRITER,
+            expected_ledger_path=self.ledger_path,
+        )
+        self.assertIsNone(public.handle)
+
+        private_candidate = _acquire_normal_writer_candidate(
+            self.binding,
+            conflict_domain_ref=contract.conflict_domain_ref,
+            expected_environment=contract.environment,
+            canonical_repository_root=self.repository_root,
+            expected_ledger_path=self.ledger_path,
+        )
+        self.assertIsNotNone(private_candidate.handle)
+        self.assertEqual(private_candidate.projection.risk_control_state, "WRITER_ELIGIBLE")
+        self.assertEqual(private_candidate.projection.history_completeness, "COMPLETE")
+        self.assertIsNone(private_candidate.projection.active_writer_session_id)
+        self.assertFalse(any(
+            event.event_type is EventType.WRITER_SESSION_STARTED
+            for event in private_candidate.handle.events
+        ))
+        private_candidate.handle.close()
+
+    # ------------------------------------------------------------------
+    # ER-NW-004 -- session start uses/returns the exact deterministic seams
+    # (clock/uuid_factory/fault_hook) required by the frozen acquisition API.
+    # ------------------------------------------------------------------
+    def test_deterministic_seams_are_honored_at_session_start(self) -> None:
+        # Two independently built fixtures, each driven through an identically
+        # freshly-seeded DeterministicInputs seam supplied only for the
+        # acquisition call itself (not the token-issuance flow, which keeps
+        # using self.inputs).  If the supplied clock/uuid_factory seam is
+        # actually threaded through to start_writer_session rather than
+        # silently falling back to the real uuid.uuid4/wall clock, the two
+        # runs must produce the exact same ws_ session id.
+        session_ids: list[str] = []
+        for _ in range(2):
+            # Each iteration needs its own fresh authority/ledger namespace;
+            # initialize() may only run once per namespace.
+            self.tearDown()
+            self.setUp()
+            token, config, process_instance_id, contract = self._issue_genuine_token()
+            seam_inputs = DeterministicInputs()
+            result = acquire_normal_writer_state(
+                self.binding,
+                canonical_repository_root=str(self.repository_root),
+                risk_config=config,
+                process_instance_id=process_instance_id,
+                current_process_release_completion=token,
+                contract=contract,
+                expected_ledger_path=str(self.ledger_path),
+                clock=seam_inputs.clock,
+                uuid_factory=seam_inputs.uuid,
+            )
+            self.assertIsNotNone(result.handle)
+            assert result.normal_writer_session_id is not None
+            self.assertTrue(result.normal_writer_session_id.startswith("ws_"))
+            session_ids.append(result.normal_writer_session_id)
+            result.handle.close()
+        self.assertEqual(session_ids[0], session_ids[1])
+
+    # ------------------------------------------------------------------
+    # ER-NW-002 direct derivation coverage.  The generic schema validator
+    # permits at most one LEGACY_INCIDENT_IMPORTED event ever
+    # (execution_ledger._validate_spec03_event_sequence), so "multiple
+    # imported incidents" is structurally unreachable; these cases instead
+    # cover the reachable state machine: import alone (protected), import +
+    # qualifying reconciliation (COMPLETE but still HELD/UNRESOLVED_WRITE_HELD),
+    # import + reconciliation + RELEASED (COMPLETE and finally
+    # SAFE_NO_WRITE_CAPABILITY), and multiple candidate controlling proofs
+    # for the same imported incident (remains protected even if one proof is
+    # eligible).
+    # ------------------------------------------------------------------
+    def test_er_nw_002_import_alone_is_protected_and_unresolved(self) -> None:
+        self.initialize()
+        incident_id = "SYNTHETIC_ER_NW_002_INCIDENT_A"
+        proof_id = "SYNTHETIC_ER_NW_002_PROOF_A"
+        legacy_writer_session_id = "SYNTHETIC_ER_NW_002_A_LOCAL_RUNNER"
+        documents = self._synthetic_legacy_evidence_documents(
+            incident_id=incident_id, writer_proof_id=proof_id,
+            legacy_writer_session_id=legacy_writer_session_id,
+        )
+        evidence = self._encode_evidence_documents(documents)
+        contract = LegacyIncidentContract(
+            incident_id=incident_id, writer_proof_id=proof_id,
+            legacy_writer_session_id=legacy_writer_session_id,
+            evidence_expectations=self._expectations_for(evidence),
+        )
+        imported = acquire_legacy_import_only(
+            self.binding, canonical_repository_root=str(self.repository_root),
+            contract=contract, expected_ledger_path=str(self.ledger_path),
+            clock=self.inputs.clock, uuid_factory=self.inputs.uuid,
+        )
+        result = imported.handle.commit_exact_legacy_import(
+            imported.handle.validate_legacy_evidence(evidence)
+        )
+        self.assertEqual(result.projection.history_completeness, "COMPLETE_WITH_PROTECTED_UNRESOLVED_LEGACY_WRITE")
+        self.assertEqual(result.projection.protected_unresolved_legacy_write_count, 1)
+        self.assertEqual(result.projection.restart_classification, RestartClassification.UNRESOLVED_WRITE_HELD)
+        self.assertFalse(result.projection.writer_proof_release_eligible_by_proof_id[proof_id])
+        self.assertEqual(result.projection.writer_proof_state_by_proof_id[proof_id], "HELD")
+        imported.handle.close()
+
+    def test_er_nw_002_full_release_reaches_safe_no_write_capability(self) -> None:
+        token, config, process_instance_id, contract = self._issue_genuine_token()
+        # By the time a genuine token has been issued, the full accepted
+        # release sequence -- including WRITER_PROOF_RELEASED -- has
+        # completed.  A fresh replay must now show COMPLETE history and
+        # SAFE_NO_WRITE_CAPABILITY (no HELD proof remains).
+        candidate = _acquire_normal_writer_candidate(
+            self.binding,
+            conflict_domain_ref=contract.conflict_domain_ref,
+            expected_environment=contract.environment,
+            canonical_repository_root=self.repository_root,
+            expected_ledger_path=self.ledger_path,
+        )
+        self.assertIsNotNone(candidate.handle)
+        self.assertEqual(candidate.projection.history_completeness, "COMPLETE")
+        self.assertEqual(candidate.projection.protected_unresolved_legacy_write_count, 0)
+        self.assertEqual(candidate.projection.restart_classification, RestartClassification.SAFE_NO_WRITE_CAPABILITY)
+        self.assertEqual(candidate.projection.writer_proof_state_by_proof_id[contract.writer_proof_id], "RELEASED")
+        candidate.handle.close()
+        _consume_current_process_release_completion(token)
+
+    def test_er_nw_002_multiple_candidate_proofs_remain_protected(self) -> None:
+        self.initialize()
+        incident_id = "SYNTHETIC_ER_NW_002_INCIDENT_B"
+        proof_id = "SYNTHETIC_ER_NW_002_PROOF_B"
+        legacy_writer_session_id = "SYNTHETIC_ER_NW_002_B_LOCAL_RUNNER"
+        documents = self._synthetic_legacy_evidence_documents(
+            incident_id=incident_id, writer_proof_id=proof_id,
+            legacy_writer_session_id=legacy_writer_session_id,
+        )
+        evidence = self._encode_evidence_documents(documents)
+        contract = LegacyIncidentContract(
+            incident_id=incident_id, writer_proof_id=proof_id,
+            legacy_writer_session_id=legacy_writer_session_id,
+            evidence_expectations=self._expectations_for(evidence),
+        )
+        imported = acquire_legacy_import_only(
+            self.binding, canonical_repository_root=str(self.repository_root),
+            contract=contract, expected_ledger_path=str(self.ledger_path),
+            clock=self.inputs.clock, uuid_factory=self.inputs.uuid,
+        )
+        imported.handle.commit_exact_legacy_import(
+            imported.handle.validate_legacy_evidence(evidence)
+        )
+        imported.handle.close()
+
+        emergency = acquire_emergency_control_only(
+            self.binding, canonical_repository_root=str(self.repository_root),
+            contract=contract, expected_ledger_path=str(self.ledger_path),
+            clock=self.inputs.clock, uuid_factory=self.inputs.uuid,
+        )
+        handle = emergency.handle
+        assert handle is not None
+        # Make the imported proof genuinely eligible ...
+        handle.record_reconciliation({
+            "incident_id": incident_id,
+            "disposition": "SYNTHETIC_QUALIFYING_RECONCILIATION_CLOSED",
+            "write_closure_class": "AUTHORITATIVE_RESULT_CLOSED",
+            "bound_order_id": None, "created_order_upper_bound": 0,
+            "active_order_upper_bound": 0, "unknown_result": False,
+            "writer_proof_release_eligible": True, "basis_event_ids": [],
+            "adapter_reconciliation_schema_id": "SYNTHETIC_RECONCILIATION_V1",
+        }, incident_id=incident_id)
+        self.assertEqual(handle.inspect_validated_projection().history_completeness, "COMPLETE")
+        # ... but then a second, unrelated proof also gets associated with
+        # the same incident_id.  Per ER-NW-002 this makes the association
+        # ambiguous ("more than one candidate controlling proof"), so the
+        # imported incident must remain protected regardless of the first
+        # proof's eligibility.
+        second_proof_id = "SYNTHETIC_ER_NW_002_PROOF_B_SECOND"
+        handle.record_writer_proof_held({
+            "writer_proof_id": second_proof_id,
+            "conflict_domain_ref": contract.conflict_domain_ref,
+            "held_reason": "SYNTHETIC_SECOND_CANDIDATE_PROOF",
+            "protected_unresolved_write_event_ids": [],
+        }, incident_id=incident_id)
+        projection = handle.inspect_validated_projection()
+        self.assertEqual(projection.history_completeness, "COMPLETE_WITH_PROTECTED_UNRESOLVED_LEGACY_WRITE")
+        self.assertEqual(projection.protected_unresolved_legacy_write_count, 1)
+        self.assertTrue(projection.writer_proof_release_eligible_by_proof_id[proof_id])
+        self.assertFalse(projection.writer_proof_release_eligible_by_proof_id[second_proof_id])
+        handle.close()
 
 
 if __name__ == "__main__":
