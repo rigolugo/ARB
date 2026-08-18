@@ -9,10 +9,12 @@ This document records accepted state facts only. It does not authorize work and 
 - Repository: `rigolugo/ARB`
 - Visibility: public
 - Default branch: `main`
-- Exact canonical base used to prepare this state update: `7681676edb86e0f8fda52d5cebd46a5f52356401`
-- Exact canonical tree observed for that base: `0da7384dc499288b49793cc5c5755666b1f90fd1`
+- Exact canonical base used to prepare this state update: `839d475b55a708ec6e2bf280a99b1c35992dd6b1`
+- Exact canonical tree observed for that base: `c6dc085da5e399bf6be144866c2b63d179242921`
+- Exact canonical parent observed for that base: `12e69143fa94540f2a5f803a5677aa1718207478`
 - Canonical `main` must always be reverified directly before a task relies on it.
 - This file does not predeclare the commit SHA of any later documentation-transfer commit that may install this update.
+- Sections 1-12 below record state as of the earlier base `7681676edb86e0f8fda52d5cebd46a5f52356401` and are preserved unchanged as historical record. Section 13 extends this snapshot forward through the persistent-ledger, emergency-cancellation, minimal-market-maker, and runner Gate A/B/C milestones and is the current-state authority where it and any earlier section describe the same fact.
 
 ## 2. Current accepted technical state
 
@@ -558,3 +560,65 @@ That document is operational context only and grants no capability.
 - Environment or source ambiguity halts closed.
 - Technical capability or installed code never substitutes for a separate explicit execution decision.
 - No strategy is called arbitrage until all required legs are filled or otherwise contractually locked and the payout relationship has been verified at rule level.
+
+## 13. Persistent ledger through runner Gate C (current canonical-state extension)
+
+Authority level for this section: canonical current-state snapshot, prepared and verified from exact canonical base `839d475b55a708ec6e2bf280a99b1c35992dd6b1` (tree `c6dc085da5e399bf6be144866c2b63d179242921`, parent `12e69143fa94540f2a5f803a5677aa1718207478`) by `ARB_CANONICAL_DOCUMENTATION_STATE_SYNC_THROUGH_GATE_C_01`. This section supersedes Section 9's now-stale "next gated work" pointer (`PERSISTENT_LEDGER_AND_RESTART_RECOVERY_SPEC_ONLY`, since completed and installed below) without rewriting Section 9's historical text.
+
+### 13.1 Critical distinction — installed versus executed
+
+`Gate C implementation is installed` is a canonical fact.
+
+`Gate C release occurred on the real historical incident` is **not** a canonical fact and must never be implied.
+
+Gate C's positive release/normal-writer behavior (Stage 3G-3K: `RELEASE_ONLY` -> durable release -> `CurrentProcessReleaseCompletionV1` -> `NORMAL_WRITER` -> Stage-3K revalidation) was demonstrated only against synthetic, temporary, offline test persistence built through canonical public authority/ledger initialization APIs. No real-account Kalshi Demo or production ledger state was ever mutated by that demonstration. Test capability is not converted into real-state evidence by this section or by Gate C's installation.
+
+### 13.2 Progression of accepted milestones (persistent ledger through Gate C)
+
+Each commit below was independently reverified from canonical Git history (exact SHA existence, exact commit-subject match, and exact linear ancestry to `839d475b55a708ec6e2bf280a99b1c35992dd6b1`) by this documentation-sync task, not merely asserted:
+
+1. `KALSHI_DEMO_FILL_DISCOVERY_EXECUTION_STATE_UPDATE_01` — commit `5a65ccadb05b29d6e8692a108bcf46347ec0d214` — already covered by Section 7 above (fill-discovery fallback execution); listed here only as the ancestry anchor for the milestones that follow.
+2. `KALSHI_DEMO_PERSISTENT_LEDGER_AND_RESTART_RECOVERY_IMPLEMENTATION_03` — commit `f9fcd96b5b3efa7a3adfc2d9eabb133aa09cac82`, tree `f3992ba10735c4cafafa541f598add1b6e5e80ba`, parent `5a65ccadb05b29d6e8692a108bcf46347ec0d214`. Introduced `src/arb/execution_ledger.py` and `src/arb/venues/kalshi/ledger_binding.py` (the persistent authority/ledger SQLite-backed safety architecture and its Kalshi binding) with their test sources. Installed/canonical; implementation and offline-test presence only — no venue or credential activity. See `project_context/ARTIFACT_INDEX.md` ART-0051-ART-0054 for exact per-path identities.
+3. `KALSHI_DEMO_EMERGENCY_CANCELLATION_AND_RISK_LIMITS_IMPLEMENTATION_05` — commit `3091edb31f66969bf0c11cf19f4ad8fe13fa8913`, tree `54e2b4a45030713110fc416bbfc4e31ee925e9fd`, parent `f9fcd96b5b3efa7a3adfc2d9eabb133aa09cac82`. Added `src/arb/venues/kalshi/emergency_cancel.py` and `src/arb/venues/kalshi/risk_control.py`, and extended `execution_ledger.py`/`ledger_binding.py`/`order_lifecycle.py`, with their test sources. Installed/canonical; implementation and offline-test presence only. See ART-0055-ART-0064.
+4. `KALSHI_DEMO_MINIMAL_TWO_SIDED_MARKET_MAKER_IMPLEMENTATION_01_BROWSER_TRANSFER_01` — commit `093f89494fe288602e334f6b37c486e425a09ee5`, tree `b0251de68788db0d58ab9873b8c38a1c4f88b80a`, parent `3091edb31f66969bf0c11cf19f4ad8fe13fa8913`. Added `src/arb/venues/kalshi/minimal_market_maker.py` and `src/arb/venues/kalshi/quote_lifecycle.py`, extended `risk_control.py`, with their test sources. Installed/canonical; implementation and offline-test presence only. See ART-0065-ART-0072.
+5. `KALSHI_DEMO_MINIMAL_TWO_SIDED_MARKET_MAKER_RUNNER_GATE_A_WRITER_RELEASE_FOUNDATION_IMPLEMENTATION_03` — commit `42e89cdda492d438d62f5ad3505f067d929d163b`, tree `2a854b9c405be57789a9b93da63e8c4a19b45535`, parent `093f89494fe288602e334f6b37c486e425a09ee5`. Extended `execution_ledger.py`/`ledger_binding.py` with the release/writer-release foundation (authority-first/ledger-second locking, `RELEASE_ONLY`/`EMERGENCY_CONTROL_ONLY` acquisition modes, the normal-writer-candidate bridge), with their test sources. Installed/canonical; implementation and offline-test presence only. See ART-0073-ART-0076.
+6. `KALSHI_DEMO_MINIMAL_TWO_SIDED_MARKET_MAKER_RUNNER_GATE_B_AUTHORITATIVE_TRUTH_AND_READ_ONLY_RECONCILIATION_IMPLEMENTATION_05` — commit `12e69143fa94540f2a5f803a5677aa1718207478`, tree `cbb2c08672f1dc76d3008bbb93b9aeced3856413`, parent `42e89cdda492d438d62f5ad3505f067d929d163b`. Added `src/arb/venues/kalshi/minimal_market_maker_experiment_runner.py` (Stage 3A-3F: `BOOT_HOLD`, local authority/ledger replay, local release-impossibility gate, `PreReleaseReadCapabilityV1`, bounded read-only Demo reconciliation, exact `ReleaseEvaluationStateV1` assembly) and extended `ledger_binding.py` with the shared trusted-evidence-projection derivation, with their test sources. Runner never acquires `RELEASE_ONLY`, never issues a token, never acquires a normal writer. Installed/canonical; implementation and offline-test presence only. See ART-0077-ART-0080.
+7. `KALSHI_DEMO_MINIMAL_TWO_SIDED_MARKET_MAKER_RUNNER_GATE_C_RELEASE_AND_NORMAL_WRITER_HANDOFF_IMPLEMENTATION_02` — commit `839d475b55a708ec6e2bf280a99b1c35992dd6b1`, tree `c6dc085da5e399bf6be144866c2b63d179242921`, parent `12e69143fa94540f2a5f803a5677aa1718207478` (exact canonical base of this section). Extended `minimal_market_maker_experiment_runner.py` with Stage 3G-3K (`RELEASE_ONLY` acquisition, exact durable release sequence, `CurrentProcessReleaseCompletionV1` issuance, `NORMAL_WRITER` acquisition, Stage-3K revalidation, and cleanup-safe post-admission failure handling), with its test source. This is the corrected Implementation 02 of a same-scope correction to a Marco-blocked Implementation 01 (blocked candidate `2fc7a281dbf091f53a859eec3f1a632bfdfe564a`, never installed). Installed/canonical; implementation and offline-test presence only — see 13.1 above. See ART-0081-ART-0082.
+
+Every one of these implementations reuses the canonical `execution_ledger.py`/`ledger_binding.py` authority-first/ledger-second safety architecture already established by the persistent-ledger milestone; none re-implements or bypasses it.
+
+### 13.3 Current historical incident — unchanged and still safety-held
+
+The current historical incident, exactly as recorded in Section 7 above, remains unresolved and has not been touched, resolved, retried, or reclassified by any milestone in 13.2, including Gate C's installation:
+
+- `incident_id = KALSHI_DEMO_ONE_ORDER_LIFECYCLE_EXECUTION_01`
+- `disposition = WRITE_UNRESOLVED_ZERO_MATCH`
+- `bound_order_id = null`
+- `unknown_result = true`
+- `writer_proof_state = HELD`
+- `writer_proof_release_eligible = false`
+- `protected_unresolved_legacy_write_count = 1`
+- `historical_unresolved_exposure = UNKNOWN_UNBOUNDED`
+- `release_eligible = false`
+
+Therefore, for this real incident and the real deployed ledger state:
+
+- normal writer eligibility for the real incident = `false`;
+- historical incident cancellation target = `NONE`;
+- automatic retry = prohibited;
+- automatic release = prohibited;
+- Gate C's canonical `_local_impossibility_reasons` / Stage-3C gate stops this exact incident before RELEASE_ONLY, before credential loading, and before any pre-release venue request, exactly as it did before Gate C existed.
+
+### 13.4 Capability state after Gate C installation
+
+No new Demo or production capability follows automatically from Gate-C installation. Specifically, the following remain unauthorized unless separately and explicitly approved by a later task:
+
+- CREATE, CANCEL, amend, decrease, or replace of any real order;
+- credential or private-key use of any kind;
+- Kalshi Demo execution;
+- Kalshi production activity of any kind;
+- WebSocket connectivity;
+- profitability claims;
+- arbitrage claims (no strategy may be called arbitrage until all required legs are filled or otherwise contractually locked and the payout relationship is verified at rule level, per Section 12 above).
+
+Gate D (the market-making decision loop, per-slot quote comparison, `NormalWriterPermit` T0->T1->T2->T3 progression, and CREATE/CANCEL write dispatch) has **not begun**. This documentation synchronization does not authorize Gate D. It is a separately gated task requiring its own explicit specification and authorization.

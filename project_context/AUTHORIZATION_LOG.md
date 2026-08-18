@@ -420,6 +420,84 @@ Candidate 10 correction authorization (AUTH-0008) shall not be represented as an
 - Later phase: `PROHIBITED`; no subsequent phase begins automatically.
 - Grants new technical capability: `NO`
 
+### AUTH-0024 — Gate-C Implementation 02 correction authorization
+- Authorization ID: `KALSHI_DEMO_MINIMAL_TWO_SIDED_MARKET_MAKER_RUNNER_GATE_C_RELEASE_AND_NORMAL_WRITER_HANDOFF_IMPLEMENTATION_02`
+- Authorizing user: Gustavo (via current-chat correction dispatch)
+- Authorized agent: Claude Code (this implementer)
+- Date: 2026-08-18
+- Task/phase: bounded same-scope correction to Marco-blocked Implementation 01 (blocked candidate `2fc7a281dbf091f53a859eec3f1a632bfdfe564a`, never installed)
+- Classification: `OFFLINE_IMPLEMENTATION_AND_TEST_ONLY`; risk tier `CONTROLLED`
+- Exact canonical base: `12e69143fa94540f2a5f803a5677aa1718207478`
+- Exact writable repository paths (two only): `src/arb/venues/kalshi/minimal_market_maker_experiment_runner.py`; `tests/test_kalshi_minimal_market_maker_experiment_runner.py`
+- Protected paths: `src/arb/execution_ledger.py`; `tests/test_execution_ledger.py`; `src/arb/venues/kalshi/ledger_binding.py`; `tests/test_kalshi_ledger_binding.py`; every other repository path
+- Required corrections: Correction 01 (post-admission cleanup-safe Stage 3J/3K region); Correction 02 (per-boundary deadline test coverage D1-D4); Correction 03 (independently verifiable raw commit-object review evidence)
+- Kalshi/Polymarket requests: `PROHIBITED`; credentials/signing/account access: `PROHIBITED`; CREATE/CANCEL/amend/decrease/replace/WebSocket: `PROHIBITED`; deployed persistent-state mutation: `PROHIBITED`; package installation: `PROHIBITED`
+- Repository read-only sync: `PERMITTED` only to verify exact canonical base
+- Local candidate commit: `PERMITTED` (exactly one, freshly materialized from exact canonical base, not a child of the blocked candidate)
+- Push: `PROHIBITED` by this authorization (transfer separately authorized by `AUTH-0025`)
+- Required output: one fresh local candidate commit plus Marco review bundle, detached checksum, and manifest with static traceability matrix
+- Canonical effect: none until Marco review and separately authorized canonical installation
+- Later phase (Gate D): `PROHIBITED`; no subsequent phase begins automatically
+- Grants new technical capability: `NO`
+
+### AUTH-0025 — Gate-C Implementation 02 remote review transfer authorization
+- Authorization ID: `KALSHI_DEMO_MINIMAL_TWO_SIDED_MARKET_MAKER_RUNNER_GATE_C_IMPLEMENTATION_02_REMOTE_REVIEW_TRANSFER_01`
+- Authorizing user: Gustavo (via current-chat transfer dispatch, asserting the exact candidate as already Marco-approved)
+- Authorized agent: Claude Code (this implementer)
+- Date: 2026-08-18
+- Task/phase: `REMOTE_REVIEW_TRANSFER_ONLY`; risk tier `CONTROLLED`
+- Exact approved candidate: `839d475b55a708ec6e2bf280a99b1c35992dd6b1` (parent `12e69143fa94540f2a5f803a5677aa1718207478`, tree `c6dc085da5e399bf6be144866c2b63d179242921`)
+- Authorized remote write: creation of exactly one temporary branch, `review/gate-c-impl-02-839d475b`, pointing directly at the exact approved commit; no new commit, no amend, no rebase, no cherry-pick, no squash, no merge, no force-push, no `main` modification, no other remote branch, no tag, no PR
+- Required pre-push verification: canonical-base reverification; local candidate SHA/parent/tree/commit-count/diff-name verification; protected-blob verification; remote-branch-namespace non-existence check
+- Required post-push verification: remote branch SHA/parent/tree/diff-path equality; `origin/main` unchanged; no PR created
+- Kalshi credentials/requests/CREATE/CANCEL/WebSocket/market-making/Demo execution/production execution/deployed ledger mutation/package installation: `PROHIBITED`
+- Canonical effect: none; Marco independently reviews the remote branch before any separate canonical-installation decision
+- Later phase (Gate D, canonical installation): `PROHIBITED` by this authorization
+- Grants new technical capability: `NO`
+- Result: branch created pointing at exactly `839d475b55a708ec6e2bf280a99b1c35992dd6b1`; `origin/main` unchanged; no PR created; reported `READY_FOR_MARCO_REMOTE_BRANCH_REVIEW`.
+
+### AUTH-0026 — Canonical installation authorization (Gate-C Implementation 02)
+- Authorization ID: not separately captured as a discrete chat message in this implementer's session
+- Authorizing user: Gustavo (inferred from the observed canonical-`main` effect and this documentation-sync dispatch's framing of Gate C as already installed; see `DEC-0032` for the exact evidentiary caveat)
+- Authorized agent: not directly observed (canonical installation itself was not performed by this implementer within this session)
+- Date: 2026-08-18
+- Task/phase: canonical installation of exact approved candidate `839d475b55a708ec6e2bf280a99b1c35992dd6b1` onto `main`
+- Required installation mode: non-force fast-forward only; no replacement commit; no merge commit
+- Evidence of effect: independently Git-verified — see `AUTH-0027`
+- Canonical effect: `main` now resolves to `839d475b55a708ec6e2bf280a99b1c35992dd6b1`
+- Later phase (Gate D): `PROHIBITED`; not authorized by this entry or by installation itself
+- Grants new technical capability: `NO` beyond the installed Gate-C code's own already-documented scope (Stage 3G-3K only; see `project_context/PROJECT_STATE.md` Section 13)
+- Note: this entry documents an authorization this implementer did not directly witness as a discrete message; it is recorded because its effect is independently provable from canonical Git state (`AUTH-0027`) and because the current documentation-sync dispatch explicitly presupposes it. It must not be read as this implementer claiming to have observed a literal Gustavo authorization utterance for this specific step.
+
+### AUTH-0027 — Canonical `main` fast-forward technical observation
+- Authorization ID: n/a (technical observation, not an authorization grant)
+- Authorizing user: n/a
+- Authorized agent: Claude Code (this implementer; read-only observation only)
+- Date: 2026-08-18
+- Task/phase: independent read-only verification performed during `ARB_CANONICAL_DOCUMENTATION_STATE_SYNC_THROUGH_GATE_C_01`
+- Observation: `git fetch origin main` then `git rev-parse origin/main` = `839d475b55a708ec6e2bf280a99b1c35992dd6b1`; `git cat-file -p` of that object shows exactly one `parent` line, `12e69143fa94540f2a5f803a5677aa1718207478` (the immediately prior canonical `main`), proving a linear non-force fast-forward with no merge commit.
+- Network access: read-only `git fetch` only
+- Canonical effect: none (observation only)
+- Grants new technical capability: `NO`
+
+### AUTH-0028 — Documentation-state synchronization through Gate C
+- Authorization ID: `ARB_CANONICAL_DOCUMENTATION_STATE_SYNC_THROUGH_GATE_C_01`
+- Authorizing user: Gustavo (via current-chat dispatch)
+- Authorized agent: Claude Code (this implementer)
+- Date: 2026-08-18
+- Task/phase: `DOCUMENTATION_ONLY`; risk tier `LOW`
+- Exact canonical base: `839d475b55a708ec6e2bf280a99b1c35992dd6b1` (tree `c6dc085da5e399bf6be144866c2b63d179242921`, parent `12e69143fa94540f2a5f803a5677aa1718207478`)
+- Exact writable repository paths (four only): `project_context/PROJECT_STATE.md`; `project_context/ARTIFACT_INDEX.md`; `project_context/DECISION_LOG.md`; `project_context/AUTHORIZATION_LOG.md`
+- Protected paths: `src/**`; `tests/**`; `specifications/**`; `handoffs/**`; `reviews/**`; `artifacts/**`; every other repository path
+- Explicitly prohibited: source changes; test-source changes; Kalshi Demo/production requests; CREATE/CANCEL; WebSocket; package installation; credentials; private keys; deployed persistence mutation; Gate-D work; direct `main` modification; PR; merge
+- Repository read-only sync: `PERMITTED` only to verify exact canonical base
+- Local candidate commit: `PERMITTED` (exactly one, documentation-only, parented by the exact canonical base)
+- Authorized remote write: creation of exactly one temporary branch, `review/doc-sync-through-gate-c-01`, pointing at that exact commit; no PR; no `main` modification; no force-push
+- Required output: the four governance files updated; one local commit; one temporary remote review branch; a completion report with the fields specified by the dispatch
+- Canonical effect: none until Marco independently reviews the documentation branch and any separate canonical-documentation-installation decision is made
+- Later phase (Gate D): `PROHIBITED`; explicitly not authorized by this entry
+- Grants new technical capability: `NO`
+
 ## Capability default
 
 All capabilities not explicitly listed as `PERMITTED` by the operative bounded Gustavo authorization are `PROHIBITED`. The canonical entries above are audit history and may evidence an authorization, but they are not a prerequisite to an already-operative exact current-chat dispatch and cannot broaden it retroactively. Kalshi Demo access, Kalshi production access, Polymarket interaction, credentials/signing, account funding, order submission, cancellation, and trading remain prohibited unless the exact active authorization separately permits them.
