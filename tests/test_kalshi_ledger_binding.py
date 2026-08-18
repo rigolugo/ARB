@@ -54,6 +54,8 @@ from arb.venues.kalshi.ledger_binding import (
     ReleaseEvaluationStateV1,
     ReleaseReconciliationSnapshotV1,
     ReleaseRiskSnapshotV1,
+    TrustedReleaseEvidenceProjectionV1,
+    TrustedReleaseEvidenceReadResultV1,
     VenueDefenseEvidenceV1,
     append_authority_anchored_send_gate,
     acquire_emergency_control_only,
@@ -61,6 +63,7 @@ from arb.venues.kalshi.ledger_binding import (
     acquire_normal_writer_state,
     acquire_release_only,
     canonical_kalshi_fill_payload,
+    read_trusted_release_evidence_projection,
     validate_legacy_evidence,
     validate_venue_defense_evidence,
 )
@@ -68,6 +71,7 @@ from arb.venues.kalshi.ledger_binding import (
     _CURRENT_PROCESS_RELEASE_COMPLETION_KEY,
     _acquire_normal_writer_candidate,
     _current_process_release_completion_registry,
+    _derive_authoritative_release_universe,
     _is_registered_current_process_release_completion,
     _register_current_process_release_completion,
     _consume_current_process_release_completion,
@@ -4259,6 +4263,416 @@ class NormalWriterAcquisitionTestCase(KalshiLedgerBindingTestCase):
         self.assertTrue(projection.writer_proof_release_eligible_by_proof_id[proof_id])
         self.assertFalse(projection.writer_proof_release_eligible_by_proof_id[second_proof_id])
         handle.close()
+
+
+# ---------------------------------------------------------------------------
+# Spec 05 ER05-TRUST-002/003/004 -- `TrustedReleaseEvidenceProjectionV1` and
+# `read_trusted_release_evidence_projection` (semantic cases 81-96).  Proves
+# the new Stage-3F read-only trusted evidence projection: deterministic,
+# non-mutating, carries no writer/release capability, fails closed on any
+# tail/identity mismatch, derives its content from the ONE shared
+# `_derive_authoritative_release_universe` function also used by
+# `ReleaseLedgerHandle` (Correction A), and its `order_evidence_ref`/
+# `fill_evidence_ref` accept no caller-chosen event ID.
+# ---------------------------------------------------------------------------
+
+
+class TrustedReleaseEvidenceProjectionTestCase(KalshiLedgerBindingTestCase):
+    def _open_emergency_handle(self):
+        self.initialize()
+        emergency = acquire_emergency_control_only(
+            self.binding, canonical_repository_root=str(self.repository_root),
+            contract=self.contract, expected_ledger_path=str(self.ledger_path),
+            clock=self.inputs.clock, uuid_factory=self.inputs.uuid,
+        )
+        self.assertIsNotNone(emergency.handle)
+        return emergency.handle
+
+    def _read_projection(self, **overrides) -> TrustedReleaseEvidenceReadResultV1:
+        kwargs = dict(
+            binding=self.binding, canonical_repository_root=str(self.repository_root),
+            contract=self.contract, expected_ledger_path=str(self.ledger_path),
+            clock=self.inputs.clock, uuid_factory=self.inputs.uuid,
+        )
+        kwargs.update(overrides)
+        return read_trusted_release_evidence_projection(**kwargs)
+
+    # ------------------------------------------------------------------
+    # 81 -- deterministic equal-tail projection: exact recorded order/fill
+    # content, exact evidence-ref event IDs, equal authority/ledger tail.
+    # ------------------------------------------------------------------
+    def test_te81_projection_matches_recorded_order_and_fill_with_evidence_refs(self) -> None:
+        handle = self._open_emergency_handle()
+        canonical_order = {
+            "order_id": "te-order-1", "status": "resting", "remaining_count_fp": "1.00",
+            "market": "SYNTHETIC", "outcome_side": "YES", "yes_price": Decimal("0.50"),
+            "cancel_order_on_pause": False,
+        }
+        order_event = handle.record_order_observation({
+            "venue_order_id": "te-order-1", "client_order_id": "te-client-order-1",
+            "source_request_id": "te-order-read", "source_operation": "GET_ORDER_V2",
+            "venue_payload_schema_id": "synthetic-order-v1",
+            "canonical_venue_payload": canonical_order,
+            "canonical_venue_payload_sha256": hashlib.sha256(canonical_json_bytes(canonical_order)).hexdigest(),
+            "observation_semantic_class": "AUTHORITATIVE_ACTIVE_ORDER",
+        }).events[-1]
+        canonical_fill = canonical_kalshi_fill_payload(
+            fill_id="te-fill-1", order_id="te-order-1", price=Decimal("0.40"),
+            quantity=Decimal("1.00"), fee=Decimal("0.01"),
+            additional_fields={
+                "market": "SYNTHETIC", "outcome_side": "YES",
+                "authoritative_created_time_utc": "2026-08-17T13:00:00.000000Z",
+            },
+        )
+        fill_event = handle.record_fill_observation({
+            "canonical_venue_payload": canonical_fill,
+            "canonical_venue_payload_sha256": hashlib.sha256(canonical_json_bytes(canonical_fill)).hexdigest(),
+            "client_order_id": "te-client-order-1", "source_operation": "SYNTHETIC_FILL_READ",
+            "source_request_id": "te-fill-read", "venue_fill_id": "te-fill-1",
+            "venue_order_id": "te-order-1", "venue_payload_schema_id": "synthetic-fill-v1",
+        }).events[-1]
+        handle.close()
+
+        result = self._read_projection()
+        self.assertIsNone(result.failure_code)
+        self.assertIsNotNone(result.projection)
+        projection = result.projection
+        assert projection is not None
+        self.assertEqual(projection.schema_revision, 1)
+        self.assertEqual(
+            projection.working_orders,
+            (WorkingOrderV1("SYNTHETIC", "te-order-1", "YES", Decimal("1.00"), Decimal("0.50")),),
+        )
+        self.assertEqual(
+            projection.fills,
+            (EconomicFillV1(
+                "SYNTHETIC", "te-fill-1", "YES", Decimal("1.00"), Decimal("0.40"),
+                "2026-08-17T13:00:00.000000Z",
+            ),),
+        )
+        self.assertEqual(projection.authority_trusted_sequence, projection.ledger_terminal_sequence)
+        self.assertEqual(projection.authority_trusted_event_hash, projection.ledger_terminal_event_hash)
+        self.assertEqual(projection.conflict_ids, ())
+        order = projection.working_orders[0]
+        fill = projection.fills[0]
+        self.assertEqual(projection.order_evidence_ref(order), ("te-order-1", order_event.event_id))
+        self.assertEqual(projection.fill_evidence_ref(fill), ("te-fill-1", fill_event.event_id))
+
+    # ------------------------------------------------------------------
+    # 82/88 -- repeated reads of an unchanged ledger are stable and prove
+    # the read itself performs zero ledger mutation.
+    # ------------------------------------------------------------------
+    def test_te82_repeated_reads_are_stable_and_non_mutating(self) -> None:
+        self._build_blocked_ledger_for_projection_tests()
+        first = self._read_projection()
+        second = self._read_projection()
+        self.assertIsNotNone(first.projection)
+        self.assertIsNotNone(second.projection)
+        assert first.projection is not None and second.projection is not None
+        self.assertEqual(first.projection.ledger_terminal_sequence, second.projection.ledger_terminal_sequence)
+        self.assertEqual(first.projection.ledger_terminal_event_hash, second.projection.ledger_terminal_event_hash)
+        self.assertEqual(first.projection.working_orders, second.projection.working_orders)
+        self.assertEqual(first.projection.fills, second.projection.fills)
+        self.assertEqual(first.projection.conflict_ids, second.projection.conflict_ids)
+
+    def _build_blocked_ledger_for_projection_tests(self) -> None:
+        self.initialize()
+        imported = acquire_legacy_import_only(
+            self.binding, canonical_repository_root=str(self.repository_root),
+            contract=self.contract, expected_ledger_path=str(self.ledger_path),
+            clock=self.inputs.clock, uuid_factory=self.inputs.uuid,
+        )
+        self.assertIsNotNone(imported.handle)
+        imported.handle.commit_exact_legacy_import(imported.handle.validate_legacy_evidence(self.evidence))
+        imported.handle.close()
+
+    # ------------------------------------------------------------------
+    # 83 -- an identity-incompatible contract (legacy history bound to a
+    # different incident/proof identity than what is actually durable)
+    # fails closed: no projection, not merely a wrong one.
+    # ------------------------------------------------------------------
+    def test_te83_incompatible_contract_identity_fails_closed(self) -> None:
+        self._build_blocked_ledger_for_projection_tests()
+        wrong_contract = replace(self.contract, incident_id="TE83_WRONG_INCIDENT_ID")
+        result = self._read_projection(contract=wrong_contract)
+        self.assertIsNone(result.projection)
+
+    # ------------------------------------------------------------------
+    # 83b -- a ledger-path identity mismatch is a distinct fail-closed path
+    # (structural open failure, not merely a replay-content failure).
+    # ------------------------------------------------------------------
+    def test_te83b_wrong_expected_ledger_path_fails_closed(self) -> None:
+        self._build_blocked_ledger_for_projection_tests()
+        decoy_path = self.root / "decoy.sqlite3"
+        decoy_path.touch()
+        result = self._read_projection(expected_ledger_path=str(decoy_path))
+        self.assertIsNone(result.projection)
+
+    # ------------------------------------------------------------------
+    # 84 -- the projection reflects only the LATEST durable ORDER_OBSERVED
+    # for a given venue order id, and `order_evidence_ref` returns exactly
+    # that latest event's id -- never an earlier superseded observation.
+    # ------------------------------------------------------------------
+    def test_te84_latest_order_event_id_supersedes_earlier_observation(self) -> None:
+        handle = self._open_emergency_handle()
+        first_content = {
+            "order_id": "te-order-2", "status": "resting", "remaining_count_fp": "2.00",
+            "market": "SYNTHETIC", "outcome_side": "YES", "yes_price": Decimal("0.50"),
+        }
+        handle.record_order_observation({
+            "venue_order_id": "te-order-2", "client_order_id": "te-client-order-2",
+            "source_request_id": "te-order-2-read-1", "source_operation": "GET_ORDER_V2",
+            "venue_payload_schema_id": "synthetic-order-v1", "canonical_venue_payload": first_content,
+            "canonical_venue_payload_sha256": hashlib.sha256(canonical_json_bytes(first_content)).hexdigest(),
+            "observation_semantic_class": "AUTHORITATIVE_ACTIVE_ORDER",
+        })
+        second_content = {
+            "order_id": "te-order-2", "status": "resting", "remaining_count_fp": "1.00",
+            "market": "SYNTHETIC", "outcome_side": "YES", "yes_price": Decimal("0.50"),
+            "cancel_order_on_pause": True,
+        }
+        second_event = handle.record_order_observation({
+            "venue_order_id": "te-order-2", "client_order_id": "te-client-order-2",
+            "source_request_id": "te-order-2-read-2", "source_operation": "GET_ORDER_V2",
+            "venue_payload_schema_id": "synthetic-order-v1", "canonical_venue_payload": second_content,
+            "canonical_venue_payload_sha256": hashlib.sha256(canonical_json_bytes(second_content)).hexdigest(),
+            "observation_semantic_class": "AUTHORITATIVE_ACTIVE_ORDER",
+        }).events[-1]
+        handle.close()
+
+        result = self._read_projection()
+        projection = result.projection
+        assert projection is not None
+        self.assertEqual(len(projection.working_orders), 1)
+        order = projection.working_orders[0]
+        self.assertEqual(order.remaining_quantity, Decimal("1.00"))
+        self.assertEqual(projection.latest_order_event_ids["te-order-2"], second_event.event_id)
+        self.assertEqual(projection.order_evidence_ref(order), ("te-order-2", second_event.event_id))
+        self.assertIn("te-order-2", projection.cancel_order_on_pause_order_ids)
+
+    # ------------------------------------------------------------------
+    # 85/86 -- repeated identical FILL_OBSERVED re-observations produce a
+    # complete matching-event tuple ordered by ledger sequence, and
+    # `fill_evidence_ref` deterministically selects the LAST one -- not a
+    # caller-chosen index.
+    # ------------------------------------------------------------------
+    def test_te85_fill_matching_event_ids_ordered_by_ledger_sequence(self) -> None:
+        handle = self._open_emergency_handle()
+        canonical_fill = canonical_kalshi_fill_payload(
+            fill_id="te-fill-2", order_id="te-order-3", price=Decimal("0.35"),
+            quantity=Decimal("2.00"), fee=Decimal("0.02"),
+            additional_fields={
+                "market": "SYNTHETIC", "outcome_side": "YES",
+                "authoritative_created_time_utc": "2026-08-17T13:00:00.000000Z",
+            },
+        )
+        payload = {
+            "canonical_venue_payload": canonical_fill,
+            "canonical_venue_payload_sha256": hashlib.sha256(canonical_json_bytes(canonical_fill)).hexdigest(),
+            "client_order_id": "te-client-order-3", "source_operation": "SYNTHETIC_FILL_READ",
+            "source_request_id": "te-fill-2-read-1", "venue_fill_id": "te-fill-2",
+            "venue_order_id": "te-order-3", "venue_payload_schema_id": "synthetic-fill-v1",
+        }
+        first_event = handle.record_fill_observation(payload).events[-1]
+        second_payload = dict(payload, source_request_id="te-fill-2-read-2")
+        second_event = handle.record_fill_observation(second_payload).events[-1]
+        handle.close()
+
+        result = self._read_projection()
+        projection = result.projection
+        assert projection is not None
+        self.assertEqual(
+            projection.fill_matching_event_ids["te-fill-2"],
+            (first_event.event_id, second_event.event_id),
+        )
+        fill = projection.fills[0]
+        self.assertEqual(projection.fill_evidence_ref(fill), ("te-fill-2", second_event.event_id))
+
+    # ------------------------------------------------------------------
+    # 87 -- `order_evidence_ref`/`fill_evidence_ref` derive the reference
+    # purely from internal projection state.  Neither `WorkingOrderV1` nor
+    # `EconomicFillV1` carries an event-id field at all, so an
+    # independently-constructed but value-equal instance (never seen by the
+    # projection before) resolves identically to the one drawn from
+    # `projection.working_orders`/`.fills`, and an economically distinct
+    # instance resolves to `None` -- there is no caller-supplied selector.
+    # ------------------------------------------------------------------
+    def test_te87_evidence_ref_accepts_no_caller_chosen_event_id(self) -> None:
+        handle = self._open_emergency_handle()
+        canonical_order = {
+            "order_id": "te-order-4", "status": "resting", "remaining_count_fp": "3.00",
+            "market": "SYNTHETIC", "outcome_side": "NO", "yes_price": Decimal("0.60"),
+        }
+        order_event = handle.record_order_observation({
+            "venue_order_id": "te-order-4", "client_order_id": "te-client-order-4",
+            "source_request_id": "te-order-4-read", "source_operation": "GET_ORDER_V2",
+            "venue_payload_schema_id": "synthetic-order-v1", "canonical_venue_payload": canonical_order,
+            "canonical_venue_payload_sha256": hashlib.sha256(canonical_json_bytes(canonical_order)).hexdigest(),
+            "observation_semantic_class": "AUTHORITATIVE_ACTIVE_ORDER",
+        }).events[-1]
+        handle.close()
+
+        result = self._read_projection()
+        projection = result.projection
+        assert projection is not None
+        rebuilt = WorkingOrderV1("SYNTHETIC", "te-order-4", "NO", Decimal("3.00"), Decimal("0.60"))
+        self.assertIsNot(rebuilt, projection.working_orders[0])
+        self.assertEqual(projection.order_evidence_ref(rebuilt), ("te-order-4", order_event.event_id))
+        distinct = WorkingOrderV1("SYNTHETIC", "te-order-4", "NO", Decimal("1.00"), Decimal("0.60"))
+        self.assertIsNone(projection.order_evidence_ref(distinct))
+        unseen = WorkingOrderV1("SYNTHETIC", "te-order-does-not-exist", "YES", Decimal("1.00"), Decimal("0.50"))
+        self.assertIsNone(projection.order_evidence_ref(unseen))
+        self.assertIsNone(projection.fill_evidence_ref(EconomicFillV1(
+            "SYNTHETIC", "te-fill-does-not-exist", "YES", Decimal("1.00"), Decimal("0.40"),
+            "2026-08-17T13:00:00.000000Z",
+        )))
+
+    # ------------------------------------------------------------------
+    # 89 -- the projection carries no writer/release/append capability and
+    # cannot be copied, deep-copied, or pickled into a detached usable
+    # object.
+    # ------------------------------------------------------------------
+    def test_te89_projection_carries_no_capability_and_rejects_reconstruction(self) -> None:
+        self._build_blocked_ledger_for_projection_tests()
+        result = self._read_projection()
+        projection = result.projection
+        assert projection is not None
+        for forbidden in (
+            "close", "append_batch", "record_order_observation", "record_fill_observation",
+            "record_reconciliation", "record_writer_proof_held", "record_risk_release",
+            "release_writer_proof", "record_writer_eligible",
+            "complete_release_and_issue_current_process_completion",
+            "authority", "ledger", "events", "binding", "closed",
+        ):
+            self.assertFalse(hasattr(projection, forbidden), forbidden)
+        # `slots=True` with exactly these plain-data fields means no other
+        # attribute -- in particular no live `LockedLedger`/authority or
+        # ledger connection -- can ever be attached to this instance.
+        self.assertEqual(
+            set(TrustedReleaseEvidenceProjectionV1.__slots__),
+            {
+                "schema_revision", "environment_classification", "conflict_domain_ref",
+                "authority_instance_id", "authority_namespace_id", "authority_store_path_identity_sha256",
+                "ledger_instance_id", "ledger_path_identity_sha256",
+                "authority_trusted_sequence", "authority_trusted_event_hash",
+                "ledger_terminal_sequence", "ledger_terminal_event_hash",
+                "working_orders", "fills", "cancel_order_on_pause_order_ids",
+                "latest_order_event_ids", "fill_matching_event_ids", "conflict_ids",
+            },
+        )
+        with self.assertRaises(TypeError):
+            copy.copy(projection)
+        with self.assertRaises(TypeError):
+            copy.deepcopy(projection)
+        with self.assertRaises(TypeError):
+            pickle.dumps(projection)
+
+    # ------------------------------------------------------------------
+    # 90 -- direct construction requires the module-private sentinel key;
+    # a forged key is rejected exactly like every other frozen/slots
+    # private-sentinel type in this module.
+    # ------------------------------------------------------------------
+    def test_te90_construction_requires_genuine_sentinel_key(self) -> None:
+        with self.assertRaises(LedgerError):
+            TrustedReleaseEvidenceProjectionV1(
+                object(), schema_revision=1, environment_classification=CURRENT_ENVIRONMENT,
+                conflict_domain_ref=CURRENT_CONFLICT_DOMAIN_REF, authority_instance_id="x",
+                authority_namespace_id="x", authority_store_path_identity_sha256="0" * 64,
+                ledger_instance_id="x", ledger_path_identity_sha256="0" * 64,
+                authority_trusted_sequence=1, authority_trusted_event_hash="0" * 64,
+                ledger_terminal_sequence=1, ledger_terminal_event_hash="0" * 64,
+                working_orders=(), fills=(), cancel_order_on_pause_order_ids=(),
+                latest_order_event_ids={}, fill_matching_event_ids={}, conflict_ids=(),
+            )
+
+    # ------------------------------------------------------------------
+    # 92/95 -- Correction A: `ReleaseLedgerHandle._authoritative_release_
+    # universe()` and the free function `_derive_authoritative_release_
+    # universe` are the SAME derivation reached through two independent
+    # entry points against the same durable state -- there is exactly one
+    # durable ORDER_OBSERVED/FILL_OBSERVED truth interpreter.
+    # ------------------------------------------------------------------
+    def test_te92_release_handle_and_shared_function_derive_identical_universe(self) -> None:
+        (proof_id, incident_id, safe_event, state, lane, normal_gate, emergency_gate) = (
+            self._build_synthetic_safe_held()
+        )
+        release_acquisition = acquire_release_only(
+            self.binding, canonical_repository_root=str(self.repository_root),
+            contract=self.contract, expected_ledger_path=str(self.ledger_path),
+            clock=self.inputs.clock, uuid_factory=self.inputs.uuid,
+            monotonic_clock_ns=self.inputs.monotonic_ns, release_wall_clock=self.inputs.clock,
+        )
+        self.assertIsNotNone(release_acquisition.handle)
+        release_handle = release_acquisition.handle
+        assert release_handle is not None
+        from_release_handle = release_handle._authoritative_release_universe()
+        release_handle.close()
+
+        candidate = _acquire_normal_writer_candidate(
+            self.binding, conflict_domain_ref=self.contract.conflict_domain_ref,
+            expected_environment=self.contract.environment,
+            canonical_repository_root=self.repository_root, expected_ledger_path=self.ledger_path,
+        )
+        self.assertIsNotNone(candidate.handle)
+        from_shared_function = _derive_authoritative_release_universe(candidate.handle)
+        candidate.handle.close()
+
+        self.assertEqual(from_release_handle.working_orders, from_shared_function.working_orders)
+        self.assertEqual(from_release_handle.fills, from_shared_function.fills)
+        self.assertEqual(
+            from_release_handle.cancel_order_on_pause_order_ids,
+            from_shared_function.cancel_order_on_pause_order_ids,
+        )
+        self.assertEqual(from_release_handle.conflict_ids, from_shared_function.conflict_ids)
+        self.assertEqual(
+            dict(from_release_handle.latest_order_event_ids), dict(from_shared_function.latest_order_event_ids),
+        )
+        self.assertEqual(
+            dict(from_release_handle.fill_event_ids), dict(from_shared_function.fill_event_ids),
+        )
+
+    # ------------------------------------------------------------------
+    # 96 -- reading the trusted evidence projection is not itself a
+    # restart/replay event: the ledger's own durable state (restart
+    # classification, protected-unresolved count, risk-control state) is
+    # completely unaffected by having been read through this projection.
+    # ------------------------------------------------------------------
+    def test_te96_projection_read_grants_no_durable_authority_or_side_effect(self) -> None:
+        self._build_blocked_ledger_for_projection_tests()
+        before = acquire_local_state(
+            self.binding, conflict_domain_ref=self.contract.conflict_domain_ref,
+            expected_environment=self.contract.environment,
+            canonical_repository_root=str(self.repository_root),
+            acquisition_mode=AcquisitionMode.NORMAL_WRITER,
+            expected_ledger_path=str(self.ledger_path),
+            clock=self.inputs.clock, uuid_factory=self.inputs.uuid,
+        )
+        self.assertIsNone(before.handle)
+        before_projection = before.projection
+        assert before_projection is not None
+
+        result = self._read_projection()
+        self.assertIsNotNone(result.projection)
+
+        after = acquire_local_state(
+            self.binding, conflict_domain_ref=self.contract.conflict_domain_ref,
+            expected_environment=self.contract.environment,
+            canonical_repository_root=str(self.repository_root),
+            acquisition_mode=AcquisitionMode.NORMAL_WRITER,
+            expected_ledger_path=str(self.ledger_path),
+            clock=self.inputs.clock, uuid_factory=self.inputs.uuid,
+        )
+        self.assertIsNone(after.handle)
+        after_projection = after.projection
+        assert after_projection is not None
+        self.assertEqual(before_projection.last_sequence, after_projection.last_sequence)
+        self.assertEqual(before_projection.terminal_event_hash, after_projection.terminal_event_hash)
+        self.assertEqual(before_projection.restart_classification, after_projection.restart_classification)
+        self.assertEqual(
+            before_projection.protected_unresolved_legacy_write_count,
+            after_projection.protected_unresolved_legacy_write_count,
+        )
+        self.assertIsNone(after_projection.active_writer_session_id)
 
 
 if __name__ == "__main__":

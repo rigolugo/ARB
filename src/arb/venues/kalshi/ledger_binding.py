@@ -1263,6 +1263,111 @@ class _AuthoritativeReleaseUniverse:
     conflict_ids: tuple[str, ...]
 
 
+def _derive_authoritative_release_universe(locked: "LockedLedger") -> _AuthoritativeReleaseUniverse:
+    """Derive the complete current economic universe from trusted replay.
+
+    The one canonical shared durable ``ORDER_OBSERVED``/``FILL_OBSERVED``
+    truth interpreter (Spec 05 ER05-TRUST-001).  ``ReleaseLedgerHandle``
+    (Stage 3G) and ``read_trusted_release_evidence_projection`` (Stage 3F)
+    both call this exact function against their own independently opened
+    ``LockedLedger`` -- there is never a second parser or a second
+    selection rule for durable order/fill truth.  Preserves the pre-Spec-05
+    semantics of the method this was extracted from byte-for-byte; this
+    refactor changes no release predicate or economic-release semantics.
+    """
+
+    projection = locked.projection()
+    latest_orders: dict[str, object] = {}
+    fill_events: dict[str, list[object]] = {}
+    conflicts: set[str] = set(projection.fill_conflicts)
+    for event in locked.events:
+        if event.event_type is EventType.ORDER_OBSERVED:
+            order_id = event.payload.get("venue_order_id")
+            content = event.payload.get("canonical_venue_payload")
+            if type(order_id) is not str or not order_id or not isinstance(content, Mapping):
+                conflicts.add(f"order-event:{event.event_id}")
+                continue
+            if content.get("order_id") != order_id:
+                conflicts.add(f"order-identity:{order_id}")
+            latest_orders[order_id] = event
+        elif event.event_type is EventType.FILL_OBSERVED:
+            fill_id = event.payload.get("venue_fill_id")
+            content = event.payload.get("canonical_venue_payload")
+            if type(fill_id) is not str or not fill_id or not isinstance(content, Mapping):
+                conflicts.add(f"fill-event:{event.event_id}")
+                continue
+            if (
+                content.get("fill_id") != fill_id
+                or content.get("order_id") != event.payload.get("venue_order_id")
+            ):
+                conflicts.add(f"fill-identity:{fill_id}")
+            fill_events.setdefault(fill_id, []).append(event)
+
+    if set(latest_orders) != set(projection.order_observation_history):
+        conflicts.add("order-replay-universe")
+    if set(fill_events) != set(projection.canonical_fills_by_fill_id):
+        conflicts.add("fill-replay-universe")
+
+    orders: list[WorkingOrderV1] = []
+    cancel_order_on_pause_ids: list[str] = []
+    latest_order_ids: dict[str, str] = {}
+    for order_id, event in sorted(latest_orders.items()):
+        content = event.payload.get("canonical_venue_payload")
+        if not isinstance(content, Mapping):
+            conflicts.add(f"order-content:{order_id}")
+            continue
+        latest_order_ids[order_id] = event.event_id
+        status = content.get("status")
+        if type(status) is not str or not status:
+            conflicts.add(f"order-status:{order_id}")
+            continue
+        if status != "resting":
+            continue
+        remaining = ReleaseLedgerHandle._positive_qty2(content.get("remaining_count_fp"))
+        yes_price = ReleaseLedgerHandle._stored_decimal_value(content.get("yes_price"))
+        try:
+            if remaining is None or yes_price is None:
+                raise ValueError
+            orders.append(WorkingOrderV1(
+                content.get("market"), order_id, content.get("outcome_side"),
+                remaining, yes_price,
+            ))
+            if content.get("cancel_order_on_pause") is True:
+                cancel_order_on_pause_ids.append(order_id)
+        except (RiskControlError, ValueError):
+            conflicts.add(f"order-economic:{order_id}")
+
+    fills: list[EconomicFillV1] = []
+    fill_event_ids: dict[str, tuple[str, ...]] = {}
+    for fill_id, canonical in sorted(projection.canonical_fills_by_fill_id.items()):
+        candidates = fill_events.get(fill_id, [])
+        matching = tuple(
+            event for event in candidates
+            if event.payload.get("canonical_venue_payload") == canonical
+        )
+        fill_event_ids[fill_id] = tuple(event.event_id for event in matching)
+        if not matching or not isinstance(canonical, Mapping):
+            conflicts.add(f"fill-content:{fill_id}")
+            continue
+        quantity = ReleaseLedgerHandle._stored_decimal_value(canonical.get("quantity"))
+        yes_price = ReleaseLedgerHandle._stored_decimal_value(canonical.get("price"))
+        try:
+            if quantity is None or yes_price is None:
+                raise ValueError
+            fills.append(EconomicFillV1(
+                canonical.get("market"), fill_id, canonical.get("outcome_side"),
+                quantity, yes_price, canonical.get("authoritative_created_time_utc"),
+            ))
+        except (RiskControlError, ValueError):
+            conflicts.add(f"fill-economic:{fill_id}")
+
+    return _AuthoritativeReleaseUniverse(
+        tuple(orders), tuple(fills), tuple(sorted(cancel_order_on_pause_ids)),
+        MappingProxyType(latest_order_ids), MappingProxyType(fill_event_ids),
+        tuple(sorted(conflicts)),
+    )
+
+
 _CURRENT_PROCESS_RELEASE_COMPLETION_KEY = object()
 _current_process_release_completion_registry_lock = threading.Lock()
 
@@ -1528,98 +1633,15 @@ class ReleaseLedgerHandle:
         return parsed
 
     def _authoritative_release_universe(self) -> _AuthoritativeReleaseUniverse:
-        """Derive the complete current economic universe from trusted replay."""
+        """Derive the complete current economic universe from trusted replay.
 
-        projection = self.__locked.projection()
-        latest_orders: dict[str, object] = {}
-        fill_events: dict[str, list[object]] = {}
-        conflicts: set[str] = set(projection.fill_conflicts)
-        for event in self.__locked.events:
-            if event.event_type is EventType.ORDER_OBSERVED:
-                order_id = event.payload.get("venue_order_id")
-                content = event.payload.get("canonical_venue_payload")
-                if type(order_id) is not str or not order_id or not isinstance(content, Mapping):
-                    conflicts.add(f"order-event:{event.event_id}")
-                    continue
-                if content.get("order_id") != order_id:
-                    conflicts.add(f"order-identity:{order_id}")
-                latest_orders[order_id] = event
-            elif event.event_type is EventType.FILL_OBSERVED:
-                fill_id = event.payload.get("venue_fill_id")
-                content = event.payload.get("canonical_venue_payload")
-                if type(fill_id) is not str or not fill_id or not isinstance(content, Mapping):
-                    conflicts.add(f"fill-event:{event.event_id}")
-                    continue
-                if (
-                    content.get("fill_id") != fill_id
-                    or content.get("order_id") != event.payload.get("venue_order_id")
-                ):
-                    conflicts.add(f"fill-identity:{fill_id}")
-                fill_events.setdefault(fill_id, []).append(event)
+        Delegates to the one shared canonical derivation (Spec 05
+        ER05-TRUST-001) also used by `read_trusted_release_evidence_projection`
+        -- there is exactly one durable ORDER_OBSERVED/FILL_OBSERVED truth
+        interpreter in this module.
+        """
 
-        if set(latest_orders) != set(projection.order_observation_history):
-            conflicts.add("order-replay-universe")
-        if set(fill_events) != set(projection.canonical_fills_by_fill_id):
-            conflicts.add("fill-replay-universe")
-
-        orders: list[WorkingOrderV1] = []
-        cancel_order_on_pause_ids: list[str] = []
-        latest_order_ids: dict[str, str] = {}
-        for order_id, event in sorted(latest_orders.items()):
-            content = event.payload.get("canonical_venue_payload")
-            if not isinstance(content, Mapping):
-                conflicts.add(f"order-content:{order_id}")
-                continue
-            latest_order_ids[order_id] = event.event_id
-            status = content.get("status")
-            if type(status) is not str or not status:
-                conflicts.add(f"order-status:{order_id}")
-                continue
-            if status != "resting":
-                continue
-            remaining = self._positive_qty2(content.get("remaining_count_fp"))
-            yes_price = self._stored_decimal_value(content.get("yes_price"))
-            try:
-                if remaining is None or yes_price is None:
-                    raise ValueError
-                orders.append(WorkingOrderV1(
-                    content.get("market"), order_id, content.get("outcome_side"),
-                    remaining, yes_price,
-                ))
-                if content.get("cancel_order_on_pause") is True:
-                    cancel_order_on_pause_ids.append(order_id)
-            except (RiskControlError, ValueError):
-                conflicts.add(f"order-economic:{order_id}")
-
-        fills: list[EconomicFillV1] = []
-        fill_event_ids: dict[str, tuple[str, ...]] = {}
-        for fill_id, canonical in sorted(projection.canonical_fills_by_fill_id.items()):
-            candidates = fill_events.get(fill_id, [])
-            matching = tuple(
-                event for event in candidates
-                if event.payload.get("canonical_venue_payload") == canonical
-            )
-            fill_event_ids[fill_id] = tuple(event.event_id for event in matching)
-            if not matching or not isinstance(canonical, Mapping):
-                conflicts.add(f"fill-content:{fill_id}")
-                continue
-            quantity = self._stored_decimal_value(canonical.get("quantity"))
-            yes_price = self._stored_decimal_value(canonical.get("price"))
-            try:
-                if quantity is None or yes_price is None:
-                    raise ValueError
-                fills.append(EconomicFillV1(
-                    canonical.get("market"), fill_id, canonical.get("outcome_side"),
-                    quantity, yes_price, canonical.get("authoritative_created_time_utc"),
-                ))
-            except (RiskControlError, ValueError):
-                conflicts.add(f"fill-economic:{fill_id}")
-
-        return _AuthoritativeReleaseUniverse(
-            tuple(orders), tuple(fills), tuple(sorted(cancel_order_on_pause_ids)),
-            MappingProxyType(latest_order_ids), MappingProxyType(fill_event_ids),
-            tuple(sorted(conflicts)),
-        )
+        return _derive_authoritative_release_universe(self.__locked)
 
     @staticmethod
     def _economic_release_pass(
@@ -2520,6 +2542,259 @@ def acquire_normal_writer_state(
     )
 
 
+# ---------------------------------------------------------------------------
+# Spec 05 Correction 01 -- TrustedReleaseEvidenceProjectionV1: a narrow,
+# immutable, READ-ONLY Stage-3F projection of the same shared canonical
+# durable release universe `ReleaseLedgerHandle` uses at Stage 3G.  It is
+# never a LockedLedger, writer/release/emergency capability, venue/
+# credential capability, append API, or generic event-history API; its
+# existence is not evidence that a venue fact is durably persisted.
+# ---------------------------------------------------------------------------
+
+_TRUSTED_RELEASE_EVIDENCE_PROJECTION_KEY = object()
+
+
+def _is_exact_sorted_unique_str_tuple(value: object) -> bool:
+    return (
+        type(value) is tuple
+        and all(type(item) is str and item for item in value)
+        and tuple(sorted(set(value))) == value
+    )
+
+
+def _is_exact_unique_event_id_sequence(value: object) -> bool:
+    """Unordered-uniqueness only: `fill_matching_event_ids[fill_id]` is
+    ordered by ledger sequence (Spec 05 ER05-TRUST-004), not alphabetically
+    sorted, so this deliberately does not require sortedness."""
+
+    return (
+        type(value) is tuple
+        and all(_is_exact_event_id(item) for item in value)
+        and len(set(value)) == len(value)
+    )
+
+
+@dataclass(frozen=True, slots=True, init=False)
+class TrustedReleaseEvidenceProjectionV1:
+    """One-shot, process-local, read-only trusted durable evidence
+    projection (Spec 05 ER05-TRUST-002).  Immutable; rejects
+    copy/deepcopy/pickle/reduce reconstruction.  Replaying its logged data
+    elsewhere can never create a writer or release capability -- it carries
+    no capability, only validated durable facts and their exact event-ID
+    references, bound to one specific equal authority/ledger tail.
+    """
+
+    schema_revision: int
+    environment_classification: str
+    conflict_domain_ref: str
+
+    authority_instance_id: str
+    authority_namespace_id: str
+    authority_store_path_identity_sha256: str
+
+    ledger_instance_id: str
+    ledger_path_identity_sha256: str
+
+    authority_trusted_sequence: int
+    authority_trusted_event_hash: str
+    ledger_terminal_sequence: int
+    ledger_terminal_event_hash: str
+
+    working_orders: tuple[WorkingOrderV1, ...]
+    fills: tuple[EconomicFillV1, ...]
+    cancel_order_on_pause_order_ids: tuple[str, ...]
+
+    latest_order_event_ids: Mapping[str, str]
+    fill_matching_event_ids: Mapping[str, tuple[str, ...]]
+
+    conflict_ids: tuple[str, ...]
+
+    def __init__(self, key: object, **values: object) -> None:
+        if key is not _TRUSTED_RELEASE_EVIDENCE_PROJECTION_KEY:
+            raise LedgerError(FailureCode.RELEASE_PREDICATE_FAILED)
+        for field in fields(type(self)):
+            object.__setattr__(self, field.name, values[field.name])
+        self.__validate()
+
+    def __validate(self) -> None:
+        if type(self.schema_revision) is not int or self.schema_revision != 1:
+            raise LedgerError(FailureCode.RELEASE_PREDICATE_FAILED)
+        for value in (
+            self.environment_classification, self.conflict_domain_ref,
+            self.authority_instance_id, self.authority_namespace_id,
+            self.ledger_instance_id,
+        ):
+            if type(value) is not str or not value:
+                raise LedgerError(FailureCode.RELEASE_PREDICATE_FAILED)
+        for value in (
+            self.authority_store_path_identity_sha256, self.ledger_path_identity_sha256,
+            self.authority_trusted_event_hash, self.ledger_terminal_event_hash,
+        ):
+            if not _is_exact_sha256_hex(value):
+                raise LedgerError(FailureCode.RELEASE_PREDICATE_FAILED)
+        for value in (self.authority_trusted_sequence, self.ledger_terminal_sequence):
+            if type(value) is not int or value <= 0:
+                raise LedgerError(FailureCode.RELEASE_PREDICATE_FAILED)
+        if (
+            self.authority_trusted_sequence != self.ledger_terminal_sequence
+            or self.authority_trusted_event_hash != self.ledger_terminal_event_hash
+        ):
+            raise LedgerError(FailureCode.RELEASE_PREDICATE_FAILED)
+        if type(self.working_orders) is not tuple or any(
+            type(item) is not WorkingOrderV1 for item in self.working_orders
+        ):
+            raise LedgerError(FailureCode.RELEASE_PREDICATE_FAILED)
+        if type(self.fills) is not tuple or any(
+            type(item) is not EconomicFillV1 for item in self.fills
+        ):
+            raise LedgerError(FailureCode.RELEASE_PREDICATE_FAILED)
+        if not _is_exact_sorted_unique_str_tuple(self.cancel_order_on_pause_order_ids):
+            raise LedgerError(FailureCode.RELEASE_PREDICATE_FAILED)
+        if not _is_exact_sorted_unique_str_tuple(self.conflict_ids):
+            raise LedgerError(FailureCode.RELEASE_PREDICATE_FAILED)
+        if not isinstance(self.latest_order_event_ids, Mapping) or any(
+            type(k) is not str or not k or not _is_exact_event_id(v)
+            for k, v in self.latest_order_event_ids.items()
+        ):
+            raise LedgerError(FailureCode.RELEASE_PREDICATE_FAILED)
+        if not isinstance(self.fill_matching_event_ids, Mapping) or any(
+            type(k) is not str or not k or not _is_exact_unique_event_id_sequence(v)
+            for k, v in self.fill_matching_event_ids.items()
+        ):
+            raise LedgerError(FailureCode.RELEASE_PREDICATE_FAILED)
+
+    def __copy__(self):
+        raise TypeError("TrustedReleaseEvidenceProjectionV1 cannot be copied")
+
+    __deepcopy__ = __copy__
+
+    def __reduce_ex__(self, protocol):
+        del protocol
+        raise TypeError("TrustedReleaseEvidenceProjectionV1 cannot be serialized")
+
+    def order_evidence_ref(self, order: "WorkingOrderV1") -> tuple[str, str] | None:
+        """Deterministic evidence lookup only -- accepts no caller-chosen
+        event ID (Spec 05 ER05-TRUST-004)."""
+
+        if type(order) is not WorkingOrderV1:
+            return None
+        for candidate in self.working_orders:
+            if candidate == order:
+                event_id = self.latest_order_event_ids.get(candidate.order_id)
+                if event_id is None:
+                    return None
+                return (candidate.order_id, event_id)
+        return None
+
+    def fill_evidence_ref(self, fill: "EconomicFillV1") -> tuple[str, str] | None:
+        """Deterministic evidence lookup only -- selects the latest element
+        of the canonical matching-event tuple; accepts no caller-chosen
+        event ID (Spec 05 ER05-TRUST-004)."""
+
+        if type(fill) is not EconomicFillV1:
+            return None
+        for candidate in self.fills:
+            if candidate == fill:
+                matching = self.fill_matching_event_ids.get(candidate.fill_id)
+                if not matching:
+                    return None
+                return (candidate.fill_id, matching[-1])
+        return None
+
+
+@dataclass(frozen=True, slots=True)
+class TrustedReleaseEvidenceReadResultV1:
+    projection: TrustedReleaseEvidenceProjectionV1 | None
+    restart_classification: RestartClassification
+    failure_code: FailureCode | None = None
+    authority_ledger_relation: AuthorityLedgerRelation | None = None
+
+
+def read_trusted_release_evidence_projection(
+    binding: AuthorityNamespaceBinding,
+    *,
+    canonical_repository_root: str,
+    contract: LegacyIncidentContract = CURRENT_LEGACY_INCIDENT_CONTRACT,
+    expected_ledger_path: str | None = None,
+    clock=None,
+    uuid_factory=None,
+    fault_hook=None,
+) -> TrustedReleaseEvidenceReadResultV1:
+    """Read-only Stage-3F trusted evidence projection factory (Spec 05
+    ER05-TRUST-003).  Reuses the already-canonical, private, authority-
+    first/ledger-second, equal-tail-validated `_acquire_normal_writer_
+    candidate(...)` bridge solely as a validated open/replay/close round
+    trip.  Never calls `start_writer_session`, never appends an event, and
+    never exposes the `LockedLedger` to the caller.  `execution_ledger.py`
+    is unchanged by this function -- the needed validated candidate bridge
+    already exists at the required canonical base.
+    """
+
+    kwargs: dict[str, object] = {}
+    if clock is not None:
+        kwargs["clock"] = clock
+    if uuid_factory is not None:
+        kwargs["uuid_factory"] = uuid_factory
+    if fault_hook is not None:
+        kwargs["fault_hook"] = fault_hook
+    opened = _acquire_normal_writer_candidate(
+        binding,
+        conflict_domain_ref=contract.conflict_domain_ref,
+        expected_environment=contract.environment,
+        canonical_repository_root=canonical_repository_root,
+        expected_ledger_path=expected_ledger_path,
+        history_validator=lambda events: _validate_bound_legacy_history(events, contract),
+        **kwargs,
+    )
+    locked = opened.handle
+    if locked is None:
+        # `_acquire_normal_writer_candidate` already requires
+        # `AuthorityLedgerRelation.EQUAL` for a live candidate; a `None`
+        # handle here means no equal-tail candidate was available.
+        return TrustedReleaseEvidenceReadResultV1(
+            None, opened.restart_classification, opened.failure_code, opened.authority_ledger_relation,
+        )
+    try:
+        universe = _derive_authoritative_release_universe(locked)
+        tail = locked.events[-1]
+        authority = locked.authority_row
+        observed_tail = (tail.sequence, tail.event_hash)
+        if (
+            (authority.trusted_sequence, authority.trusted_event_hash) != observed_tail
+            or (opened.projection.trusted_sequence, opened.projection.trusted_event_hash) != observed_tail
+        ):
+            return TrustedReleaseEvidenceReadResultV1(
+                None, opened.projection.restart_classification,
+                FailureCode.AUTHORITY_LEDGER_ANCHOR_HASH_MISMATCH, locked.relation,
+            )
+        projection = TrustedReleaseEvidenceProjectionV1(
+            _TRUSTED_RELEASE_EVIDENCE_PROJECTION_KEY,
+            schema_revision=1,
+            environment_classification=locked.ledger_meta.environment_classification,
+            conflict_domain_ref=locked.conflict_domain_ref,
+            authority_instance_id=locked.authority_meta.authority_instance_id,
+            authority_namespace_id=locked.authority_meta.authority_namespace_id,
+            authority_store_path_identity_sha256=locked.authority_meta.authority_store_path_identity_sha256,
+            ledger_instance_id=locked.ledger_meta.ledger_instance_id,
+            ledger_path_identity_sha256=locked.ledger_meta.ledger_path_identity_sha256,
+            authority_trusted_sequence=authority.trusted_sequence,
+            authority_trusted_event_hash=authority.trusted_event_hash,
+            ledger_terminal_sequence=tail.sequence,
+            ledger_terminal_event_hash=tail.event_hash,
+            working_orders=universe.working_orders,
+            fills=universe.fills,
+            cancel_order_on_pause_order_ids=universe.cancel_order_on_pause_order_ids,
+            latest_order_event_ids=MappingProxyType(dict(universe.latest_order_event_ids)),
+            fill_matching_event_ids=MappingProxyType(dict(universe.fill_event_ids)),
+            conflict_ids=universe.conflict_ids,
+        )
+        return TrustedReleaseEvidenceReadResultV1(
+            projection, opened.projection.restart_classification, None, locked.relation,
+        )
+    finally:
+        locked.close()
+
+
 def prepared_request_identity(payload: Mapping[str, object]) -> str:
     """Hash a validated, secret-free prepared request identity."""
     return sha256_hex(canonical_json_bytes(dict(payload)))
@@ -2616,4 +2891,6 @@ __all__ = [
     "append_authority_anchored_send_gate", "canonical_kalshi_fill_payload",
     "prepared_request_identity", "validate_legacy_evidence",
     "validate_venue_defense_evidence",
+    "TrustedReleaseEvidenceProjectionV1", "TrustedReleaseEvidenceReadResultV1",
+    "read_trusted_release_evidence_projection",
 ]
