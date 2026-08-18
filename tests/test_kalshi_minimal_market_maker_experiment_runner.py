@@ -11,9 +11,12 @@ cases C01-C25.
 
 from __future__ import annotations
 
+import copy
 import dataclasses
 import hashlib
+import inspect
 import json
+import pickle
 import tempfile
 import unittest
 import uuid
@@ -25,10 +28,14 @@ from typing import Callable, Mapping
 
 from arb.execution_ledger import (
     AcquisitionMode,
+    AuthorityLedgerRelation,
     AuthorityNamespaceBinding,
+    FailureCode,
+    LedgerError,
     OpenResult,
     acquire_local_state,
     canonical_json_bytes,
+    end_writer_session,
 )
 from arb.venues.kalshi.ledger_binding import (
     CURRENT_ACCOUNT_SCOPE_REF,
@@ -42,11 +49,15 @@ from arb.venues.kalshi.ledger_binding import (
     CurrentProcessReleaseCompletionV1,
     EvidenceExpectation,
     LegacyIncidentContract,
+    NormalWriterAcquisition,
     ReleaseEvaluationStateV1,
+    ReleaseLedgerHandle,
     TrustedReleaseEvidenceProjectionV1,
     TrustedReleaseEvidenceReadResultV1,
     acquire_emergency_control_only,
     acquire_legacy_import_only,
+    acquire_normal_writer_state,
+    acquire_release_only,
     canonical_kalshi_fill_payload,
     read_trusted_release_evidence_projection,
 )
@@ -74,6 +85,7 @@ from arb.venues.kalshi.orderbook import (
     OrderBookStage,
 )
 
+import arb.venues.kalshi.ledger_binding as ledger_binding
 import arb.venues.kalshi.minimal_market_maker_experiment_runner as runner
 from arb.venues.kalshi.minimal_market_maker_experiment_runner import (
     ExperimentRunnerInvocationV1,
@@ -611,6 +623,10 @@ class GateBTestCase(unittest.TestCase):
             monotonic_clock_ns=self.inputs.monotonic_ns, wall_clock=self.inputs.clock,
             uuid_factory=self.inputs.uuid, risk_config=config,
             experiment_absolute_end_monotonic_ns=experiment_absolute_end_monotonic_ns,
+            authority_binding=self.binding,
+            canonical_repository_root=str(self.repository_root),
+            expected_ledger_path=str(self.ledger_path),
+            contract=self.contract,
         )
 
     def _invocation(self, *, incident_id: str, proof_id: str) -> ExperimentRunnerInvocationV1:
@@ -1127,6 +1143,10 @@ class ReadPhaseTests(GateBTestCase):
             send_operation_request=transport, fetch_orderbook=runtime.fetch_orderbook,
             monotonic_clock_ns=_clock, wall_clock=self.inputs.clock, uuid_factory=self.inputs.uuid,
             risk_config=config, experiment_absolute_end_monotonic_ns=base + 300_000_000_000,
+            authority_binding=runtime.authority_binding,
+            canonical_repository_root=runtime.canonical_repository_root,
+            expected_ledger_path=runtime.expected_ledger_path,
+            contract=runtime.contract,
         )
         capability = self._capability(runtime)
         with self.assertRaises(RunnerError) as ctx:
@@ -1672,13 +1692,29 @@ class ReadPhaseTests(GateBTestCase):
         self.assertEqual(before.projection.last_sequence, after.projection.last_sequence)
         self.assertEqual(before.projection.terminal_event_hash, after.projection.terminal_event_hash)
 
+    # Gate-B-own-call-graph source scope for c23/c24 (as opposed to a whole-
+    # file text scan): Gate C (a separate, later-invoked private function)
+    # legitimately contains these exact canonical calls, so the true
+    # preserved Gate-B invariant is that `run_pre_release_read_phase` and
+    # everything IT transitively calls never do -- not that the string never
+    # appears anywhere in the file.
+    _GATE_B_OWN_CALL_GRAPH = (
+        run_pre_release_read_phase,
+        runner._local_impossibility_reasons,
+        runner._issue_pre_release_read_capability,
+        collect_authoritative_read_truth,
+        runner.assemble_release_evaluation_state,
+        runner._match_trusted_release_evidence,
+        runner._require_exact_t0_t1_durable_coherence,
+    )
+
     def test_c23_no_release_token_created(self) -> None:
         transport = _ScriptedTransport()
         self._script_full_read_cycle(transport)
         runtime, invocation = self._ready_runtime_and_invocation(transport)
         result = run_pre_release_read_phase(invocation, runtime)
         self.assertIsInstance(result.release_state, ReleaseEvaluationStateV1)
-        source = Path(runner.__file__).read_text(encoding="utf-8")
+        source = "\n".join(inspect.getsource(fn) for fn in self._GATE_B_OWN_CALL_GRAPH)
         for forbidden in (
             "complete_release_and_issue_current_process_completion",
             "acquire_release_only", "acquire_normal_writer_state",
@@ -1686,7 +1722,7 @@ class ReadPhaseTests(GateBTestCase):
             self.assertNotIn(forbidden, source)
 
     def test_c24_no_release_only_session(self) -> None:
-        source = Path(runner.__file__).read_text(encoding="utf-8")
+        source = "\n".join(inspect.getsource(fn) for fn in self._GATE_B_OWN_CALL_GRAPH)
         self.assertNotIn("evaluate_release", source)
         self.assertNotIn("record_risk_release", source)
         self.assertNotIn("release_writer_proof(", source)
@@ -2368,6 +2404,788 @@ class ImplementationFiveCorrectionTests(ReadPhaseTests):
         )
         self.assertEqual(exc.code, RunnerFailureCode.PRE_RELEASE_RELEASE_PREDICATE_FAILED)
         self.assertIn("fresh-fill-without-durable-counterpart:fill-2", exc.detail)
+
+
+# ---------------------------------------------------------------------------
+# Gate C -- Stage 3G (RELEASE_ONLY) through Stage 3K (final normal-writer
+# revalidation). GC01-GC24 (dispatch Section 22) plus Implementation-02
+# Corrections 01/02 (post-admission cleanup safety; per-boundary deadline
+# coverage).
+# ---------------------------------------------------------------------------
+
+
+class _ExpireOnDemandClock:
+    """Deterministic monotonic clock (Implementation 02 Correction 02):
+    returns ordinary `DeterministicInputs` values until `expire()` is
+    called, after which every subsequent call returns a value already past
+    the fixed deadline. Lets each D1-D4 test expire the clock at the EXACT
+    Gate-C checkpoint under test -- via a canonical-method wrapper that
+    calls the real method then expires -- rather than approximating how
+    many internal monotonic-clock calls happen before that checkpoint."""
+
+    def __init__(self, inner: Callable[[], int], deadline: int) -> None:
+        self._inner = inner
+        self.deadline = deadline
+        self._expired = False
+
+    def expire(self) -> None:
+        self._expired = True
+
+    def __call__(self) -> int:
+        if self._expired:
+            return self.deadline + 1_000_000
+        return self._inner()
+
+
+class GateCTests(ReadPhaseTests):
+    def _read_phase_complete(self, transport: _ScriptedTransport | None = None, **runtime_kwargs):
+        """Empty-portfolio Gate-B READ_PHASE_COMPLETE: zero orders/fills is
+        trivially within every configured risk limit, so this is the
+        simplest genuinely release-eligible fixture for Gate C."""
+
+        transport = transport or _ScriptedTransport()
+        self._script_full_read_cycle(transport)
+        runtime, invocation = self._ready_runtime_and_invocation(transport, **runtime_kwargs)
+        result = run_pre_release_read_phase(invocation, runtime)
+        self.assertEqual(result.status, "READ_PHASE_COMPLETE")
+        return result, runtime
+
+    def _sequence(self) -> tuple[int, str]:
+        opened = self._read_local_safety_state()()
+        return opened.projection.last_sequence, opened.projection.terminal_event_hash
+
+    def _obtain_unconsumed_token(
+        self, runtime: ExperimentRunnerRuntimeV1, release_state: ReleaseEvaluationStateV1,
+    ) -> CurrentProcessReleaseCompletionV1:
+        """Test-only direct canonical Stage 3G/3H/3I sequence (public API
+        only) that stops BEFORE Stage 3J, so the returned token has not yet
+        been consumed by `acquire_normal_writer_state` -- needed for
+        GC10/GC12/GC13/GC14, which each exercise the token's own
+        continuity/consumption boundary independently of the full Gate C
+        continuation."""
+
+        acquisition = acquire_release_only(
+            runtime.authority_binding, canonical_repository_root=runtime.canonical_repository_root,
+            contract=runtime.contract, expected_ledger_path=runtime.expected_ledger_path,
+            clock=runtime.wall_clock, uuid_factory=runtime.uuid_factory,
+            monotonic_clock_ns=runtime.monotonic_clock_ns, release_wall_clock=runtime.wall_clock,
+        )
+        self.assertIsNone(acquisition.failure_code)
+        handle = acquisition.handle
+        assessment = handle.evaluate_release(release_state)
+        handle.record_risk_release(assessment)
+        handle.release_writer_proof(assessment)
+        handle.record_writer_eligible(assessment)
+        return handle.complete_release_and_issue_current_process_completion(assessment)
+
+    def test_gc01_full_stage3_success(self) -> None:
+        """GC01: successful same-process Gate-B READ_PHASE_COMPLETE carries
+        through RELEASE_ONLY -> RISK_RELEASE_RECORDED -> WRITER_PROOF_
+        RELEASED -> SAFE_HELD->WRITER_ELIGIBLE -> RESTRICTED_SESSION_ENDED
+        -> CurrentProcessReleaseCompletionV1 -> NORMAL_WRITER -> exactly one
+        fresh ws_ -> Stage-3K PASS."""
+
+        result, runtime = self._read_phase_complete()
+        before_seq, _ = self._sequence()
+
+        stage3 = runner._complete_stage3_release_and_normal_writer(result, runtime)
+
+        self.assertEqual(stage3.process_instance_id, runtime.normal_gate.process_instance_id)
+        self.assertTrue(stage3.release_id.startswith("rel_"))
+        self.assertRegex(stage3.normal_writer_session_id, r"^ws_[0-9a-f]{32}$")
+        acquisition = stage3.normal_writer_acquisition
+        self.assertIsInstance(acquisition, NormalWriterAcquisition)
+        self.assertIsNotNone(acquisition.handle)
+        self.assertFalse(acquisition.handle.closed)
+        self.assertEqual(acquisition.handle.relation, AuthorityLedgerRelation.EQUAL)
+        self.assertEqual(acquisition.projection.risk_control_state, "WRITER_ELIGIBLE")
+        self.assertEqual(acquisition.projection.active_writer_session_id, stage3.normal_writer_session_id)
+        self.assertEqual(len([s for s in acquisition.projection.writer_sessions if s == stage3.normal_writer_session_id]), 1)
+
+        # Clean explicit teardown through the canonical public API only.
+        end_writer_session(acquisition.handle, writer_session_id=stage3.normal_writer_session_id)
+        after = self._read_local_safety_state()()
+        after_seq = after.projection.last_sequence
+        self.assertGreater(after_seq, before_seq)
+        self.assertIsNone(after.projection.active_writer_session_id)
+        self.assertIn(stage3.normal_writer_session_id, after.projection.writer_sessions)
+
+    def _blocked_runtime(self, transport: _ScriptedTransport) -> ExperimentRunnerRuntimeV1:
+        """Mirrors `LocalImpossibilityGateTests._blocked_runtime`: builds the
+        exact current historical incident and closes every fixture-only
+        handle before returning, so the runtime's own later acquisitions
+        never race a still-open harness lock."""
+
+        self._build_blocked_ledger()
+        normal_gate = WriterEligibilityGate(
+            monotonic_clock_ns=self.inputs.monotonic_ns, wall_clock=self.inputs.clock,
+            uuid_factory=self.inputs.uuid,
+        )
+        emergency = acquire_emergency_control_only(
+            self.binding, canonical_repository_root=str(self.repository_root),
+            contract=self.contract, expected_ledger_path=str(self.ledger_path),
+            clock=self.inputs.clock, uuid_factory=self.inputs.uuid,
+        )
+        lane = EmergencyRateLane(EmergencyRateConfigV1(2, 1_000, 1, 500, 1, 10, 100))
+        emergency_gate = EmergencyCancelGate(
+            handle=emergency.handle, rate_lane=lane, process_instance_id=normal_gate.process_instance_id,
+            monotonic_clock_ns=self.inputs.monotonic_ns, wall_clock=self.inputs.clock,
+            uuid_factory=self.inputs.uuid,
+        )
+        emergency.handle.close()
+        return self._runtime(normal_gate=normal_gate, emergency_gate=emergency_gate, config=None, transport=transport)
+
+    def test_gc02_locally_blocked_result_cannot_enter_gate_c(self) -> None:
+        """GC02: a LOCALLY_BLOCKED Gate-B result cannot enter Gate C; zero
+        persistence mutation."""
+
+        transport = _ScriptedTransport()
+        runtime = self._blocked_runtime(transport)
+        invocation = self._invocation(incident_id=CURRENT_INCIDENT_ID, proof_id=CURRENT_WRITER_PROOF_ID)
+        result = run_pre_release_read_phase(invocation, runtime)
+        self.assertEqual(result.status, "LOCALLY_BLOCKED")
+
+        before = self._sequence()
+        with (
+            mock.patch.object(runner, "acquire_release_only", wraps=runner.acquire_release_only) as spy,
+            self.assertRaises(RunnerError) as ctx,
+        ):
+            runner._complete_stage3_release_and_normal_writer(result, runtime)
+        self.assertEqual(ctx.exception.code, RunnerFailureCode.GATE_C_ENTRY_PRECONDITION_FAILED)
+        self.assertEqual(spy.call_count, 0)
+        self.assertEqual(self._sequence(), before)
+        self.assertEqual(transport.calls, [])
+
+    def test_gc03_missing_release_state_fails_before_release_only(self) -> None:
+        """GC03: READ_PHASE_COMPLETE with missing/invalid release_state
+        fails before RELEASE_ONLY."""
+
+        result, runtime = self._read_phase_complete()
+        malformed = dataclasses.replace(result, release_state=None)
+        before = self._sequence()
+        with (
+            mock.patch.object(runner, "acquire_release_only", wraps=runner.acquire_release_only) as spy,
+            self.assertRaises(RunnerError) as ctx,
+        ):
+            runner._complete_stage3_release_and_normal_writer(malformed, runtime)
+        self.assertEqual(ctx.exception.code, RunnerFailureCode.GATE_C_ENTRY_PRECONDITION_FAILED)
+        self.assertEqual(spy.call_count, 0)
+        self.assertEqual(self._sequence(), before)
+
+    def test_gc04_process_instance_id_mismatch_fails_before_release_mutation(self) -> None:
+        """GC04: process_instance_id mismatch fails before release
+        mutation."""
+
+        result, runtime = self._read_phase_complete()
+        malformed = dataclasses.replace(result, process_instance_id="proc_" + "0" * 32)
+        before = self._sequence()
+        with (
+            mock.patch.object(runner, "acquire_release_only", wraps=runner.acquire_release_only) as spy,
+            self.assertRaises(RunnerError) as ctx,
+        ):
+            runner._complete_stage3_release_and_normal_writer(malformed, runtime)
+        self.assertEqual(ctx.exception.code, RunnerFailureCode.GATE_C_ENTRY_PRECONDITION_FAILED)
+        self.assertEqual(spy.call_count, 0)
+        self.assertEqual(self._sequence(), before)
+
+    def test_gc05_failing_predicate_produces_no_release_token_or_writer(self) -> None:
+        """GC05: canonical evaluate_release false/failing predicate ->
+        no RISK_RELEASE_RECORDED, token, or writer.
+
+        `evaluate_release` itself never raises on a false predicate (it
+        always returns an assessment carrying whatever vector the current
+        durable state produces); `record_risk_release` is the first
+        canonical step that actually enforces `all(vector.values())`. This
+        is forced honestly via `ReleaseEvaluationStateV1.replace(...)` (the
+        canonical "current inputs re-read" mutator Stage 3's own runner
+        would use) binding a structurally valid but DIFFERENT risk config
+        than the one whose sha256 was recorded active at SAFE_HELD, so the
+        evaluator's own `risk_config_complete_valid` predicate is false."""
+
+        result, runtime = self._read_phase_complete()
+        different_config = dataclasses.replace(
+            runtime.risk_config,
+            conflict_domain_account=dataclasses.replace(
+                runtime.risk_config.conflict_domain_account, max_aggregate_working_orders=999,
+            ),
+        )
+        self.assertNotEqual(different_config.sha256, runtime.risk_config.sha256)
+        result.release_state.replace(risk_config=different_config)
+        registry_before = len(ledger_binding._current_process_release_completion_registry)
+
+        with self.assertRaises(RunnerError) as ctx:
+            runner._complete_stage3_release_and_normal_writer(result, runtime)
+        self.assertEqual(ctx.exception.code, RunnerFailureCode.DURABLE_RELEASE_SEQUENCE_FAILED)
+        self.assertEqual(ctx.exception.detail, "record_risk_release")
+        # A clean RELEASE_ONLY acquire-then-close is itself a restricted
+        # session with its own START/END bookkeeping events; the invariant
+        # under test is that no release/writer/token event was recorded, not
+        # that the ledger sequence is byte-for-byte unchanged.
+        after = self._read_local_safety_state()()
+        self.assertIsNone(after.projection.active_restricted_session_id)
+        self.assertEqual(len(ledger_binding._current_process_release_completion_registry), registry_before)
+
+    def _fault_after(self, method_name: str, expected_detail: str) -> None:
+        result, runtime = self._read_phase_complete()
+        registry_before = len(ledger_binding._current_process_release_completion_registry)
+        with mock.patch.object(
+            ReleaseLedgerHandle, method_name,
+            side_effect=LedgerError(FailureCode.RELEASE_PREDICATE_CHANGED),
+        ):
+            with self.assertRaises(RunnerError) as ctx:
+                runner._complete_stage3_release_and_normal_writer(result, runtime)
+        self.assertEqual(ctx.exception.code, RunnerFailureCode.DURABLE_RELEASE_SEQUENCE_FAILED)
+        self.assertEqual(ctx.exception.detail, expected_detail)
+        self.assertEqual(len(ledger_binding._current_process_release_completion_registry), registry_before)
+        after = self._read_local_safety_state()()
+        self.assertIsNone(after.projection.active_restricted_session_id)
+        self.assertIsNone(after.projection.active_writer_session_id)
+        return registry_before, after
+
+    def test_gc06_fault_after_risk_release_recorded(self) -> None:
+        """GC06: fault after RISK_RELEASE_RECORDED -> no token, no writer,
+        no automatic second release (the patched method is called exactly
+        once by construction -- Gate C never loops or retries)."""
+
+        self._fault_after("release_writer_proof", "release_writer_proof")
+
+    def test_gc07_fault_after_writer_proof_released(self) -> None:
+        """GC07: fault after WRITER_PROOF_RELEASED -> no token, no
+        writer."""
+
+        self._fault_after("record_writer_eligible", "record_writer_eligible")
+
+    def test_gc08_fault_after_writer_eligible_before_token(self) -> None:
+        """GC08: fault after WRITER_ELIGIBLE but before successful
+        session-end/token issuance -> no token, no normal writer."""
+
+        result, runtime = self._read_phase_complete()
+        registry_before = len(ledger_binding._current_process_release_completion_registry)
+        with mock.patch.object(
+            ReleaseLedgerHandle, "complete_release_and_issue_current_process_completion",
+            side_effect=LedgerError(FailureCode.CURRENT_PROCESS_RELEASE_COMPLETION_NOT_ISSUED),
+        ):
+            with self.assertRaises(RunnerError) as ctx:
+                runner._complete_stage3_release_and_normal_writer(result, runtime)
+        self.assertEqual(ctx.exception.code, RunnerFailureCode.CURRENT_PROCESS_RELEASE_COMPLETION_ISSUANCE_FAILED)
+        self.assertEqual(len(ledger_binding._current_process_release_completion_registry), registry_before)
+        after = self._read_local_safety_state()()
+        # WRITER_ELIGIBLE was durably recorded (real record_writer_eligible
+        # ran); only the finalizer/token step was faulted.
+        self.assertEqual(after.projection.risk_control_state, "WRITER_ELIGIBLE")
+        self.assertIsNone(after.projection.active_restricted_session_id)
+        self.assertIsNone(after.projection.active_writer_session_id)
+
+    def test_gc09_token_requires_exact_restricted_session_ended_readback(self) -> None:
+        """GC09: token cannot exist until exact RESTRICTED_SESSION_ENDED
+        positive equal-tail readback -- proven directly against the
+        canonical finalizer by skipping `record_writer_eligible` (the step
+        immediately before the finalizer): the finalizer refuses to
+        fabricate the readback/token without it, exactly mirroring what
+        GC08 proves for a raised fault at that same boundary."""
+
+        result, runtime = self._read_phase_complete()
+        registry_before = len(ledger_binding._current_process_release_completion_registry)
+        acquisition = acquire_release_only(
+            runtime.authority_binding, canonical_repository_root=runtime.canonical_repository_root,
+            contract=runtime.contract, expected_ledger_path=runtime.expected_ledger_path,
+            clock=runtime.wall_clock, uuid_factory=runtime.uuid_factory,
+            monotonic_clock_ns=runtime.monotonic_clock_ns, release_wall_clock=runtime.wall_clock,
+        )
+        handle = acquisition.handle
+        assessment = handle.evaluate_release(result.release_state)
+        handle.record_risk_release(assessment)
+        handle.release_writer_proof(assessment)
+        with self.assertRaises(LedgerError) as ctx:
+            handle.complete_release_and_issue_current_process_completion(assessment)
+        self.assertEqual(ctx.exception.code, FailureCode.CURRENT_PROCESS_RELEASE_COMPLETION_NOT_ISSUED)
+        self.assertEqual(len(ledger_binding._current_process_release_completion_registry), registry_before)
+        handle.close()
+
+    def test_gc10_genuine_token_admits_normal_writer_only_once(self) -> None:
+        """GC10: genuine token admits normal writer only once; reuse
+        fails."""
+
+        result, runtime = self._read_phase_complete()
+        token = self._obtain_unconsumed_token(runtime, result.release_state)
+        first = acquire_normal_writer_state(
+            runtime.authority_binding, canonical_repository_root=runtime.canonical_repository_root,
+            risk_config=runtime.risk_config, process_instance_id=runtime.normal_gate.process_instance_id,
+            current_process_release_completion=token, contract=runtime.contract,
+            expected_ledger_path=runtime.expected_ledger_path,
+            clock=runtime.wall_clock, uuid_factory=runtime.uuid_factory,
+        )
+        self.assertIsNone(first.failure_code)
+        self.assertIsNotNone(first.handle)
+        end_writer_session(first.handle, writer_session_id=first.normal_writer_session_id)
+
+        second = acquire_normal_writer_state(
+            runtime.authority_binding, canonical_repository_root=runtime.canonical_repository_root,
+            risk_config=runtime.risk_config, process_instance_id=runtime.normal_gate.process_instance_id,
+            current_process_release_completion=token, contract=runtime.contract,
+            expected_ledger_path=runtime.expected_ledger_path,
+            clock=runtime.wall_clock, uuid_factory=runtime.uuid_factory,
+        )
+        self.assertEqual(second.failure_code, FailureCode.CURRENT_PROCESS_RELEASE_COMPLETION_INVALID)
+        self.assertIsNone(second.handle)
+        self.assertIsNone(second.normal_writer_session_id)
+
+    def test_gc11_copied_or_reconstructed_token_remains_rejected(self) -> None:
+        """GC11: copy/deepcopy/reconstructed/direct token remains rejected
+        regression."""
+
+        result, runtime = self._read_phase_complete()
+        token = self._obtain_unconsumed_token(runtime, result.release_state)
+        with self.assertRaises(TypeError):
+            copy.copy(token)
+        with self.assertRaises(TypeError):
+            copy.deepcopy(token)
+        with self.assertRaises(TypeError):
+            pickle.dumps(token)
+        fields = {field.name: getattr(token, field.name) for field in dataclasses.fields(token)}
+        with self.assertRaises(LedgerError):
+            CurrentProcessReleaseCompletionV1(object(), **fields)
+
+        # The genuine unconsumed token still works -- proves the rejections
+        # above are about identity/reconstruction, not about this fixture.
+        normal = acquire_normal_writer_state(
+            runtime.authority_binding, canonical_repository_root=runtime.canonical_repository_root,
+            risk_config=runtime.risk_config, process_instance_id=runtime.normal_gate.process_instance_id,
+            current_process_release_completion=token, contract=runtime.contract,
+            expected_ledger_path=runtime.expected_ledger_path,
+            clock=runtime.wall_clock, uuid_factory=runtime.uuid_factory,
+        )
+        self.assertIsNone(normal.failure_code)
+        end_writer_session(normal.handle, writer_session_id=normal.normal_writer_session_id)
+
+    def test_gc12_durable_writer_eligible_without_live_token_cannot_start_ws(self) -> None:
+        """GC12: historical durable WRITER_ELIGIBLE + RELEASED proof but no
+        live same-process token cannot start ws_."""
+
+        result, runtime = self._read_phase_complete()
+        self._obtain_unconsumed_token(runtime, result.release_state)  # issued, then simply discarded
+
+        normal = acquire_normal_writer_state(
+            runtime.authority_binding, canonical_repository_root=runtime.canonical_repository_root,
+            risk_config=runtime.risk_config, process_instance_id=runtime.normal_gate.process_instance_id,
+            current_process_release_completion=None, contract=runtime.contract,
+            expected_ledger_path=runtime.expected_ledger_path,
+            clock=runtime.wall_clock, uuid_factory=runtime.uuid_factory,
+        )
+        self.assertEqual(normal.failure_code, FailureCode.CURRENT_PROCESS_RELEASE_COMPLETION_REQUIRED)
+        self.assertIsNone(normal.handle)
+        self.assertIsNone(normal.normal_writer_session_id)
+
+    def test_gc13_simulated_process_termination_destroys_token_continuity(self) -> None:
+        """GC13: simulated process termination destroys token continuity;
+        Process B replay cannot acquire normal writer. Fault injection
+        directly removes the token's registry entry (the in-memory-only
+        state process termination would destroy) without touching any
+        durable ledger state -- Section 21 permits patching a private
+        module boundary for exactly this kind of direct fault injection."""
+
+        result, runtime = self._read_phase_complete()
+        token = self._obtain_unconsumed_token(runtime, result.release_state)
+        removed = ledger_binding._current_process_release_completion_registry.pop(id(token), None)
+        self.assertIsNotNone(removed)
+
+        normal = acquire_normal_writer_state(
+            runtime.authority_binding, canonical_repository_root=runtime.canonical_repository_root,
+            risk_config=runtime.risk_config, process_instance_id=runtime.normal_gate.process_instance_id,
+            current_process_release_completion=token, contract=runtime.contract,
+            expected_ledger_path=runtime.expected_ledger_path,
+            clock=runtime.wall_clock, uuid_factory=runtime.uuid_factory,
+        )
+        self.assertEqual(normal.failure_code, FailureCode.CURRENT_PROCESS_RELEASE_COMPLETION_INVALID)
+        self.assertIsNone(normal.handle)
+
+    def test_gc14_tail_movement_between_token_and_normal_writer_fails(self) -> None:
+        """GC14: config/proof/state/tail movement between token issuance and
+        normal-writer acquisition fails with zero ws_ start. The tail is
+        moved by a genuine canonical append (a fresh ORDER_OBSERVED) through
+        the emergency-control handle -- a real, otherwise-harmless durable
+        mutation the live token was not issued against."""
+
+        result, runtime = self._read_phase_complete()
+        token = self._obtain_unconsumed_token(runtime, result.release_state)
+
+        emergency = acquire_emergency_control_only(
+            self.binding, canonical_repository_root=str(self.repository_root),
+            contract=self.contract, expected_ledger_path=str(self.ledger_path),
+            clock=self.inputs.clock, uuid_factory=self.inputs.uuid,
+        )
+        self.assertIsNotNone(emergency.handle)
+        canonical_order = {
+            "order_id": "order-tail-mover", "status": "resting", "remaining_count_fp": "1.00",
+            "market": self.TICKER, "outcome_side": "YES", "yes_price": Decimal("0.45"),
+        }
+        emergency.handle.record_order_observation({
+            "venue_order_id": "order-tail-mover", "client_order_id": "client-tail-mover",
+            "source_request_id": "tail-mover-read", "source_operation": "GET_ORDER_V2",
+            "venue_payload_schema_id": "synthetic-order-v1", "canonical_venue_payload": canonical_order,
+            "canonical_venue_payload_sha256": hashlib.sha256(canonical_json_bytes(canonical_order)).hexdigest(),
+            "observation_semantic_class": "AUTHORITATIVE_ACTIVE_ORDER",
+        })
+        emergency.handle.close()
+
+        normal = acquire_normal_writer_state(
+            runtime.authority_binding, canonical_repository_root=runtime.canonical_repository_root,
+            risk_config=runtime.risk_config, process_instance_id=runtime.normal_gate.process_instance_id,
+            current_process_release_completion=token, contract=runtime.contract,
+            expected_ledger_path=runtime.expected_ledger_path,
+            clock=runtime.wall_clock, uuid_factory=runtime.uuid_factory,
+        )
+        self.assertEqual(normal.failure_code, FailureCode.CURRENT_PROCESS_RELEASE_COMPLETION_STALE)
+        self.assertIsNone(normal.handle)
+        self.assertIsNone(normal.normal_writer_session_id)
+
+    def test_gc15_successful_acquisition_starts_exactly_one_ws_with_equal_tails(self) -> None:
+        """GC15: successful normal acquisition starts exactly one ws_,
+        active writer identity is exact, and authority/ledger tails remain
+        equal."""
+
+        result, runtime = self._read_phase_complete()
+        stage3 = runner._complete_stage3_release_and_normal_writer(result, runtime)
+        acquisition = stage3.normal_writer_acquisition
+        locked = acquisition.handle
+        started = [
+            event for event in locked.events
+            if event.event_type.value == "WRITER_SESSION_STARTED"
+        ]
+        self.assertEqual(len(started), 1)
+        self.assertEqual(started[0].payload["writer_session_id"], stage3.normal_writer_session_id)
+        tail = locked.events[-1]
+        self.assertEqual((locked.authority_row.trusted_sequence, locked.authority_row.trusted_event_hash), (tail.sequence, tail.event_hash))
+        self.assertEqual(locked.relation, AuthorityLedgerRelation.EQUAL)
+        end_writer_session(locked, writer_session_id=stage3.normal_writer_session_id)
+
+    def test_gc16_current_historical_incident_remains_stage3c_blocked(self) -> None:
+        """GC16: exact current historical incident remains Stage-3C blocked
+        with Gate-C entry count zero, secret reads zero, venue requests
+        zero."""
+
+        transport = _ScriptedTransport()
+        runtime = self._blocked_runtime(transport)
+        opened = self._read_local_safety_state()()
+        self.assertEqual(opened.projection.protected_unresolved_legacy_write_count, 1)
+        invocation = self._invocation(incident_id=CURRENT_INCIDENT_ID, proof_id=CURRENT_WRITER_PROOF_ID)
+
+        result = run_pre_release_read_phase(invocation, runtime)
+        self.assertEqual(result.status, "LOCALLY_BLOCKED")
+        self.assertEqual(transport.calls, [])
+
+        with (
+            mock.patch.object(runner, "acquire_release_only", wraps=runner.acquire_release_only) as release_spy,
+            mock.patch.object(runner, "acquire_normal_writer_state", wraps=runner.acquire_normal_writer_state) as writer_spy,
+            self.assertRaises(RunnerError) as ctx,
+        ):
+            runner._complete_stage3_release_and_normal_writer(result, runtime)
+        self.assertEqual(ctx.exception.code, RunnerFailureCode.GATE_C_ENTRY_PRECONDITION_FAILED)
+        self.assertEqual(release_spy.call_count, 0)
+        self.assertEqual(writer_spy.call_count, 0)
+        self.assertEqual(transport.calls, [])
+
+    def test_gc17_no_credential_signing_venue_or_websocket_path(self) -> None:
+        """GC17: Gate-C runner code has no credential load, signing, venue
+        request, CREATE/CANCEL, WebSocket, or production path."""
+
+        source = inspect.getsource(runner._complete_stage3_release_and_normal_writer)
+        for forbidden in (
+            "sign", "credential", "secret", "private_key", "websocket", "WebSocket",
+            "CREATE_ORDER", "CANCEL_ORDER", "requests.", "urllib", "socket.", "http.client",
+        ):
+            self.assertNotIn(forbidden, source)
+
+    def test_gc18_no_writer_permit_progression_or_decision_loop(self) -> None:
+        """GC18: Gate-C code contains no NormalWriterPermit progression,
+        market-maker decision loop, Stage-4+ transport, or cleanup-cancel
+        implementation."""
+
+        source = inspect.getsource(runner._complete_stage3_release_and_normal_writer)
+        for forbidden in (
+            "NormalWriterPermit", "decision_cycle", "cleanup_cancel", "T0", "T1", "T2", "T3",
+        ):
+            self.assertNotIn(forbidden, source)
+
+    def test_gc19d1_deadline_expired_before_release_only(self) -> None:
+        """GC19/D1 (Implementation 02 Correction 02): deadline already
+        expired before RELEASE_ONLY acquisition -> no RELEASE_ONLY
+        mutation, no token, no NORMAL_WRITER, fail closed.
+
+        Gate B itself must reach READ_PHASE_COMPLETE under a generous
+        deadline first (an already-expired deadline would instead fail
+        inside Gate B's own operations, proving nothing about Gate C); only
+        the SEPARATE runtime handed to Gate C carries an already-elapsed
+        `experiment_absolute_end_monotonic_ns`, so this is genuinely the
+        very first Gate-C boundary check, and only it, that fails here."""
+
+        result, runtime = self._read_phase_complete()
+        already_expired = self.inputs.monotonic_value
+        expired_runtime = dataclasses.replace(runtime, experiment_absolute_end_monotonic_ns=already_expired)
+        before = self._sequence()
+        with (
+            mock.patch.object(runner, "acquire_release_only", wraps=runner.acquire_release_only) as spy,
+            self.assertRaises(RunnerError) as ctx,
+        ):
+            runner._complete_stage3_release_and_normal_writer(result, expired_runtime)
+        self.assertEqual(ctx.exception.code, RunnerFailureCode.DEADLINE_EXCEEDED)
+        self.assertEqual(ctx.exception.detail, "before RELEASE_ONLY")
+        self.assertEqual(spy.call_count, 0)
+        self.assertEqual(self._sequence(), before)
+
+    def test_gc19d2_deadline_expires_before_current_process_completion(self) -> None:
+        """GC19/D2: deadline expires after durable release progression
+        (RISK_RELEASE_RECORDED -> WRITER_PROOF_RELEASED -> WRITER_ELIGIBLE
+        all durably recorded for real) but before `complete_release_and_
+        issue_current_process_completion(...)` -> no token issued, no
+        NORMAL_WRITER, restricted session safely closed/ended.
+
+        The clock is expired via a wrapper around the REAL canonical
+        `record_writer_eligible` (the step immediately preceding the
+        finalizer): the real method runs to completion first, then the
+        clock flips to expired, so Gate C's own next deadline check -- and
+        only that one -- observes expiry."""
+
+        result, runtime = self._read_phase_complete()
+        clock = _ExpireOnDemandClock(runtime.monotonic_clock_ns, deadline=10**18)
+        d2_runtime = dataclasses.replace(
+            runtime, monotonic_clock_ns=clock, experiment_absolute_end_monotonic_ns=clock.deadline,
+        )
+        real_record_writer_eligible = ReleaseLedgerHandle.record_writer_eligible
+
+        def _expire_after(self_handle, assessment):
+            outcome = real_record_writer_eligible(self_handle, assessment)
+            clock.expire()
+            return outcome
+
+        registry_before = len(ledger_binding._current_process_release_completion_registry)
+        with mock.patch.object(ReleaseLedgerHandle, "record_writer_eligible", _expire_after):
+            with self.assertRaises(RunnerError) as ctx:
+                runner._complete_stage3_release_and_normal_writer(result, d2_runtime)
+        self.assertEqual(ctx.exception.code, RunnerFailureCode.DEADLINE_EXCEEDED)
+        self.assertEqual(ctx.exception.detail, "before current-process completion")
+        self.assertEqual(len(ledger_binding._current_process_release_completion_registry), registry_before)
+        after = self._read_local_safety_state()()
+        self.assertEqual(after.projection.risk_control_state, "WRITER_ELIGIBLE")
+        self.assertIsNone(after.projection.active_restricted_session_id)
+        self.assertIsNone(after.projection.active_writer_session_id)
+
+    def test_gc19d3_deadline_expires_before_normal_writer_acquisition(self) -> None:
+        """GC19/D3: deadline expires after genuine current-process
+        completion token issuance but before `acquire_normal_writer_state
+        (...)` -> no NORMAL_WRITER ws_, fail closed. No reconstructed or
+        fabricated token is ever used -- the wrapper expires the clock only
+        AFTER the real finalizer has already returned a genuine live
+        token, which then simply goes unconsumed."""
+
+        result, runtime = self._read_phase_complete()
+        clock = _ExpireOnDemandClock(runtime.monotonic_clock_ns, deadline=10**18)
+        d3_runtime = dataclasses.replace(
+            runtime, monotonic_clock_ns=clock, experiment_absolute_end_monotonic_ns=clock.deadline,
+        )
+        real_finalizer = ReleaseLedgerHandle.complete_release_and_issue_current_process_completion
+
+        def _expire_after_token(self_handle, assessment):
+            token = real_finalizer(self_handle, assessment)
+            clock.expire()
+            return token
+
+        registry_before = len(ledger_binding._current_process_release_completion_registry)
+        with mock.patch.object(
+            ReleaseLedgerHandle, "complete_release_and_issue_current_process_completion", _expire_after_token,
+        ):
+            with self.assertRaises(RunnerError) as ctx:
+                runner._complete_stage3_release_and_normal_writer(result, d3_runtime)
+        self.assertEqual(ctx.exception.code, RunnerFailureCode.DEADLINE_EXCEEDED)
+        self.assertEqual(ctx.exception.detail, "before NORMAL_WRITER")
+        # The genuine token was issued and remains registered (unconsumed,
+        # exactly like process termination before Stage 3J) -- registry
+        # size grows by exactly one, it is not silently discarded/reused.
+        self.assertEqual(len(ledger_binding._current_process_release_completion_registry), registry_before + 1)
+        after = self._read_local_safety_state()()
+        self.assertIsNone(after.projection.active_writer_session_id)
+        self.assertEqual(after.projection.writer_sessions, ())
+
+    def test_gc19d4_deadline_expires_after_normal_writer_before_stage3k_success(self) -> None:
+        """GC19/D4: deadline expires after genuine NORMAL_WRITER admission
+        (a real `ws_` has started) but before successful Stage-3K
+        completion -> canonical WRITER_SESSION_ENDED cleanup occurs, no
+        active writer survives, Gate C fails closed."""
+
+        result, runtime = self._read_phase_complete()
+        clock = _ExpireOnDemandClock(runtime.monotonic_clock_ns, deadline=10**18)
+        d4_runtime = dataclasses.replace(
+            runtime, monotonic_clock_ns=clock, experiment_absolute_end_monotonic_ns=clock.deadline,
+        )
+        real_acquire = runner.acquire_normal_writer_state
+
+        def _expire_after_admission(binding, **kwargs):
+            outcome = real_acquire(binding, **kwargs)
+            if outcome.handle is not None:
+                clock.expire()
+            return outcome
+
+        with mock.patch.object(runner, "acquire_normal_writer_state", side_effect=_expire_after_admission):
+            with self.assertRaises(RunnerError) as ctx:
+                runner._complete_stage3_release_and_normal_writer(result, d4_runtime)
+        self.assertEqual(ctx.exception.code, RunnerFailureCode.DEADLINE_EXCEEDED)
+        self.assertEqual(ctx.exception.detail, "Stage-3K success boundary")
+        after = self._read_local_safety_state()()
+        self.assertIsNone(after.projection.active_writer_session_id)
+        self.assertIsNone(after.projection.active_restricted_session_id)
+        self.assertEqual(len(after.projection.writer_sessions), 1)
+
+    def test_gc_corr01a_malformed_post_acquisition_carrier_ends_genuine_ws(self) -> None:
+        """Implementation 02 Correction 01 / GC-CORR-01A: the real canonical
+        `acquire_normal_writer_state` genuinely creates a live `ws_`
+        writer session; only the RETURNED carrier's runner-validated
+        `authority_ledger_relation` field is then altered (the canonical
+        acquisition and the durable ledger state underneath are untouched).
+        Runner-level post-acquisition validation must fail on that altered
+        field AND durably end the genuine `ws_` through canonical
+        `end_writer_session` before propagating -- not merely raise while
+        abandoning the still-open lock."""
+
+        result, runtime = self._read_phase_complete()
+        real_acquire = runner.acquire_normal_writer_state
+
+        def _corrupt_relation_after_real_admission(binding, **kwargs):
+            outcome = real_acquire(binding, **kwargs)
+            if outcome.handle is None:
+                return outcome
+            return dataclasses.replace(outcome, authority_ledger_relation=None)
+
+        with mock.patch.object(runner, "acquire_normal_writer_state", side_effect=_corrupt_relation_after_real_admission):
+            with self.assertRaises(RunnerError) as ctx:
+                runner._complete_stage3_release_and_normal_writer(result, runtime)
+        self.assertEqual(ctx.exception.code, RunnerFailureCode.NORMAL_WRITER_ACQUISITION_FAILED)
+
+        after = self._read_local_safety_state()()
+        self.assertIsNone(after.projection.active_writer_session_id)
+        self.assertIsNone(after.projection.active_restricted_session_id)
+        self.assertEqual(len(after.projection.writer_sessions), 1)
+
+    def test_gc_corr01b_stage3k_rederivation_exception_ends_genuine_ws(self) -> None:
+        """Implementation 02 Correction 01 / GC-CORR-01B: an exception
+        raised BY the Stage-3K re-derivation machinery itself (not merely a
+        boolean predicate returning false) after genuine NORMAL_WRITER
+        admission must still durably end the genuine `ws_` through
+        canonical `end_writer_session` before propagating.
+
+        The fault is injected as a one-shot raise from the live
+        `LockedLedger`'s own `.projection()` method (instance-level
+        rebinding -- `LockedLedger` has no `__slots__`), simulating an
+        unexpected fault inside the re-derivation call itself rather than
+        a scripted false predicate."""
+
+        result, runtime = self._read_phase_complete()
+        real_acquire = runner.acquire_normal_writer_state
+
+        def _raise_once_from_projection(binding, **kwargs):
+            outcome = real_acquire(binding, **kwargs)
+            if outcome.handle is None:
+                return outcome
+
+            def _projection_raises_once():
+                raise RuntimeError("simulated Stage-3K re-derivation fault")
+
+            outcome.handle.projection = _projection_raises_once
+            return outcome
+
+        with mock.patch.object(runner, "acquire_normal_writer_state", side_effect=_raise_once_from_projection):
+            with self.assertRaises(RuntimeError):
+                runner._complete_stage3_release_and_normal_writer(result, runtime)
+
+        after = self._read_local_safety_state()()
+        self.assertIsNone(after.projection.active_writer_session_id)
+        self.assertIsNone(after.projection.active_restricted_session_id)
+        self.assertEqual(len(after.projection.writer_sessions), 1)
+
+    def test_gc20_pre_token_failures_leave_no_active_restricted_session(self) -> None:
+        """GC20: all pre-token failure paths release/close RELEASE_ONLY
+        correctly and leave no active restricted session where a clean
+        close is deterministically possible."""
+
+        before, after = self._fault_after("record_risk_release", "record_risk_release")
+        self.assertIsNone(after.projection.active_restricted_session_id)
+
+    def test_gc21_no_raw_persistence_bridge_calls(self) -> None:
+        """GC21: runner never invokes raw SQLite, _open_locked,
+        _acquire_normal_writer_candidate, or start_writer_session
+        directly."""
+
+        source = inspect.getsource(runner._complete_stage3_release_and_normal_writer)
+        for forbidden in ("_open_locked", "_acquire_normal_writer_candidate", "start_writer_session(", "sqlite3"):
+            self.assertNotIn(forbidden, source)
+
+    def test_gc22_all_prior_semantic_cases_preserved(self) -> None:
+        """GC22: all Gate-B semantic cases 1-113 remain preserved -- smoke
+        re-check of a representative cross-section (the full suite is the
+        complete evidence, run alongside this file)."""
+
+        transport = _ScriptedTransport()
+        self._script_full_read_cycle(transport)
+        runtime, invocation = self._ready_runtime_and_invocation(transport)
+        result = run_pre_release_read_phase(invocation, runtime)
+        self.assertEqual(result.status, "READ_PHASE_COMPLETE")
+        produced = build_operation_binding_index()
+        self.assertEqual(len(produced), OPERATION_BINDING_INDEX_BYTES)
+        self.assertEqual(hashlib.sha256(produced).hexdigest(), OPERATION_BINDING_INDEX_SHA256)
+
+    def test_gc23_successful_handoff_leaves_acquisition_open_for_test_to_end(self) -> None:
+        """GC23: successful Gate-C handoff returns the live canonical
+        normal-writer acquisition without closing it; test then ends it
+        explicitly with canonical end_writer_session."""
+
+        result, runtime = self._read_phase_complete()
+        stage3 = runner._complete_stage3_release_and_normal_writer(result, runtime)
+        acquisition = stage3.normal_writer_acquisition
+        self.assertFalse(acquisition.handle.closed)
+        end_writer_session(acquisition.handle, writer_session_id=stage3.normal_writer_session_id)
+        self.assertTrue(acquisition.handle.closed)
+
+    def test_gc24_forced_stage3k_failure_ends_writer_session_through_canonical_api(self) -> None:
+        """GC24: forced Stage-3K validation failure after writer admission
+        uses canonical end_writer_session and positively anchors WRITER_
+        SESSION_ENDED before locks close.
+
+        Forced by rebinding just the returned `LockedLedger` instance's own
+        `.projection()` method (the object has no `__slots__`, so this is
+        ordinary instance-level rebinding, not a class-wide patch) to report
+        a corrupted `active_risk_config_sha256` -- but only for Stage-3K's
+        own later fresh re-derivation call. The real
+        `acquire_normal_writer_state` call underneath still runs for real
+        and genuinely starts `ws_`, so the session `end_writer_session`
+        later ends is the exact real active one."""
+
+        result, runtime = self._read_phase_complete()
+        real_acquire = runner.acquire_normal_writer_state
+
+        def _corrupt_projection_after_real_start(binding, **kwargs):
+            outcome = real_acquire(binding, **kwargs)
+            if outcome.handle is None:
+                return outcome
+            real_projection_fn = outcome.handle.projection
+
+            def _corrupted_projection():
+                return dataclasses.replace(real_projection_fn(), active_risk_config_sha256="0" * 64)
+
+            outcome.handle.projection = _corrupted_projection
+            return outcome
+
+        with mock.patch.object(runner, "acquire_normal_writer_state", side_effect=_corrupt_projection_after_real_start):
+            with self.assertRaises(RunnerError) as ctx:
+                runner._complete_stage3_release_and_normal_writer(result, runtime)
+        self.assertEqual(ctx.exception.code, RunnerFailureCode.STAGE_3K_REVALIDATION_FAILED)
+
+        # The real ws_ genuinely started and was genuinely ended through the
+        # canonical public API (not dropped) -- re-reading local safety
+        # state through an entirely separate, freshly-opened handle proves
+        # WRITER_SESSION_ENDED was durably, positively anchored.
+        after = self._read_local_safety_state()()
+        self.assertIsNone(after.projection.active_restricted_session_id)
+        self.assertIsNone(after.projection.active_writer_session_id)
+        self.assertEqual(len(after.projection.writer_sessions), 1)
 
 
 # ---------------------------------------------------------------------------

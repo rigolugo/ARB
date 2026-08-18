@@ -1,6 +1,6 @@
-"""Kalshi Demo minimal two-sided market-maker experiment runner -- Gate B.
+"""Kalshi Demo minimal two-sided market-maker experiment runner -- Gate B + C.
 
-Implements ONLY the authoritative-truth / read-only reconciliation spine
+Gate B implements the authoritative-truth / read-only reconciliation spine
 required by
 `KALSHI_DEMO_MINIMAL_TWO_SIDED_MARKET_MAKER_EXPERIMENT_RUNNER_SPEC_04.md`
 (bytes 45629, sha256
@@ -9,9 +9,13 @@ incorporates by exact predecessor identity every non-superseded requirement
 of
 `KALSHI_DEMO_MINIMAL_TWO_SIDED_MARKET_MAKER_EXPERIMENT_RUNNER_SPEC_03.md`
 (bytes 117449, sha256
-09bdca72ea83c4b701ee8c743b06f384c7fe682f7fb5bf14459ab484dad81771).
+09bdca72ea83c4b701ee8c743b06f384c7fe682f7fb5bf14459ab484dad81771), as
+corrected without reopening architecture by
+`KALSHI_DEMO_MINIMAL_TWO_SIDED_MARKET_MAKER_EXPERIMENT_RUNNER_SPEC_05.md`
+(bytes 44642, sha256
+8b49b6437d0024ada65e43c3586a72d857063263ee4f46ca0b18e3a292ceb878).
 
-Gate B scope (refined Stage 3 of the preserved 20-stage runner sequence):
+Gate B scope (Stage 3 of the preserved 20-stage runner sequence):
 
     3A  process starts BOOT_HOLD
     3B  open exact authority/ledger read/local-gate path and replay
@@ -20,19 +24,30 @@ Gate B scope (refined Stage 3 of the preserved 20-stage runner sequence):
     3E  collect bounded current-process read/reconciliation truth
     3F  close venue-read phase; assemble exact ReleaseEvaluationStateV1
 
-Gate B stops before Stage 3G (acquiring `RELEASE_ONLY` and completing the
-durable release/session-end sequence).  It never constructs a
-`CurrentProcessReleaseCompletionV1`, never acquires a normal writer, and
-never exposes the write-capable experiment surface.  Those stages, the
-20-stage decision loop, and CREATE/CANCEL dispatch belong to a later gate.
+Gate C (this implementation) begins only from a successfully completed Gate-B
+`PreReleaseReadPhaseResultV1` (`status == "READ_PHASE_COMPLETE"`) and
+implements exactly:
 
-Six-path writable envelope (Spec 04 Section 11) -- this file and its test
-module are two of the six; the remaining four
-(`src/arb/execution_ledger.py`, `tests/test_execution_ledger.py`,
-`src/arb/venues/kalshi/ledger_binding.py`,
-`tests/test_kalshi_ledger_binding.py`) are protected and unmodified by this
-task.  Every type imported from those files is used exactly as canonically
-defined; none is re-implemented here.
+    3G  acquire canonical RELEASE_ONLY
+    3H  exact durable release sequence (RISK_RELEASE_RECORDED ->
+        WRITER_PROOF_RELEASED -> SAFE_HELD -> WRITER_ELIGIBLE)
+    3I  CurrentProcessReleaseCompletionV1 (RESTRICTED_SESSION_ENDED readback)
+    3J  NORMAL_WRITER acquisition consuming that exact same-process token
+    3K  final revalidation of the live normal-writer acquisition
+
+Gate C never constructs `CurrentProcessReleaseCompletionV1` by any means
+other than the canonical `ReleaseLedgerHandle.complete_release_and_issue_
+current_process_completion(...)` return value, never acquires a normal
+writer other than through `acquire_normal_writer_state(...)`, and never
+exposes CREATE/CANCEL, a decision loop, or any write-capable experiment
+surface -- those remain a later gate's scope.
+
+Two-path writable envelope (Gate-C dispatch Section 5) -- this file and its
+test module are the only two writable paths; `src/arb/execution_ledger.py`,
+`tests/test_execution_ledger.py`, `src/arb/venues/kalshi/ledger_binding.py`,
+and `tests/test_kalshi_ledger_binding.py` are protected and unmodified by
+this task.  Every type imported from those files is used exactly as
+canonically defined; none is re-implemented here.
 """
 
 from __future__ import annotations
@@ -48,22 +63,32 @@ from decimal import Decimal, InvalidOperation
 from typing import Callable, Mapping, Sequence, Tuple
 
 from arb.execution_ledger import (
+    AuthorityLedgerRelation,
+    AuthorityNamespaceBinding,
+    LedgerError,
     OpenResult,
     RestartClassification,
     SafetyProjection,
     acquire_local_state,
     canonical_json_bytes,
     canonical_timestamp,
+    end_writer_session,
     sha256_hex,
     validate_canonical_timestamp,
 )
 from arb.venues.kalshi.ledger_binding import (
     CURRENT_LEGACY_INCIDENT_CONTRACT,
+    CurrentProcessReleaseCompletionV1,
+    LegacyIncidentContract,
+    NormalWriterAcquisition,
     ReleaseEvaluationStateV1,
     ReleaseReconciliationSnapshotV1,
     ReleaseRiskSnapshotV1,
+    ReleaseLedgerHandle,
     TrustedReleaseEvidenceProjectionV1,
     TrustedReleaseEvidenceReadResultV1,
+    acquire_normal_writer_state,
+    acquire_release_only,
 )
 from arb.venues.kalshi.risk_control import (
     EconomicFillV1,
@@ -206,6 +231,19 @@ class RunnerFailureCode(enum.StrEnum):
     ORDER_TARGET_NOT_AUTHORITATIVE = "ORDER_TARGET_NOT_AUTHORITATIVE"
     MARKET_GRID_INVALID = "MARKET_GRID_INVALID"
     POSITION_CORROBORATION_CONFLICT = "POSITION_CORROBORATION_CONFLICT"
+
+    # Gate C -- Stage 3G-3K release / normal-writer continuation (dispatch
+    # Sections 6-20). Reused where an existing classification already fits
+    # (e.g. DEADLINE_EXCEEDED); these are new only where Gate C introduces a
+    # genuinely new failure surface no earlier gate had.
+    GATE_C_ENTRY_PRECONDITION_FAILED = "GATE_C_ENTRY_PRECONDITION_FAILED"
+    RELEASE_ONLY_ACQUISITION_FAILED = "RELEASE_ONLY_ACQUISITION_FAILED"
+    DURABLE_RELEASE_SEQUENCE_FAILED = "DURABLE_RELEASE_SEQUENCE_FAILED"
+    CURRENT_PROCESS_RELEASE_COMPLETION_ISSUANCE_FAILED = (
+        "CURRENT_PROCESS_RELEASE_COMPLETION_ISSUANCE_FAILED"
+    )
+    NORMAL_WRITER_ACQUISITION_FAILED = "NORMAL_WRITER_ACQUISITION_FAILED"
+    STAGE_3K_REVALIDATION_FAILED = "STAGE_3K_REVALIDATION_FAILED"
 
 
 class RunnerError(RuntimeError):
@@ -957,6 +995,24 @@ class ExperimentRunnerRuntimeV1:
     uuid_factory: Callable[[], "uuid.UUID"]
     risk_config: RiskLimitConfigV1 | None
     experiment_absolute_end_monotonic_ns: int
+    # Gate C closed data bindings (dispatch Section 9): narrow values, not
+    # callbacks, needed to invoke the canonical `acquire_release_only` /
+    # `acquire_normal_writer_state` persistence entrypoints directly. There
+    # is deliberately no `release_callback`/`normal_writer_callback`/
+    # `ledger_callback`/`writer_session_callback` -- a caller-selectable
+    # authority path is exactly what Gate C must not expose.
+    authority_binding: AuthorityNamespaceBinding
+    canonical_repository_root: str
+    expected_ledger_path: str | None
+    # `contract` binds the exact `LegacyIncidentContract` (conflict domain /
+    # environment / bound legacy-history identity) already used to open
+    # `read_local_safety_state`/`read_trusted_release_evidence`. Every
+    # replay-time history validation inside `acquire_release_only`/
+    # `acquire_normal_writer_state` depends on this exact same contract;
+    # defaulting silently to the production `CURRENT_LEGACY_INCIDENT_
+    # CONTRACT` would make Gate C's own acquisitions diverge from Gate B's
+    # already-open contract in any non-production (synthetic-evidence) run.
+    contract: LegacyIncidentContract
 
     def __post_init__(self) -> None:
         if type(self.normal_gate) is not WriterEligibilityGate:
@@ -970,6 +1026,14 @@ class ExperimentRunnerRuntimeV1:
             or not callable(self.fetch_orderbook) or not callable(self.read_trusted_release_evidence)
         ):
             raise RunnerError(RunnerFailureCode.PRE_RELEASE_CAPABILITY_NOT_AUTHORIZED, detail="runtime callables")
+        if type(self.authority_binding) is not AuthorityNamespaceBinding:
+            raise RunnerError(RunnerFailureCode.PRE_RELEASE_CAPABILITY_NOT_AUTHORIZED, detail="authority_binding type")
+        if type(self.canonical_repository_root) is not str or not self.canonical_repository_root:
+            raise RunnerError(RunnerFailureCode.PRE_RELEASE_CAPABILITY_NOT_AUTHORIZED, detail="canonical_repository_root")
+        if self.expected_ledger_path is not None and type(self.expected_ledger_path) is not str:
+            raise RunnerError(RunnerFailureCode.PRE_RELEASE_CAPABILITY_NOT_AUTHORIZED, detail="expected_ledger_path type")
+        if type(self.contract) is not LegacyIncidentContract:
+            raise RunnerError(RunnerFailureCode.PRE_RELEASE_CAPABILITY_NOT_AUTHORIZED, detail="contract type")
 
 
 @dataclass(frozen=True, slots=True)
@@ -1973,6 +2037,270 @@ def run_pre_release_read_phase(
         release_state=release_state,
         truth=truth,
         requests_consumed=capability.requests_consumed,
+    )
+
+
+# ---------------------------------------------------------------------------
+# Section 12b -- Gate C: Stage 3G (RELEASE_ONLY) through Stage 3K (final
+# normal-writer revalidation). Module-private continuation only -- no second
+# public experiment entrypoint. Every durable mutation below is performed
+# exclusively through the canonical `ledger_binding.py`/`execution_ledger.py`
+# public surface (`acquire_release_only`, `ReleaseLedgerHandle.evaluate_
+# release`/`record_risk_release`/`release_writer_proof`/`record_writer_
+# eligible`/`complete_release_and_issue_current_process_completion`,
+# `acquire_normal_writer_state`, `end_writer_session`); this file never
+# touches raw SQLite, `_open_locked`, `_acquire_normal_writer_candidate`, or
+# `start_writer_session` directly, and never constructs, copies, or
+# reconstructs a `CurrentProcessReleaseCompletionV1`.
+# ---------------------------------------------------------------------------
+
+
+_WRITER_SESSION_ID_PATTERN = re.compile(r"^ws_[0-9a-f]{32}$")
+
+
+def _fail_closed_end_writer_session(locked: "LockedLedger", writer_session_id: str | None) -> None:
+    """Post-admission cleanup obligation (Implementation 02 Correction 01).
+
+    Once `acquire_normal_writer_state` has returned a genuine non-`None`
+    handle, a real `ws_` writer session already exists durably. This helper
+    is the single place that ends it through the canonical public
+    `end_writer_session` -- never raw SQLite, never a dropped/abandoned
+    lock, never a second append bridge. It prefers the session ID the
+    canonical acquisition itself returned; it falls back to reading the
+    ledger's own live active-session identity only if that field is
+    somehow unusable, so a corrupted return carrier can never leave a
+    genuine writer session un-terminated. A no-op if the locks are already
+    closed (the canonical finalizer/acquisition functions already close on
+    their own internal failure branches)."""
+
+    if locked.closed:
+        return
+    session_id = writer_session_id
+    if type(session_id) is not str or _WRITER_SESSION_ID_PATTERN.fullmatch(session_id) is None:
+        session_id = locked.projection().active_writer_session_id
+    if session_id is None:
+        locked.close()
+        return
+    end_writer_session(locked, writer_session_id=session_id)
+
+
+@dataclass(frozen=True, slots=True)
+class _Stage3ReleaseAndNormalWriterResultV1:
+    """Gate C (Stage 3G-3K) success carrier (dispatch Section 18).
+
+    Module-private: no public export, no serialization, no credential/
+    secret/transport field. Carries the live canonical
+    `NormalWriterAcquisition` -- its still-open `LockedLedger` and started
+    `ws_` session -- forward for a later gate's continuation; this function
+    never closes it on success."""
+
+    process_instance_id: str
+    release_id: str
+    normal_writer_session_id: str
+    normal_writer_acquisition: NormalWriterAcquisition
+
+
+def _complete_stage3_release_and_normal_writer(
+    read_phase_result: PreReleaseReadPhaseResultV1,
+    runtime: ExperimentRunnerRuntimeV1,
+) -> _Stage3ReleaseAndNormalWriterResultV1:
+    """Gate C: Stage 3G (RELEASE_ONLY) through Stage 3K (final normal-writer
+    revalidation) (dispatch Sections 6-20).
+
+    Only a genuine same-process Gate-B `READ_PHASE_COMPLETE` result may
+    enter (Section 8); every failure below exposes no token and no normal
+    writer, performs no retry, and never fabricates, copies, or
+    reconstructs a `CurrentProcessReleaseCompletionV1`. The durable release
+    sequence (`record_risk_release` -> `release_writer_proof` ->
+    `record_writer_eligible` -> `complete_release_and_issue_current_
+    process_completion`) is invoked exactly once, in exactly that order, on
+    exactly one `ReleaseAssessmentV1` obtained from the canonical
+    evaluator -- no subset of its predicate vector is inspected locally to
+    declare success; every gate is enforced by the canonical handle methods
+    themselves, which raise `LedgerError` on any predicate failure or
+    drift."""
+
+    if type(runtime) is not ExperimentRunnerRuntimeV1:
+        raise RunnerError(RunnerFailureCode.GATE_C_ENTRY_PRECONDITION_FAILED, detail="runtime type")
+
+    # Stage 3G entry preconditions (dispatch Section 8). No RELEASE_ONLY
+    # acquisition may occur until every one of these holds. This is the only
+    # gate: there is no "resume Gate C" entrypoint and no reconstruction of
+    # a `ReleaseEvaluationStateV1` from serialized fields -- the exact
+    # same-process object produced by Gate B's own Stage 3F is required.
+    if (
+        type(read_phase_result) is not PreReleaseReadPhaseResultV1
+        or read_phase_result.status != "READ_PHASE_COMPLETE"
+        or type(read_phase_result.release_state) is not ReleaseEvaluationStateV1
+        or read_phase_result.process_instance_id != runtime.normal_gate.process_instance_id
+        or type(runtime.risk_config) is not RiskLimitConfigV1
+    ):
+        raise RunnerError(RunnerFailureCode.GATE_C_ENTRY_PRECONDITION_FAILED)
+    if runtime.monotonic_clock_ns() >= runtime.experiment_absolute_end_monotonic_ns:
+        raise RunnerError(RunnerFailureCode.DEADLINE_EXCEEDED, detail="before RELEASE_ONLY")
+
+    # Stage 3G -- the sole supported RELEASE_ONLY acquisition path.
+    acquisition = acquire_release_only(
+        runtime.authority_binding,
+        canonical_repository_root=runtime.canonical_repository_root,
+        contract=runtime.contract,
+        expected_ledger_path=runtime.expected_ledger_path,
+        clock=runtime.wall_clock,
+        uuid_factory=runtime.uuid_factory,
+        monotonic_clock_ns=runtime.monotonic_clock_ns,
+        release_wall_clock=runtime.wall_clock,
+    )
+    if (
+        acquisition.failure_code is not None
+        or type(acquisition.handle) is not ReleaseLedgerHandle
+        or acquisition.authority_ledger_relation is not AuthorityLedgerRelation.EQUAL
+    ):
+        if acquisition.handle is not None:
+            acquisition.handle.close()
+        raise RunnerError(RunnerFailureCode.RELEASE_ONLY_ACQUISITION_FAILED)
+
+    handle = acquisition.handle
+
+    # Stage 3H -- exact durable release sequence (dispatch Section 12). Each
+    # canonical mutation is invoked exactly once; a failure at any step
+    # closes the still-open `ReleaseLedgerHandle` (a no-op if the canonical
+    # method already closed it) and exposes no token, no writer, and
+    # attempts no automatic second release.
+    try:
+        assessment = handle.evaluate_release(read_phase_result.release_state)
+    except LedgerError as exc:
+        handle.close()
+        raise RunnerError(RunnerFailureCode.DURABLE_RELEASE_SEQUENCE_FAILED, detail="evaluate_release") from exc
+
+    try:
+        handle.record_risk_release(assessment)
+    except LedgerError as exc:
+        handle.close()
+        raise RunnerError(RunnerFailureCode.DURABLE_RELEASE_SEQUENCE_FAILED, detail="record_risk_release") from exc
+
+    try:
+        handle.release_writer_proof(assessment)
+    except LedgerError as exc:
+        handle.close()
+        raise RunnerError(RunnerFailureCode.DURABLE_RELEASE_SEQUENCE_FAILED, detail="release_writer_proof") from exc
+
+    try:
+        handle.record_writer_eligible(assessment)
+    except LedgerError as exc:
+        handle.close()
+        raise RunnerError(RunnerFailureCode.DURABLE_RELEASE_SEQUENCE_FAILED, detail="record_writer_eligible") from exc
+
+    if runtime.monotonic_clock_ns() >= runtime.experiment_absolute_end_monotonic_ns:
+        handle.close()
+        raise RunnerError(RunnerFailureCode.DEADLINE_EXCEEDED, detail="before current-process completion")
+
+    # Stage 3I -- the exact live token returned by the canonical finalizer,
+    # which itself positively anchors RESTRICTED_SESSION_ENDED and proves
+    # authority/ledger tail equality before returning (dispatch Section 14).
+    try:
+        token = handle.complete_release_and_issue_current_process_completion(assessment)
+    except LedgerError as exc:
+        handle.close()
+        raise RunnerError(RunnerFailureCode.CURRENT_PROCESS_RELEASE_COMPLETION_ISSUANCE_FAILED) from exc
+    if type(token) is not CurrentProcessReleaseCompletionV1:
+        raise RunnerError(RunnerFailureCode.CURRENT_PROCESS_RELEASE_COMPLETION_ISSUANCE_FAILED)
+
+    if runtime.monotonic_clock_ns() >= runtime.experiment_absolute_end_monotonic_ns:
+        # The token now exists and is registered, but Section 19 forbids any
+        # retry or reconstruction on expiry -- it is simply never consumed
+        # and Stage 3J is never reached.
+        raise RunnerError(RunnerFailureCode.DEADLINE_EXCEEDED, detail="before NORMAL_WRITER")
+
+    # Stage 3J -- the sole supported normal-writer acquisition path. The
+    # one-shot token is consumed exactly once, only inside this canonical
+    # call, only after every durable/continuity predicate re-validates.
+    normal = acquire_normal_writer_state(
+        runtime.authority_binding,
+        canonical_repository_root=runtime.canonical_repository_root,
+        risk_config=runtime.risk_config,
+        process_instance_id=runtime.normal_gate.process_instance_id,
+        current_process_release_completion=token,
+        contract=runtime.contract,
+        expected_ledger_path=runtime.expected_ledger_path,
+        clock=runtime.wall_clock,
+        uuid_factory=runtime.uuid_factory,
+    )
+    if normal.handle is None:
+        # The canonical function itself already closed everything on every
+        # one of its own failure branches (ER-NW-003) -- there is no
+        # genuine `ws_` to clean up here.
+        raise RunnerError(RunnerFailureCode.NORMAL_WRITER_ACQUISITION_FAILED)
+
+    # From this point on a genuine `LockedLedger` + started `ws_` writer
+    # session exists (Implementation 02 Correction 01): `acquire_normal_
+    # writer_state` never returns a non-`None` handle except on a full
+    # successful admission that already durably appended WRITER_SESSION_
+    # STARTED. Every subsequent runner-side check -- post-acquisition
+    # carrier validation, Stage-3K fresh re-derivation, the final deadline
+    # check, and any exception any of that machinery raises -- is wrapped
+    # in exactly this one cleanup-protected region, so no future edit can
+    # add a new post-admission failure path that bypasses canonical
+    # `end_writer_session` cleanup. On success, execution falls through to
+    # the `return` below the `try` and no cleanup runs.
+    locked = normal.handle
+    session_id = normal.normal_writer_session_id
+    try:
+        if (
+            normal.failure_code is not None
+            or session_id is None
+            or _WRITER_SESSION_ID_PATTERN.fullmatch(session_id) is None
+            or normal.authority_ledger_relation is not AuthorityLedgerRelation.EQUAL
+        ):
+            raise RunnerError(RunnerFailureCode.NORMAL_WRITER_ACQUISITION_FAILED)
+
+        # Stage 3K -- final revalidation while the normal-writer locks
+        # remain live (dispatch Section 16). Re-derives the projection
+        # fresh from the still-open `LockedLedger` rather than trusting
+        # the acquisition's own snapshot, so this is a genuine independent
+        # readback under live locks.
+        tail = locked.events[-1]
+        authority = locked.authority_row
+        observed_tail = (tail.sequence, tail.event_hash)
+        projection = locked.projection()
+        revalidated = (
+            not locked.closed
+            and type(projection) is SafetyProjection
+            and locked.relation is AuthorityLedgerRelation.EQUAL
+            and projection.active_writer_session_id == session_id
+            and session_id in projection.writer_sessions
+            and projection.active_restricted_session_id is None
+            and projection.risk_control_state == "WRITER_ELIGIBLE"
+            and projection.active_risk_config_sha256 == runtime.risk_config.sha256
+            and projection.writer_proof_state_by_proof_id.get(token.writer_proof_id) == "RELEASED"
+            and projection.writer_proof_release_eligible_by_proof_id.get(token.writer_proof_id) is True
+            and projection.protected_unresolved_legacy_write_count == 0
+            and not projection.unresolved_write_request_ids
+            and (authority.trusted_sequence, authority.trusted_event_hash) == observed_tail
+            and (projection.trusted_sequence, projection.trusted_event_hash) == observed_tail
+            and (projection.last_sequence, projection.terminal_event_hash) == observed_tail
+            and runtime.normal_gate.process_instance_id == token.process_instance_id
+        )
+        if not revalidated:
+            raise RunnerError(RunnerFailureCode.STAGE_3K_REVALIDATION_FAILED)
+
+        if runtime.monotonic_clock_ns() >= runtime.experiment_absolute_end_monotonic_ns:
+            raise RunnerError(RunnerFailureCode.DEADLINE_EXCEEDED, detail="Stage-3K success boundary")
+    except Exception:
+        # Fail-closed cleanup-protected region (dispatch Correction 01): a
+        # real `ws_` exists, so any failure/exception reaching here -- a
+        # predicate, a corrupted carrier field, or an exception raised by
+        # the re-derivation machinery itself -- ends it canonically before
+        # propagating. The original exception is never suppressed; if the
+        # cleanup call itself also fails, that failure chains onto it as
+        # additional safety-relevant evidence rather than replacing it.
+        _fail_closed_end_writer_session(locked, session_id)
+        raise
+
+    return _Stage3ReleaseAndNormalWriterResultV1(
+        process_instance_id=runtime.normal_gate.process_instance_id,
+        release_id=token.release_id,
+        normal_writer_session_id=session_id,
+        normal_writer_acquisition=normal,
     )
 
 
