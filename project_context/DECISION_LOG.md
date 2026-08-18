@@ -364,3 +364,75 @@ Entry schema: Decision ID, Candidate ID (if applicable), Bound artifact identiti
 - User approval reference: `ARB_WORKFLOW_SIMPLIFICATION_AMENDMENT_01_CANONICAL_INSTALLATION_02`.
 - Authorizes further work: `NO` beyond this exact preparation; no subsequent phase begins automatically.
 - Canonical effect: `NONE` at package preparation. Marco review is pending.
+
+### DEC-0030
+- Candidate ID: `839d475b55a708ec6e2bf280a99b1c35992dd6b1` (Gate-C `IMPLEMENTATION_02`, a same-scope correction to Marco-blocked `IMPLEMENTATION_01` candidate `2fc7a281dbf091f53a859eec3f1a632bfdfe564a`, never installed)
+- Date: 2026-08-18
+- Decision: Marco formal decision `APPROVE` of Implementation 02's local candidate `839d475b55a708ec6e2bf280a99b1c35992dd6b1` (parent `12e69143fa94540f2a5f803a5677aa1718207478`, tree `c6dc085da5e399bf6be144866c2b63d179242921`), correcting Implementation 01's two blocking defects (post-admission cleanup safety; per-boundary deadline test coverage) and adding independently verified commit-object provenance.
+- Status: `ACCEPTED`
+- Rationale: Correction 01 (cleanup-protected Stage 3J/3K post-admission region ending any genuine live `ws_` session through canonical `end_writer_session` on every subsequent failure path) and Correction 02 (four independently targeted deadline-boundary tests replacing one mislabeled test) resolved the exact defects Marco identified in Implementation 01. Marco independently reviewed static contract conformance, provenance, and the reported regression evidence (focused 824 passed, protected regression 873 passed, broader regression 1772 passed, full discovery 2199 passed, 0 failed) before approval.
+- Evidence: direct project-chat provenance supplied by Marco (candidate, parent, and tree identities stated above); the task-implementer-produced candidate, review bundle (`KALSHI_DEMO_MINIMAL_TWO_SIDED_MARKET_MAKER_RUNNER_GATE_C_RELEASE_AND_NORMAL_WRITER_HANDOFF_IMPLEMENTATION_02_MARCO_REVIEW_BUNDLE_01.zip`), and its manifest.
+- Scope affected: Gate-C release/normal-writer runner code (`src/arb/venues/kalshi/minimal_market_maker_experiment_runner.py`, `tests/test_kalshi_minimal_market_maker_experiment_runner.py`) only.
+- Superseded decisions: none recorded for Implementation 01 in this log (Implementation 01 was blocked before reaching this log; see `project_context/ARTIFACT_INDEX.md` non-indexed note).
+- User approval reference: Marco's `APPROVE` of the local candidate, stated directly in this project's chat.
+- Authorizes further work: `NO` — local approval alone does not authorize a remote write, canonical installation, or Gate D.
+
+### DEC-0031
+- Candidate ID: `839d475b55a708ec6e2bf280a99b1c35992dd6b1`
+- Date: 2026-08-18
+- Decision: Marco formal decision `APPROVE` of the temporary remote review branch `review/gate-c-impl-02-839d475b` (pointing directly at commit `839d475b55a708ec6e2bf280a99b1c35992dd6b1`) as equivalent to the locally approved candidate in `DEC-0030`.
+- Status: `ACCEPTED`
+- Rationale: Marco independently verified: same exact commit; same parent (`12e69143fa94540f2a5f803a5677aa1718207478`); same tree (`c6dc085da5e399bf6be144866c2b63d179242921`); exactly one commit above base; exact two-path diff; protected blobs unchanged; canonical `main` unchanged during the remote review; and that no PR was created.
+- Evidence: direct project-chat provenance supplied by Marco; the remote-review-transfer completion report (`READY_FOR_MARCO_REMOTE_BRANCH_REVIEW`) recorded in this project's chat; `project_context/AUTHORIZATION_LOG.md` entry `AUTH-0025`.
+- Scope affected: remote-hosted equivalence confirmation for `839d475b55a708ec6e2bf280a99b1c35992dd6b1` only.
+- Superseded decisions: none.
+- User approval reference: Marco's `APPROVE` of the remote branch, stated directly in this project's chat.
+- Authorizes further work: `NO` — remote-branch equivalence approval alone does not authorize canonical installation or Gate D.
+
+### DEC-0032
+- Candidate ID: `839d475b55a708ec6e2bf280a99b1c35992dd6b1`
+- Date: 2026-08-18
+- Decision: Gustavo's direct project-chat instruction "proceed with main merge" authorized canonical installation of the already Marco-approved exact Gate-C candidate `839d475b55a708ec6e2bf280a99b1c35992dd6b1`.
+- Status: `ACCEPTED`
+- Rationale: Following `DEC-0030`/`DEC-0031`'s local and remote-branch approvals, this direct user instruction authorized Marco to install exactly that candidate onto canonical `main`.
+- Evidence: Gustavo's exact chat instruction "proceed with main merge," recorded directly in this project's chat, following the completed `DEC-0030`/`DEC-0031` review chain.
+- Scope affected: canonical `main` for `rigolugo/ARB`.
+- Superseded decisions: none.
+- User approval reference: "proceed with main merge."
+- Authorizes further work: `NO` beyond the installation itself — installation grants no Gate-D capability (see `DEC-0034`/`PROJECT_STATE.md` Section 13.4 for the corrected Gate-D wording).
+
+### DEC-0033
+- Candidate ID: `839d475b55a708ec6e2bf280a99b1c35992dd6b1`
+- Date: 2026-08-18
+- Decision: Marco performed the non-force fast-forward of canonical `main` from `12e69143fa94540f2a5f803a5677aa1718207478` to `839d475b55a708ec6e2bf280a99b1c35992dd6b1` authorized by `DEC-0032`. No merge commit or replacement commit was created.
+- Status: `ACCEPTED`
+- Rationale: `DEC-0032`'s authorization was executed exactly as bounded: a linear, non-force fast-forward with no replacement or merge commit.
+- Evidence: direct project-chat provenance supplied by Marco (the fast-forward act itself), corroborated by the independently Git-verified technical fact that `git cat-file -p 839d475b55a708ec6e2bf280a99b1c35992dd6b1` shows exactly one `parent` line (`12e69143fa94540f2a5f803a5677aa1718207478`, the immediately prior canonical `main`) — structurally inconsistent with a merge commit (which would carry two or more `parent` lines) and consistent only with a linear, non-force fast-forward; independently re-verified via `git fetch origin main` plus `git rev-parse origin/main` by this correction task.
+- Scope affected: canonical `main` for `rigolugo/ARB`.
+- Superseded decisions: none.
+- User approval reference: see `DEC-0032`.
+- Authorizes further work: `NO`.
+
+### DEC-0034
+- Candidate ID: n/a (documentation-only)
+- Date: 2026-08-18
+- Decision: Gustavo explicitly authorized `ARB_CANONICAL_DOCUMENTATION_STATE_SYNC_THROUGH_GATE_C_01`, a bounded documentation-only synchronization of `project_context/PROJECT_STATE.md`, `project_context/ARTIFACT_INDEX.md`, `project_context/DECISION_LOG.md`, and `project_context/AUTHORIZATION_LOG.md` through the installed Gate-C candidate, to occur after Gate C's canonical installation (`DEC-0032`/`DEC-0033`) and before any Gate-D work. Gustavo's chat clarification "i meant gate D" confirmed the intended sequencing is Gate C canonical -> documentation sync -> Gate D consideration, not documentation sync before Gate C.
+- Status: `ACCEPTED`
+- Rationale: Carries canonical governance-state documentation forward through the persistent-ledger, emergency-cancellation, minimal-market-maker, and runner Gate A/B/C milestones while preserving the unresolved historical incident and explicitly withholding any Gate-D authorization.
+- Evidence: Gustavo's exact current-chat dispatch `ARB_CANONICAL_DOCUMENTATION_STATE_SYNC_THROUGH_GATE_C_01` and the clarifying chat instruction "i meant gate D," both posted directly in this project's chat; `project_context/AUTHORIZATION_LOG.md` entry `AUTH-0027`.
+- Scope affected: exactly the four named governance paths.
+- Superseded decisions: none.
+- User approval reference: `ARB_CANONICAL_DOCUMENTATION_STATE_SYNC_THROUGH_GATE_C_01`; "i meant gate D."
+- Authorizes further work: `NO` — this decision explicitly does not authorize Gate D, and grants no venue, credential, or execution capability.
+
+### DEC-0035
+- Candidate ID: n/a (documentation-only; this correction)
+- Date: 2026-08-18
+- Decision: Gustavo explicitly authorized `ARB_CANONICAL_DOCUMENTATION_STATE_SYNC_THROUGH_GATE_C_CORRECTION_02`, a bounded same-scope correction to the Marco-blocked `ARB_CANONICAL_DOCUMENTATION_STATE_SYNC_THROUGH_GATE_C_01` candidate (`22661583ba7558a98532f38e9d261c6c77878d9e`, non-canonical, never installed), correcting exactly the three Marco findings: false provenance-gap statements for controlling specifications/handoffs now supplied by Marco; an invented Gate-D specification prerequisite; and unnecessary implementer-perspective caveats on Gate-C review/authorization provenance that Marco has now directly established.
+- Status: `ACCEPTED`
+- Rationale: Corrects exactly the three identified blockers without reopening unrelated Documentation-Sync-01 content, per the `BLOCKER -> EXACT CORRECTION -> NO OTHER CHANGE` discipline.
+- Evidence: Gustavo's exact current-chat instruction "PROCEED with the correction," following the `ARB_CANONICAL_DOCUMENTATION_STATE_SYNC_THROUGH_GATE_C_CORRECTION_02` dispatch, posted directly in this project's chat; `project_context/AUTHORIZATION_LOG.md` entry `AUTH-0028`.
+- Scope affected: exactly the four named governance paths.
+- Superseded decisions: none (Documentation Sync 01 was blocked before reaching canonical effect; this correction does not supersede a `DECISION_LOG.md` entry because Documentation Sync 01's own preparation was never separately logged as a decision prior to being blocked).
+- User approval reference: "PROCEED with the correction."
+- Authorizes further work: `NO` — this decision explicitly does not authorize Gate D, and grants no venue, credential, or execution capability.
