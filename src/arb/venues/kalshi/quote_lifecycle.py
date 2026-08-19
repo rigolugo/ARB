@@ -27,6 +27,8 @@ choice, not a claim of literal spec text.
 from __future__ import annotations
 
 import enum
+import re
+import unicodedata
 from dataclasses import dataclass
 from decimal import Decimal, InvalidOperation
 from typing import Mapping, Sequence
@@ -42,20 +44,36 @@ from arb.venues.kalshi.minimal_market_maker import (
 )
 from arb.venues.kalshi.order_lifecycle import build_cancel_query, generate_client_order_id, is_valid_lowercase_uuid4
 from arb.venues.kalshi.risk_control import (
+    UNKNOWN_UNBOUNDED,
     CandidateOrderV1,
+    EconomicFillV1,
     MarketEconomicState,
     NormalWriterPermit,
     PriceRangeV1,
     RiskControlError,
     RiskLimitConfigV1,
+    WorkingOrderV1,
     WriterEligibilityAssessment,
     WriterEligibilityGate,
+    compute_market_economic_state,
     enforce_projected_limits,
     project_candidate_risk,
 )
 
 ZERO = Decimal("0")
 KEEP_MAX_REMAINING_QUANTITY = Decimal("1.00")
+_HEX64_RE = re.compile(r"^[0-9a-f]{64}$")
+_QUOTE_GENERATION_ID_RE = re.compile(r"^qg_[0-9a-f]{32}$")
+_CANCEL_INTENT_OUTER_KEYS = frozenset({
+    "execution_attempt_id", "venue", "environment", "conflict_domain_ref", "incident_id",
+    "operation_family", "client_order_id", "capability_reference_id", "intent_payload_schema_id",
+    "intent_payload",
+})
+_CANCEL_INTENT_NESTED_KEYS = frozenset({
+    "schema_revision", "request_id", "strategy_instance_id", "market_ticker", "quote_slot",
+    "quote_generation_id", "target_venue_order_id", "reconciliation_snapshot_sha256", "client_order_id",
+})
+_CANCEL_INTENT_QUOTE_SLOT_VALUES = frozenset({QuoteSlot.LOWER_YES_BID.value, QuoteSlot.UPPER_YES_ASK.value})
 
 CREATE_ORDER_ALLOWED_FIELDS: frozenset[str] = frozenset({
     "ticker", "client_order_id", "side", "count", "price", "time_in_force",
@@ -503,10 +521,158 @@ def build_writer_eligibility_assessment(
     )
 
 
+def _worst_case_abs_net_position(state: MarketEconomicState) -> Decimal:
+    """Spec 06/07 MM07-ECON-001: the pure existing-state worst-case absolute
+    net position -- no hypothetical candidate lot is ever added here (that
+    would require a prohibited ``CandidateOrderV1``, MM06-ECON-001)."""
+
+    return max(
+        abs(state.signed_net_position + state.working_bid_quantity),
+        abs(state.signed_net_position - state.working_ask_quantity),
+    )
+
+
+def _market_gross_exposure_usd(state: MarketEconomicState, unresolved_exposure_usd: Decimal) -> Decimal:
+    return state.filled_exposure_usd + state.working_exposure_usd + unresolved_exposure_usd
+
+
+def _cancel_state_within_limits(state: MarketEconomicState, unresolved_exposure_usd: Decimal, risk_config: RiskLimitConfigV1) -> bool:
+    per_market = risk_config.per_market
+    return (
+        _worst_case_abs_net_position(state) <= per_market.max_abs_net_position_contracts
+        and _market_gross_exposure_usd(state, unresolved_exposure_usd) <= per_market.max_gross_exposure_usd
+        and state.working_order_count <= per_market.max_authoritative_working_orders
+        and state.working_contracts <= per_market.max_working_contracts
+        and state.working_exposure_usd <= per_market.max_working_order_exposure_usd
+    )
+
+
+def _market_economic_state_object(state: MarketEconomicState) -> dict:
+    """Exact Spec 06 MM06-ECON-006 ``market_economic_state_object(s)``
+    (preserved unchanged by Spec 07 MM07-HASH-001)."""
+
+    return {
+        "filled_exposure_usd": state.filled_exposure_usd,
+        "signed_net_position": state.signed_net_position,
+        "working_exposure_usd": state.working_exposure_usd,
+        "working_bid_quantity": state.working_bid_quantity,
+        "working_ask_quantity": state.working_ask_quantity,
+        "working_order_count": state.working_order_count,
+        "working_contracts": state.working_contracts,
+    }
+
+
+def _validate_cancel_transformation_invariants(
+    *, pre_state: MarketEconomicState, post_state: MarketEconomicState, target: WorkingOrderV1,
+) -> str | None:
+    """MM07-ECON-005..009 (Spec 07 Correction 03, MM07-CLAR-TRANSFORM-001):
+    explicit, load-bearing transformation invariants for the exact
+    hypothetical single-order removal that produced ``post_state`` from
+    ``pre_state``. Returns ``None`` only when every invariant holds exactly;
+    otherwise a machine-readable violation reason.
+
+    This is a pure function over the two already-independently-constructed
+    states and the exact target -- it never recomputes, repairs, clamps, or
+    normalizes either state. A contradictory post state (wrong order
+    removed, two orders removed, target not removed, a mutated fill/signed-
+    inventory quantity, or an ignored target quantity/side) is detected here
+    and MUST NOT become eligible merely because both states independently
+    satisfy the configured per-market maximum limits."""
+
+    q = target.remaining_quantity
+    if type(q) is not Decimal or q <= ZERO:
+        return "TARGET_QUANTITY_NOT_POSITIVE"
+
+    # MM07-ECON-005: fill-derived quantities are invariant -- the post state
+    # must have been computed from the exact same authoritative fill
+    # sequence as the pre state.
+    if post_state.filled_exposure_usd != pre_state.filled_exposure_usd:
+        return "FILLED_EXPOSURE_MUTATED"
+    if post_state.signed_net_position != pre_state.signed_net_position:
+        return "SIGNED_NET_POSITION_MUTATED"
+
+    # MM07-ECON-006: working-order-count and working-contracts decrease by
+    # exactly one order / exactly the target's remaining quantity -- never
+    # merely `post <= pre`.
+    if post_state.working_order_count != pre_state.working_order_count - 1:
+        return "WORKING_ORDER_COUNT_NOT_EXACT_DECREMENT"
+    if post_state.working_contracts != pre_state.working_contracts - q:
+        return "WORKING_CONTRACTS_NOT_EXACT_DECREMENT"
+    if post_state.working_contracts < ZERO:
+        return "WORKING_CONTRACTS_NEGATIVE"
+
+    # MM07-ECON-006: side-specific exact quantity transformation -- the
+    # opposite side is byte-for-byte unchanged, never merely non-increasing.
+    if target.outcome_side == "YES":
+        if post_state.working_bid_quantity != pre_state.working_bid_quantity - q:
+            return "WORKING_BID_QUANTITY_NOT_EXACT_DECREMENT"
+        if post_state.working_ask_quantity != pre_state.working_ask_quantity:
+            return "WORKING_ASK_QUANTITY_UNEXPECTEDLY_CHANGED"
+    elif target.outcome_side == "NO":
+        if post_state.working_ask_quantity != pre_state.working_ask_quantity - q:
+            return "WORKING_ASK_QUANTITY_NOT_EXACT_DECREMENT"
+        if post_state.working_bid_quantity != pre_state.working_bid_quantity:
+            return "WORKING_BID_QUANTITY_UNEXPECTEDLY_CHANGED"
+    else:
+        return "TARGET_SIDE_INVALID"
+
+    if post_state.working_bid_quantity < ZERO or post_state.working_ask_quantity < ZERO:
+        return "WORKING_QUANTITY_NEGATIVE"
+
+    # MM07-ECON-006/007: working exposure and market gross exposure are
+    # non-increasing (the caller supplies the same finite unresolved
+    # exposure to both states' gross-exposure evaluation).
+    if post_state.working_exposure_usd > pre_state.working_exposure_usd:
+        return "WORKING_EXPOSURE_INCREASED"
+
+    # MM07-ECON-002..004: the frozen W(n,b,a) monotonicity theorem itself,
+    # checked directly against the exact reconstructed states -- not
+    # asserted, not hardcoded.
+    if _worst_case_abs_net_position(post_state) > _worst_case_abs_net_position(pre_state):
+        return "WORST_CASE_ABS_NET_POSITION_INCREASED"
+
+    return None
+
+
+def _target_working_order_object(order: WorkingOrderV1) -> dict:
+    """Exact Spec 06 MM06-ECON-006 ``target_working_order_object`` (preserved
+    unchanged by Spec 07 MM07-HASH-001)."""
+
+    return {
+        "market": order.market,
+        "order_id": order.order_id,
+        "outcome_side": order.outcome_side,
+        "remaining_quantity": order.remaining_quantity,
+        "yes_price": order.yes_price,
+        "status": order.status,
+    }
+
+
+def _cancel_ineligible_economic_sha256(*, request_id: str, target_venue_order_id: str, reason: str) -> str:
+    """Deterministic, secret-safe compatibility-slot hash used only when the
+    full Spec-06/07 ``cancel_operation_economic_object`` cannot be
+    constructed at all (no exact target, unbounded exposure). ``eligible``
+    is always ``False`` in this path, so this hash never gates a permit."""
+
+    return sha256_hex(canonical_json_bytes({
+        "schema_revision": 1, "operation_kind": "CANCEL_ORDER_V2", "request_id": request_id,
+        "target_venue_order_id": target_venue_order_id, "ineligible_reason": reason,
+    }))
+
+
 def build_cancel_writer_eligibility_assessment(
     *,
     risk_assessment_id: str,
     request_id: str,
+    strategy_instance_id: str,
+    market_ticker: str,
+    quote_slot: str,
+    quote_generation_id: str,
+    target_venue_order_id: str,
+    client_order_id: str,
+    authoritative_fills: Sequence[EconomicFillV1],
+    authoritative_working_orders: Sequence[WorkingOrderV1],
+    unresolved_exposure_usd: Decimal | str,
     prepared_request_sha256: str,
     risk_config: RiskLimitConfigV1,
     market_data_snapshot_sha256: str,
@@ -516,20 +682,226 @@ def build_cancel_writer_eligibility_assessment(
     risk_state_epoch: int,
     freshness_deadline_monotonic_ns: int,
 ) -> WriterEligibilityAssessment:
-    """Ordinary strategy-driven CANCEL_ORDER_V2 assessment. Cancellation is
-    risk-reducing (never increases candidate exposure), so unlike CREATE it
-    carries no candidate-risk projection: eligibility here is unconditional
-    for a genuine cancel target -- the shared gate itself still enforces
-    hard-HALT, nested request binding, and trusted-tail invariants
-    independently of this ``eligible`` flag."""
+    """Ordinary strategy-driven CANCEL_ORDER_V2 assessment (Spec 06 Section
+    8, corrected rationale in Spec 07 Sections 5-9): the exact two-outcome
+    economic proof -- never the unconditional "cancellation is
+    risk-reducing" shortcut, and never simplified merely because Spec 07
+    proves the frozen ``worst_case_abs_net_position`` formula cannot expand
+    under single-order removal (MM07-ECON-001..004). Never constructs or
+    reuses a ``CandidateOrderV1`` (MM06-ECON-001). ``eligible`` is ``True``
+    only when an exact single target is proven present in
+    ``authoritative_working_orders``, ``unresolved_exposure_usd`` is a
+    finite nonnegative ``Decimal`` (never ``UNKNOWN_UNBOUNDED``), and BOTH
+    the pre-cancel and post-target-removed economic states -- each
+    genuinely, independently constructed via ``compute_market_economic_state``
+    -- satisfy every configured per-market limit (MM06-ECON-002..004,007;
+    MM07-ECON-005..009)."""
 
-    candidate_economic_sha256 = sha256_hex(canonical_json_bytes({"operation": "CANCEL_ORDER_V2", "request_id": request_id}))
+    def _ineligible(reason: str) -> WriterEligibilityAssessment:
+        candidate_economic_sha256 = _cancel_ineligible_economic_sha256(
+            request_id=request_id, target_venue_order_id=target_venue_order_id, reason=reason,
+        )
+        return WriterEligibilityAssessment(
+            risk_assessment_id, "CANCEL_ORDER_V2", request_id, prepared_request_sha256, candidate_economic_sha256,
+            risk_config.sha256, market_data_snapshot_sha256, market_data_freshness_identity_sha256,
+            reconciliation_snapshot_sha256, reconciliation_freshness_identity_sha256, risk_state_epoch,
+            freshness_deadline_monotonic_ns, False,
+        )
+
+    if unresolved_exposure_usd == UNKNOWN_UNBOUNDED:
+        return _ineligible("UNKNOWN_UNBOUNDED_EXPOSURE")
+    if (
+        type(unresolved_exposure_usd) is not Decimal
+        or not unresolved_exposure_usd.is_finite()
+        or unresolved_exposure_usd < ZERO
+    ):
+        return _ineligible("UNRESOLVED_EXPOSURE_INVALID")
+
+    matching_targets = [order for order in authoritative_working_orders if order.order_id == target_venue_order_id]
+    if len(matching_targets) != 1:
+        return _ineligible("TARGET_NOT_EXACTLY_ONE")
+    target_working_order = matching_targets[0]
+    if target_working_order.market != market_ticker:
+        return _ineligible("TARGET_MARKET_MISMATCH")
+
+    try:
+        # MM07-ECON-008/009: both states are genuinely, independently
+        # recomputed from the exact authoritative fill sequence -- the post
+        # state is never inferred, hardcoded, or copied from the pre state.
+        pre_cancel_state = compute_market_economic_state(market_ticker, authoritative_fills, authoritative_working_orders)
+        remaining_working_orders = [
+            order for order in authoritative_working_orders if order.order_id != target_venue_order_id
+        ]
+        post_target_removed_state = compute_market_economic_state(market_ticker, authoritative_fills, remaining_working_orders)
+    except RiskControlError:
+        return _ineligible("ECONOMIC_STATE_UNAVAILABLE")
+
+    cancel_operation_economic_object = {
+        "schema_revision": 1,
+        "operation_kind": "CANCEL_ORDER_V2",
+        "request_id": request_id,
+        "strategy_instance_id": strategy_instance_id,
+        "market_ticker": market_ticker,
+        "quote_slot": quote_slot,
+        "quote_generation_id": quote_generation_id,
+        "target_venue_order_id": target_venue_order_id,
+        "client_order_id": client_order_id,
+        "market_data_snapshot_sha256": market_data_snapshot_sha256,
+        "market_data_freshness_identity_sha256": market_data_freshness_identity_sha256,
+        "reconciliation_snapshot_sha256": reconciliation_snapshot_sha256,
+        "reconciliation_freshness_identity_sha256": reconciliation_freshness_identity_sha256,
+        "pre_cancel_market_economic_state": _market_economic_state_object(pre_cancel_state),
+        "target_working_order": _target_working_order_object(target_working_order),
+        "post_target_removed_market_economic_state": _market_economic_state_object(post_target_removed_state),
+        "unresolved_exposure_usd": unresolved_exposure_usd,
+    }
+    candidate_economic_sha256 = sha256_hex(canonical_json_bytes(cancel_operation_economic_object))
+
+    # MM07-ECON-005..009 (Correction 03 Defect 01): every applicable
+    # transformation invariant must hold exactly before the two-state limit
+    # checks are even consulted -- a contradictory post state (wrong/extra
+    # removal, mutated fills/inventory, ignored quantity/side) never becomes
+    # eligible merely because both states independently satisfy the
+    # configured maximum limits. The hash above is still computed over the
+    # exact (possibly contradictory) reconstructed states either way.
+    transformation_violation = _validate_cancel_transformation_invariants(
+        pre_state=pre_cancel_state, post_state=post_target_removed_state, target=target_working_order,
+    )
+    eligible = (
+        transformation_violation is None
+        and _cancel_state_within_limits(pre_cancel_state, unresolved_exposure_usd, risk_config)
+        and _cancel_state_within_limits(post_target_removed_state, unresolved_exposure_usd, risk_config)
+    )
+
     return WriterEligibilityAssessment(
         risk_assessment_id, "CANCEL_ORDER_V2", request_id, prepared_request_sha256, candidate_economic_sha256,
         risk_config.sha256, market_data_snapshot_sha256, market_data_freshness_identity_sha256,
         reconciliation_snapshot_sha256, reconciliation_freshness_identity_sha256, risk_state_epoch,
-        freshness_deadline_monotonic_ns, True,
+        freshness_deadline_monotonic_ns, eligible,
     )
+
+
+# ---------------------------------------------------------------------------
+# MM06-INTENT-001..008 / MM06-TARGET-001..002 / MM06-REQ-001..002 -- exact
+# ordinary CANCEL intent schema and cross-object binding validation (Spec 06
+# Sections 5-7, preserved unchanged by Spec 07 MM07-CANCEL-001). Defense-in-
+# depth: the runner calls this before T1/transport so a malformed intent, a
+# mismatched request/target identity, or a wrong built-in type/null field can
+# never reach the ledger or the adapter.
+# ---------------------------------------------------------------------------
+
+
+def _require_nonempty_nfc_str(value: object) -> str:
+    if type(value) is not str or not value or unicodedata.normalize("NFC", value) != value:
+        raise QuoteLifecycleError("MM_CANCEL_INTENT_FIELD_INVALID")
+    return value
+
+
+def _require_lowercase_uuid4(value: object) -> str:
+    if type(value) is not str or not is_valid_lowercase_uuid4(value):
+        raise QuoteLifecycleError("MM_CANCEL_INTENT_FIELD_INVALID")
+    return value
+
+
+def _require_hex64(value: object) -> str:
+    if type(value) is not str or _HEX64_RE.fullmatch(value) is None:
+        raise QuoteLifecycleError("MM_CANCEL_INTENT_FIELD_INVALID")
+    return value
+
+
+def validate_mm_cancel_intent_payload(payload: object) -> Mapping[str, object]:
+    """Exact Spec-06 Section 5 outer/nested key-set, type, nullability, and
+    identity-grammar validation for an ordinary CANCEL
+    ``EXECUTION_INTENT_RECORDED`` payload (MM06-INTENT-001..003, preserved
+    unchanged by Spec 07 MM07-CANCEL-001). Raises ``QuoteLifecycleError`` on
+    any violation -- missing key, extra key, wrong built-in type, null where
+    prohibited, or malformed identity. Returns the validated nested
+    ``intent_payload`` mapping on success."""
+
+    if type(payload) is not dict or set(payload) != _CANCEL_INTENT_OUTER_KEYS:
+        raise QuoteLifecycleError("MM_CANCEL_INTENT_OUTER_SHAPE_INVALID")
+
+    execution_attempt_id = _require_nonempty_nfc_str(payload["execution_attempt_id"])
+    if payload["venue"] != "KALSHI":
+        raise QuoteLifecycleError("MM_CANCEL_INTENT_FIELD_INVALID")
+    if payload["environment"] != "KALSHI_DEMO":
+        raise QuoteLifecycleError("MM_CANCEL_INTENT_FIELD_INVALID")
+    conflict_domain_ref = _require_nonempty_nfc_str(payload["conflict_domain_ref"])
+    _require_nonempty_nfc_str(payload["incident_id"])
+    if payload["operation_family"] != "KALSHI_DEMO_MINIMAL_MM_CANCEL":
+        raise QuoteLifecycleError("MM_CANCEL_INTENT_FIELD_INVALID")
+    outer_client_order_id = _require_lowercase_uuid4(payload["client_order_id"])
+    _require_nonempty_nfc_str(payload["capability_reference_id"])
+    if payload["intent_payload_schema_id"] != "KALSHI_MINIMAL_MM_CANCEL_INTENT_V1":
+        raise QuoteLifecycleError("MM_CANCEL_INTENT_FIELD_INVALID")
+
+    nested = payload["intent_payload"]
+    if type(nested) is not dict or set(nested) != _CANCEL_INTENT_NESTED_KEYS:
+        raise QuoteLifecycleError("MM_CANCEL_INTENT_NESTED_SHAPE_INVALID")
+    if type(nested["schema_revision"]) is not int or nested["schema_revision"] != 1:
+        raise QuoteLifecycleError("MM_CANCEL_INTENT_FIELD_INVALID")
+    request_id = _require_nonempty_nfc_str(nested["request_id"])
+    _require_nonempty_nfc_str(nested["strategy_instance_id"])
+    _require_nonempty_nfc_str(nested["market_ticker"])
+    if nested["quote_slot"] not in _CANCEL_INTENT_QUOTE_SLOT_VALUES:
+        raise QuoteLifecycleError("MM_CANCEL_INTENT_FIELD_INVALID")
+    quote_generation_id = nested["quote_generation_id"]
+    if type(quote_generation_id) is not str or _QUOTE_GENERATION_ID_RE.fullmatch(quote_generation_id) is None:
+        raise QuoteLifecycleError("MM_CANCEL_INTENT_FIELD_INVALID")
+    _require_nonempty_nfc_str(nested["target_venue_order_id"])
+    _require_hex64(nested["reconciliation_snapshot_sha256"])
+    nested_client_order_id = _require_lowercase_uuid4(nested["client_order_id"])
+
+    # MM06-INTENT-004/005: exact equality bindings within the payload.
+    if nested_client_order_id != outer_client_order_id:
+        raise QuoteLifecycleError("MM_CANCEL_INTENT_BINDING_MISMATCH")
+    if request_id in (execution_attempt_id, outer_client_order_id, conflict_domain_ref):
+        raise QuoteLifecycleError("MM_CANCEL_INTENT_BINDING_MISMATCH")
+
+    return nested
+
+
+def validate_cancel_request_binding(
+    *,
+    outer_intent_payload: Mapping[str, object],
+    prepared_payload: Mapping[str, object],
+    assessment: WriterEligibilityAssessment,
+    target_venue_order_id: str,
+) -> None:
+    """Exact cross-object equality required before T1/transport
+    (MM06-INTENT-004, MM06-TARGET-001..002, MM06-REQ-002; preserved
+    unchanged by Spec 07 MM07-CANCEL-002/003). Never targets by
+    ``client_order_id``, ticker, price, time, or fuzzy match -- the only
+    accepted target is the exact authoritative ``target_venue_order_id``
+    bound identically across the intent, the prepared DELETE request, and
+    the assessment. Raises ``QuoteLifecycleError`` on any mismatch."""
+
+    nested = validate_mm_cancel_intent_payload(dict(outer_intent_payload))
+    request_id = nested["request_id"]
+    nested_target = nested["target_venue_order_id"]
+
+    if nested_target != target_venue_order_id:
+        raise QuoteLifecycleError("MM_CANCEL_TARGET_MISMATCH")
+
+    expected_path_suffix = "/" + target_venue_order_id
+    if (
+        prepared_payload.get("request_id") != request_id
+        or prepared_payload.get("operation_name") != "CANCEL_ORDER_V2"
+        or prepared_payload.get("method") != "DELETE"
+        or prepared_payload.get("venue_order_id") != target_venue_order_id
+        or prepared_payload.get("client_order_id") != nested["client_order_id"]
+        or type(prepared_payload.get("path_without_query")) is not str
+        or not prepared_payload["path_without_query"].endswith(expected_path_suffix)
+    ):
+        raise QuoteLifecycleError("MM_CANCEL_TARGET_MISMATCH")
+
+    if (
+        assessment.operation_kind != "CANCEL_ORDER_V2"
+        or assessment.request_id != request_id
+        or assessment.candidate_request_sha256 != prepared_payload.get("prepared_request_sha256")
+        or assessment.reconciliation_snapshot_sha256 != nested["reconciliation_snapshot_sha256"]
+    ):
+        raise QuoteLifecycleError("MM_CANCEL_INTENT_BINDING_MISMATCH")
 
 
 # ---------------------------------------------------------------------------
@@ -595,7 +967,10 @@ def _decimal_from_replayed_field(value: object) -> Decimal | None:
 # engine. A slot is ACTIVE_EXACT / TERMINAL_RECONCILED / UNRESOLVED_OR_
 # AMBIGUOUS / CONFLICT / ABSENT purely from this exact persisted evidence
 # chain; price, quantity, ticker+side, and timestamps are never identity
-# proof (MM-ID-005).
+# proof (MM-ID-005). The exact accepted terminal-status vocabulary here
+# (``"canceled"``, ``"executed"``) is the same one ``order_lifecycle.py``'s
+# protected ``SUPPORTED_ORDER_STATUSES`` already freezes (MM07-CLAR-002):
+# never ``status != "resting"``.
 
 
 @dataclass(frozen=True, slots=True)

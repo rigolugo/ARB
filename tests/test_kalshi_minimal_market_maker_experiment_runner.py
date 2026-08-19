@@ -68,7 +68,11 @@ from arb.venues.kalshi.emergency_cancel import (
 )
 from arb.venues.kalshi.risk_control import (
     AccountRiskLimits,
+    CandidateOrderV1,
     FlowRiskLimits,
+    FreshnessStampV1,
+    MarketEconomicState,
+    NormalWriteAdapter,
     PerMarketRiskLimits,
     PerOrderRiskLimits,
     RiskLimitConfigV1,
@@ -84,12 +88,30 @@ from arb.venues.kalshi.orderbook import (
     OrderBookHaltCode,
     OrderBookStage,
 )
+from arb.venues.kalshi.minimal_market_maker import QuoteSlot
+from arb.venues.kalshi.quote_lifecycle import (
+    VenueBindingV1,
+    build_cancel_prepared_payload,
+    build_cancel_writer_eligibility_assessment,
+    build_create_prepared_payload,
+    build_mm_cancel_intent_payload,
+    build_mm_create_intent_payload,
+    build_mm_create_order_body,
+    build_writer_eligibility_assessment,
+    issue_and_persist_write_permit,
+)
 
 import arb.venues.kalshi.ledger_binding as ledger_binding
 import arb.venues.kalshi.minimal_market_maker_experiment_runner as runner
 from arb.venues.kalshi.minimal_market_maker_experiment_runner import (
     ExperimentRunnerInvocationV1,
     ExperimentRunnerRuntimeV1,
+    GATE_D_DECISION_CYCLE_MAX,
+    GATE_D_ORDINARY_WRITE_SEND_MAX,
+    GATE_D_READ_REQUEST_MAX,
+    GateDCycleResultV1,
+    GateDLoopResultV1,
+    GateDWriteOutcomeV1,
     OPERATION_BINDING_INDEX_BYTES,
     OPERATION_BINDING_INDEX_SHA256,
     OperationDeadlineV1,
@@ -105,6 +127,7 @@ from arb.venues.kalshi.minimal_market_maker_experiment_runner import (
     collect_authoritative_read_truth,
     create_one_shot_marker,
     prepare_runner_operation_request,
+    run_gate_d_ordinary_decision_loop,
     run_pre_release_read_phase,
 )
 
@@ -183,16 +206,54 @@ def _orders_payload(rows: list[dict], *, cursor: str = "") -> RawOperationRespon
     return _json_response({"orders": rows, "cursor": cursor})
 
 
-def _order_row(order_id: str, *, ticker: str, side: str = "yes", status: str = "resting") -> dict:
-    return {
+# Correction 06: sentinel distinguishing "omit this field from the row
+# entirely" from any real value (including `False`/`0.0`/`"0"`/`None`) so
+# TERM06-CLOSE tests can construct a row with a genuinely missing
+# subaccount/exchange_index rather than one merely set to a falsy value.
+_OMIT_FIELD = object()
+
+
+def _order_row(
+    order_id: str, *, ticker: str, side: str = "yes", status: str = "resting",
+    remaining_count_fp: str = "1.00", fill_count_fp: str = "0.00", initial_count_fp: str = "1.00",
+    client_order_id: str | None = None, yes_price_dollars: str = "0.45",
+    subaccount: object = 0, exchange_index: object = 0,
+) -> dict:
+    row = {
         "order_id": order_id, "ticker": ticker, "side": side, "status": status,
-        "subaccount": 0, "exchange_index": 0,
-        "remaining_count_fp": "1.00", "yes_price_dollars": "0.45",
+        "remaining_count_fp": remaining_count_fp, "fill_count_fp": fill_count_fp,
+        "initial_count_fp": initial_count_fp, "yes_price_dollars": yes_price_dollars,
     }
+    if subaccount is not _OMIT_FIELD:
+        row["subaccount"] = subaccount
+    if exchange_index is not _OMIT_FIELD:
+        row["exchange_index"] = exchange_index
+    if client_order_id is not None:
+        row["client_order_id"] = client_order_id
+    return row
 
 
-def _order_payload(order_id: str, *, ticker: str, side: str = "yes", status: str = "resting") -> RawOperationResponseV1:
-    return _json_response({"order": _order_row(order_id, ticker=ticker, side=side, status=status)})
+def _order_payload(
+    order_id: str, *, ticker: str, side: str = "yes", status: str = "resting",
+    remaining_count_fp: str = "1.00", fill_count_fp: str = "0.00", initial_count_fp: str = "1.00",
+    client_order_id: str | None = None, yes_price_dollars: str = "0.45",
+    subaccount: object = 0, exchange_index: object = 0,
+) -> RawOperationResponseV1:
+    return _json_response({"order": _order_row(
+        order_id, ticker=ticker, side=side, status=status,
+        remaining_count_fp=remaining_count_fp, fill_count_fp=fill_count_fp, initial_count_fp=initial_count_fp,
+        client_order_id=client_order_id, yes_price_dollars=yes_price_dollars,
+        subaccount=subaccount, exchange_index=exchange_index,
+    )})
+
+
+def _cancel_result_payload(
+    *, order_id: str, reduced_by: str, ts_ms: int = 1_755_000_000_000, client_order_id: str | None = None,
+) -> RawOperationResponseV1:
+    body: dict = {"order_id": order_id, "reduced_by": reduced_by, "ts_ms": ts_ms}
+    if client_order_id is not None:
+        body["client_order_id"] = client_order_id
+    return _json_response(body)
 
 
 def _fills_payload(rows: list[dict], *, cursor: str = "") -> RawOperationResponseV1:
@@ -3186,6 +3247,1266 @@ class GateCTests(ReadPhaseTests):
         self.assertIsNone(after.projection.active_restricted_session_id)
         self.assertIsNone(after.projection.active_writer_session_id)
         self.assertEqual(len(after.projection.writer_sessions), 1)
+
+
+# ---------------------------------------------------------------------------
+# Gate D: Stage-4+ ordinary strategy write decision loop (Spec 07 same-scope
+# correction of the Marco-blocked Implementation 01 candidate). Covers the
+# four defect corrections (MM07-CLAR-001..004) plus entry-precondition and
+# budget/cutoff boundary behavior. Reconstructed fresh from clean base --
+# the blocked candidate's own test file is never read as ancestry here.
+# ---------------------------------------------------------------------------
+
+
+D = Decimal
+GATE_D_STRATEGY_INSTANCE_ID = "mm_" + "d" * 32
+GATE_D_MIN_SPREAD = Decimal("0.0100")
+
+
+class _ScriptedWriteTransport:
+    """Fake one-arg `normal_write_transport` (matches `NormalWriteAdapter.
+    invoke`'s `transport(request)` contract -- distinct from the three-arg
+    `send_operation_request` read transport)."""
+
+    def __init__(self) -> None:
+        self.responses: list = []
+        self.calls: list = []
+
+    def queue(self, response) -> None:
+        self.responses.append(response)
+
+    def __call__(self, request):
+        self.calls.append(request)
+        if not self.responses:
+            raise AssertionError("no scripted write-transport response")
+        response = self.responses.pop(0)
+        if isinstance(response, Exception):
+            raise response
+        return response
+
+
+class GateDTestCase(GateCTests):
+    def _gate_d_ready(self):
+        """Reaches a genuine Stage-3K NORMAL_WRITER result through an
+        empty-portfolio Gate-B/C read-and-release cycle (Stage 3F's trusted-
+        evidence matcher requires the fresh read to agree with the
+        synthetic zero-order legacy-import fixture, so this initial cycle
+        is always order_ids=()). The Gate-D loop's OWN read cycle(s) are
+        entirely separate and must be queued afterward via
+        `_queue_gate_d_read_cycle`."""
+
+        transport = _ScriptedTransport()
+        self._script_full_read_cycle(transport, order_ids=())
+        runtime, invocation = self._ready_runtime_and_invocation(transport)
+        result = run_pre_release_read_phase(invocation, runtime)
+        self.assertEqual(result.status, "READ_PHASE_COMPLETE")
+        stage3 = runner._complete_stage3_release_and_normal_writer(result, runtime)
+        write_transport = _ScriptedWriteTransport()
+
+        def _identified_orderbook_fetch(ticker: str, deadline) -> KalshiNativeOrderBookSnapshot:
+            # Production `fetch_orderbook` implementations attach the
+            # canonical snapshot identity before returning; `_fake_
+            # orderbook_snapshot` (shared with Gate B/C tests that never
+            # read this field) does not, so Gate D's own fixture finishes
+            # the same step here.
+            return _fake_orderbook_snapshot(ticker).with_canonical_identity()
+
+        gate_d_runtime = dataclasses.replace(
+            runtime, strategy_instance_id=GATE_D_STRATEGY_INSTANCE_ID, minimum_spread_usd=GATE_D_MIN_SPREAD,
+            gate_d_incident_id="SYNTHETIC_MM_TEST_GATE_D_INCIDENT", gate_d_capability_reference_id="cap_gate_d_test",
+            normal_write_transport=write_transport, fetch_orderbook=_identified_orderbook_fetch,
+        )
+        return stage3, gate_d_runtime, invocation, transport, write_transport
+
+    def _queue_gate_d_read_cycle(self, transport, *, order_ids: tuple = (), fills_by_order=None) -> None:
+        self._script_full_read_cycle(transport, order_ids=order_ids, fills_by_order=fills_by_order)
+
+    def _close(self, stage3) -> None:
+        handle = stage3.normal_writer_acquisition.handle
+        if not handle.closed:
+            handle.close()
+
+    def _seed_active_exact_order(
+        self, stage3, gate_d_runtime, *, quote_slot: str, client_order_id: str, venue_order_id: str,
+        yes_price: Decimal, request_seed: str,
+    ) -> None:
+        from arb.execution_ledger import EventInput, EventType as ET
+        locked = stage3.normal_writer_acquisition.handle
+        session_id = stage3.normal_writer_session_id
+        venue_side = "bid" if quote_slot == QuoteSlot.LOWER_YES_BID.value else "ask"
+        outcome_side = "YES" if quote_slot == QuoteSlot.LOWER_YES_BID.value else "NO"
+        binding = VenueBindingV1(adapter_payload_schema_id="mm-create-v1")
+        body = build_mm_create_order_body(
+            ticker=self.TICKER, client_order_id=client_order_id, venue_side=venue_side, yes_price=yes_price,
+            quantity=D("1.00"), expiration_time=6_000_000_000, venue_binding=binding,
+        )
+        prepared = build_create_prepared_payload(
+            request_id=f"req_{request_seed}", environment="KALSHI_DEMO", client_order_id=client_order_id,
+            canonical_body=body, venue_binding=binding,
+        )
+        candidate = CandidateOrderV1(self.TICKER, outcome_side, D("1.00"), yes_price)
+        state = MarketEconomicState(D("0"), D("0"), D("0"), D("0"), D("0"), 0, D("0"))
+        risk_state_epoch = locked.projection().risk_state_epoch
+        assessment = build_writer_eligibility_assessment(
+            risk_assessment_id=f"ra_{request_seed}", request_id=f"req_{request_seed}", candidate=candidate,
+            market_economic_state=state, unresolved_exposure=D("0"), risk_config=gate_d_runtime.risk_config,
+            prepared_request_sha256=prepared["prepared_request_sha256"], market_data_snapshot_sha256="a" * 64,
+            market_data_freshness_identity_sha256="b" * 64, reconciliation_snapshot_sha256="c" * 64,
+            reconciliation_freshness_identity_sha256="d" * 64, risk_state_epoch=risk_state_epoch,
+            freshness_deadline_monotonic_ns=999_999_999_999,
+        )
+        quote_generation_id = "qg_" + hashlib.sha256(request_seed.encode("utf-8")).hexdigest()[:32]
+        outer_intent = build_mm_create_intent_payload(
+            execution_attempt_id=f"ea_{request_seed}", conflict_domain_ref=locked.conflict_domain_ref,
+            incident_id=gate_d_runtime.gate_d_incident_id, client_order_id=client_order_id,
+            capability_reference_id=gate_d_runtime.gate_d_capability_reference_id, request_id=f"req_{request_seed}",
+            strategy_instance_id=GATE_D_STRATEGY_INSTANCE_ID, market_ticker=self.TICKER, quote_slot=quote_slot,
+            quote_generation_id=quote_generation_id, quote_plan_sha256="a" * 64, plan_input_sha256="b" * 64,
+            source_book_snapshot_sha256="c" * 64, risk_config_sha256=gate_d_runtime.risk_config.sha256,
+            risk_state_epoch=risk_state_epoch, reconciliation_snapshot_sha256="c" * 64,
+            venue_side=venue_side, outcome_side=outcome_side, yes_price=yes_price, quantity=D("1.00"),
+        )
+        issue_and_persist_write_permit(
+            gate=gate_d_runtime.normal_gate, locked=locked, normal_writer_session_id=session_id,
+            assessment=assessment, outer_intent_payload=outer_intent, prepared_payload=prepared,
+        )
+        # Close out this seeded write's own unresolved-request bookkeeping
+        # (SafetyProjection.unresolved_write_request_ids) so Gate D's entry
+        # precondition -- a genuinely zero-unresolved-write projection --
+        # still passes; production closes this the same way via
+        # `_gate_d_record_http_response_classified`.
+        locked.append_batch((EventInput(ET.HTTP_RESPONSE_CLASSIFIED, {
+            "request_id": f"req_{request_seed}", "http_status": 200, "response_media_type": "application/json",
+            "response_byte_length": 0, "response_sha256": "0" * 64,
+            "adapter_result_class": "DEFINITIVE_RESPONSE_AFTER_SEND", "write_closure_class": "AUTHORITATIVE_RESULT_CLOSED",
+            "validated_identity_fields": {},
+        }, session_id, None, None),))
+        locked.append_batch((EventInput(ET.ORDER_IDENTITY_BOUND, {
+            "client_order_id": client_order_id, "venue_order_id": venue_order_id, "venue": "KALSHI",
+            "environment": "KALSHI_DEMO", "incident_id": gate_d_runtime.gate_d_incident_id,
+            "binding_basis_event_ids": [],
+        }, session_id, gate_d_runtime.gate_d_incident_id, None),))
+        canonical_order = {"order_id": venue_order_id, "status": "resting", "remaining_count_fp": "1.00"}
+        locked.append_batch((EventInput(ET.ORDER_OBSERVED, {
+            "venue_order_id": venue_order_id, "client_order_id": client_order_id,
+            "source_request_id": "seed-read", "source_operation": "GET_ORDER_V2",
+            "venue_payload_schema_id": "seed-order-v1", "canonical_venue_payload": canonical_order,
+            "canonical_venue_payload_sha256": hashlib.sha256(canonical_json_bytes(canonical_order)).hexdigest(),
+            "observation_semantic_class": "AUTHORITATIVE_ACTIVE_ORDER",
+        }, session_id, None, None),))
+
+
+class GateDEntryPreconditionTests(GateDTestCase):
+    def test_gd01_wrong_stage3_type_rejected(self) -> None:
+        stage3, gate_d_runtime, invocation, _t, _wt = self._gate_d_ready()
+        with self.assertRaises(RunnerError) as ctx:
+            run_gate_d_ordinary_decision_loop(object(), gate_d_runtime, invocation)
+        self.assertEqual(ctx.exception.code, RunnerFailureCode.GATE_D_ENTRY_PRECONDITION_FAILED)
+        self._close(stage3)
+
+    def test_gd02_closed_acquisition_handle_rejected(self) -> None:
+        stage3, gate_d_runtime, invocation, _t, _wt = self._gate_d_ready()
+        stage3.normal_writer_acquisition.handle.close()
+        with self.assertRaises(RunnerError) as ctx:
+            run_gate_d_ordinary_decision_loop(stage3, gate_d_runtime, invocation)
+        self.assertEqual(ctx.exception.code, RunnerFailureCode.GATE_D_ENTRY_PRECONDITION_FAILED)
+
+    def test_gd03_missing_strategy_instance_id_rejected(self) -> None:
+        stage3, gate_d_runtime, invocation, _t, _wt = self._gate_d_ready()
+        broken = dataclasses.replace(gate_d_runtime, strategy_instance_id=None)
+        with self.assertRaises(RunnerError) as ctx:
+            run_gate_d_ordinary_decision_loop(stage3, broken, invocation)
+        self.assertEqual(ctx.exception.code, RunnerFailureCode.GATE_D_ENTRY_PRECONDITION_FAILED)
+        self._close(stage3)
+
+    def test_gd04_missing_normal_write_transport_rejected(self) -> None:
+        stage3, gate_d_runtime, invocation, _t, _wt = self._gate_d_ready()
+        broken = dataclasses.replace(gate_d_runtime, normal_write_transport=None)
+        with self.assertRaises(RunnerError) as ctx:
+            run_gate_d_ordinary_decision_loop(stage3, broken, invocation)
+        self.assertEqual(ctx.exception.code, RunnerFailureCode.GATE_D_ENTRY_PRECONDITION_FAILED)
+        self._close(stage3)
+
+    def test_gd05_missing_gate_d_incident_id_rejected(self) -> None:
+        stage3, gate_d_runtime, invocation, _t, _wt = self._gate_d_ready()
+        broken = dataclasses.replace(gate_d_runtime, gate_d_incident_id=None)
+        with self.assertRaises(RunnerError) as ctx:
+            run_gate_d_ordinary_decision_loop(stage3, broken, invocation)
+        self.assertEqual(ctx.exception.code, RunnerFailureCode.GATE_D_ENTRY_PRECONDITION_FAILED)
+        self._close(stage3)
+
+    def test_gd06_invalid_decision_cycle_max_rejected(self) -> None:
+        stage3, gate_d_runtime, invocation, _t, _wt = self._gate_d_ready()
+        with self.assertRaises(RunnerError) as ctx:
+            run_gate_d_ordinary_decision_loop(stage3, gate_d_runtime, invocation, decision_cycle_max=0)
+        self.assertEqual(ctx.exception.code, RunnerFailureCode.GATE_D_ENTRY_PRECONDITION_FAILED)
+        self._close(stage3)
+
+    def test_gd07_writer_session_ended_before_entry_rejected(self) -> None:
+        stage3, gate_d_runtime, invocation, _t, _wt = self._gate_d_ready()
+        end_writer_session(
+            stage3.normal_writer_acquisition.handle, writer_session_id=stage3.normal_writer_session_id,
+        )
+        with self.assertRaises(RunnerError) as ctx:
+            run_gate_d_ordinary_decision_loop(stage3, gate_d_runtime, invocation)
+        self.assertEqual(ctx.exception.code, RunnerFailureCode.GATE_D_ENTRY_PRECONDITION_FAILED)
+        self._close(stage3)
+
+
+class GateDLoopBehaviorTests(GateDTestCase):
+    def test_gd10_no_compute_quote_decision_seam_exists_on_runtime(self) -> None:
+        """MM07-CLAR-003: there must be no generic quote-decision-
+        substitution field anywhere on the runtime dataclass."""
+        field_names = {f.name for f in dataclasses.fields(ExperimentRunnerRuntimeV1)}
+        self.assertNotIn("compute_quote_decision", field_names)
+        self.assertNotIn("quote_decision_callback", field_names)
+
+    def test_gd11_empty_portfolio_create_new_charges_budget_and_uses_real_strategy_pipeline(self) -> None:
+        """MM07-CLAR-001/003/004 integration: an empty-portfolio cycle
+        selects CREATE_NEW (never a cleanup lane), the ordinary send budget
+        is charged, and the real `evaluate_market_maker_input` (not a
+        substitutable seam) drives the desired quote."""
+        stage3, gate_d_runtime, invocation, transport, write_transport = self._gate_d_ready()
+        self._queue_gate_d_read_cycle(transport, order_ids=())
+        transport.queue(RunnerOperation.GET_ORDER, _order_payload("venue-order-created-1", ticker=self.TICKER))
+        write_transport.queue(_json_response({"order": {"order_id": "venue-order-created-1"}}))
+
+        real_evaluate = runner.evaluate_market_maker_input
+        with mock.patch.object(runner, "evaluate_market_maker_input", wraps=real_evaluate) as spy:
+            result = run_gate_d_ordinary_decision_loop(stage3, gate_d_runtime, invocation, decision_cycle_max=1)
+
+        self.assertTrue(spy.called)
+        self.assertEqual(result.ordinary_writes_sent, 1)
+        self.assertEqual(result.cleanup_cancels_sent, 0)
+        outcome = result.cycle_results[0].write_outcome
+        self.assertIsNotNone(outcome)
+        self.assertEqual(outcome.action, "CREATE")
+        self.assertEqual(outcome.lane, "ORDINARY")
+        self.assertTrue(outcome.budget_charged)
+        self.assertEqual(outcome.result_classification, "BOUND_ACTIVE")
+
+        end_writer_session(
+            stage3.normal_writer_acquisition.handle, writer_session_id=stage3.normal_writer_session_id,
+        )
+
+    def test_gd12_budget_charged_even_when_adapter_raises(self) -> None:
+        """MM07-CLAR-004: the ordinary send-budget unit is spent the
+        instant trusted T3 durably commits -- an adapter-level transport
+        exception afterward must not un-charge it."""
+        stage3, gate_d_runtime, invocation, transport, write_transport = self._gate_d_ready()
+        self._queue_gate_d_read_cycle(transport, order_ids=())
+        write_transport.queue(ConnectionError("synthetic transport failure"))
+
+        result = run_gate_d_ordinary_decision_loop(stage3, gate_d_runtime, invocation, decision_cycle_max=1)
+
+        self.assertEqual(result.ordinary_writes_sent, 1)
+        outcome = result.cycle_results[0].write_outcome
+        self.assertTrue(outcome.budget_charged)
+        self.assertEqual(outcome.result_classification, "ADAPTER_EXCEPTION")
+        self.assertTrue(outcome.transport_invoked)
+
+        end_writer_session(
+            stage3.normal_writer_acquisition.handle, writer_session_id=stage3.normal_writer_session_id,
+        )
+
+    def test_gd13_cancel_terminal_classification_uses_exact_accepted_vocabulary(self) -> None:
+        """MM07-CLAR-002: a post-cancel authoritative read reporting the
+        exact accepted terminal status ``"canceled"`` clears the target as
+        TERMINAL and records a closing reconciliation -- never a
+        ``status != "resting"`` shortcut."""
+        stage3, gate_d_runtime, invocation, transport, write_transport = self._gate_d_ready()
+        self._seed_active_exact_order(
+            stage3, gate_d_runtime, quote_slot=QuoteSlot.LOWER_YES_BID.value,
+            client_order_id="99999999-9999-4999-8999-999999999999", venue_order_id="venue-order-old-1",
+            yes_price=D("0.05"), request_seed="gd13",
+        )
+        self._queue_gate_d_read_cycle(transport, order_ids=("venue-order-old-1",))
+        transport.queue(
+            RunnerOperation.GET_ORDER,
+            _order_payload(
+                "venue-order-old-1", ticker=self.TICKER, status="canceled",
+                remaining_count_fp="1.00", fill_count_fp="0.00", initial_count_fp="1.00",
+                client_order_id="99999999-9999-4999-8999-999999999999", yes_price_dollars="0.05",
+            ),
+        )
+        transport.queue(RunnerOperation.GET_FILLS, _fills_payload([]))
+        write_transport.queue(_cancel_result_payload(order_id="venue-order-old-1", reduced_by="1.00"))
+
+        result = run_gate_d_ordinary_decision_loop(stage3, gate_d_runtime, invocation, decision_cycle_max=1)
+
+        outcome = result.cycle_results[0].write_outcome
+        self.assertIsNotNone(outcome)
+        self.assertEqual(outcome.action, "CANCEL")
+        self.assertEqual(outcome.lane, "ORDINARY")
+        self.assertTrue(outcome.budget_charged)
+        self.assertEqual(outcome.result_classification, "TERMINAL")
+        self.assertEqual(result.ordinary_writes_sent, 1)
+        self.assertEqual(result.cleanup_cancels_sent, 0)
+
+        end_writer_session(
+            stage3.normal_writer_acquisition.handle, writer_session_id=stage3.normal_writer_session_id,
+        )
+
+    def test_gd14_cancel_unsupported_status_stays_ambiguous_not_terminal(self) -> None:
+        """MM07-CLAR-002 negative case: a post-cancel read reporting a
+        status outside the exact accepted terminal vocabulary (here an
+        empty/malformed status) must remain AMBIGUOUS -- the pre-Spec-07
+        ``status != "resting"`` shortcut would have wrongly closed this as
+        terminal."""
+        stage3, gate_d_runtime, invocation, transport, write_transport = self._gate_d_ready()
+        self._seed_active_exact_order(
+            stage3, gate_d_runtime, quote_slot=QuoteSlot.LOWER_YES_BID.value,
+            client_order_id="88888888-8888-4888-8888-888888888888", venue_order_id="venue-order-old-2",
+            yes_price=D("0.05"), request_seed="gd14",
+        )
+        self._queue_gate_d_read_cycle(transport, order_ids=("venue-order-old-2",))
+        transport.queue(
+            RunnerOperation.GET_ORDER, _order_payload("venue-order-old-2", ticker=self.TICKER, status="queued"),
+        )
+        write_transport.queue(_json_response({}))
+
+        result = run_gate_d_ordinary_decision_loop(stage3, gate_d_runtime, invocation, decision_cycle_max=1)
+
+        outcome = result.cycle_results[0].write_outcome
+        self.assertIsNotNone(outcome)
+        self.assertEqual(outcome.action, "CANCEL")
+        self.assertTrue(outcome.budget_charged)
+        self.assertEqual(outcome.result_classification, "AMBIGUOUS")
+
+        end_writer_session(
+            stage3.normal_writer_acquisition.handle, writer_session_id=stage3.normal_writer_session_id,
+        )
+
+    def test_gd15_halted_state_stops_before_any_write(self) -> None:
+        stage3, gate_d_runtime, invocation, _transport, _write_transport = self._gate_d_ready()
+
+        # Persist a genuine HALT through the real WriterEligibilityGate
+        # production surface (also ends the writer session durably).
+        gate_d_runtime.normal_gate.persist_case_a_halt(
+            locked=stage3.normal_writer_acquisition.handle,
+            normal_writer_session_id=stage3.normal_writer_session_id,
+            risk_config_sha256=gate_d_runtime.risk_config.sha256,
+        )
+
+        with self.assertRaises(RunnerError) as ctx:
+            run_gate_d_ordinary_decision_loop(stage3, gate_d_runtime, invocation, decision_cycle_max=3)
+        # The writer session that persist_case_a_halt just ended no longer
+        # matches the active-session entry precondition -- this is the same
+        # fail-closed path GD07 exercises, reached here via a genuine HALT
+        # rather than an explicit end_writer_session call.
+        self.assertEqual(ctx.exception.code, RunnerFailureCode.GATE_D_ENTRY_PRECONDITION_FAILED)
+
+    def test_gd16_crossed_book_yields_no_plan_and_exhausts_decision_cycle_budget(self) -> None:
+        """A crossed/locked synthetic book makes `evaluate_market_maker_
+        input` fail closed to NO_NEW_QUOTE_PLAN; both slots then HOLD, no
+        write is selectable, and the loop still consumes the cycle and
+        reports DECISION_CYCLE_BUDGET_EXHAUSTED rather than looping
+        forever or crashing."""
+        stage3, gate_d_runtime, invocation, transport, _write_transport = self._gate_d_ready()
+        self._queue_gate_d_read_cycle(transport, order_ids=())
+
+        def _crossed_orderbook(ticker: str, deadline) -> KalshiNativeOrderBookSnapshot:
+            snapshot = dataclasses.replace(
+                _fake_orderbook_snapshot(ticker),
+                yes_levels=(KalshiNativeOrderBookLevel(price=D("0.60"), quantity=D("10")),),
+                no_levels=(KalshiNativeOrderBookLevel(price=D("0.60"), quantity=D("8")),),
+            )
+            return snapshot.with_canonical_identity()
+
+        crossed_runtime = dataclasses.replace(gate_d_runtime, fetch_orderbook=_crossed_orderbook)
+        result = run_gate_d_ordinary_decision_loop(stage3, crossed_runtime, invocation, decision_cycle_max=1)
+
+        self.assertEqual(result.cycles_executed, 1)
+        self.assertEqual(result.stop_reason, "DECISION_CYCLE_BUDGET_EXHAUSTED")
+        self.assertEqual(result.ordinary_writes_sent, 0)
+        self.assertIsNone(result.cycle_results[0].write_outcome)
+
+        end_writer_session(
+            stage3.normal_writer_acquisition.handle, writer_session_id=stage3.normal_writer_session_id,
+        )
+
+    def test_gd17_ordinary_write_budget_exhausted_stop_reason(self) -> None:
+        stage3, gate_d_runtime, invocation, transport, write_transport = self._gate_d_ready()
+        self._queue_gate_d_read_cycle(transport, order_ids=())
+        with mock.patch.object(runner, "GATE_D_ORDINARY_WRITE_SEND_MAX", 0):
+            result = run_gate_d_ordinary_decision_loop(stage3, gate_d_runtime, invocation, decision_cycle_max=1)
+        self.assertEqual(result.stop_reason, "ORDINARY_WRITE_BUDGET_EXHAUSTED")
+        self.assertEqual(result.ordinary_writes_sent, 0)
+
+        end_writer_session(
+            stage3.normal_writer_acquisition.handle, writer_session_id=stage3.normal_writer_session_id,
+        )
+
+    # -----------------------------------------------------------------
+    # Correction 03 additions -- mandatory T3 accounting tests
+    # (dispatch Section 22 / MM07-TEST-T3-14..18) and post-CANCEL
+    # order+fill reconciliation / closure tests (dispatch Sections 14-19,
+    # 23 / MM07-CLOSE-001..002, MM07-TEST-CLOSURE).
+    # -----------------------------------------------------------------
+
+    def test_gd18_post_t3_freshness_expiry_zero_adapter_calls_budget_still_charged(self) -> None:
+        """MM07-CLAR-004 / MM07-TEST-T3-15: trusted T3 durably commits, then
+        freshness expires before adapter invocation -- exactly one ordinary
+        budget unit is consumed and the adapter is never invoked."""
+        stage3, gate_d_runtime, invocation, transport, write_transport = self._gate_d_ready()
+        self._seed_active_exact_order(
+            stage3, gate_d_runtime, quote_slot=QuoteSlot.LOWER_YES_BID.value,
+            client_order_id="77777777-7777-4777-8777-777777777777", venue_order_id="venue-order-old-3",
+            yes_price=D("0.05"), request_seed="gd18",
+        )
+        self._queue_gate_d_read_cycle(transport, order_ids=("venue-order-old-3",))
+
+        clock = _ExpireOnDemandClock(gate_d_runtime.monotonic_clock_ns, deadline=10**18)
+        expiring_runtime = dataclasses.replace(gate_d_runtime, monotonic_clock_ns=clock)
+        real_issue = runner.issue_and_persist_write_permit
+
+        def _expire_after_permit(**kwargs):
+            permit = real_issue(**kwargs)
+            clock.expire()
+            return permit
+
+        with mock.patch.object(runner, "issue_and_persist_write_permit", side_effect=_expire_after_permit):
+            result = run_gate_d_ordinary_decision_loop(stage3, expiring_runtime, invocation, decision_cycle_max=1)
+
+        outcome = result.cycle_results[0].write_outcome
+        self.assertIsNotNone(outcome)
+        self.assertEqual(outcome.action, "CANCEL")
+        self.assertTrue(outcome.budget_charged)
+        self.assertEqual(outcome.result_classification, "FRESHNESS_EXPIRED_BEFORE_ADAPTER")
+        self.assertFalse(outcome.transport_invoked)
+        self.assertEqual(write_transport.calls, [])
+        self.assertEqual(result.ordinary_writes_sent, 1)
+
+        end_writer_session(
+            stage3.normal_writer_acquisition.handle, writer_session_id=stage3.normal_writer_session_id,
+        )
+
+    def test_gd19_pre_t3_failure_consumes_zero_ordinary_budget(self) -> None:
+        """MM07-CLAR-004 / MM07-TEST-T3-18: a failure before trusted T3 can
+        durably commit (here, permit issuance itself failing) consumes zero
+        ordinary send-budget units and makes zero adapter calls."""
+        from arb.venues.kalshi.risk_control import RiskControlCode, RiskControlError
+
+        stage3, gate_d_runtime, invocation, transport, write_transport = self._gate_d_ready()
+        self._queue_gate_d_read_cycle(transport, order_ids=())  # empty portfolio -> CREATE_NEW selected
+
+        with mock.patch.object(
+            runner, "issue_and_persist_write_permit",
+            side_effect=RiskControlError(RiskControlCode.NORMAL_WRITER_PERMIT_INVALID),
+        ):
+            result = run_gate_d_ordinary_decision_loop(stage3, gate_d_runtime, invocation, decision_cycle_max=1)
+
+        outcome = result.cycle_results[0].write_outcome
+        self.assertIsNotNone(outcome)
+        self.assertFalse(outcome.budget_charged)
+        self.assertFalse(outcome.transport_invoked)
+        self.assertEqual(outcome.result_classification, "PERMIT_ISSUANCE_FAILED")
+        self.assertEqual(result.ordinary_writes_sent, 0)
+        self.assertEqual(write_transport.calls, [])
+
+        end_writer_session(
+            stage3.normal_writer_acquisition.handle, writer_session_id=stage3.normal_writer_session_id,
+        )
+
+    def test_gd20_terminal_status_with_conservation_mismatch_does_not_close(self) -> None:
+        """MM07-CLOSE-001 / Correction 04 Defect 02: an exact supported
+        ``canceled`` status with a valid, protected-classifier-validated
+        ``reduced_by`` that does NOT reconcile with the fresh fill quantity
+        under the protected canonical ``check_cancel_conservation`` does
+        not close the slot -- it stays held as TERMINAL_UNRECONCILED, never
+        TERMINAL (CANCEL-CONSERVATION-04)."""
+        stage3, gate_d_runtime, invocation, transport, write_transport = self._gate_d_ready()
+        self._seed_active_exact_order(
+            stage3, gate_d_runtime, quote_slot=QuoteSlot.LOWER_YES_BID.value,
+            client_order_id="66666666-6666-4666-8666-666666666666", venue_order_id="venue-order-old-4",
+            yes_price=D("0.05"), request_seed="gd20",
+        )
+        self._queue_gate_d_read_cycle(transport, order_ids=("venue-order-old-4",))
+        # fresh fill quantity 0.60, but the validated CANCEL reduced_by is
+        # 0.10 -- 0.60 + 0.10 = 0.70 != 1.00, so check_cancel_conservation
+        # must fail even though the order's own fill_count_fp (0.60)
+        # reconciles exactly to the fresh fill total.
+        transport.queue(
+            RunnerOperation.GET_ORDER,
+            _order_payload(
+                "venue-order-old-4", ticker=self.TICKER, status="canceled",
+                remaining_count_fp="0.40", fill_count_fp="0.60", initial_count_fp="1.00",
+            ),
+        )
+        transport.queue(
+            RunnerOperation.GET_FILLS,
+            _fills_payload([_fill_row("fill-gd20-1", order_id="venue-order-old-4", ticker=self.TICKER, quantity="0.60")]),
+        )
+        write_transport.queue(_cancel_result_payload(order_id="venue-order-old-4", reduced_by="0.10"))
+
+        result = run_gate_d_ordinary_decision_loop(stage3, gate_d_runtime, invocation, decision_cycle_max=1)
+
+        outcome = result.cycle_results[0].write_outcome
+        self.assertIsNotNone(outcome)
+        self.assertTrue(outcome.budget_charged)
+        self.assertEqual(outcome.result_classification, "TERMINAL_UNRECONCILED")
+
+        end_writer_session(
+            stage3.normal_writer_acquisition.handle, writer_session_id=stage3.normal_writer_session_id,
+        )
+
+    def test_gd21_terminal_status_with_incomplete_fill_pagination_does_not_close(self) -> None:
+        """MM07-CLOSE-001/002: an exact supported terminal status with a
+        fill read that could not be proven complete (pagination budget
+        exhausted before a terminal empty cursor) must not close the slot
+        either -- fill retrieval failure/incompleteness remains
+        unresolved, never silently treated as zero fills."""
+        stage3, gate_d_runtime, invocation, transport, write_transport = self._gate_d_ready()
+        self._seed_active_exact_order(
+            stage3, gate_d_runtime, quote_slot=QuoteSlot.LOWER_YES_BID.value,
+            client_order_id="55555555-5555-4555-8555-555555555555", venue_order_id="venue-order-old-5",
+            yes_price=D("0.05"), request_seed="gd21",
+        )
+        self._queue_gate_d_read_cycle(transport, order_ids=("venue-order-old-5",))
+        transport.queue(
+            RunnerOperation.GET_ORDER,
+            _order_payload(
+                "venue-order-old-5", ticker=self.TICKER, status="canceled",
+                remaining_count_fp="1.00", fill_count_fp="0.00", initial_count_fp="1.00",
+            ),
+        )
+        # A non-empty cursor that never resolves within the fill-pagination
+        # budget: every page still claims a further page exists.
+        for _ in range(runner.GET_FILLS_MAX_PAGES_PER_ORDER):
+            transport.queue(RunnerOperation.GET_FILLS, _fills_payload([], cursor="still-more"))
+        write_transport.queue(_json_response({}))
+
+        result = run_gate_d_ordinary_decision_loop(stage3, gate_d_runtime, invocation, decision_cycle_max=1)
+
+        outcome = result.cycle_results[0].write_outcome
+        self.assertIsNotNone(outcome)
+        self.assertTrue(outcome.budget_charged)
+        self.assertEqual(outcome.result_classification, "TERMINAL_UNRECONCILED")
+
+        end_writer_session(
+            stage3.normal_writer_acquisition.handle, writer_session_id=stage3.normal_writer_session_id,
+        )
+
+    def test_gd22_executed_status_with_full_fill_reconciliation_closes(self) -> None:
+        """MM07-TEST-CLOSURE 2/3: an exact ``executed`` status with a
+        complete, conserving fresh fill set (incorporating the fill that
+        raced the CANCEL send) closes the slot as TERMINAL -- proving the
+        closure path is not limited to a zero-fill ``canceled`` case."""
+        stage3, gate_d_runtime, invocation, transport, write_transport = self._gate_d_ready()
+        self._seed_active_exact_order(
+            stage3, gate_d_runtime, quote_slot=QuoteSlot.LOWER_YES_BID.value,
+            client_order_id="44444444-4444-4444-8444-444444444444", venue_order_id="venue-order-old-6",
+            yes_price=D("0.05"), request_seed="gd22",
+        )
+        self._queue_gate_d_read_cycle(transport, order_ids=("venue-order-old-6",))
+        transport.queue(
+            RunnerOperation.GET_ORDER,
+            _order_payload(
+                "venue-order-old-6", ticker=self.TICKER, status="executed",
+                remaining_count_fp="0.00", fill_count_fp="1.00", initial_count_fp="1.00",
+                client_order_id="44444444-4444-4444-8444-444444444444", yes_price_dollars="0.05",
+            ),
+        )
+        transport.queue(
+            RunnerOperation.GET_FILLS,
+            _fills_payload([_fill_row("fill-gd22-1", order_id="venue-order-old-6", ticker=self.TICKER, quantity="1.00")]),
+        )
+        write_transport.queue(_json_response({}))
+
+        result = run_gate_d_ordinary_decision_loop(stage3, gate_d_runtime, invocation, decision_cycle_max=1)
+
+        outcome = result.cycle_results[0].write_outcome
+        self.assertIsNotNone(outcome)
+        self.assertTrue(outcome.budget_charged)
+        self.assertEqual(outcome.result_classification, "TERMINAL")
+
+        end_writer_session(
+            stage3.normal_writer_acquisition.handle, writer_session_id=stage3.normal_writer_session_id,
+        )
+
+    def test_gd23_missing_status_field_remains_unresolved(self) -> None:
+        """MM07-TEST-CLOSURE 8: a GET_ORDER response with no ``status``
+        field at all remains AMBIGUOUS/unresolved -- never promoted to a
+        supported terminal value, and the fill-reconciliation path is never
+        even attempted."""
+        stage3, gate_d_runtime, invocation, transport, write_transport = self._gate_d_ready()
+        self._seed_active_exact_order(
+            stage3, gate_d_runtime, quote_slot=QuoteSlot.LOWER_YES_BID.value,
+            client_order_id="33333333-3333-4333-8333-333333333333", venue_order_id="venue-order-old-7",
+            yes_price=D("0.05"), request_seed="gd23",
+        )
+        self._queue_gate_d_read_cycle(transport, order_ids=("venue-order-old-7",))
+        malformed_row = _order_row("venue-order-old-7", ticker=self.TICKER)
+        del malformed_row["status"]
+        transport.queue(RunnerOperation.GET_ORDER, _json_response({"order": malformed_row}))
+        write_transport.queue(_json_response({}))
+
+        result = run_gate_d_ordinary_decision_loop(stage3, gate_d_runtime, invocation, decision_cycle_max=1)
+
+        outcome = result.cycle_results[0].write_outcome
+        self.assertIsNotNone(outcome)
+        self.assertTrue(outcome.budget_charged)
+        self.assertEqual(outcome.result_classification, "AMBIGUOUS")
+        # GET_FILLS is called once as part of the ordinary per-cycle truth
+        # collection (for the still-admitted resting order); the dedicated
+        # post-CANCEL reconciliation fetch is never attempted for a status
+        # that was never confirmed terminal.
+        fills_calls = [call for call in transport.calls if call[0] is RunnerOperation.GET_FILLS]
+        self.assertEqual(len(fills_calls), 1)
+
+        end_writer_session(
+            stage3.normal_writer_acquisition.handle, writer_session_id=stage3.normal_writer_session_id,
+        )
+
+    def test_gd24_canceled_with_raced_partial_fill_closes_and_retains_full_evidence(self) -> None:
+        """CLOSURE-02 / EVIDENCE-01..03: a partial fill that raced the
+        CANCEL send (0.35) plus a complementary validated ``reduced_by``
+        (0.65) passes the protected ``check_cancel_conservation`` and
+        closes the slot -- and the durable evidence retains the full
+        authoritative order row (not merely order_id/status/
+        remaining_count_fp) plus the exact validated ``reduced_by`` used."""
+        from arb.execution_ledger import EventType as ET
+
+        stage3, gate_d_runtime, invocation, transport, write_transport = self._gate_d_ready()
+        seeded_client_order_id = "12121212-1212-4121-8121-121212121212"
+        self._seed_active_exact_order(
+            stage3, gate_d_runtime, quote_slot=QuoteSlot.LOWER_YES_BID.value,
+            client_order_id=seeded_client_order_id, venue_order_id="venue-order-old-8",
+            yes_price=D("0.05"), request_seed="gd24",
+        )
+        self._queue_gate_d_read_cycle(transport, order_ids=("venue-order-old-8",))
+        transport.queue(
+            RunnerOperation.GET_ORDER,
+            _order_payload(
+                "venue-order-old-8", ticker=self.TICKER, status="canceled",
+                remaining_count_fp="0.65", fill_count_fp="0.35", initial_count_fp="1.00",
+                client_order_id=seeded_client_order_id, yes_price_dollars="0.05",
+            ),
+        )
+        transport.queue(
+            RunnerOperation.GET_FILLS,
+            _fills_payload([_fill_row("fill-gd24-1", order_id="venue-order-old-8", ticker=self.TICKER, quantity="0.35")]),
+        )
+        write_transport.queue(_cancel_result_payload(order_id="venue-order-old-8", reduced_by="0.65"))
+
+        result = run_gate_d_ordinary_decision_loop(stage3, gate_d_runtime, invocation, decision_cycle_max=1)
+
+        outcome = result.cycle_results[0].write_outcome
+        self.assertIsNotNone(outcome)
+        self.assertEqual(outcome.result_classification, "TERMINAL")
+
+        events = list(stage3.normal_writer_acquisition.handle.events)
+        order_observed = [
+            e for e in events if e.event_type is ET.ORDER_OBSERVED
+            and e.payload.get("venue_order_id") == "venue-order-old-8"
+            and e.payload.get("observation_semantic_class") == "AUTHORITATIVE_TERMINAL_ORDER"
+        ]
+        self.assertEqual(len(order_observed), 1)
+        canonical = order_observed[0].payload["canonical_venue_payload"]
+        self.assertEqual(canonical["fill_count_fp"], "0.35")
+        self.assertEqual(canonical["remaining_count_fp"], "0.65")
+        self.assertEqual(canonical["initial_count_fp"], "1.00")
+        self.assertEqual(canonical["client_order_id"], seeded_client_order_id)
+        self.assertEqual(canonical["status"], "canceled")
+
+        fill_observed = [
+            e for e in events if e.event_type is ET.FILL_OBSERVED and e.payload.get("venue_order_id") == "venue-order-old-8"
+        ]
+        self.assertEqual(len(fill_observed), 1)
+
+        http_classified = [
+            e for e in events if e.event_type is ET.HTTP_RESPONSE_CLASSIFIED
+            and e.payload.get("request_id") == outcome.request_id
+        ]
+        self.assertEqual(len(http_classified), 1)
+        self.assertEqual(http_classified[0].payload["validated_identity_fields"]["reduced_by"], "0.65")
+        self.assertEqual(http_classified[0].payload["adapter_result_class"], "DEFINITIVE_SUCCESS")
+        self.assertEqual(http_classified[0].payload["write_closure_class"], "AUTHORITATIVE_RESULT_CLOSED")
+
+        end_writer_session(
+            stage3.normal_writer_acquisition.handle, writer_session_id=stage3.normal_writer_session_id,
+        )
+
+    # -- TERM05-CLOSE-01..04 (Correction 05 dispatch Section 30): an
+    # otherwise-fully-valid canceled closure (correct status, complete
+    # reconciling fills, valid conserving reduced_by) must still NOT close
+    # when exactly one terminal-order identity predicate fails. TERM05-
+    # CLOSE-05/06 (valid closure still works) are already exercised by
+    # GD13/GD24 (canceled) and GD22 (executed). ---------------------------
+
+    def test_gd25_term05_close_01_missing_client_order_id_blocks_otherwise_valid_closure(self) -> None:
+        stage3, gate_d_runtime, invocation, transport, write_transport = self._gate_d_ready()
+        self._seed_active_exact_order(
+            stage3, gate_d_runtime, quote_slot=QuoteSlot.LOWER_YES_BID.value,
+            client_order_id="13131313-1313-4131-8131-131313131313", venue_order_id="venue-order-old-9",
+            yes_price=D("0.05"), request_seed="gd25",
+        )
+        self._queue_gate_d_read_cycle(transport, order_ids=("venue-order-old-9",))
+        malformed_row = _order_row(
+            "venue-order-old-9", ticker=self.TICKER, status="canceled",
+            remaining_count_fp="1.00", fill_count_fp="0.00", initial_count_fp="1.00", yes_price_dollars="0.05",
+        )
+        self.assertNotIn("client_order_id", malformed_row)
+        transport.queue(RunnerOperation.GET_ORDER, _json_response({"order": malformed_row}))
+        transport.queue(RunnerOperation.GET_FILLS, _fills_payload([]))
+        write_transport.queue(_cancel_result_payload(order_id="venue-order-old-9", reduced_by="1.00"))
+
+        result = run_gate_d_ordinary_decision_loop(stage3, gate_d_runtime, invocation, decision_cycle_max=1)
+
+        outcome = result.cycle_results[0].write_outcome
+        self.assertIsNotNone(outcome)
+        self.assertNotEqual(outcome.result_classification, "TERMINAL")
+        self.assertEqual(outcome.result_classification, "TERMINAL_UNRECONCILED")
+
+        end_writer_session(
+            stage3.normal_writer_acquisition.handle, writer_session_id=stage3.normal_writer_session_id,
+        )
+
+    def test_gd26_term05_close_02_fill_plus_remaining_over_quantity_blocks_otherwise_valid_closure(self) -> None:
+        stage3, gate_d_runtime, invocation, transport, write_transport = self._gate_d_ready()
+        self._seed_active_exact_order(
+            stage3, gate_d_runtime, quote_slot=QuoteSlot.LOWER_YES_BID.value,
+            client_order_id="14141414-1414-4141-8141-141414141414", venue_order_id="venue-order-old-10",
+            yes_price=D("0.05"), request_seed="gd26",
+        )
+        self._queue_gate_d_read_cycle(transport, order_ids=("venue-order-old-10",))
+        transport.queue(
+            RunnerOperation.GET_ORDER,
+            _order_payload(
+                "venue-order-old-10", ticker=self.TICKER, status="canceled",
+                # 0.75 + 0.50 = 1.25 > 1.00 -- internally contradictory.
+                remaining_count_fp="0.50", fill_count_fp="0.75", initial_count_fp="1.00",
+                client_order_id="14141414-1414-4141-8141-141414141414", yes_price_dollars="0.05",
+            ),
+        )
+        transport.queue(
+            RunnerOperation.GET_FILLS,
+            _fills_payload([_fill_row("fill-gd26-1", order_id="venue-order-old-10", ticker=self.TICKER, quantity="0.75")]),
+        )
+        write_transport.queue(_cancel_result_payload(order_id="venue-order-old-10", reduced_by="0.50"))
+
+        result = run_gate_d_ordinary_decision_loop(stage3, gate_d_runtime, invocation, decision_cycle_max=1)
+
+        outcome = result.cycle_results[0].write_outcome
+        self.assertIsNotNone(outcome)
+        self.assertEqual(outcome.result_classification, "TERMINAL_UNRECONCILED")
+
+        end_writer_session(
+            stage3.normal_writer_acquisition.handle, writer_session_id=stage3.normal_writer_session_id,
+        )
+
+    def test_gd27_term05_close_03_wrong_quote_price_blocks_otherwise_valid_closure(self) -> None:
+        stage3, gate_d_runtime, invocation, transport, write_transport = self._gate_d_ready()
+        self._seed_active_exact_order(
+            stage3, gate_d_runtime, quote_slot=QuoteSlot.LOWER_YES_BID.value,
+            client_order_id="15151515-1515-4151-8151-151515151515", venue_order_id="venue-order-old-11",
+            yes_price=D("0.05"), request_seed="gd27",
+        )
+        self._queue_gate_d_read_cycle(transport, order_ids=("venue-order-old-11",))
+        transport.queue(
+            RunnerOperation.GET_ORDER,
+            _order_payload(
+                "venue-order-old-11", ticker=self.TICKER, status="canceled",
+                remaining_count_fp="1.00", fill_count_fp="0.00", initial_count_fp="1.00",
+                client_order_id="15151515-1515-4151-8151-151515151515",
+                yes_price_dollars="0.50",  # seeded target quote price is 0.05 -- mismatch.
+            ),
+        )
+        transport.queue(RunnerOperation.GET_FILLS, _fills_payload([]))
+        write_transport.queue(_cancel_result_payload(order_id="venue-order-old-11", reduced_by="1.00"))
+
+        result = run_gate_d_ordinary_decision_loop(stage3, gate_d_runtime, invocation, decision_cycle_max=1)
+
+        outcome = result.cycle_results[0].write_outcome
+        self.assertIsNotNone(outcome)
+        self.assertEqual(outcome.result_classification, "TERMINAL_UNRECONCILED")
+
+        end_writer_session(
+            stage3.normal_writer_acquisition.handle, writer_session_id=stage3.normal_writer_session_id,
+        )
+
+    def test_gd28_term05_close_04_wrong_side_outcome_blocks_otherwise_valid_closure(self) -> None:
+        stage3, gate_d_runtime, invocation, transport, write_transport = self._gate_d_ready()
+        self._seed_active_exact_order(
+            stage3, gate_d_runtime, quote_slot=QuoteSlot.LOWER_YES_BID.value,
+            client_order_id="16161616-1616-4161-8161-161616161616", venue_order_id="venue-order-old-12",
+            yes_price=D("0.05"), request_seed="gd28",
+        )
+        self._queue_gate_d_read_cycle(transport, order_ids=("venue-order-old-12",))
+        transport.queue(
+            RunnerOperation.GET_ORDER,
+            _order_payload(
+                "venue-order-old-12", ticker=self.TICKER, status="canceled",
+                remaining_count_fp="1.00", fill_count_fp="0.00", initial_count_fp="1.00",
+                client_order_id="16161616-1616-4161-8161-161616161616", yes_price_dollars="0.05",
+                side="no",  # the LOWER_YES_BID slot's strategy target is outcome side YES -- mismatch.
+            ),
+        )
+        transport.queue(RunnerOperation.GET_FILLS, _fills_payload([]))
+        write_transport.queue(_cancel_result_payload(order_id="venue-order-old-12", reduced_by="1.00"))
+
+        result = run_gate_d_ordinary_decision_loop(stage3, gate_d_runtime, invocation, decision_cycle_max=1)
+
+        outcome = result.cycle_results[0].write_outcome
+        self.assertIsNotNone(outcome)
+        self.assertEqual(outcome.result_classification, "TERMINAL_UNRECONCILED")
+
+        end_writer_session(
+            stage3.normal_writer_acquisition.handle, writer_session_id=stage3.normal_writer_session_id,
+        )
+
+    def test_gd29_term06_close_01_missing_subaccount_blocks_otherwise_valid_closure(self) -> None:
+        stage3, gate_d_runtime, invocation, transport, write_transport = self._gate_d_ready()
+        self._seed_active_exact_order(
+            stage3, gate_d_runtime, quote_slot=QuoteSlot.LOWER_YES_BID.value,
+            client_order_id="17171717-1717-4171-8171-171717171717", venue_order_id="venue-order-old-13",
+            yes_price=D("0.05"), request_seed="gd29",
+        )
+        self._queue_gate_d_read_cycle(transport, order_ids=("venue-order-old-13",))
+        malformed_row = _order_row(
+            "venue-order-old-13", ticker=self.TICKER, status="canceled",
+            remaining_count_fp="1.00", fill_count_fp="0.00", initial_count_fp="1.00", yes_price_dollars="0.05",
+            client_order_id="17171717-1717-4171-8171-171717171717", subaccount=_OMIT_FIELD,
+        )
+        self.assertNotIn("subaccount", malformed_row)
+        transport.queue(RunnerOperation.GET_ORDER, _json_response({"order": malformed_row}))
+        transport.queue(RunnerOperation.GET_FILLS, _fills_payload([]))
+        write_transport.queue(_cancel_result_payload(order_id="venue-order-old-13", reduced_by="1.00"))
+
+        result = run_gate_d_ordinary_decision_loop(stage3, gate_d_runtime, invocation, decision_cycle_max=1)
+
+        outcome = result.cycle_results[0].write_outcome
+        self.assertIsNotNone(outcome)
+        self.assertEqual(outcome.result_classification, "TERMINAL_UNRECONCILED")
+
+        end_writer_session(
+            stage3.normal_writer_acquisition.handle, writer_session_id=stage3.normal_writer_session_id,
+        )
+
+    def test_gd30_term06_close_02_missing_exchange_index_blocks_otherwise_valid_closure(self) -> None:
+        stage3, gate_d_runtime, invocation, transport, write_transport = self._gate_d_ready()
+        self._seed_active_exact_order(
+            stage3, gate_d_runtime, quote_slot=QuoteSlot.LOWER_YES_BID.value,
+            client_order_id="18181818-1818-4181-8181-181818181818", venue_order_id="venue-order-old-14",
+            yes_price=D("0.05"), request_seed="gd30",
+        )
+        self._queue_gate_d_read_cycle(transport, order_ids=("venue-order-old-14",))
+        malformed_row = _order_row(
+            "venue-order-old-14", ticker=self.TICKER, status="canceled",
+            remaining_count_fp="1.00", fill_count_fp="0.00", initial_count_fp="1.00", yes_price_dollars="0.05",
+            client_order_id="18181818-1818-4181-8181-181818181818", exchange_index=_OMIT_FIELD,
+        )
+        self.assertNotIn("exchange_index", malformed_row)
+        transport.queue(RunnerOperation.GET_ORDER, _json_response({"order": malformed_row}))
+        transport.queue(RunnerOperation.GET_FILLS, _fills_payload([]))
+        write_transport.queue(_cancel_result_payload(order_id="venue-order-old-14", reduced_by="1.00"))
+
+        result = run_gate_d_ordinary_decision_loop(stage3, gate_d_runtime, invocation, decision_cycle_max=1)
+
+        outcome = result.cycle_results[0].write_outcome
+        self.assertIsNotNone(outcome)
+        self.assertEqual(outcome.result_classification, "TERMINAL_UNRECONCILED")
+
+        end_writer_session(
+            stage3.normal_writer_acquisition.handle, writer_session_id=stage3.normal_writer_session_id,
+        )
+
+    def test_gd31_term06_close_03_subaccount_false_blocks_otherwise_valid_closure(self) -> None:
+        stage3, gate_d_runtime, invocation, transport, write_transport = self._gate_d_ready()
+        self._seed_active_exact_order(
+            stage3, gate_d_runtime, quote_slot=QuoteSlot.LOWER_YES_BID.value,
+            client_order_id="19191919-1919-4191-8191-191919191919", venue_order_id="venue-order-old-15",
+            yes_price=D("0.05"), request_seed="gd31",
+        )
+        self._queue_gate_d_read_cycle(transport, order_ids=("venue-order-old-15",))
+        transport.queue(
+            RunnerOperation.GET_ORDER,
+            _order_payload(
+                "venue-order-old-15", ticker=self.TICKER, status="canceled",
+                remaining_count_fp="1.00", fill_count_fp="0.00", initial_count_fp="1.00", yes_price_dollars="0.05",
+                client_order_id="19191919-1919-4191-8191-191919191919", subaccount=False,
+            ),
+        )
+        transport.queue(RunnerOperation.GET_FILLS, _fills_payload([]))
+        write_transport.queue(_cancel_result_payload(order_id="venue-order-old-15", reduced_by="1.00"))
+
+        result = run_gate_d_ordinary_decision_loop(stage3, gate_d_runtime, invocation, decision_cycle_max=1)
+
+        outcome = result.cycle_results[0].write_outcome
+        self.assertIsNotNone(outcome)
+        self.assertEqual(outcome.result_classification, "TERMINAL_UNRECONCILED")
+
+        end_writer_session(
+            stage3.normal_writer_acquisition.handle, writer_session_id=stage3.normal_writer_session_id,
+        )
+
+    def test_gd32_term06_close_04_exchange_index_false_blocks_otherwise_valid_closure(self) -> None:
+        stage3, gate_d_runtime, invocation, transport, write_transport = self._gate_d_ready()
+        self._seed_active_exact_order(
+            stage3, gate_d_runtime, quote_slot=QuoteSlot.LOWER_YES_BID.value,
+            client_order_id="20202020-2020-4202-8202-202020202020", venue_order_id="venue-order-old-16",
+            yes_price=D("0.05"), request_seed="gd32",
+        )
+        self._queue_gate_d_read_cycle(transport, order_ids=("venue-order-old-16",))
+        transport.queue(
+            RunnerOperation.GET_ORDER,
+            _order_payload(
+                "venue-order-old-16", ticker=self.TICKER, status="canceled",
+                remaining_count_fp="1.00", fill_count_fp="0.00", initial_count_fp="1.00", yes_price_dollars="0.05",
+                client_order_id="20202020-2020-4202-8202-202020202020", exchange_index=False,
+            ),
+        )
+        transport.queue(RunnerOperation.GET_FILLS, _fills_payload([]))
+        write_transport.queue(_cancel_result_payload(order_id="venue-order-old-16", reduced_by="1.00"))
+
+        result = run_gate_d_ordinary_decision_loop(stage3, gate_d_runtime, invocation, decision_cycle_max=1)
+
+        outcome = result.cycle_results[0].write_outcome
+        self.assertIsNotNone(outcome)
+        self.assertEqual(outcome.result_classification, "TERMINAL_UNRECONCILED")
+
+        end_writer_session(
+            stage3.normal_writer_acquisition.handle, writer_session_id=stage3.normal_writer_session_id,
+        )
+
+    def test_gd33_term06_close_05_exact_int_zero_scope_canceled_closure_still_succeeds(self) -> None:
+        """TERM06-CLOSE-05: an otherwise fully valid ``canceled`` closure
+        whose row carries exact Python ``int`` zero for both ``subaccount``
+        and ``exchange_index`` (the ordinary case) still closes -- the
+        Correction 06 tightening rejects only missing/bool/float/string/
+        wrong-int scope, never the exact accepted value."""
+        stage3, gate_d_runtime, invocation, transport, write_transport = self._gate_d_ready()
+        self._seed_active_exact_order(
+            stage3, gate_d_runtime, quote_slot=QuoteSlot.LOWER_YES_BID.value,
+            client_order_id="21212121-2121-4212-8212-212121212121", venue_order_id="venue-order-old-17",
+            yes_price=D("0.05"), request_seed="gd33",
+        )
+        self._queue_gate_d_read_cycle(transport, order_ids=("venue-order-old-17",))
+        transport.queue(
+            RunnerOperation.GET_ORDER,
+            _order_payload(
+                "venue-order-old-17", ticker=self.TICKER, status="canceled",
+                remaining_count_fp="1.00", fill_count_fp="0.00", initial_count_fp="1.00", yes_price_dollars="0.05",
+                client_order_id="21212121-2121-4212-8212-212121212121", subaccount=0, exchange_index=0,
+            ),
+        )
+        transport.queue(RunnerOperation.GET_FILLS, _fills_payload([]))
+        write_transport.queue(_cancel_result_payload(order_id="venue-order-old-17", reduced_by="1.00"))
+
+        result = run_gate_d_ordinary_decision_loop(stage3, gate_d_runtime, invocation, decision_cycle_max=1)
+
+        outcome = result.cycle_results[0].write_outcome
+        self.assertIsNotNone(outcome)
+        self.assertEqual(outcome.result_classification, "TERMINAL")
+
+        end_writer_session(
+            stage3.normal_writer_acquisition.handle, writer_session_id=stage3.normal_writer_session_id,
+        )
+
+    def test_gd34_term06_close_06_exact_int_zero_scope_executed_closure_still_succeeds(self) -> None:
+        """TERM06-CLOSE-06: an otherwise fully valid ``executed`` closure
+        with complete fresh fills and exact Python ``int`` zero scope still
+        closes."""
+        stage3, gate_d_runtime, invocation, transport, write_transport = self._gate_d_ready()
+        self._seed_active_exact_order(
+            stage3, gate_d_runtime, quote_slot=QuoteSlot.LOWER_YES_BID.value,
+            client_order_id="22222222-2222-4222-8222-222222222222", venue_order_id="venue-order-old-18",
+            yes_price=D("0.05"), request_seed="gd34",
+        )
+        self._queue_gate_d_read_cycle(transport, order_ids=("venue-order-old-18",))
+        transport.queue(
+            RunnerOperation.GET_ORDER,
+            _order_payload(
+                "venue-order-old-18", ticker=self.TICKER, status="executed",
+                remaining_count_fp="0.00", fill_count_fp="1.00", initial_count_fp="1.00", yes_price_dollars="0.05",
+                client_order_id="22222222-2222-4222-8222-222222222222", subaccount=0, exchange_index=0,
+            ),
+        )
+        transport.queue(
+            RunnerOperation.GET_FILLS,
+            _fills_payload([_fill_row("fill-gd34-1", order_id="venue-order-old-18", ticker=self.TICKER, quantity="1.00")]),
+        )
+        write_transport.queue(_json_response({}))
+
+        result = run_gate_d_ordinary_decision_loop(stage3, gate_d_runtime, invocation, decision_cycle_max=1)
+
+        outcome = result.cycle_results[0].write_outcome
+        self.assertIsNotNone(outcome)
+        self.assertEqual(outcome.result_classification, "TERMINAL")
+
+        end_writer_session(
+            stage3.normal_writer_acquisition.handle, writer_session_id=stage3.normal_writer_session_id,
+        )
+
+
+# ---------------------------------------------------------------------------
+# Correction 04 -- direct unit tests for the module-private CANCEL result
+# classification (Defect 01), terminal-order identity validation
+# (Defect 03), and conservation (Defect 02) helpers. No ledger/writer-
+# session fixture is needed for these -- they exercise pure functions.
+# ---------------------------------------------------------------------------
+
+
+class GateDCancelReconciliationUnitTests(unittest.TestCase):
+    TICKER = CURRENT_TICKER
+    ORDER_ID = "venue-order-unit-1"
+    CLIENT_ORDER_ID = "11111111-1111-4111-8111-111111111111"
+
+    @staticmethod
+    def _raw(*, http_status: int = 200, body: dict | None = None, transport_unknown: bool = False) -> RawOperationResponseV1:
+        payload = json.dumps(body if body is not None else {}).encode("utf-8")
+        return RawOperationResponseV1(
+            http_status=http_status, content_type="application/json", body_bytes=payload,
+            transport_unknown=transport_unknown,
+        )
+
+    def _classify(self, raw: RawOperationResponseV1):
+        return runner._gate_d_classify_cancel_result(
+            raw, expected_order_id=self.ORDER_ID, expected_client_order_id=self.CLIENT_ORDER_ID,
+        )
+
+    # -- CANCEL-RESULT-01..08 (dispatch Section 29) --------------------
+
+    def test_cancel_result_01_valid_exact_response_is_definitive_success(self) -> None:
+        outcome, body = self._classify(self._raw(body={"order_id": self.ORDER_ID, "reduced_by": "1.00", "ts_ms": 123}))
+        self.assertIs(outcome, runner.SendOutcome.DEFINITIVE_SUCCESS)
+        self.assertEqual(body["reduced_by"], "1.00")
+
+    def test_cancel_result_02_missing_reduced_by(self) -> None:
+        outcome, _ = self._classify(self._raw(body={"order_id": self.ORDER_ID, "ts_ms": 123}))
+        self.assertIs(outcome, runner.SendOutcome.SEND_MAY_HAVE_BEGUN_UNKNOWN)
+
+    def test_cancel_result_03_malformed_reduced_by(self) -> None:
+        outcome, _ = self._classify(self._raw(body={"order_id": self.ORDER_ID, "reduced_by": "abc", "ts_ms": 123}))
+        self.assertIs(outcome, runner.SendOutcome.SEND_MAY_HAVE_BEGUN_UNKNOWN)
+
+    def test_cancel_result_04_wrong_order_id(self) -> None:
+        outcome, _ = self._classify(self._raw(body={"order_id": "wrong-order", "reduced_by": "1.00", "ts_ms": 123}))
+        self.assertIs(outcome, runner.SendOutcome.SEND_MAY_HAVE_BEGUN_UNKNOWN)
+
+    def test_cancel_result_05_wrong_present_client_order_id(self) -> None:
+        outcome, _ = self._classify(self._raw(body={
+            "order_id": self.ORDER_ID, "reduced_by": "1.00", "ts_ms": 123,
+            "client_order_id": "22222222-2222-4222-8222-222222222222",
+        }))
+        self.assertIs(outcome, runner.SendOutcome.SEND_MAY_HAVE_BEGUN_UNKNOWN)
+
+    def test_cancel_result_06_absent_client_order_id_still_succeeds(self) -> None:
+        outcome, _ = self._classify(self._raw(body={"order_id": self.ORDER_ID, "reduced_by": "1.00", "ts_ms": 123}))
+        self.assertIs(outcome, runner.SendOutcome.DEFINITIVE_SUCCESS)
+
+    def test_cancel_result_07_malformed_ts_ms(self) -> None:
+        outcome, _ = self._classify(self._raw(body={"order_id": self.ORDER_ID, "reduced_by": "1.00", "ts_ms": "abc"}))
+        self.assertIs(outcome, runner.SendOutcome.SEND_MAY_HAVE_BEGUN_UNKNOWN)
+
+    def test_cancel_result_08_malformed_body_never_labeled_definitive_success(self) -> None:
+        raw = RawOperationResponseV1(http_status=200, content_type="application/json", body_bytes=b"not-json-bytes")
+        outcome, _ = self._classify(raw)
+        self.assertIsNot(outcome, runner.SendOutcome.DEFINITIVE_SUCCESS)
+
+    # -- CANCEL-CONSERVATION-01..04 (dispatch Section 30; 05/06 are
+    # structural/integration properties covered by the GD-series tests --
+    # no code path ever substitutes GET_ORDER remaining_count_fp for
+    # reduced_by, and GD20/GD13 already prove trustworthy-reduced_by
+    # gating end-to-end) -----------------------------------------------
+
+    def test_cancel_conservation_01_zero_fill_full_reduced_by_passes(self) -> None:
+        self.assertIsNone(runner.check_cancel_conservation(final_fill_quantity=D("0.00"), reduced_by=D("1.00")))
+
+    def test_cancel_conservation_02_partial_fill_complement_passes(self) -> None:
+        self.assertIsNone(runner.check_cancel_conservation(final_fill_quantity=D("0.25"), reduced_by=D("0.75")))
+
+    def test_cancel_conservation_03_another_exact_split_passes(self) -> None:
+        self.assertIsNone(runner.check_cancel_conservation(final_fill_quantity=D("0.60"), reduced_by=D("0.40")))
+
+    def test_cancel_conservation_04_mismatch_fails_closed(self) -> None:
+        self.assertIsNotNone(runner.check_cancel_conservation(final_fill_quantity=D("0.25"), reduced_by=D("0.70")))
+
+    # -- TERM05-01..25 (Correction 05 dispatch Sections 26-29). Status
+    # itself is validated against `SUPPORTED_ORDER_STATUSES` inside
+    # `_gate_d_validate_terminal_order_identity` now (Correction 05
+    # Section 23), but this validator is still only ever invoked by the
+    # caller after status is already confirmed to be an exact member of
+    # `_GATE_D_TERMINAL_ORDER_STATUSES` -- the "resting"/unsupported-status
+    # end-to-end path remains covered by GD14. ---------------------------
+
+    EXPECTED_YES_PRICE = D("0.44")
+
+    def _row(self, *, remove: tuple = (), **overrides) -> dict:
+        row = {
+            "order_id": self.ORDER_ID, "client_order_id": self.CLIENT_ORDER_ID, "ticker": self.TICKER,
+            "side": "yes", "status": "canceled", "subaccount": 0, "exchange_index": 0,
+            "fill_count_fp": "0.00", "remaining_count_fp": "1.00", "initial_count_fp": "1.00",
+            "yes_price_dollars": "0.44",
+        }
+        row.update(overrides)
+        for key in remove:
+            row.pop(key, None)
+        return row
+
+    def _violation(
+        self, *, remove: tuple = (), expected_outcome_side: str = "YES", expected_yes_price: Decimal | None = None,
+        **row_overrides,
+    ) -> str | None:
+        return runner._gate_d_validate_terminal_order_identity(
+            self._row(remove=remove, **row_overrides), expected_order_id=self.ORDER_ID,
+            expected_client_order_id=self.CLIENT_ORDER_ID, expected_ticker=self.TICKER,
+            expected_outcome_side=expected_outcome_side,
+            expected_yes_price=expected_yes_price if expected_yes_price is not None else self.EXPECTED_YES_PRICE,
+        )
+
+    # -- TERM05-01..07: exact complete rows accepted; core identity
+    # mismatches unresolved (dispatch Section 26) ------------------------
+
+    def test_term05_01_exact_lower_slot_canceled_row_accepted(self) -> None:
+        self.assertIsNone(self._violation())
+
+    def test_term05_02_exact_upper_slot_canceled_row_accepted(self) -> None:
+        self.assertIsNone(self._violation(side="no", expected_outcome_side="NO"))
+
+    def test_term05_03_exact_executed_row_accepted(self) -> None:
+        self.assertIsNone(self._violation(status="executed", fill_count_fp="1.00", remaining_count_fp="0.00"))
+
+    def test_term05_04_missing_client_order_id_unresolved(self) -> None:
+        self.assertEqual(self._violation(remove=("client_order_id",)), "CLIENT_ORDER_ID_MISSING")
+
+    def test_term05_05_wrong_client_order_id_unresolved(self) -> None:
+        self.assertIsNotNone(self._violation(client_order_id="99999999-9999-4999-8999-999999999999"))
+
+    def test_term05_06_wrong_ticker_unresolved(self) -> None:
+        self.assertIsNotNone(self._violation(ticker="SOME-OTHER-TICKER"))
+
+    def test_term05_07_wrong_order_id_unresolved(self) -> None:
+        self.assertIsNotNone(self._violation(order_id="a-different-order"))
+
+    # -- TERM05-08..14: exact FixedPointCount lexical contract (dispatch
+    # Section 27) ----------------------------------------------------------
+
+    def test_term05_08_fill_count_fp_json_number_unresolved(self) -> None:
+        self.assertIsNotNone(self._violation(fill_count_fp=0))
+
+    def test_term05_09_fill_count_fp_exponent_notation_unresolved(self) -> None:
+        self.assertIsNotNone(self._violation(fill_count_fp="1e0"))
+
+    def test_term05_10_fill_count_fp_single_digit_unresolved(self) -> None:
+        self.assertIsNotNone(self._violation(fill_count_fp="1"))
+
+    def test_term05_11_fill_count_fp_one_fractional_digit_unresolved(self) -> None:
+        self.assertIsNotNone(self._violation(fill_count_fp="1.0"))
+
+    def test_term05_12_remaining_count_fp_single_digit_unresolved(self) -> None:
+        self.assertIsNotNone(self._violation(remaining_count_fp="1"))
+
+    def test_term05_13_remaining_count_fp_three_fractional_digits_unresolved(self) -> None:
+        self.assertIsNotNone(self._violation(remaining_count_fp="1.000"))
+
+    def test_term05_14_initial_count_fp_malformed_unresolved(self) -> None:
+        self.assertIsNotNone(self._violation(initial_count_fp="one"))
+
+    # -- TERM05-15..18: quantity bounds / internal conservation (dispatch
+    # Section 28) ------------------------------------------------------------
+
+    def test_term05_15_fill_count_fp_exceeds_upper_bound_unresolved(self) -> None:
+        self.assertIsNotNone(self._violation(fill_count_fp="1.01"))
+
+    def test_term05_16_remaining_count_fp_exceeds_upper_bound_unresolved(self) -> None:
+        self.assertIsNotNone(self._violation(remaining_count_fp="1.01"))
+
+    def test_term05_17_fill_plus_remaining_exceeds_quantity_unresolved(self) -> None:
+        self.assertIsNotNone(self._violation(fill_count_fp="0.75", remaining_count_fp="0.50"))
+
+    def test_term05_18_initial_count_fp_not_fixed_quantity_unresolved(self) -> None:
+        self.assertIsNotNone(self._violation(initial_count_fp="0.99"))
+
+    # -- TERM05-19..25: price/identity/scope (dispatch Sections 20-22, 29) --
+
+    def test_term05_19_wrong_quote_price_unresolved(self) -> None:
+        self.assertIsNotNone(self._violation(yes_price_dollars="0.50"))
+
+    def test_term05_20_missing_quote_price_unresolved(self) -> None:
+        self.assertIsNotNone(self._violation(remove=("yes_price_dollars",)))
+
+    def test_term05_21_wrong_outcome_side_mapping_unresolved(self) -> None:
+        self.assertIsNotNone(self._violation(side="no"))  # expected_outcome_side stays "YES"
+
+    def test_term05_22_wrong_venue_book_side_mapping_unresolved(self) -> None:
+        # Gate D's accepted venue row exposes exactly one side field
+        # (outcome side yes/no, bijectively coupled to venue bid/ask by the
+        # fixed two-slot strategy); an unsupported value fails closed
+        # rather than silently defaulting.
+        self.assertIsNotNone(self._violation(side="unknown"))
+
+    def test_term05_23_order_type_field_not_part_of_accepted_venue_row(self) -> None:
+        # Gate D's already-established accepted venue-row schema carries no
+        # separate order-type field (dispatch Section 21: validated "wherever
+        # those fields are part of the accepted venue row"); this documents
+        # that scoping choice rather than exercising a live check.
+        self.assertIsNone(self._violation())
+
+    def test_term05_24_wrong_subaccount_scope_unresolved(self) -> None:
+        self.assertIsNotNone(self._violation(subaccount=1))
+
+    def test_term05_25_wrong_exchange_index_scope_unresolved(self) -> None:
+        self.assertIsNotNone(self._violation(exchange_index=1))
+
+    # -- TERM06-01..13: mandatory, exact-int-typed subaccount/exchange_index
+    # scope (dispatch Sections 13-16/22) -- `type(...) is int`, never
+    # `isinstance`, since `bool` is a subclass of `int` in Python; no
+    # invented default for a missing field ----------------------------------
+
+    def test_term06_01_missing_subaccount_unresolved(self) -> None:
+        self.assertEqual(self._violation(remove=("subaccount",)), "SUBACCOUNT_MISSING_OR_MALFORMED")
+
+    def test_term06_02_missing_exchange_index_unresolved(self) -> None:
+        self.assertEqual(self._violation(remove=("exchange_index",)), "EXCHANGE_INDEX_MISSING_OR_MALFORMED")
+
+    def test_term06_03_subaccount_false_unresolved(self) -> None:
+        self.assertEqual(self._violation(subaccount=False), "SUBACCOUNT_MISSING_OR_MALFORMED")
+
+    def test_term06_04_exchange_index_false_unresolved(self) -> None:
+        self.assertEqual(self._violation(exchange_index=False), "EXCHANGE_INDEX_MISSING_OR_MALFORMED")
+
+    def test_term06_05_subaccount_true_unresolved(self) -> None:
+        self.assertEqual(self._violation(subaccount=True), "SUBACCOUNT_MISSING_OR_MALFORMED")
+
+    def test_term06_06_exchange_index_true_unresolved(self) -> None:
+        self.assertEqual(self._violation(exchange_index=True), "EXCHANGE_INDEX_MISSING_OR_MALFORMED")
+
+    def test_term06_07_subaccount_float_zero_unresolved(self) -> None:
+        self.assertEqual(self._violation(subaccount=0.0), "SUBACCOUNT_MISSING_OR_MALFORMED")
+
+    def test_term06_08_exchange_index_float_zero_unresolved(self) -> None:
+        self.assertEqual(self._violation(exchange_index=0.0), "EXCHANGE_INDEX_MISSING_OR_MALFORMED")
+
+    def test_term06_09_subaccount_string_zero_unresolved(self) -> None:
+        self.assertEqual(self._violation(subaccount="0"), "SUBACCOUNT_MISSING_OR_MALFORMED")
+
+    def test_term06_10_exchange_index_string_zero_unresolved(self) -> None:
+        self.assertEqual(self._violation(exchange_index="0"), "EXCHANGE_INDEX_MISSING_OR_MALFORMED")
+
+    def test_term06_11_subaccount_wrong_int_unresolved(self) -> None:
+        self.assertEqual(self._violation(subaccount=1), "SUBACCOUNT_MISMATCH")
+
+    def test_term06_12_exchange_index_wrong_int_unresolved(self) -> None:
+        self.assertEqual(self._violation(exchange_index=1), "EXCHANGE_INDEX_MISMATCH")
+
+    def test_term06_13_exact_int_zero_scope_accepted(self) -> None:
+        self.assertIsNone(self._violation(subaccount=0, exchange_index=0))
+
+    # -- Fresh fill reconciliation (Correction 03/04, independent of
+    # reduced_by) ---------------------------------------------------------
+
+    def test_fresh_fill_reconciliation_matches_order_fill_count(self) -> None:
+        from arb.venues.kalshi.risk_control import EconomicFillV1
+        order_row = self._row(fill_count_fp="0.60")
+        fills = (EconomicFillV1(self.TICKER, "fill-1", "YES", D("0.60"), D("0.44"), "2026-08-15T00:00:00.000000Z"),)
+        self.assertIsNone(runner._gate_d_fresh_fill_reconciliation_violation(order_row=order_row, fresh_fills=fills))
+
+    def test_fresh_fill_reconciliation_mismatch_detected(self) -> None:
+        from arb.venues.kalshi.risk_control import EconomicFillV1
+        order_row = self._row(fill_count_fp="0.60")
+        fills = (EconomicFillV1(self.TICKER, "fill-1", "YES", D("0.25"), D("0.44"), "2026-08-15T00:00:00.000000Z"),)
+        self.assertIsNotNone(runner._gate_d_fresh_fill_reconciliation_violation(order_row=order_row, fresh_fills=fills))
 
 
 # ---------------------------------------------------------------------------

@@ -790,8 +790,14 @@ def test_cancel_target_is_exact_venue_order_id_never_client_order_id() -> None:
 
 
 def test_cancel_writer_eligibility_assessment_uses_cancel_operation_kind() -> None:
+    target = WorkingOrderV1("TICK-1", "venue-order-1", "YES", D("1.00"), D("0.44"))
     assessment = build_cancel_writer_eligibility_assessment(
-        risk_assessment_id="ra_" + "1" * 32, request_id="req_" + "1" * 32, prepared_request_sha256="a" * 64,
+        risk_assessment_id="ra_" + "1" * 32, request_id="req_" + "1" * 32,
+        strategy_instance_id="mm_" + "1" * 32, market_ticker="TICK-1", quote_slot=QuoteSlot.LOWER_YES_BID.value,
+        quote_generation_id="qg_" + "1" * 32, target_venue_order_id="venue-order-1",
+        client_order_id="11111111-1111-4111-8111-111111111111",
+        authoritative_fills=(), authoritative_working_orders=(target,), unresolved_exposure_usd=D("0"),
+        prepared_request_sha256="a" * 64,
         risk_config=risk_config(), market_data_snapshot_sha256="b" * 64, market_data_freshness_identity_sha256="c" * 64,
         reconciliation_snapshot_sha256="d" * 64, reconciliation_freshness_identity_sha256="e" * 64,
         risk_state_epoch=1, freshness_deadline_monotonic_ns=999_999_999_999,
@@ -949,8 +955,13 @@ def _persist_mm_cancel(
         request_id=request_id, environment="KALSHI_DEMO", venue_order_id=target_venue_order_id,
         client_order_id=client_order_id, adapter_payload_schema_id="mm-cancel-v1",
     )
+    target = WorkingOrderV1("TICK-1", target_venue_order_id, "YES", D("1.00"), D("0.44"))
     assessment = build_cancel_writer_eligibility_assessment(
         risk_assessment_id="ra_cancel_" + request_id[-8:], request_id=request_id,
+        strategy_instance_id="mm_" + "1" * 32, market_ticker="TICK-1", quote_slot=QuoteSlot.LOWER_YES_BID.value,
+        quote_generation_id=quote_generation_id, target_venue_order_id=target_venue_order_id,
+        client_order_id=client_order_id, authoritative_fills=(), authoritative_working_orders=(target,),
+        unresolved_exposure_usd=D("0"),
         prepared_request_sha256=prepared["prepared_request_sha256"], risk_config=risk_config(),
         market_data_snapshot_sha256="a" * 64, market_data_freshness_identity_sha256="b" * 64,
         reconciliation_snapshot_sha256="c" * 64, reconciliation_freshness_identity_sha256="d" * 64,
@@ -1688,3 +1699,394 @@ def test_c04_10_downstream_comparison_holds_not_create_new(writer_eligible_ledge
     )
     assert action is QuoteAction.HOLD_NO_STRATEGY_WRITE
     assert action is not QuoteAction.CREATE_NEW
+
+
+# ---------------------------------------------------------------------------
+# Spec 07 MM07-TEST-ECON-001..008 -- the actual controlling C1-C8 (dispatch
+# Correction 03 Section 21). Correction 02 mislabeled its eight
+# exact-reconstruction hazard tests as "C1-C8"; they are in fact all C8
+# sub-cases (MM07-TEST-ECON-008 "exact post construction cannot be replaced
+# by theorem hardcoding") and are kept below, renamed accordingly. C1-C7
+# proper -- pre-state-already-unsafe, BID/ASK removal monotonicity across
+# signed-inventory regimes, working/gross monotonicity with exact
+# decrements, fill-derived invariance, the safe-complete-proof-may-be-
+# eligible case, and unknown/incomplete-truth fail-closed behavior -- are
+# added as their own dedicated tests further below.
+# ---------------------------------------------------------------------------
+
+
+def _expected_cancel_economic_sha256(
+    *, request_id: str, strategy_instance_id: str, market_ticker: str, quote_slot: str,
+    quote_generation_id: str, target: WorkingOrderV1, client_order_id: str,
+    fills: tuple, working_orders: tuple, unresolved_exposure_usd: Decimal,
+    market_data_snapshot_sha256: str, market_data_freshness_identity_sha256: str,
+    reconciliation_snapshot_sha256: str, reconciliation_freshness_identity_sha256: str,
+) -> tuple[str, "MarketEconomicState", "MarketEconomicState"]:
+    from arb.execution_ledger import sha256_hex
+    from arb.venues.kalshi.risk_control import compute_market_economic_state
+    import arb.venues.kalshi.quote_lifecycle as ql
+
+    pre_state = compute_market_economic_state(market_ticker, fills, working_orders)
+    remaining = tuple(order for order in working_orders if order.order_id != target.order_id)
+    post_state = compute_market_economic_state(market_ticker, fills, remaining)
+    economic_object = {
+        "schema_revision": 1, "operation_kind": "CANCEL_ORDER_V2", "request_id": request_id,
+        "strategy_instance_id": strategy_instance_id, "market_ticker": market_ticker, "quote_slot": quote_slot,
+        "quote_generation_id": quote_generation_id, "target_venue_order_id": target.order_id,
+        "client_order_id": client_order_id, "market_data_snapshot_sha256": market_data_snapshot_sha256,
+        "market_data_freshness_identity_sha256": market_data_freshness_identity_sha256,
+        "reconciliation_snapshot_sha256": reconciliation_snapshot_sha256,
+        "reconciliation_freshness_identity_sha256": reconciliation_freshness_identity_sha256,
+        "pre_cancel_market_economic_state": ql._market_economic_state_object(pre_state),
+        "target_working_order": ql._target_working_order_object(target),
+        "post_target_removed_market_economic_state": ql._market_economic_state_object(post_state),
+        "unresolved_exposure_usd": unresolved_exposure_usd,
+    }
+    return sha256_hex(canonical_json_bytes(economic_object)), pre_state, post_state
+
+
+def _assert_cancel_economic_hash_correct(
+    *, target: WorkingOrderV1, working_orders: tuple, fills: tuple = (),
+    market_ticker: str = "TICK-1", quote_slot: str = QuoteSlot.LOWER_YES_BID.value,
+) -> None:
+    request_id = "req_" + "1" * 32
+    strategy_instance_id = "mm_" + "1" * 32
+    quote_generation_id = "qg_" + "1" * 32
+    client_order_id = "11111111-1111-4111-8111-111111111111"
+    kwargs = dict(
+        request_id=request_id, strategy_instance_id=strategy_instance_id, market_ticker=market_ticker,
+        quote_slot=quote_slot, quote_generation_id=quote_generation_id, target=target,
+        client_order_id=client_order_id, fills=fills, working_orders=working_orders,
+        unresolved_exposure_usd=D("0"), market_data_snapshot_sha256="a" * 64,
+        market_data_freshness_identity_sha256="b" * 64, reconciliation_snapshot_sha256="c" * 64,
+        reconciliation_freshness_identity_sha256="d" * 64,
+    )
+    expected_sha256, _pre, _post = _expected_cancel_economic_sha256(**kwargs)
+    assessment = build_cancel_writer_eligibility_assessment(
+        risk_assessment_id="ra_" + "1" * 32, request_id=request_id, strategy_instance_id=strategy_instance_id,
+        market_ticker=market_ticker, quote_slot=quote_slot, quote_generation_id=quote_generation_id,
+        target_venue_order_id=target.order_id, client_order_id=client_order_id,
+        authoritative_fills=fills, authoritative_working_orders=working_orders,
+        unresolved_exposure_usd=D("0"), prepared_request_sha256="e" * 64, risk_config=risk_config(),
+        market_data_snapshot_sha256="a" * 64, market_data_freshness_identity_sha256="b" * 64,
+        reconciliation_snapshot_sha256="c" * 64, reconciliation_freshness_identity_sha256="d" * 64,
+        risk_state_epoch=1, freshness_deadline_monotonic_ns=999_999_999_999,
+    )
+    assert assessment.candidate_economic_sha256 == expected_sha256
+
+
+def test_c8_1_wrong_target_removed_would_mismatch_hash() -> None:
+    """Two working orders on the same side; the target is the smaller one.
+    A buggy implementation that excludes the wrong (larger) order from the
+    post-state would produce a different, mismatching hash."""
+    target = WorkingOrderV1("TICK-1", "target-a", "YES", D("1.00"), D("0.44"))
+    other = WorkingOrderV1("TICK-1", "other-b", "YES", D("5.00"), D("0.44"))
+    _assert_cancel_economic_hash_correct(target=target, working_orders=(other, target))
+
+
+def test_c8_2_two_orders_removed_would_mismatch_hash() -> None:
+    """Three working orders; only the exact target may be excluded from the
+    post-state. An over-removal bug that drops a second order too would
+    under-count post-state exposure and mismatch the expected hash."""
+    target = WorkingOrderV1("TICK-1", "target-a", "YES", D("1.00"), D("0.44"))
+    sibling_1 = WorkingOrderV1("TICK-1", "sib-1", "YES", D("2.00"), D("0.44"))
+    sibling_2 = WorkingOrderV1("TICK-1", "sib-2", "NO", D("3.00"), D("0.30"))
+    _assert_cancel_economic_hash_correct(target=target, working_orders=(target, sibling_1, sibling_2))
+
+
+def test_c8_3_target_not_removed_would_mismatch_hash() -> None:
+    """A single working order (the target). A no-op bug that fails to
+    remove it at all would leave post-state identical to pre-state,
+    mismatching the expected (empty post-state) hash."""
+    target = WorkingOrderV1("TICK-1", "target-only", "YES", D("1.00"), D("0.44"))
+    _assert_cancel_economic_hash_correct(target=target, working_orders=(target,))
+
+
+def test_c8_4_fill_list_reused_identically_across_both_states() -> None:
+    """Fills contribute identically to both the pre- and post-cancel states
+    (only working orders differ); a fill-list mutation between the two
+    ``compute_market_economic_state`` calls would change filled_exposure_usd
+    and mismatch the expected hash."""
+    fills = (
+        EconomicFillV1("TICK-1", "fill-1", "YES", D("2.00"), D("0.40"), "2026-08-15T00:00:00.000000Z"),
+        EconomicFillV1("TICK-1", "fill-2", "NO", D("1.00"), D("0.35"), "2026-08-15T00:01:00.000000Z"),
+    )
+    target = WorkingOrderV1("TICK-1", "target-a", "YES", D("1.00"), D("0.44"))
+    _, pre_state, post_state = _expected_cancel_economic_sha256(
+        request_id="req_" + "1" * 32, strategy_instance_id="mm_" + "1" * 32, market_ticker="TICK-1",
+        quote_slot=QuoteSlot.LOWER_YES_BID.value, quote_generation_id="qg_" + "1" * 32, target=target,
+        client_order_id="11111111-1111-4111-8111-111111111111", fills=fills, working_orders=(target,),
+        unresolved_exposure_usd=D("0"), market_data_snapshot_sha256="a" * 64,
+        market_data_freshness_identity_sha256="b" * 64, reconciliation_snapshot_sha256="c" * 64,
+        reconciliation_freshness_identity_sha256="d" * 64,
+    )
+    assert pre_state.filled_exposure_usd == post_state.filled_exposure_usd
+    _assert_cancel_economic_hash_correct(target=target, working_orders=(target,), fills=fills)
+
+
+def test_c8_5_signed_inventory_derives_only_from_fills_not_mutated_by_cancel() -> None:
+    """Signed net position is a pure function of the authoritative fill
+    sequence and must be identical before and after removing a working
+    order; a signed-inventory mutation bug would change it and mismatch."""
+    fills = (
+        EconomicFillV1("TICK-1", "fill-1", "YES", D("3.00"), D("0.50"), "2026-08-15T00:00:00.000000Z"),
+    )
+    target = WorkingOrderV1("TICK-1", "target-a", "NO", D("2.00"), D("0.60"))
+    _, pre_state, post_state = _expected_cancel_economic_sha256(
+        request_id="req_" + "1" * 32, strategy_instance_id="mm_" + "1" * 32, market_ticker="TICK-1",
+        quote_slot=QuoteSlot.UPPER_YES_ASK.value, quote_generation_id="qg_" + "1" * 32, target=target,
+        client_order_id="11111111-1111-4111-8111-111111111111", fills=fills, working_orders=(target,),
+        unresolved_exposure_usd=D("0"), market_data_snapshot_sha256="a" * 64,
+        market_data_freshness_identity_sha256="b" * 64, reconciliation_snapshot_sha256="c" * 64,
+        reconciliation_freshness_identity_sha256="d" * 64,
+    )
+    assert pre_state.signed_net_position == D("3.00") == post_state.signed_net_position
+    _assert_cancel_economic_hash_correct(
+        target=target, working_orders=(target,), fills=fills, quote_slot=QuoteSlot.UPPER_YES_ASK.value,
+    )
+
+
+def test_c8_6_post_state_independently_computed_not_copied_from_pre_state() -> None:
+    """Removing the sole working order must measurably change at least one
+    post-state field relative to pre-state; a blind ``post = pre`` copy bug
+    would leave working_order_count/working_bid_quantity unchanged and
+    mismatch the expected (genuinely recomputed) hash."""
+    target = WorkingOrderV1("TICK-1", "target-a", "YES", D("4.00"), D("0.44"))
+    _, pre_state, post_state = _expected_cancel_economic_sha256(
+        request_id="req_" + "1" * 32, strategy_instance_id="mm_" + "1" * 32, market_ticker="TICK-1",
+        quote_slot=QuoteSlot.LOWER_YES_BID.value, quote_generation_id="qg_" + "1" * 32, target=target,
+        client_order_id="11111111-1111-4111-8111-111111111111", fills=(), working_orders=(target,),
+        unresolved_exposure_usd=D("0"), market_data_snapshot_sha256="a" * 64,
+        market_data_freshness_identity_sha256="b" * 64, reconciliation_snapshot_sha256="c" * 64,
+        reconciliation_freshness_identity_sha256="d" * 64,
+    )
+    assert pre_state.working_order_count == 1 and post_state.working_order_count == 0
+    assert pre_state.working_bid_quantity == D("4.00") and post_state.working_bid_quantity == D("0")
+    assert pre_state != post_state
+    _assert_cancel_economic_hash_correct(target=target, working_orders=(target,))
+
+
+def test_c8_7_target_quantity_flows_exactly_into_removal() -> None:
+    """The target's exact ``remaining_quantity`` (not a truncated/zeroed
+    value) must be what is subtracted out of working-side quantity when
+    computing the post-state; a target-quantity-ignored bug would leave
+    the sibling-only post-state understated or overstated."""
+    target = WorkingOrderV1("TICK-1", "target-a", "YES", D("7.50"), D("0.44"))
+    sibling = WorkingOrderV1("TICK-1", "sib-1", "YES", D("1.00"), D("0.44"))
+    _, pre_state, post_state = _expected_cancel_economic_sha256(
+        request_id="req_" + "1" * 32, strategy_instance_id="mm_" + "1" * 32, market_ticker="TICK-1",
+        quote_slot=QuoteSlot.LOWER_YES_BID.value, quote_generation_id="qg_" + "1" * 32, target=target,
+        client_order_id="11111111-1111-4111-8111-111111111111", fills=(), working_orders=(target, sibling),
+        unresolved_exposure_usd=D("0"), market_data_snapshot_sha256="a" * 64,
+        market_data_freshness_identity_sha256="b" * 64, reconciliation_snapshot_sha256="c" * 64,
+        reconciliation_freshness_identity_sha256="d" * 64,
+    )
+    assert pre_state.working_bid_quantity == D("8.50")
+    assert post_state.working_bid_quantity == D("1.00")
+    _assert_cancel_economic_hash_correct(target=target, working_orders=(target, sibling))
+
+
+def test_c8_8_target_side_flows_exactly_into_removal() -> None:
+    """The target is on the ASK side; removing it must reduce
+    working_ask_quantity, never working_bid_quantity. A target-side-ignored
+    bug that decremented the wrong side would mismatch the expected hash."""
+    target = WorkingOrderV1("TICK-1", "target-a", "NO", D("3.00"), D("0.60"))  # NO/ask leg
+    bid_sibling = WorkingOrderV1("TICK-1", "sib-bid", "YES", D("2.00"), D("0.44"))
+    _, pre_state, post_state = _expected_cancel_economic_sha256(
+        request_id="req_" + "1" * 32, strategy_instance_id="mm_" + "1" * 32, market_ticker="TICK-1",
+        quote_slot=QuoteSlot.UPPER_YES_ASK.value, quote_generation_id="qg_" + "1" * 32, target=target,
+        client_order_id="11111111-1111-4111-8111-111111111111", fills=(), working_orders=(target, bid_sibling),
+        unresolved_exposure_usd=D("0"), market_data_snapshot_sha256="a" * 64,
+        market_data_freshness_identity_sha256="b" * 64, reconciliation_snapshot_sha256="c" * 64,
+        reconciliation_freshness_identity_sha256="d" * 64,
+    )
+    assert pre_state.working_ask_quantity == D("3.00") and post_state.working_ask_quantity == D("0")
+    assert pre_state.working_bid_quantity == D("2.00") == post_state.working_bid_quantity
+    _assert_cancel_economic_hash_correct(
+        target=target, working_orders=(target, bid_sibling), quote_slot=QuoteSlot.UPPER_YES_ASK.value,
+    )
+
+
+# ---------------------------------------------------------------------------
+# The actual controlling MM07-TEST-ECON-001..007 (C1-C7) -- direct
+# eligibility-outcome tests, distinct from the C8 exact-reconstruction hazard
+# family above.
+# ---------------------------------------------------------------------------
+
+
+def _cancel_assessment(*, target: WorkingOrderV1, working_orders: tuple, fills: tuple = (), unresolved_exposure_usd=D("0")):
+    return build_cancel_writer_eligibility_assessment(
+        risk_assessment_id="ra_" + "1" * 32, request_id="req_" + "1" * 32,
+        strategy_instance_id="mm_" + "1" * 32, market_ticker="TICK-1", quote_slot=QuoteSlot.LOWER_YES_BID.value,
+        quote_generation_id="qg_" + "1" * 32, target_venue_order_id=target.order_id,
+        client_order_id="11111111-1111-4111-8111-111111111111",
+        authoritative_fills=fills, authoritative_working_orders=working_orders,
+        unresolved_exposure_usd=unresolved_exposure_usd, prepared_request_sha256="e" * 64, risk_config=risk_config(),
+        market_data_snapshot_sha256="a" * 64, market_data_freshness_identity_sha256="b" * 64,
+        reconciliation_snapshot_sha256="c" * 64, reconciliation_freshness_identity_sha256="d" * 64,
+        risk_state_epoch=1, freshness_deadline_monotonic_ns=999_999_999_999,
+    )
+
+
+def test_c1_pre_state_already_unsafe_is_ineligible() -> None:
+    """MM07-TEST-ECON-001 (C1): a valid exact target whose pre-cancel state
+    already violates ``max_abs_net_position_contracts`` (25 > the
+    configured 20) is ineligible -- even though exact target removal is
+    non-expansive under the frozen theorem, an already-unsafe pre-state is
+    never treated as if the violation were created by the removal."""
+    target = WorkingOrderV1("TICK-1", "target-a", "YES", D("25.00"), D("0.44"))
+    assessment = _cancel_assessment(target=target, working_orders=(target,))
+    assert assessment.eligible is False
+
+
+def test_c2_bid_removal_monotonic_across_signed_inventory_regimes() -> None:
+    """MM07-TEST-ECON-002 (C2): every valid single-BID-removal fixture is
+    monotone (``post_worst_case_abs_net_position <=
+    pre_worst_case_abs_net_position``) across negative, zero, and positive
+    signed net position, including a complete-removal fixture."""
+    import arb.venues.kalshi.quote_lifecycle as ql
+    from arb.venues.kalshi.risk_control import compute_market_economic_state
+
+    regimes = [
+        ("zero", D("0"), D("3.00")),      # interior removal, signed == 0
+        ("positive", D("4"), D("2.00")),  # interior removal, signed > 0
+        ("negative", D("-6"), D("6.00")),  # complete removal, signed < 0
+    ]
+    for _label, signed_position, bid_quantity in regimes:
+        fills = () if signed_position == D("0") else (
+            EconomicFillV1("TICK-1", f"seed-{signed_position}", "YES" if signed_position > 0 else "NO",
+                            abs(signed_position), D("0.50"), "2026-08-15T00:00:00.000000Z"),
+        )
+        target = WorkingOrderV1("TICK-1", "bid-target", "YES", bid_quantity, D("0.44"))
+        pre_state = compute_market_economic_state("TICK-1", fills, (target,))
+        post_state = compute_market_economic_state("TICK-1", fills, ())
+        assert ql._worst_case_abs_net_position(post_state) <= ql._worst_case_abs_net_position(pre_state)
+
+
+def test_c3_ask_removal_monotonic_across_signed_inventory_regimes() -> None:
+    """MM07-TEST-ECON-003 (C3): the same monotonicity proof for ASK-side
+    removal, across negative, zero, and positive signed net position."""
+    import arb.venues.kalshi.quote_lifecycle as ql
+    from arb.venues.kalshi.risk_control import compute_market_economic_state
+
+    regimes = [
+        ("zero", D("0"), D("3.00")),
+        ("negative", D("-4"), D("2.00")),
+        ("positive", D("6"), D("6.00")),
+    ]
+    for _label, signed_position, ask_quantity in regimes:
+        fills = () if signed_position == D("0") else (
+            EconomicFillV1("TICK-1", f"seed-{signed_position}", "YES" if signed_position > 0 else "NO",
+                            abs(signed_position), D("0.50"), "2026-08-15T00:00:00.000000Z"),
+        )
+        target = WorkingOrderV1("TICK-1", "ask-target", "NO", ask_quantity, D("0.60"))
+        pre_state = compute_market_economic_state("TICK-1", fills, (target,))
+        post_state = compute_market_economic_state("TICK-1", fills, ())
+        assert ql._worst_case_abs_net_position(post_state) <= ql._worst_case_abs_net_position(pre_state)
+
+
+def test_c4_working_and_gross_monotonicity_with_exact_decrements() -> None:
+    """MM07-TEST-ECON-004 (C4): exact target removal never increases
+    working_exposure_usd/working_order_count/working_contracts/market_gross
+    _exposure_usd, and working_order_count/working_contracts decrease by
+    exactly one order / exactly the target's remaining quantity."""
+    from arb.venues.kalshi.risk_control import compute_market_economic_state
+
+    target = WorkingOrderV1("TICK-1", "target-a", "YES", D("3.00"), D("0.44"))
+    sibling = WorkingOrderV1("TICK-1", "sib-1", "NO", D("2.00"), D("0.30"))
+    unresolved = D("1.50")
+    pre_state = compute_market_economic_state("TICK-1", (), (target, sibling))
+    post_state = compute_market_economic_state("TICK-1", (), (sibling,))
+
+    assert post_state.working_exposure_usd <= pre_state.working_exposure_usd
+    assert post_state.working_order_count == pre_state.working_order_count - 1
+    assert post_state.working_contracts == pre_state.working_contracts - target.remaining_quantity
+    assert post_state.working_contracts <= pre_state.working_contracts
+
+    def gross(state):
+        return state.filled_exposure_usd + state.working_exposure_usd + unresolved
+
+    assert gross(post_state) <= gross(pre_state)
+
+
+def test_c5_fill_derived_state_invariant_and_mutation_rejected() -> None:
+    """MM07-TEST-ECON-005 (C5): fill-derived state (filled_exposure_usd,
+    signed_net_position) is unchanged by target removal when the exact same
+    fill sequence is used for both states; a construction that instead
+    mutates a fill is directly rejected by the C8 hash-mismatch mechanism
+    (test_c8_4/test_c8_5 above)."""
+    from arb.venues.kalshi.risk_control import compute_market_economic_state
+
+    fills = (EconomicFillV1("TICK-1", "fill-1", "YES", D("2.00"), D("0.40"), "2026-08-15T00:00:00.000000Z"),)
+    target = WorkingOrderV1("TICK-1", "target-a", "NO", D("1.00"), D("0.30"))
+    pre_state = compute_market_economic_state("TICK-1", fills, (target,))
+    post_state = compute_market_economic_state("TICK-1", fills, ())
+    assert post_state.filled_exposure_usd == pre_state.filled_exposure_usd
+    assert post_state.signed_net_position == pre_state.signed_net_position
+
+
+def test_c6_safe_complete_two_state_proof_is_eligible() -> None:
+    """MM07-TEST-ECON-006 (C6): a complete, fresh, exact target-bound
+    assessment for which both states satisfy every controlling predicate
+    MAY yield ``eligible = True``."""
+    target = WorkingOrderV1("TICK-1", "target-a", "YES", D("1.00"), D("0.44"))
+    assessment = _cancel_assessment(target=target, working_orders=(target,))
+    assert assessment.eligible is True
+
+
+def test_c7_unknown_or_incomplete_truth_fails_closed() -> None:
+    """MM07-TEST-ECON-007 (C7): UNKNOWN_UNBOUNDED exposure, invalid/negative
+    exposure, and a missing or duplicate/conflicting exact target all remain
+    fail-closed/ineligible."""
+    from arb.venues.kalshi.risk_control import UNKNOWN_UNBOUNDED
+
+    target = WorkingOrderV1("TICK-1", "target-a", "YES", D("1.00"), D("0.44"))
+
+    unknown_exposure = _cancel_assessment(target=target, working_orders=(target,), unresolved_exposure_usd=UNKNOWN_UNBOUNDED)
+    assert unknown_exposure.eligible is False
+
+    negative_exposure = _cancel_assessment(target=target, working_orders=(target,), unresolved_exposure_usd=D("-1"))
+    assert negative_exposure.eligible is False
+
+    missing_target = _cancel_assessment(target=target, working_orders=())
+    assert missing_target.eligible is False
+
+    duplicate_a = WorkingOrderV1("TICK-1", "target-a", "YES", D("1.00"), D("0.44"))
+    duplicate_b = WorkingOrderV1("TICK-1", "target-a", "NO", D("2.00"), D("0.30"))
+    conflicting_target = _cancel_assessment(target=target, working_orders=(duplicate_a, duplicate_b))
+    assert conflicting_target.eligible is False
+
+
+def test_mm07_econ_single_removal_never_expands_worst_case_abs_net_position() -> None:
+    """MM07-ECON-001..004: direct regression for the frozen monotonicity
+    theorem across a spread of signed positions and working quantities --
+    removing any single working order can never increase
+    ``worst_case_abs_net_position`` relative to the pre-removal state. This
+    is the exact frozen-formula theorem that made the withdrawn Revision-06
+    case C mathematically impossible (MM07-SUPER-001/002)."""
+    from arb.venues.kalshi.risk_control import compute_market_economic_state
+    import arb.venues.kalshi.quote_lifecycle as ql
+
+    scenarios = [
+        (D("0"), (WorkingOrderV1("TICK-1", "a", "YES", D("3.00"), D("0.44")),)),
+        (D("5"), (WorkingOrderV1("TICK-1", "a", "NO", D("2.00"), D("0.30")),)),
+        (D("-4"), (
+            WorkingOrderV1("TICK-1", "a", "YES", D("6.00"), D("0.44")),
+            WorkingOrderV1("TICK-1", "b", "NO", D("1.00"), D("0.30")),
+        )),
+    ]
+    for signed_position, working_orders in scenarios:
+        fills = () if signed_position == D("0") else (
+            EconomicFillV1("TICK-1", "seed-fill", "YES" if signed_position > 0 else "NO",
+                            abs(signed_position), D("0.50"), "2026-08-15T00:00:00.000000Z"),
+        )
+        pre_state = compute_market_economic_state("TICK-1", fills, working_orders)
+        pre_worst = ql._worst_case_abs_net_position(pre_state)
+        for target in working_orders:
+            remaining = tuple(o for o in working_orders if o.order_id != target.order_id)
+            post_state = compute_market_economic_state("TICK-1", fills, remaining)
+            post_worst = ql._worst_case_abs_net_position(post_state)
+            assert post_worst <= pre_worst, (
+                f"removing {target.order_id} expanded worst-case abs net position: "
+                f"{pre_worst} -> {post_worst}"
+            )

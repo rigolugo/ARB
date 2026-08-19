@@ -65,7 +65,10 @@ from typing import Callable, Mapping, Sequence, Tuple
 from arb.execution_ledger import (
     AuthorityLedgerRelation,
     AuthorityNamespaceBinding,
+    EventInput,
+    EventType,
     LedgerError,
+    LockedLedger,
     OpenResult,
     RestartClassification,
     SafetyProjection,
@@ -93,12 +96,14 @@ from arb.venues.kalshi.ledger_binding import (
 from arb.venues.kalshi.risk_control import (
     EconomicFillV1,
     FreshnessStampV1,
+    NormalWriteAdapter,
     PriceRangeV1,
     RiskControlError,
     RiskLimitConfigV1,
     UNKNOWN_UNBOUNDED,
     WorkingOrderV1,
     WriterEligibilityGate,
+    build_orderbook_reference,
     compute_market_economic_state,
     validate_price_ranges,
 )
@@ -110,6 +115,47 @@ from arb.venues.kalshi.orderbook import (
     DEMO_PORT,
     KalshiNativeOrderBookSnapshot,
     OrderBookHalt,
+)
+from arb.venues.kalshi.order_lifecycle import (
+    SUPPORTED_ORDER_STATUSES,
+    SendOutcome,
+    check_cancel_conservation,
+    classify_cancel_response,
+)
+from arb.venues.kalshi.order_lifecycle import RawHttpResponse as LifecycleRawHttpResponse
+from arb.venues.kalshi.minimal_market_maker import (
+    QUOTE_QUANTITY,
+    DesiredQuoteV1,
+    MarketMakerEconomicTruthV1,
+    MarketMakerInputV1,
+    QuoteSlot as MMQuoteSlot,
+    SlotClassification,
+    build_economic_truth,
+    build_market_maker_config,
+    compute_mm_freshness_identity_sha256,
+    compute_price_grid_sha256,
+    evaluate_market_maker_input,
+)
+from arb.venues.kalshi.quote_lifecycle import (
+    QuoteAction,
+    QuoteLifecycleError,
+    ReconstructedSlotOwnershipV1,
+    SelectedWriteV1,
+    VenueBindingV1,
+    allocate_client_order_id,
+    build_cancel_prepared_payload,
+    build_cancel_writer_eligibility_assessment,
+    build_create_prepared_payload,
+    build_mm_cancel_intent_payload,
+    build_mm_create_intent_payload,
+    build_mm_create_order_body,
+    build_writer_eligibility_assessment,
+    candidate_for_desired_quote,
+    compare_slot,
+    issue_and_persist_write_permit,
+    reconstruct_slot_ownership,
+    select_write_action,
+    validate_cancel_request_binding,
 )
 
 __all__ = [
@@ -244,6 +290,19 @@ class RunnerFailureCode(enum.StrEnum):
     )
     NORMAL_WRITER_ACQUISITION_FAILED = "NORMAL_WRITER_ACQUISITION_FAILED"
     STAGE_3K_REVALIDATION_FAILED = "STAGE_3K_REVALIDATION_FAILED"
+
+    # Gate D -- Stage 4+ ordinary strategy write decision loop (dispatch
+    # KALSHI_DEMO_MINIMAL_TWO_SIDED_MARKET_MAKER_RUNNER_GATE_D_ORDINARY_STRATEGY_WRITE_LOOP_IMPLEMENTATION_CORRECTION_02,
+    # Spec 07).
+    GATE_D_ENTRY_PRECONDITION_FAILED = "GATE_D_ENTRY_PRECONDITION_FAILED"
+    GATE_D_READ_BUDGET_EXHAUSTED = "GATE_D_READ_BUDGET_EXHAUSTED"
+    GATE_D_ORDINARY_WRITE_BUDGET_EXHAUSTED = "GATE_D_ORDINARY_WRITE_BUDGET_EXHAUSTED"
+    GATE_D_STRATEGY_CUTOFF_EXCEEDED = "GATE_D_STRATEGY_CUTOFF_EXCEEDED"
+    GATE_D_ABSOLUTE_DEADLINE_EXCEEDED = "GATE_D_ABSOLUTE_DEADLINE_EXCEEDED"
+    GATE_D_HALTED = "GATE_D_HALTED"
+    GATE_D_CANCEL_TARGET_BINDING_INVALID = "GATE_D_CANCEL_TARGET_BINDING_INVALID"
+    GATE_D_FRESHNESS_EXPIRED_BEFORE_ADAPTER = "GATE_D_FRESHNESS_EXPIRED_BEFORE_ADAPTER"
+    GATE_D_STRATEGY_INPUT_CONSTRUCTION_FAILED = "GATE_D_STRATEGY_INPUT_CONSTRUCTION_FAILED"
 
 
 class RunnerError(RuntimeError):
@@ -1013,6 +1072,25 @@ class ExperimentRunnerRuntimeV1:
     # CONTRACT` would make Gate C's own acquisitions diverge from Gate B's
     # already-open contract in any non-production (synthetic-evidence) run.
     contract: LegacyIncidentContract
+    # Gate D closed bindings (all optional, defaulted to `None`, so every
+    # existing Gate A/B/C construction of this dataclass remains valid
+    # unchanged). None of these grants capability by itself -- Gate D's own
+    # entry preconditions (a genuine Stage-3K NORMAL_WRITER result) must
+    # still pass before any of them is used. There is deliberately no
+    # generic `compute_quote_decision`/quote-decision callback field here
+    # (MM07-CLAR-003): production Gate D always builds a real
+    # `MarketMakerInputV1` and calls the protected, unmodified
+    # `evaluate_market_maker_input` directly -- there is no substitutable
+    # strategy seam on this runtime at all.
+    strategy_instance_id: str | None = None
+    minimum_spread_usd: Decimal | None = None
+    gate_d_incident_id: str | None = None
+    gate_d_capability_reference_id: str | None = None
+    # The one narrow write-transport callable Gate D's `NormalWriteAdapter`
+    # is ever constructed with. Never a generic HTTP client, never
+    # caller-selectable per request -- exactly the same one-adapter-per-gate
+    # shape `risk_control.NormalWriteAdapter` already enforces.
+    normal_write_transport: Callable[[object], object] | None = None
 
     def __post_init__(self) -> None:
         if type(self.normal_gate) is not WriterEligibilityGate:
@@ -1098,12 +1176,14 @@ class PreReleaseReadCapabilityV1:
 
     __slots__ = (
         "__process_instance_id", "__ticker", "__runtime", "__consumed",
-        "__lock", "__ordinal", "__authoritative_order_ids",
+        "__lock", "__ordinal", "__authoritative_order_ids", "__budget_max", "__exhausted_code",
     )
 
     def __init__(
         self, issuance_key: object, *, process_instance_id: str, ticker: str,
         runtime: ExperimentRunnerRuntimeV1,
+        budget_max: int = PRE_RELEASE_READ_REQUEST_MAX,
+        exhausted_code: "RunnerFailureCode | None" = None,
     ) -> None:
         if issuance_key is not _CAPABILITY_ISSUANCE_KEY:
             raise RunnerError(RunnerFailureCode.CAPABILITY_ISSUANCE_UNAUTHORIZED)
@@ -1113,6 +1193,8 @@ class PreReleaseReadCapabilityV1:
             raise RunnerError(RunnerFailureCode.MARKET_IDENTITY_INVALID, detail="capability ticker")
         if type(runtime) is not ExperimentRunnerRuntimeV1:
             raise RunnerError(RunnerFailureCode.PRE_RELEASE_CAPABILITY_NOT_AUTHORIZED, detail="runtime type")
+        if type(budget_max) is not int or budget_max <= 0:
+            raise RunnerError(RunnerFailureCode.PRE_RELEASE_CAPABILITY_NOT_AUTHORIZED, detail="budget_max")
         self.__process_instance_id = process_instance_id
         self.__ticker = ticker
         self.__runtime = runtime
@@ -1120,6 +1202,8 @@ class PreReleaseReadCapabilityV1:
         self.__ordinal = 0
         self.__lock = threading.Lock()
         self.__authoritative_order_ids: set[str] = set()
+        self.__budget_max = budget_max
+        self.__exhausted_code = exhausted_code or RunnerFailureCode.PRE_RELEASE_READ_BUDGET_EXHAUSTED
 
     @property
     def requests_consumed(self) -> int:
@@ -1140,8 +1224,8 @@ class PreReleaseReadCapabilityV1:
 
     def _reserve(self) -> int:
         with self.__lock:
-            if self.__consumed >= PRE_RELEASE_READ_REQUEST_MAX:
-                raise RunnerError(RunnerFailureCode.PRE_RELEASE_READ_BUDGET_EXHAUSTED)
+            if self.__consumed >= self.__budget_max:
+                raise RunnerError(self.__exhausted_code)
             self.__consumed += 1
             self.__ordinal += 1
             return self.__ordinal
@@ -2370,3 +2454,1288 @@ def create_one_shot_marker(
         readback = handle.read()
     if readback != data:
         raise RunnerError(RunnerFailureCode.EXPERIMENT_AUTHORIZATION_CONSUMPTION_STATE_INVALID, detail="readback")
+
+
+# ---------------------------------------------------------------------------
+# Section 14 -- Gate D: Stage 4+ ordinary strategy write decision loop
+# (dispatch KALSHI_DEMO_MINIMAL_TWO_SIDED_MARKET_MAKER_RUNNER_GATE_D_
+# ORDINARY_STRATEGY_WRITE_LOOP_IMPLEMENTATION_CORRECTION_06, Spec 07 --
+# one narrow same-scope correction to the Marco-blocked Implementation
+# Correction 05 candidate 8afa3c63bf83b7597a0323fe86dbf160a52711de (itself a
+# correction to the Marco-blocked Correction 04 candidate
+# 8532486c23cdc9e0fd0336cafc38540cb284b071, which corrected the Marco-blocked
+# Correction 03 candidate 6311dea74b0c80787cf53efbdf8152592ad5d6ce, which
+# corrected the Marco-blocked Correction 02 candidate
+# cedfb6e0f3098b46d787660d276d5dd0b8847517, which corrected the Marco-blocked
+# Implementation 01 candidate 34136bcfec4f92f8a35ec9c12cb9dd9819836ac8),
+# freshly reconstructed on clean canonical base
+# 969bc79c312e45161371d6637e5c54326f349ddb; none of the five blocked
+# candidates is this file's ancestor).
+#
+# Four corrections relative to the Implementation 01 candidate (Spec 07
+# MM07-CLAR-001..004, all preserved unchanged), one correction relative to
+# the Correction 02 candidate (Correction 03 Defect 01, quote_lifecycle.py),
+# three corrections relative to the Correction 03 candidate (Correction 04
+# Defects 01-03), one further tightening relative to the Correction 04
+# candidate (Correction 05), and one further tightening relative to the
+# Correction 05 candidate (Correction 06), applied deliberately below:
+#
+#   1. CANCEL_THEN_RECONCILE_BEFORE_NEW is an ORDINARY STRATEGY write. It
+#      consumes ordinary_strategy_write_send_max, never cleanup_exact_
+#      cancel_send_max. This loop never selects a "cleanup" lane at all --
+#      that capacity is reserved for the separate termination/cleanup
+#      architecture this Gate-D loop does not implement or touch.
+#   2. A CANCEL/CREATE target is cleared only when the fresh authoritative
+#      post-send read reports an exact accepted terminal status
+#      (`"canceled"`/`"executed"`, taken from the protected canonical
+#      `order_lifecycle.SUPPORTED_ORDER_STATUSES`) -- never `status !=
+#      "resting"`.
+#   3. Production construction always builds a real `MarketMakerInputV1`
+#      and calls the protected, unmodified `evaluate_market_maker_input`
+#      directly (`_gate_d_build_quote_plan` below). There is no generic
+#      `compute_quote_decision` field or any other quote-logic-substitution
+#      seam anywhere on `ExperimentRunnerRuntimeV1` or in this loop.
+#   4. One ordinary send-budget unit is consumed the instant trusted T3
+#      (`WRITE_SEND_BOUNDARY_ENTERED`) durably commits -- before the final
+#      pre-adapter freshness recheck, before `adapter.invoke`, and
+#      regardless of adapter exceptions, HTTP outcome, or reconciliation
+#      result. Charging never depends on anything after T3.
+#   5. (Correction 03 Defect 01, quote_lifecycle.py) Every applicable
+#      MM07-ECON-005..009 transformation invariant between the exact
+#      reconstructed pre/post economic states is explicitly, load-bearingly
+#      validated before an ordinary CANCEL assessment may be eligible --
+#      never merely `post <= pre` and never satisfied by both states
+#      independently passing the configured maximum limits alone.
+#   6. (Correction 04 Defect 01) The returned CANCEL transport result is
+#      always routed through the protected canonical
+#      `order_lifecycle.classify_cancel_response` (`_gate_d_classify_
+#      cancel_result` below) -- an adapter call returning normally is never
+#      itself treated as a validated definitive success, and a malformed
+#      successful-looking response is never durably labeled
+#      `DEFINITIVE_SUCCESS`.
+#   7. (Correction 04 Defect 03) An authoritative terminal row is never
+#      accepted for closure purposes based only on `order_id`/`status`
+#      (`_gate_d_validate_terminal_order_identity` below) -- exact
+#      `order_id`, `client_order_id`, `ticker`, outcome side, account/
+#      exchange scope, and well-formed `status`/`fill_count_fp`/
+#      `remaining_count_fp`/`initial_count_fp` are all validated first, and
+#      the full validated row (not merely `order_id`/`status`/
+#      `remaining_count_fp`) is what gets durably retained as closure
+#      evidence.
+#   8. (Correction 04 Defect 02) `canceled` closure requires the protected
+#      canonical `order_lifecycle.check_cancel_conservation`, using ONLY
+#      the exact `reduced_by` value that itself already passed
+#      `classify_cancel_response` -- never
+#      `fill_count_fp + remaining_count_fp == 1.00` (no controlling
+#      artifact establishes that identity for Gate D), and never a
+#      GET_ORDER `remaining_count_fp` substituted for `reduced_by`.
+#      `executed` closure instead requires complete fresh fills proving
+#      full execution of the exact original quantity, independent of any
+#      CANCEL `reduced_by`. A fresh, independently re-fetched fill read for
+#      the exact target order (via the same closed GET_FILLS pagination
+#      machinery every ordinary decision cycle already uses) remains
+#      mandatory either way, incorporating any fill that raced the CANCEL
+#      send. HTTP success alone, or an exact terminal order-status read
+#      alone, never closes the slot (MM07-CLOSE-001).
+#   9. (Correction 05) The terminal-order identity validator
+#      (`_gate_d_validate_terminal_order_identity`) is fully fail-closed:
+#      `client_order_id` binding is now mandatory (never conditional on the
+#      field merely being present); `fill_count_fp`/`remaining_count_fp`/
+#      `initial_count_fp` are parsed only under the exact accepted
+#      FixedPointCount lexical grammar (unsigned, exactly two fractional
+#      digits -- never a bare JSON number, never `"1"`/`"1.0"`/`"1.000"`/
+#      exponent notation) and bounded (`0.00 <= fill_count_fp <= 1.00`,
+#      `0.00 <= remaining_count_fp <= 1.00`,
+#      `fill_count_fp + remaining_count_fp <= 1.00` -- a pure order-record
+#      self-consistency check, never a substitute for the protected
+#      `check_cancel_conservation` identity used separately for CANCEL
+#      closure); and the authoritative row's exact quote price is now
+#      bound against the strategy-owned target's `yes_price`. Works
+#      identically for both the LOWER_YES_BID and UPPER_YES_ASK slots.
+#   10. (Correction 06) The `subaccount`/`exchange_index` scope checks in
+#      `_gate_d_validate_terminal_order_identity` are now mandatory and
+#      exact-`int`-typed: `type(order_row["subaccount"]) is int` (never
+#      `isinstance`, since `bool` is a subclass of `int` in Python) and
+#      `order_row["subaccount"] == 0` are both required, and likewise for
+#      `exchange_index` -- a missing field, `False`, `True`, `0.0`, `"0"`,
+#      or any wrong int all leave the slot unresolved rather than being
+#      silently accepted or defaulted to `0`.
+# ---------------------------------------------------------------------------
+
+GATE_D_ORDINARY_WRITE_SEND_MAX = 4
+GATE_D_CLEANUP_CANCEL_SEND_MAX = 2  # reserved capacity; never consumed by this ordinary loop (MM07-CLAR-001)
+GATE_D_DECISION_CYCLE_MAX = 12
+GATE_D_READ_REQUEST_MAX = EXPERIMENT_READ_REQUEST_MAX  # 64 -- Section 2's preserved identity
+GATE_D_ORDINARY_WRITE_IN_FLIGHT_MAX = 1
+GATE_D_CLEANUP_CANCEL_IN_FLIGHT_MAX = 1
+GATE_D_STRATEGY_ACTIVITY_CUTOFF_SECONDS = 240
+GATE_D_ABSOLUTE_EXPERIMENT_DEADLINE_SECONDS = 300
+
+_GATE_D_QUOTE_SLOTS: Tuple[str, ...] = (MMQuoteSlot.LOWER_YES_BID.value, MMQuoteSlot.UPPER_YES_ASK.value)
+_GATE_D_KEEP_REPRICE_DISTANCE_GRID_STEPS = 2  # minimal_market_maker.py's own fixed constant, Spec 03/05 unreopened.
+_GATE_D_CANCEL_ADAPTER_PAYLOAD_SCHEMA_ID = "gate-d-cancel-v1"
+_GATE_D_CREATE_ADAPTER_PAYLOAD_SCHEMA_ID = "gate-d-create-v1"
+_GATE_D_CREATE_EXPIRATION_WINDOW_SECONDS = 21600
+# MM07-CLAR-002: the exact accepted authoritative terminal-status vocabulary,
+# derived from the protected canonical order_lifecycle.SUPPORTED_ORDER_
+# STATUSES rather than a locally-invented set -- never `status != "resting"`.
+_GATE_D_TERMINAL_ORDER_STATUSES: frozenset[str] = frozenset(SUPPORTED_ORDER_STATUSES) - {"resting"}
+
+
+@dataclass(frozen=True, slots=True)
+class GateDWriteOutcomeV1:
+    quote_slot: str
+    action: str  # "CANCEL" | "CREATE"
+    lane: str  # always "ORDINARY" -- MM07-CLAR-001, no cleanup lane in this loop
+    request_id: str
+    client_order_id: str
+    target_venue_order_id: str | None
+    assessment_eligible: bool
+    budget_charged: bool  # MM07-CLAR-004: true iff trusted T3 durably committed
+    transport_invoked: bool
+    result_classification: str
+    # ELIGIBLE_NOT_SENT | TARGET_BINDING_INVALID | PERMIT_ISSUANCE_FAILED |
+    # FRESHNESS_EXPIRED_BEFORE_ADAPTER | ADAPTER_EXCEPTION | TERMINAL |
+    # TERMINAL_UNRECONCILED | STILL_ACTIVE | BOUND_ACTIVE | AMBIGUOUS
+
+
+@dataclass(frozen=True, slots=True)
+class GateDCycleResultV1:
+    cycle_index: int
+    reads_consumed_after: int
+    actions_by_slot: Mapping[str, str]
+    selected_slot: str | None
+    selected_action: str | None
+    write_outcome: GateDWriteOutcomeV1 | None
+
+
+@dataclass(frozen=True, slots=True)
+class GateDLoopResultV1:
+    stop_reason: str
+    cycles_executed: int
+    reads_consumed: int
+    ordinary_writes_sent: int
+    cleanup_cancels_sent: int  # always 0 -- this loop never selects the cleanup lane
+    cycle_results: Tuple[GateDCycleResultV1, ...]
+
+
+def _issue_gate_d_read_capability(
+    *, process_instance_id: str, ticker: str, runtime: ExperimentRunnerRuntimeV1,
+) -> PreReleaseReadCapabilityV1:
+    """Module-private factory for Gate D's Stage-4+ read capability: the
+    exact same closed six-operation, REST-only, read-only surface as
+    Stage 3E's `PreReleaseReadCapabilityV1` -- no new venue operation, no
+    write method -- but budgeted against the Gate-D-scoped
+    `GATE_D_READ_REQUEST_MAX` (dispatch's preserved `read_request_max = 64`
+    identity) rather than Stage 3E's 16, and exhausted with
+    `GATE_D_READ_BUDGET_EXHAUSTED`. Called only by
+    `run_gate_d_ordinary_decision_loop`, and only after its own entry
+    preconditions (a genuine Stage-3K `NORMAL_WRITER` result) have already
+    passed."""
+
+    return PreReleaseReadCapabilityV1(
+        _CAPABILITY_ISSUANCE_KEY, process_instance_id=process_instance_id, ticker=ticker, runtime=runtime,
+        budget_max=GATE_D_READ_REQUEST_MAX, exhausted_code=RunnerFailureCode.GATE_D_READ_BUDGET_EXHAUSTED,
+    )
+
+
+def _gate_d_unresolved_exposure_usd(projection: "SafetyProjection", truth: AuthoritativeReadTruthV1) -> Decimal | str:
+    """Exactly the same conservative rule Stage 3F's `assemble_release_
+    evaluation_state` already uses (Section 11): provably zero only when
+    the durable unresolved-write count is zero AND fresh venue position
+    truth corroborates the independently-derived economic state;
+    `UNKNOWN_UNBOUNDED` otherwise. UNKNOWN is never treated as zero."""
+
+    durable_unresolved_count = projection.protected_unresolved_legacy_write_count + len(projection.unresolved_write_request_ids)
+    if durable_unresolved_count == 0 and truth.position_corroboration == "CORROBORATED":
+        return Decimal("0")
+    return UNKNOWN_UNBOUNDED
+
+
+def _gate_d_reconciliation_snapshot_object(truth: AuthoritativeReadTruthV1) -> Mapping[str, object]:
+    return {
+        "bound_order_ids": sorted(truth.bound_order_ids),
+        "fill_ids": sorted(fill.fill_id for fill in truth.fills),
+        "position_state": truth.position_state,
+    }
+
+
+def _gate_d_working_orders_map(
+    reconstructions: Mapping[str, ReconstructedSlotOwnershipV1],
+) -> Mapping[str, object]:
+    return {slot: reconstructions[slot].working_order for slot in _GATE_D_QUOTE_SLOTS}
+
+
+def _gate_d_read_order_status(
+    capability: PreReleaseReadCapabilityV1, *, order_id: str,
+) -> Tuple[str, Mapping[str, object]]:
+    """Exact authoritative post-send order read (MM07-CLAR-002): the raw
+    GET_ORDER status, never collapsed into "identity invalid" for a
+    genuinely terminal order the way the Stage-3E `get_order()` wrapper does
+    for its own (resting-only) purpose. Reuses the same closed request/
+    deadline/budget pipeline via the capability's own `_send_generic` -- no
+    new venue operation."""
+
+    parsed, _deadline = capability._send_generic(
+        RunnerOperation.GET_ORDER, path_parameters={"order_id": order_id},
+    )
+    obj = _require_dict(parsed, code=RunnerFailureCode.RESPONSE_SCHEMA_INVALID, detail="get_order top level")
+    order_row = _require_dict(
+        _require_field(obj, "order", code=RunnerFailureCode.RESPONSE_SCHEMA_INVALID),
+        code=RunnerFailureCode.RESPONSE_SCHEMA_INVALID, detail="order shape",
+    )
+    confirmed_id = _require_exact_str(
+        _require_field(order_row, "order_id", code=RunnerFailureCode.RESPONSE_SCHEMA_INVALID),
+        code=RunnerFailureCode.ORDER_IDENTITY_INVALID, detail="order_id type",
+    )
+    if confirmed_id != order_id:
+        raise RunnerError(RunnerFailureCode.ORDER_IDENTITY_INVALID, detail="order_id mismatch")
+    status = _require_field(order_row, "status", code=RunnerFailureCode.RESPONSE_SCHEMA_INVALID)
+    if type(status) is not str or not status:
+        # Missing/malformed status remains unresolved (MM07-CLAR-002 /
+        # MM07-TEST-CLOSURE 8) -- never promoted to a supported value.
+        return "", order_row
+    return status, order_row
+
+
+def _gate_d_record_closing_reconciliation(
+    locked: "LockedLedger", *, session_id: str, incident_id: str, bound_order_id: str,
+) -> None:
+    payload = {
+        "incident_id": incident_id, "disposition": "GATE_D_AUTHORITATIVE_TERMINAL",
+        "write_closure_class": "AUTHORITATIVE_RESULT_CLOSED", "bound_order_id": bound_order_id,
+        "created_order_upper_bound": 0, "active_order_upper_bound": 0, "unknown_result": False,
+        "writer_proof_release_eligible": True, "basis_event_ids": [],
+        "adapter_reconciliation_schema_id": "GATE_D_RECONCILIATION_V1",
+    }
+    locked.append_batch((EventInput(EventType.RECONCILIATION_RECORDED, payload, session_id, incident_id, None),))
+
+
+_GATE_D_TERMINAL_ORDER_EVIDENCE_FIELDS: Tuple[str, ...] = (
+    "order_id", "client_order_id", "ticker", "side", "status",
+    "fill_count_fp", "remaining_count_fp", "initial_count_fp",
+    "subaccount", "exchange_index", "yes_price_dollars",
+)
+
+
+def _gate_d_record_terminal_order_observation(
+    locked: "LockedLedger", *, session_id: str, venue_order_id: str, client_order_id: str, order_row: Mapping[str, object],
+) -> None:
+    """Record the fresh authoritative terminal observation
+    `reconstruct_slot_ownership` requires before a closing reconciliation
+    can classify a slot `TERMINAL_RECONCILED` rather than continuing to
+    read the order's last (pre-send) `resting` observation.
+
+    Correction 04 dispatch Sections 15/21: retains every closure-relevant
+    field actually present on the exact validated authoritative
+    ``order_row`` (identity, status, and all three fixed-point-count
+    fields) -- never reduced to only ``order_id``/``status``/
+    ``remaining_count_fp``, and never a synthesized ``"0.00"``/invented
+    value for any field. Only called after
+    `_gate_d_validate_terminal_order_identity` has already proven every one
+    of these fields present and well-formed."""
+
+    canonical_order = {
+        name: order_row[name] for name in _GATE_D_TERMINAL_ORDER_EVIDENCE_FIELDS if name in order_row
+    }
+    locked.append_batch((EventInput(EventType.ORDER_OBSERVED, {
+        "venue_order_id": venue_order_id, "client_order_id": client_order_id,
+        "source_request_id": f"gate-d-post-send-{venue_order_id}", "source_operation": "GET_ORDER_V2",
+        "venue_payload_schema_id": "gate-d-order-v1", "canonical_venue_payload": canonical_order,
+        "canonical_venue_payload_sha256": sha256_hex(canonical_json_bytes(canonical_order)),
+        "observation_semantic_class": "AUTHORITATIVE_TERMINAL_ORDER",
+    }, session_id, None, None),))
+
+
+def _gate_d_record_fill_observation(
+    locked: "LockedLedger", *, session_id: str, venue_order_id: str, client_order_id: str, fill: EconomicFillV1,
+) -> None:
+    """Persist one fresh authoritative post-CANCEL fill as evidence
+    (Correction 03 Defect 02 / MM07-CLOSE-001): binds the exact fill this
+    closure's reconciliation relied on into the same durable evidence chain
+    `_authoritative_terminal_reconciliation_exists` (quote_lifecycle.py)
+    already checks every `FILL_OBSERVED` sequence number against, so a
+    still-later race is always detectable on restart."""
+
+    canonical_fill = {
+        "fill_id": fill.fill_id, "order_id": venue_order_id, "outcome_side": fill.outcome_side,
+        "quantity": str(fill.quantity), "yes_price": str(fill.yes_price),
+        "created_time_utc": fill.authoritative_created_time_utc,
+    }
+    locked.append_batch((EventInput(EventType.FILL_OBSERVED, {
+        "venue_fill_id": fill.fill_id, "venue_order_id": venue_order_id, "client_order_id": client_order_id,
+        "source_request_id": f"gate-d-post-cancel-fill-{fill.fill_id}", "source_operation": "GET_FILLS_V2",
+        "venue_payload_schema_id": "gate-d-fill-v1", "canonical_venue_payload": canonical_fill,
+        "canonical_venue_payload_sha256": sha256_hex(canonical_json_bytes(canonical_fill)),
+    }, session_id, None, None),))
+
+
+def _gate_d_fetch_fresh_fills_for_order(
+    capability: PreReleaseReadCapabilityV1, *, ticker: str, order_id: str,
+) -> Tuple[Tuple[EconomicFillV1, ...], bool]:
+    """Fresh authoritative post-CANCEL fill evidence for the exact target
+    order (Correction 03 Defect 02 / MM07-CLOSE-001..002). Reuses the exact
+    same closed GET_FILLS pagination machinery `collect_authoritative_read_
+    truth` already uses for every ordinary decision cycle
+    (`_fetch_fills_for_order`) -- this is not a new or second reconciliation
+    engine. A full fresh fetch inherently incorporates any fill that raced
+    the CANCEL send, since it is never computed as a diff against a stale
+    pre-cancel snapshot."""
+
+    fills_by_id: dict[str, EconomicFillV1] = {}
+    complete = _fetch_fills_for_order(capability, ticker=ticker, order_id=order_id, fills_by_id=fills_by_id)
+    fills = tuple(sorted(fills_by_id.values(), key=lambda item: (item.authoritative_created_time_utc, item.fill_id)))
+    return fills, complete
+
+
+def _gate_d_nonnegative_decimal(value: object) -> Decimal | None:
+    """Correction 05 Section 17: the exact accepted FixedPointCount lexical
+    contract -- JSON string, unsigned ASCII decimal, exactly two fractional
+    digits, no sign, no exponent, no whitespace, never coerced from a JSON
+    number. Rejects `0`, `1`, `"1"`, `"1.0"`, `"1.000"`, `"1e0"`,
+    `"+1.00"`, `" 1.00"`; accepts only `"0.00"`-shaped strings. Uses the
+    same exact grammar `_gate_d_parse_cancel_fixed_point_count` already
+    applies to a validated Cancel V2 `reduced_by` -- one shared lexical
+    definition, never two independently interpreted representations."""
+
+    if type(value) is not str or _GATE_D_FIXED_POINT_COUNT_RE.fullmatch(value) is None:
+        return None
+    return Decimal(value)
+
+
+def _gate_d_price_decimal(value: object) -> Decimal | None:
+    """The same lax `FixedPointDollars`-shaped price representation
+    already accepted elsewhere in Gate D for `yes_price_dollars`
+    (`_decimal_from_price_string`), made non-raising for validator use."""
+
+    if type(value) is not str:
+        return None
+    try:
+        parsed = Decimal(value)
+    except InvalidOperation:
+        return None
+    if not parsed.is_finite() or parsed < Decimal("0") or parsed > Decimal("1"):
+        return None
+    return parsed
+
+
+def _gate_d_validate_terminal_order_identity(
+    order_row: Mapping[str, object], *, expected_order_id: str, expected_client_order_id: str,
+    expected_ticker: str, expected_outcome_side: str, expected_yes_price: Decimal,
+) -> str | None:
+    """Correction 04 Defect 03 / Correction 05 (dispatch Sections 14-23) /
+    Correction 06 (dispatch Sections 13-16): an authoritative terminal row
+    must never be accepted for closure purposes based on a partial
+    identity/scope check. Validates, in order: exact ``order_id``; exact
+    ``client_order_id`` -- MANDATORY, never conditional on the field merely
+    being present (Correction 05 Section 16); exact ``ticker``; exact
+    outcome side (the accepted Gate-D venue row has no separate bid/ask
+    field -- outcome side and venue side are bijectively coupled by the
+    fixed two-slot strategy, so this one check covers both); exact
+    account/exchange scope -- MANDATORY and exact-``int``-typed
+    (Correction 06 Section 14): ``type(order_row["subaccount"]) is int``
+    is required rather than ``isinstance`` because ``bool`` is a subclass
+    of ``int`` in Python, so an ``isinstance`` or bare ``!=`` check would
+    incorrectly accept ``False`` as equal to ``0``; a missing field, any
+    bool, any float, any string, and any wrong int are all rejected, and no
+    default is ever substituted for a missing field; exact supported
+    ``status``; the exact FixedPointCount lexical contract plus quantity
+    bounds and internal conservation for
+    ``fill_count_fp``/``remaining_count_fp``/``initial_count_fp``
+    (Correction 05 Sections 17/18 -- a pure order-record self-consistency
+    check, never a substitute for the protected `check_cancel_conservation`
+    identity used separately for CANCEL closure); and the exact strategy
+    quote price (Correction 05 Sections 19/20). Returns ``None`` only when
+    every check passes; any violation leaves the slot unresolved (never
+    fail-open)."""
+
+    if order_row.get("order_id") != expected_order_id:
+        return "ORDER_ID_MISMATCH"
+    client_order_id = order_row.get("client_order_id")
+    if client_order_id is None:
+        return "CLIENT_ORDER_ID_MISSING"
+    if client_order_id != expected_client_order_id:
+        return "CLIENT_ORDER_ID_MISMATCH"
+    if order_row.get("ticker") != expected_ticker:
+        return "TICKER_MISMATCH"
+    side = order_row.get("side")
+    outcome_side = {"yes": "YES", "no": "NO"}.get(side) if type(side) is str else None
+    if outcome_side != expected_outcome_side:
+        return "OUTCOME_SIDE_MISMATCH"
+    subaccount = order_row.get("subaccount")
+    if type(subaccount) is not int:
+        return "SUBACCOUNT_MISSING_OR_MALFORMED"
+    if subaccount != _SUBACCOUNT:
+        return "SUBACCOUNT_MISMATCH"
+    exchange_index = order_row.get("exchange_index")
+    if type(exchange_index) is not int:
+        return "EXCHANGE_INDEX_MISSING_OR_MALFORMED"
+    if exchange_index != _EXCHANGE_INDEX:
+        return "EXCHANGE_INDEX_MISMATCH"
+    status = order_row.get("status")
+    if status not in SUPPORTED_ORDER_STATUSES:
+        return "STATUS_UNSUPPORTED_OR_MALFORMED"
+
+    fill_count = _gate_d_nonnegative_decimal(order_row.get("fill_count_fp"))
+    if fill_count is None:
+        return "FILL_COUNT_FP_MISSING_OR_MALFORMED"
+    remaining_count = _gate_d_nonnegative_decimal(order_row.get("remaining_count_fp"))
+    if remaining_count is None:
+        return "REMAINING_COUNT_FP_MISSING_OR_MALFORMED"
+    initial_count = _gate_d_nonnegative_decimal(order_row.get("initial_count_fp"))
+    if initial_count is None:
+        return "INITIAL_COUNT_FP_MISSING_OR_MALFORMED"
+
+    if fill_count > QUOTE_QUANTITY:
+        return "FILL_COUNT_FP_OUT_OF_BOUNDS"
+    if remaining_count > QUOTE_QUANTITY:
+        return "REMAINING_COUNT_FP_OUT_OF_BOUNDS"
+    if fill_count + remaining_count > QUOTE_QUANTITY:
+        return "FILL_PLUS_REMAINING_EXCEEDS_QUANTITY"
+    if initial_count != QUOTE_QUANTITY:
+        return "INITIAL_COUNT_FP_NOT_FIXED_QUANTITY"
+
+    price = _gate_d_price_decimal(order_row.get("yes_price_dollars"))
+    if price is None:
+        return "PRICE_EVIDENCE_MISSING_OR_MALFORMED"
+    if price != expected_yes_price:
+        return "PRICE_MISMATCH"
+
+    return None
+
+
+def _gate_d_fresh_fill_reconciliation_violation(
+    *, order_row: Mapping[str, object], fresh_fills: Tuple[EconomicFillV1, ...],
+) -> str | None:
+    """MM07-CLOSE-001 (Correction 03/04): the independently re-fetched
+    fresh fill set must reconcile exactly to the order's own authoritative
+    ``fill_count_fp`` -- the same accounting identity
+    ``order_lifecycle.FillLedger.reconcile_against_order`` establishes as
+    canonical, applied here to Gate D's own two-sided, variable-price
+    working orders (that fixed-side/fixed-price protected helper cannot
+    validate directly). This is deliberately independent of any CANCEL-
+    response ``reduced_by`` value and independent of the withdrawn
+    ``fill_count_fp + remaining_count_fp == 1.00`` identity (Correction 04
+    Section 16) -- it only proves the fresh fill set is internally
+    consistent with the order's own bookkeeping."""
+
+    fill_count = _gate_d_nonnegative_decimal(order_row.get("fill_count_fp"))
+    if fill_count is None:
+        return "FILL_COUNT_FP_MISSING_OR_MALFORMED"
+    fresh_total = sum((fill.quantity for fill in fresh_fills), Decimal("0"))
+    if fresh_total != fill_count:
+        return "FRESH_FILL_TOTAL_DOES_NOT_RECONCILE_TO_ORDER"
+    return None
+
+
+_GATE_D_FIXED_POINT_COUNT_RE = re.compile(r"^[0-9]+\.[0-9]{2}$")
+
+
+def _gate_d_parse_cancel_fixed_point_count(value: object) -> Decimal | None:
+    """The exact same FixedPointCount representation the protected
+    `order_lifecycle.classify_cancel_response` already accepts/rejects for
+    `reduced_by` (Correction 04 Section 17) -- never a second,
+    independently interpreted representation. By the time this is called,
+    `classify_cancel_response` has already proven this exact string parses
+    under this exact grammar (it returns SEND_MAY_HAVE_BEGUN_UNKNOWN
+    otherwise), so this re-parses rather than re-validates it."""
+
+    if type(value) is not str or _GATE_D_FIXED_POINT_COUNT_RE.fullmatch(value) is None:
+        return None
+    return Decimal(value)
+
+
+def _gate_d_classify_cancel_result(
+    raw_response: object, *, expected_order_id: str, expected_client_order_id: str,
+) -> Tuple["SendOutcome", Mapping[str, object]]:
+    """Correction 04 Defect 01 (dispatch Sections 12-14): route the
+    returned CANCEL transport result through the protected canonical
+    `classify_cancel_response` -- an adapter call returning normally is
+    never itself treated as a validated definitive success. Builds the
+    exact `order_lifecycle.RawHttpResponse` evidence carrier that
+    classifier requires; never duplicates or rewrites its validation logic
+    locally."""
+
+    body: Mapping[str, object] = {}
+    http_status = 0
+    if type(raw_response) is RawOperationResponseV1 and not raw_response.transport_unknown:
+        http_status = raw_response.http_status
+        try:
+            parsed = _strict_json_loads(raw_response.body_bytes.decode("utf-8"))
+        except (RunnerError, UnicodeDecodeError):
+            parsed = None
+        if type(parsed) is dict:
+            body = parsed
+        disposition = (
+            SendOutcome.DEFINITIVE_SUCCESS if http_status == 200 and type(parsed) is dict
+            else SendOutcome.DEFINITIVE_RESPONSE_AFTER_SEND
+        )
+    else:
+        disposition = SendOutcome.SEND_MAY_HAVE_BEGUN_UNKNOWN
+
+    lifecycle_raw = LifecycleRawHttpResponse(
+        status=http_status, body=body, media_type="application/json", retry_count=0, redirect_count=0,
+        send_result_classification=disposition,
+    )
+    outcome = classify_cancel_response(
+        lifecycle_raw, expected_order_id=expected_order_id, expected_client_order_id=expected_client_order_id,
+    )
+    return outcome, body
+
+
+def _gate_d_record_order_identity_and_observation(
+    locked: "LockedLedger", *, session_id: str, incident_id: str, client_order_id: str,
+    venue_order_id: str, market_ticker: str, outcome_side: str, remaining_count_fp: str, yes_price_dollars: str,
+) -> None:
+    locked.append_batch((EventInput(EventType.ORDER_IDENTITY_BOUND, {
+        "client_order_id": client_order_id, "venue_order_id": venue_order_id, "venue": "KALSHI",
+        "environment": "KALSHI_DEMO", "incident_id": incident_id, "binding_basis_event_ids": [],
+    }, session_id, incident_id, None),))
+    canonical_order = {
+        "order_id": venue_order_id, "status": "resting", "remaining_count_fp": remaining_count_fp,
+        "market": market_ticker, "outcome_side": outcome_side, "yes_price": yes_price_dollars,
+    }
+    locked.append_batch((EventInput(EventType.ORDER_OBSERVED, {
+        "venue_order_id": venue_order_id, "client_order_id": client_order_id,
+        "source_request_id": f"gate-d-{venue_order_id}", "source_operation": "GET_ORDER_V2",
+        "venue_payload_schema_id": "gate-d-order-v1", "canonical_venue_payload": canonical_order,
+        "canonical_venue_payload_sha256": sha256_hex(canonical_json_bytes(canonical_order)),
+        "observation_semantic_class": "AUTHORITATIVE_ACTIVE_ORDER",
+    }, session_id, None, None),))
+
+
+def _gate_d_record_http_response_classified(
+    locked: "LockedLedger", *, session_id: str, request_id: str, raw_response: object, write_closure_class: str,
+    adapter_result_class: str = "DEFINITIVE_RESPONSE_AFTER_SEND", validated_identity_fields: Mapping[str, object] | None = None,
+) -> None:
+    """Close the ledger's own WRITE_SEND_BOUNDARY_ENTERED bookkeeping
+    (`SafetyProjection.unresolved_write_request_ids`) for this exact
+    request. This is independent of, and always chronologically after,
+    Gate D's own ordinary-send-budget charge (MM07-CLAR-004): the budget is
+    already consumed by the time this runs. Only `write_closure_class in
+    {"NO_SEND_PROVEN", "AUTHORITATIVE_RESULT_CLOSED"}` clears the durable
+    unresolved-write set; every other value (in particular "UNRESOLVED")
+    leaves the request durably unresolved, blocking a future fresh Gate-D/
+    Gate-C re-entry until genuinely reconciled.
+
+    `adapter_result_class` carries the actual protected classifier outcome
+    (e.g. the exact `SendOutcome` value) when the caller has one, rather
+    than always the generic default. `validated_identity_fields` retains
+    the exact validated result-evidence fields (Correction 04 Section 15) --
+    for a validated definitive CANCEL success this is `order_id`,
+    `reduced_by`, `ts_ms`, and `client_order_id` when present -- using this
+    existing allowed evidence structure rather than a new persistent event
+    field or schema."""
+
+    if type(raw_response) is RawOperationResponseV1:
+        http_status = raw_response.http_status
+        body = raw_response.body_bytes
+    else:
+        http_status = 0
+        body = b""
+    payload = {
+        "request_id": request_id, "http_status": http_status, "response_media_type": "application/json",
+        "response_byte_length": len(body), "response_sha256": sha256_hex(body),
+        "adapter_result_class": adapter_result_class, "write_closure_class": write_closure_class,
+        "validated_identity_fields": dict(validated_identity_fields) if validated_identity_fields else {},
+    }
+    locked.append_batch((EventInput(EventType.HTTP_RESPONSE_CLASSIFIED, payload, session_id, None, None),))
+
+
+def _gate_d_extract_created_order_id(raw_response: object, *, expected_client_order_id: str) -> str | None:
+    """Parse Gate D's own internal CREATE transport-response contract for
+    the venue-assigned order id. This identity is ordinary send-result
+    evidence (receiving it back is how the strategy learns a new order's
+    identity at all); it is never treated as authoritative *state* --
+    `_gate_d_execute_create` still requires a fresh authoritative GET_ORDER
+    read reporting `"resting"` before binding it."""
+
+    if (
+        type(raw_response) is not RawOperationResponseV1
+        or raw_response.transport_unknown
+        or raw_response.http_status != 200
+    ):
+        return None
+    try:
+        parsed = _strict_json_loads(raw_response.body_bytes.decode("utf-8"))
+    except (RunnerError, UnicodeDecodeError):
+        return None
+    if type(parsed) is not dict:
+        return None
+    order = parsed.get("order")
+    if type(order) is not dict:
+        return None
+    order_id = order.get("order_id")
+    if type(order_id) is not str or not order_id:
+        return None
+    client_order_id = order.get("client_order_id")
+    if client_order_id is not None and client_order_id != expected_client_order_id:
+        return None
+    return order_id
+
+
+# ---------------------------------------------------------------------------
+# MM07-CLAR-003 -- production strategy binding. This is the ONLY place Gate D
+# ever calls the protected, unmodified `evaluate_market_maker_input`. There is
+# no other route into strategy planning and no caller-substitutable seam.
+# ---------------------------------------------------------------------------
+
+
+def _gate_d_build_quote_plan(
+    *,
+    runtime: ExperimentRunnerRuntimeV1,
+    invocation: ExperimentRunnerInvocationV1,
+    truth: AuthoritativeReadTruthV1,
+    reconstructions: Mapping[str, ReconstructedSlotOwnershipV1],
+    projection: "SafetyProjection",
+) -> "QuotePlanV1":
+    """Build a genuine `MarketMakerInputV1` from this cycle's fresh
+    authoritative truth and durable ledger state, and evaluate it through
+    the protected canonical `evaluate_market_maker_input`. This is
+    production Gate D's only strategy-planning path (MM07-CLAR-003) -- no
+    generic quote-decision callback exists anywhere in this module."""
+
+    process_instance_id = runtime.normal_gate.process_instance_id
+    now_ns = runtime.monotonic_clock_ns()
+    now_utc = canonical_timestamp(runtime.wall_clock())
+
+    try:
+        strategy_config = build_market_maker_config(
+            strategy_instance_id=runtime.strategy_instance_id, market_ticker=invocation.market_ticker,
+            minimum_spread_usd=runtime.minimum_spread_usd,
+        )
+        price_ranges = _parse_price_ranges(truth.market.get("price_ranges"))
+        price_grid_sha256 = compute_price_grid_sha256(price_ranges)
+
+        book_snapshot = truth.orderbook
+        if type(book_snapshot) is not KalshiNativeOrderBookSnapshot:
+            raise RunnerError(RunnerFailureCode.GATE_D_STRATEGY_INPUT_CONSTRUCTION_FAILED, detail="book_snapshot type")
+        book_snapshot_sha256 = book_snapshot.canonical_snapshot_sha256
+        book_freshness = FreshnessStampV1(process_instance_id, now_utc, now_ns, "NONE", None, book_snapshot_sha256)
+
+        reconciliation_snapshot_sha256 = sha256_hex(canonical_json_bytes(_gate_d_reconciliation_snapshot_object(truth)))
+        reconciliation_freshness = FreshnessStampV1(process_instance_id, now_utc, now_ns, "NONE", None, reconciliation_snapshot_sha256)
+
+        market_economic_state = compute_market_economic_state(invocation.market_ticker, truth.fills, truth.working_orders)
+        unresolved_write_exposure_usd = _gate_d_unresolved_exposure_usd(projection, truth)
+        signed_inventory_known = unresolved_write_exposure_usd != UNKNOWN_UNBOUNDED
+        fill_history_completeness = "COMPLETE" if truth.fills_complete else "INCOMPLETE"
+        reconciliation_completeness = (
+            "COMPLETE" if truth.orders_complete and truth.position_corroboration == "CORROBORATED" else "INCOMPLETE"
+        )
+        economic_truth = build_economic_truth(
+            signed_inventory_state="KNOWN" if signed_inventory_known else "UNKNOWN",
+            unresolved_write_exposure_usd=unresolved_write_exposure_usd,
+            fill_history_completeness=fill_history_completeness,
+            reconciliation_completeness=reconciliation_completeness,
+            signed_net_position_contracts=market_economic_state.signed_net_position if signed_inventory_known else None,
+            market_economic_state=market_economic_state,
+            unresolved_write_request_ids=tuple(projection.unresolved_write_request_ids),
+            protected_unresolved_legacy_write_count=projection.protected_unresolved_legacy_write_count,
+            fill_identity_conflict_ids=tuple(projection.fill_conflicts),
+        )
+
+        strategy_working_orders = tuple(
+            reconstructions[slot].working_order for slot in _GATE_D_QUOTE_SLOTS if reconstructions[slot].working_order is not None
+        )
+        slot_classifications = {slot: reconstructions[slot].classification for slot in _GATE_D_QUOTE_SLOTS}
+
+        market_maker_input = MarketMakerInputV1(
+            strategy_config=strategy_config, book_snapshot=book_snapshot, book_snapshot_sha256=book_snapshot_sha256,
+            book_freshness=book_freshness, price_ranges=price_ranges, price_grid_sha256=price_grid_sha256,
+            risk_control_state=projection.risk_control_state, risk_state_epoch=projection.risk_state_epoch,
+            risk_config=runtime.risk_config, risk_config_sha256=runtime.risk_config.sha256,
+            reconciliation_snapshot_sha256=reconciliation_snapshot_sha256, reconciliation_freshness=reconciliation_freshness,
+            economic_truth=economic_truth, strategy_working_orders=strategy_working_orders,
+            slot_classifications=slot_classifications, process_instance_id=process_instance_id,
+            now_monotonic_ns=now_ns, now_utc=now_utc,
+        )
+    except (RiskControlError, ValueError) as exc:
+        raise RunnerError(RunnerFailureCode.GATE_D_STRATEGY_INPUT_CONSTRUCTION_FAILED) from exc
+
+    return evaluate_market_maker_input(market_maker_input)
+
+
+# ---------------------------------------------------------------------------
+# MM07-CANCEL-001..003 / MM07-PERMIT-001..003 / MM07-CLAR-002/004 -- the
+# ordinary CANCEL send sequence, corrected for exact terminal classification
+# and trusted-T3 budget charging.
+# ---------------------------------------------------------------------------
+
+
+def _gate_d_execute_cancel(
+    *,
+    locked: "LockedLedger",
+    session_id: str,
+    capability: PreReleaseReadCapabilityV1,
+    adapter: NormalWriteAdapter,
+    runtime: ExperimentRunnerRuntimeV1,
+    invocation: ExperimentRunnerInvocationV1,
+    projection: "SafetyProjection",
+    truth: AuthoritativeReadTruthV1,
+    reconstruction: ReconstructedSlotOwnershipV1,
+    selected: SelectedWriteV1,
+) -> GateDWriteOutcomeV1:
+    """Exact Spec-06/07 ordinary CANCEL send sequence: fresh economic proof
+    (with load-bearing transformation-invariant validation, Correction 03
+    Defect 01), exact target/request binding, genuine one-shot permit
+    T0->T1->T2->T3, ordinary send-budget charge the instant T3 durably
+    commits, final pre-adapter freshness/target recheck, at most one
+    transport invocation, then the protected canonical
+    `classify_cancel_response` result classification (Correction 04 Defect
+    01), exact terminal-order identity validation (Correction 04 Defect
+    03), a fresh independently-refetched fill reconciliation (Correction 03
+    Defect 02), and closure via the protected canonical
+    `check_cancel_conservation` using only the exact validated `reduced_by`
+    that itself passed the classifier for `canceled`, or complete fresh
+    fill proof of full execution for `executed` (Correction 04 Defect 02) --
+    an exact terminal status alone, HTTP success alone, or a
+    fill_count_fp/remaining_count_fp identity no controlling artifact
+    establishes, never closes the slot (MM07-CLOSE-001)."""
+
+    working_order = reconstruction.working_order
+    target_venue_order_id = selected.target_venue_order_id
+    request_id = f"req_{runtime.uuid_factory().hex}"
+    execution_attempt_id = f"ea_{runtime.uuid_factory().hex}"
+    conflict_domain_ref = locked.conflict_domain_ref
+
+    reconciliation_snapshot_sha256 = sha256_hex(canonical_json_bytes(_gate_d_reconciliation_snapshot_object(truth)))
+    market_data_object = _market_data_snapshot(truth.market, truth.orderbook)
+    market_data_snapshot_sha256 = sha256_hex(canonical_json_bytes(market_data_object))
+    now_ns = runtime.monotonic_clock_ns()
+    now_utc = canonical_timestamp(runtime.wall_clock())
+    process_instance_id = runtime.normal_gate.process_instance_id
+    market_data_freshness_identity_sha256 = compute_mm_freshness_identity_sha256(
+        FreshnessStampV1(process_instance_id, now_utc, now_ns, "NONE", None, market_data_snapshot_sha256),
+    )
+    reconciliation_freshness_identity_sha256 = compute_mm_freshness_identity_sha256(
+        FreshnessStampV1(process_instance_id, now_utc, now_ns, "NONE", None, reconciliation_snapshot_sha256),
+    )
+    freshness_deadline_monotonic_ns = now_ns + OPERATION_DEADLINE_MS * 1_000_000
+
+    prepared = build_cancel_prepared_payload(
+        request_id=request_id, environment="KALSHI_DEMO", venue_order_id=target_venue_order_id,
+        client_order_id=working_order.client_order_id, adapter_payload_schema_id=_GATE_D_CANCEL_ADAPTER_PAYLOAD_SCHEMA_ID,
+    )
+    unresolved_exposure_usd = _gate_d_unresolved_exposure_usd(projection, truth)
+    assessment = build_cancel_writer_eligibility_assessment(
+        risk_assessment_id=f"ra_{runtime.uuid_factory().hex}", request_id=request_id,
+        strategy_instance_id=runtime.strategy_instance_id, market_ticker=invocation.market_ticker,
+        quote_slot=selected.quote_slot, quote_generation_id=working_order.quote_generation_id,
+        target_venue_order_id=target_venue_order_id, client_order_id=working_order.client_order_id,
+        authoritative_fills=truth.fills, authoritative_working_orders=truth.working_orders,
+        unresolved_exposure_usd=unresolved_exposure_usd, prepared_request_sha256=prepared["prepared_request_sha256"],
+        risk_config=runtime.risk_config, market_data_snapshot_sha256=market_data_snapshot_sha256,
+        market_data_freshness_identity_sha256=market_data_freshness_identity_sha256,
+        reconciliation_snapshot_sha256=reconciliation_snapshot_sha256,
+        reconciliation_freshness_identity_sha256=reconciliation_freshness_identity_sha256,
+        risk_state_epoch=projection.risk_state_epoch, freshness_deadline_monotonic_ns=freshness_deadline_monotonic_ns,
+    )
+    outer_intent = build_mm_cancel_intent_payload(
+        execution_attempt_id=execution_attempt_id, conflict_domain_ref=conflict_domain_ref,
+        incident_id=runtime.gate_d_incident_id, client_order_id=working_order.client_order_id,
+        capability_reference_id=runtime.gate_d_capability_reference_id, request_id=request_id,
+        strategy_instance_id=runtime.strategy_instance_id, market_ticker=invocation.market_ticker,
+        quote_slot=selected.quote_slot, quote_generation_id=working_order.quote_generation_id,
+        target_venue_order_id=target_venue_order_id, reconciliation_snapshot_sha256=reconciliation_snapshot_sha256,
+    )
+
+    def _outcome(*, budget_charged: bool, transport_invoked: bool, classification: str) -> GateDWriteOutcomeV1:
+        return GateDWriteOutcomeV1(
+            selected.quote_slot, "CANCEL", "ORDINARY", request_id, working_order.client_order_id,
+            target_venue_order_id, assessment.eligible, budget_charged, transport_invoked, classification,
+        )
+
+    # Pre-T1: malformed intent or target mismatch never reaches the ledger.
+    try:
+        validate_cancel_request_binding(
+            outer_intent_payload=outer_intent, prepared_payload=prepared, assessment=assessment,
+            target_venue_order_id=target_venue_order_id,
+        )
+    except QuoteLifecycleError:
+        return _outcome(budget_charged=False, transport_invoked=False, classification="TARGET_BINDING_INVALID")
+
+    if not assessment.eligible:
+        return _outcome(budget_charged=False, transport_invoked=False, classification="ELIGIBLE_NOT_SENT")
+
+    # MM07-CLAR-004: budget is charged the instant trusted T3 durably
+    # commits below -- never before (a failure here charges nothing) and
+    # never contingent on anything that happens afterward.
+    try:
+        permit = issue_and_persist_write_permit(
+            gate=runtime.normal_gate, locked=locked, normal_writer_session_id=session_id, assessment=assessment,
+            outer_intent_payload=outer_intent, prepared_payload=prepared,
+        )
+    except (RiskControlError, LedgerError):
+        return _outcome(budget_charged=False, transport_invoked=False, classification="PERMIT_ISSUANCE_FAILED")
+
+    # Trusted T3 has now committed: the ordinary send-budget unit is spent
+    # regardless of everything that follows.
+    budget_charged = True
+
+    # Final pre-adapter freshness and target-binding recheck (dispatch
+    # Section 20 / MM07-PERMIT-002/003). If freshness expires after T3 but
+    # before adapter entry, transport must not be called and no replacement
+    # CREATE may follow -- but the budget unit charged above stands.
+    try:
+        validate_cancel_request_binding(
+            outer_intent_payload=outer_intent, prepared_payload=prepared, assessment=assessment,
+            target_venue_order_id=target_venue_order_id,
+        )
+    except QuoteLifecycleError:
+        return _outcome(budget_charged=budget_charged, transport_invoked=False, classification="TARGET_BINDING_INVALID")
+    if runtime.monotonic_clock_ns() > permit.freshness_deadline_monotonic_ns:
+        return _outcome(budget_charged=budget_charged, transport_invoked=False, classification="FRESHNESS_EXPIRED_BEFORE_ADAPTER")
+
+    try:
+        raw_response = adapter.invoke(permit, prepared)
+    except Exception:
+        # trusted T3 + adapter exception => budget already consumed above;
+        # the request may or may not have reached the venue (write-ambiguity
+        # boundary), so the slot remains conservatively unresolved -- no
+        # reconciliation write, no replacement, no blind retry.
+        return _outcome(budget_charged=budget_charged, transport_invoked=True, classification="ADAPTER_EXCEPTION")
+
+    # Correction 04 Defect 01 (dispatch Sections 12-14): route the returned
+    # result through the protected canonical classify_cancel_response --
+    # an adapter call returning normally is never itself treated as a
+    # validated definitive success.
+    cancel_send_outcome, cancel_result_body = _gate_d_classify_cancel_result(
+        raw_response, expected_order_id=target_venue_order_id, expected_client_order_id=working_order.client_order_id,
+    )
+    trustworthy_reduced_by: Decimal | None = None
+    validated_identity_fields: dict[str, object] = {}
+    if cancel_send_outcome is SendOutcome.DEFINITIVE_SUCCESS:
+        # Correction 04 Section 15: retain the exact validated result
+        # evidence so restart/review can recover the exact reduced_by this
+        # closure relied on, using the existing HTTP_RESPONSE_CLASSIFIED
+        # validated_identity_fields structure -- no new schema.
+        trustworthy_reduced_by = _gate_d_parse_cancel_fixed_point_count(cancel_result_body.get("reduced_by"))
+        validated_identity_fields = {
+            "order_id": cancel_result_body.get("order_id"), "reduced_by": cancel_result_body.get("reduced_by"),
+            "ts_ms": cancel_result_body.get("ts_ms"),
+        }
+        if "client_order_id" in cancel_result_body:
+            validated_identity_fields["client_order_id"] = cancel_result_body.get("client_order_id")
+
+    # MM07-CLOSE-001/MM07-CLAR-002: an exact supported terminal order status
+    # is necessary but never sufficient to close the slot. HTTP success
+    # alone does not clear it, a terminal order-status read alone does not
+    # clear it, and (Correction 04) neither does a fill_count_fp/
+    # remaining_count_fp identity that no controlling artifact establishes,
+    # nor a GET_ORDER remaining_count_fp substituted for reduced_by.
+    classification = "AMBIGUOUS"
+    try:
+        status, order_row = _gate_d_read_order_status(capability, order_id=target_venue_order_id)
+    except RunnerError as exc:
+        if exc.code is RunnerFailureCode.GATE_D_READ_BUDGET_EXHAUSTED:
+            raise
+        status = ""
+        order_row = {}
+
+    if status in _GATE_D_TERMINAL_ORDER_STATUSES:
+        fresh_fills: Tuple[EconomicFillV1, ...] = ()
+        # Correction 04 Defect 03: exact terminal-order identity/scope
+        # validation before the row may contribute to closure at all.
+        identity_violation = _gate_d_validate_terminal_order_identity(
+            order_row, expected_order_id=target_venue_order_id, expected_client_order_id=working_order.client_order_id,
+            expected_ticker=invocation.market_ticker, expected_outcome_side=working_order.outcome_side,
+            expected_yes_price=working_order.yes_price,
+        )
+        if identity_violation is not None:
+            classification = "TERMINAL_UNRECONCILED"
+        else:
+            try:
+                fresh_fills, fills_complete = _gate_d_fetch_fresh_fills_for_order(
+                    capability, ticker=invocation.market_ticker, order_id=target_venue_order_id,
+                )
+            except RunnerError as exc:
+                if exc.code is RunnerFailureCode.GATE_D_READ_BUDGET_EXHAUSTED:
+                    raise
+                fresh_fills, fills_complete = (), False
+
+            if not fills_complete:
+                classification = "TERMINAL_UNRECONCILED"
+            elif _gate_d_fresh_fill_reconciliation_violation(order_row=order_row, fresh_fills=fresh_fills) is not None:
+                classification = "TERMINAL_UNRECONCILED"
+            else:
+                fresh_total = sum((fill.quantity for fill in fresh_fills), Decimal("0"))
+                if status == "canceled":
+                    # Correction 04 Defect 02 (dispatch Section 16): the
+                    # protected canonical check_cancel_conservation, using
+                    # ONLY the exact reduced_by value that itself already
+                    # passed the protected classifier -- never
+                    # fill_count_fp + remaining_count_fp == 1.00, never a
+                    # second independently interpreted reduced_by, never a
+                    # GET_ORDER remaining_count_fp substitute.
+                    if trustworthy_reduced_by is None:
+                        classification = "TERMINAL_UNRECONCILED"
+                    else:
+                        conservation_halt = check_cancel_conservation(
+                            final_fill_quantity=fresh_total, reduced_by=trustworthy_reduced_by,
+                        )
+                        classification = "TERMINAL_UNRECONCILED" if conservation_halt is not None else "TERMINAL"
+                else:
+                    # status == "executed" (dispatch Sections 19/25):
+                    # closure requires complete fresh fills proving full
+                    # execution of the exact original quantity --
+                    # independent of any CANCEL reduced_by. The actual
+                    # CANCEL result classification is preserved separately
+                    # (validated_identity_fields/adapter_result_class)
+                    # regardless of this outcome.
+                    classification = "TERMINAL" if fresh_total == QUOTE_QUANTITY else "TERMINAL_UNRECONCILED"
+
+        if classification == "TERMINAL":
+            _gate_d_record_terminal_order_observation(
+                locked, session_id=session_id, venue_order_id=target_venue_order_id,
+                client_order_id=working_order.client_order_id, order_row=order_row,
+            )
+            for fill in fresh_fills:
+                _gate_d_record_fill_observation(
+                    locked, session_id=session_id, venue_order_id=target_venue_order_id,
+                    client_order_id=working_order.client_order_id, fill=fill,
+                )
+            _gate_d_record_closing_reconciliation(
+                locked, session_id=session_id, incident_id=runtime.gate_d_incident_id, bound_order_id=target_venue_order_id,
+            )
+    elif status == "resting":
+        classification = "STILL_ACTIVE"
+    # any other status (missing/malformed/unsupported) stays "AMBIGUOUS" --
+    # unresolved/fail-closed (MM07-CLAR-002).
+
+    _gate_d_record_http_response_classified(
+        locked, session_id=session_id, request_id=request_id, raw_response=raw_response,
+        write_closure_class="AUTHORITATIVE_RESULT_CLOSED" if classification == "TERMINAL" else "UNRESOLVED",
+        adapter_result_class=cancel_send_outcome.value, validated_identity_fields=validated_identity_fields,
+    )
+
+    return _outcome(budget_charged=budget_charged, transport_invoked=True, classification=classification)
+
+
+def _gate_d_execute_create(
+    *,
+    locked: "LockedLedger",
+    session_id: str,
+    capability: PreReleaseReadCapabilityV1,
+    adapter: NormalWriteAdapter,
+    runtime: ExperimentRunnerRuntimeV1,
+    invocation: ExperimentRunnerInvocationV1,
+    projection: "SafetyProjection",
+    truth: AuthoritativeReadTruthV1,
+    reconstruction: ReconstructedSlotOwnershipV1,
+    selected: SelectedWriteV1,
+    desired: DesiredQuoteV1 | None,
+    quote_plan_sha256: str,
+    plan_input_sha256: str,
+    source_book_snapshot_sha256: str,
+) -> GateDWriteOutcomeV1:
+    """Exact ordinary CREATE send sequence, structurally parallel to
+    `_gate_d_execute_cancel`, reusing the unmodified canonical
+    `build_writer_eligibility_assessment` candidate-risk projection
+    (MM-RISK-002..006, not reopened by Spec 06/07)."""
+
+    if desired is None or type(desired) is not DesiredQuoteV1:
+        raise RunnerError(RunnerFailureCode.GATE_D_STRATEGY_INPUT_CONSTRUCTION_FAILED, detail="missing desired for CREATE_NEW")
+
+    client_order_id = allocate_client_order_id(persisted_client_order_id=reconstruction.persisted_client_order_id)
+    request_id = f"req_{runtime.uuid_factory().hex}"
+    execution_attempt_id = f"ea_{runtime.uuid_factory().hex}"
+    conflict_domain_ref = locked.conflict_domain_ref
+    process_instance_id = runtime.normal_gate.process_instance_id
+
+    reconciliation_snapshot_sha256 = sha256_hex(canonical_json_bytes(_gate_d_reconciliation_snapshot_object(truth)))
+    market_data_object = _market_data_snapshot(truth.market, truth.orderbook)
+    market_data_snapshot_sha256 = sha256_hex(canonical_json_bytes(market_data_object))
+    now_ns = runtime.monotonic_clock_ns()
+    now_utc = canonical_timestamp(runtime.wall_clock())
+    market_data_freshness_identity_sha256 = compute_mm_freshness_identity_sha256(
+        FreshnessStampV1(process_instance_id, now_utc, now_ns, "NONE", None, market_data_snapshot_sha256),
+    )
+    reconciliation_freshness_identity_sha256 = compute_mm_freshness_identity_sha256(
+        FreshnessStampV1(process_instance_id, now_utc, now_ns, "NONE", None, reconciliation_snapshot_sha256),
+    )
+    unresolved_exposure_usd = _gate_d_unresolved_exposure_usd(projection, truth)
+
+    venue_binding = VenueBindingV1(adapter_payload_schema_id=_GATE_D_CREATE_ADAPTER_PAYLOAD_SCHEMA_ID)
+    expiration_time = int(runtime.wall_clock().timestamp()) + _GATE_D_CREATE_EXPIRATION_WINDOW_SECONDS
+    body = build_mm_create_order_body(
+        ticker=invocation.market_ticker, client_order_id=client_order_id, venue_side=desired.venue_side,
+        yes_price=desired.yes_price, quantity=desired.quantity, expiration_time=expiration_time, venue_binding=venue_binding,
+    )
+    prepared = build_create_prepared_payload(
+        request_id=request_id, environment="KALSHI_DEMO", client_order_id=client_order_id,
+        canonical_body=body, venue_binding=venue_binding,
+    )
+    market_economic_state = compute_market_economic_state(invocation.market_ticker, truth.fills, truth.working_orders)
+    candidate = candidate_for_desired_quote(market_ticker=invocation.market_ticker, desired=desired)
+    assessment = build_writer_eligibility_assessment(
+        risk_assessment_id=f"ra_{runtime.uuid_factory().hex}", request_id=request_id, candidate=candidate,
+        market_economic_state=market_economic_state, unresolved_exposure=unresolved_exposure_usd,
+        risk_config=runtime.risk_config, prepared_request_sha256=prepared["prepared_request_sha256"],
+        market_data_snapshot_sha256=market_data_snapshot_sha256,
+        market_data_freshness_identity_sha256=market_data_freshness_identity_sha256,
+        reconciliation_snapshot_sha256=reconciliation_snapshot_sha256,
+        reconciliation_freshness_identity_sha256=reconciliation_freshness_identity_sha256,
+        risk_state_epoch=projection.risk_state_epoch,
+        freshness_deadline_monotonic_ns=now_ns + OPERATION_DEADLINE_MS * 1_000_000,
+    )
+    outer_intent = build_mm_create_intent_payload(
+        execution_attempt_id=execution_attempt_id, conflict_domain_ref=conflict_domain_ref,
+        incident_id=runtime.gate_d_incident_id, client_order_id=client_order_id,
+        capability_reference_id=runtime.gate_d_capability_reference_id, request_id=request_id,
+        strategy_instance_id=runtime.strategy_instance_id, market_ticker=invocation.market_ticker,
+        quote_slot=selected.quote_slot, quote_generation_id=desired.quote_generation_id,
+        quote_plan_sha256=quote_plan_sha256, plan_input_sha256=plan_input_sha256,
+        source_book_snapshot_sha256=source_book_snapshot_sha256, risk_config_sha256=runtime.risk_config.sha256,
+        risk_state_epoch=projection.risk_state_epoch, reconciliation_snapshot_sha256=reconciliation_snapshot_sha256,
+        venue_side=desired.venue_side, outcome_side=desired.outcome_side, yes_price=desired.yes_price,
+        quantity=desired.quantity,
+    )
+
+    def _outcome(*, budget_charged: bool, transport_invoked: bool, classification: str, venue_order_id: str | None = None) -> GateDWriteOutcomeV1:
+        return GateDWriteOutcomeV1(
+            selected.quote_slot, "CREATE", "ORDINARY", request_id, client_order_id,
+            venue_order_id, assessment.eligible, budget_charged, transport_invoked, classification,
+        )
+
+    if not assessment.eligible:
+        return _outcome(budget_charged=False, transport_invoked=False, classification="ELIGIBLE_NOT_SENT")
+
+    try:
+        permit = issue_and_persist_write_permit(
+            gate=runtime.normal_gate, locked=locked, normal_writer_session_id=session_id, assessment=assessment,
+            outer_intent_payload=outer_intent, prepared_payload=prepared,
+        )
+    except (RiskControlError, LedgerError):
+        return _outcome(budget_charged=False, transport_invoked=False, classification="PERMIT_ISSUANCE_FAILED")
+
+    budget_charged = True
+
+    if runtime.monotonic_clock_ns() > permit.freshness_deadline_monotonic_ns:
+        return _outcome(budget_charged=budget_charged, transport_invoked=False, classification="FRESHNESS_EXPIRED_BEFORE_ADAPTER")
+
+    try:
+        raw_response = adapter.invoke(permit, prepared)
+    except Exception:
+        return _outcome(budget_charged=budget_charged, transport_invoked=True, classification="ADAPTER_EXCEPTION")
+
+    venue_order_id = _gate_d_extract_created_order_id(raw_response, expected_client_order_id=client_order_id)
+    classification = "AMBIGUOUS"
+    if venue_order_id is not None:
+        try:
+            status, order_row = _gate_d_read_order_status(capability, order_id=venue_order_id)
+        except RunnerError as exc:
+            if exc.code is RunnerFailureCode.GATE_D_READ_BUDGET_EXHAUSTED:
+                raise
+            status = ""
+            order_row = {}
+        if status == "resting":
+            # Dispatch Section 16: use the real authoritative returned order
+            # record, not an invented/desired value, when it is present and
+            # well-formed.
+            raw_remaining_count_fp = order_row.get("remaining_count_fp")
+            _gate_d_record_order_identity_and_observation(
+                locked, session_id=session_id, incident_id=runtime.gate_d_incident_id, client_order_id=client_order_id,
+                venue_order_id=venue_order_id, market_ticker=invocation.market_ticker, outcome_side=desired.outcome_side,
+                remaining_count_fp=raw_remaining_count_fp if type(raw_remaining_count_fp) is str else str(desired.quantity),
+                yes_price_dollars=str(desired.yes_price),
+            )
+            classification = "BOUND_ACTIVE"
+
+    _gate_d_record_http_response_classified(
+        locked, session_id=session_id, request_id=request_id, raw_response=raw_response,
+        write_closure_class="AUTHORITATIVE_RESULT_CLOSED" if classification == "BOUND_ACTIVE" else "UNRESOLVED",
+    )
+
+    return _outcome(budget_charged=budget_charged, transport_invoked=True, classification=classification, venue_order_id=venue_order_id)
+
+
+def run_gate_d_ordinary_decision_loop(
+    stage3: "_Stage3ReleaseAndNormalWriterResultV1",
+    runtime: ExperimentRunnerRuntimeV1,
+    invocation: ExperimentRunnerInvocationV1,
+    *,
+    decision_cycle_max: int = GATE_D_DECISION_CYCLE_MAX,
+) -> GateDLoopResultV1:
+    """Gate D entrypoint: the bounded Stage-4+ ordinary strategy write
+    decision loop. Begins only from a genuine, still-open Stage-3K
+    `_Stage3ReleaseAndNormalWriterResultV1` -- the real historical incident
+    (`protected_unresolved_legacy_write_count` permanently 1) can never
+    reach this function at all, because Gate C's own Stage-3C/3K predicates
+    already reject it before RELEASE_ONLY, exactly as they did before Gate D
+    existed (Spec 07 MM07-HIST-001). This function adds no new persistent
+    event type, table, authority, or writer gate -- every durable mutation
+    goes through the unmodified canonical `WriterEligibilityGate`/
+    `LockedLedger.append_batch` surface. Production strategy planning is
+    always the real `evaluate_market_maker_input` pipeline
+    (`_gate_d_build_quote_plan`) -- there is no substitutable seam."""
+
+    if type(stage3) is not _Stage3ReleaseAndNormalWriterResultV1:
+        raise RunnerError(RunnerFailureCode.GATE_D_ENTRY_PRECONDITION_FAILED, detail="stage3 type")
+    acquisition = stage3.normal_writer_acquisition
+    if (
+        type(acquisition) is not NormalWriterAcquisition
+        or acquisition.handle is None
+        or acquisition.handle.closed
+        or stage3.normal_writer_session_id != acquisition.normal_writer_session_id
+    ):
+        raise RunnerError(RunnerFailureCode.GATE_D_ENTRY_PRECONDITION_FAILED, detail="normal_writer_acquisition")
+    locked = acquisition.handle
+    session_id = stage3.normal_writer_session_id
+    projection = locked.projection()
+    if (
+        projection.risk_control_state != "WRITER_ELIGIBLE"
+        or projection.active_writer_session_id != session_id
+        or projection.protected_unresolved_legacy_write_count != 0
+        or projection.unresolved_write_request_ids
+    ):
+        # Stage-4 never begins unless Stage 3K completed with a genuine
+        # current NORMAL_WRITER session and zero durable unresolved writes
+        # -- including the real historical incident, which this predicate
+        # rejects unconditionally.
+        raise RunnerError(RunnerFailureCode.GATE_D_ENTRY_PRECONDITION_FAILED, detail="projection")
+    if (
+        type(runtime) is not ExperimentRunnerRuntimeV1
+        or type(runtime.strategy_instance_id) is not str or not runtime.strategy_instance_id
+        or type(runtime.minimum_spread_usd) is not Decimal
+        or type(runtime.gate_d_incident_id) is not str or not runtime.gate_d_incident_id
+        or type(runtime.gate_d_capability_reference_id) is not str or not runtime.gate_d_capability_reference_id
+        or not callable(runtime.normal_write_transport)
+        or type(runtime.risk_config) is not RiskLimitConfigV1
+    ):
+        raise RunnerError(RunnerFailureCode.GATE_D_ENTRY_PRECONDITION_FAILED, detail="runtime gate-d bindings")
+    if type(invocation) is not ExperimentRunnerInvocationV1:
+        raise RunnerError(RunnerFailureCode.GATE_D_ENTRY_PRECONDITION_FAILED, detail="invocation type")
+    if type(decision_cycle_max) is not int or not (0 < decision_cycle_max <= GATE_D_DECISION_CYCLE_MAX):
+        raise RunnerError(RunnerFailureCode.GATE_D_ENTRY_PRECONDITION_FAILED, detail="decision_cycle_max")
+
+    capability = _issue_gate_d_read_capability(
+        process_instance_id=runtime.normal_gate.process_instance_id, ticker=invocation.market_ticker, runtime=runtime,
+    )
+    adapter = NormalWriteAdapter(runtime.normal_gate, runtime.normal_write_transport)
+
+    loop_start_ns = runtime.monotonic_clock_ns()
+    cutoff_ns = GATE_D_STRATEGY_ACTIVITY_CUTOFF_SECONDS * 1_000_000_000
+    ordinary_writes_sent = 0
+    cleanup_cancels_sent = 0  # never incremented -- MM07-CLAR-001, no cleanup lane in this loop
+    cycle_results: list[GateDCycleResultV1] = []
+    stop_reason = "DECISION_CYCLE_BUDGET_EXHAUSTED"
+
+    for cycle_index in range(1, decision_cycle_max + 1):
+        now_ns = runtime.monotonic_clock_ns()
+        if now_ns - loop_start_ns >= cutoff_ns:
+            stop_reason = "STRATEGY_CUTOFF_EXCEEDED"
+            break
+        if now_ns >= runtime.experiment_absolute_end_monotonic_ns:
+            stop_reason = "ABSOLUTE_DEADLINE_EXCEEDED"
+            break
+
+        live_projection = locked.projection()
+        if live_projection.risk_control_state != "WRITER_ELIGIBLE" or live_projection.active_writer_session_id != session_id:
+            # MM07-HALT-001: ordinary strategy CANCEL/CREATE both stop at
+            # HALT. Emergency exact-target cancellation remains owned
+            # exclusively by the separate EMERGENCY_CONTROL_ONLY
+            # architecture -- never routed through here.
+            stop_reason = "HALTED"
+            break
+
+        try:
+            truth = collect_authoritative_read_truth(capability, ticker=invocation.market_ticker)
+        except RunnerError as exc:
+            if exc.code is RunnerFailureCode.GATE_D_READ_BUDGET_EXHAUSTED:
+                stop_reason = "READ_BUDGET_EXHAUSTED"
+                break
+            raise
+
+        reconstructions = {
+            slot: reconstruct_slot_ownership(
+                locked.events, strategy_instance_id=runtime.strategy_instance_id,
+                market_ticker=invocation.market_ticker, quote_slot=slot,
+            )
+            for slot in _GATE_D_QUOTE_SLOTS
+        }
+
+        # MM07-CLAR-003: the ONLY strategy-planning call in production Gate D.
+        plan = _gate_d_build_quote_plan(
+            runtime=runtime, invocation=invocation, truth=truth, reconstructions=reconstructions, projection=live_projection,
+        )
+        plan_valid = plan.plan_classification == "VALID_DESIRED_STATE"
+        desired_by_slot = {
+            MMQuoteSlot.LOWER_YES_BID.value: plan.lower_quote,
+            MMQuoteSlot.UPPER_YES_ASK.value: plan.upper_quote,
+        }
+        reference = None
+        try:
+            reference = build_orderbook_reference(
+                tuple((level.price, level.quantity) for level in truth.orderbook.yes_levels),
+                tuple((level.price, level.quantity) for level in truth.orderbook.no_levels),
+            )
+        except RiskControlError:
+            reference = None
+        best_yes_bid = reference.best_yes_bid if reference is not None else None
+        best_yes_ask = reference.best_yes_ask if reference is not None else None
+        price_ranges = _parse_price_ranges(truth.market.get("price_ranges"))
+
+        actions: dict[str, QuoteAction] = {
+            slot: compare_slot(
+                desired=desired_by_slot[slot], plan_valid=plan_valid,
+                classification=reconstructions[slot].classification, working_order=reconstructions[slot].working_order,
+                price_ranges=price_ranges, keep_reprice_distance_grid_steps=_GATE_D_KEEP_REPRICE_DISTANCE_GRID_STEPS,
+                best_yes_bid=best_yes_bid, best_yes_ask=best_yes_ask,
+                risk_control_state=live_projection.risk_control_state,
+            )
+            for slot in _GATE_D_QUOTE_SLOTS
+        }
+
+        working_orders_map = _gate_d_working_orders_map(reconstructions)
+        try:
+            selected = select_write_action(actions, working_orders_map)
+        except QuoteLifecycleError:
+            # MM06-TARGET-001: no exact proven target for a selected CANCEL
+            # -> zero ordinary CANCEL sends this cycle, never a fallback
+            # targeting mechanism.
+            selected = None
+
+        write_outcome: GateDWriteOutcomeV1 | None = None
+        budget_stop = False
+        if selected is not None:
+            # MM07-CLAR-001: CANCEL_EXISTING, CANCEL_THEN_RECONCILE_BEFORE_
+            # NEW, and CREATE_NEW are ALL ordinary strategy writes -- there
+            # is no cleanup lane in this loop at all.
+            if ordinary_writes_sent >= GATE_D_ORDINARY_WRITE_SEND_MAX:
+                stop_reason = "ORDINARY_WRITE_BUDGET_EXHAUSTED"
+                budget_stop = True
+            elif selected.action == "CANCEL":
+                write_outcome = _gate_d_execute_cancel(
+                    locked=locked, session_id=session_id, capability=capability, adapter=adapter, runtime=runtime,
+                    invocation=invocation, projection=live_projection, truth=truth,
+                    reconstruction=reconstructions[selected.quote_slot], selected=selected,
+                )
+                if write_outcome.budget_charged:
+                    ordinary_writes_sent += 1
+            else:
+                write_outcome = _gate_d_execute_create(
+                    locked=locked, session_id=session_id, capability=capability, adapter=adapter, runtime=runtime,
+                    invocation=invocation, projection=live_projection, truth=truth,
+                    reconstruction=reconstructions[selected.quote_slot], selected=selected,
+                    desired=desired_by_slot[selected.quote_slot],
+                    quote_plan_sha256=plan.plan_sha256, plan_input_sha256=plan.plan_input_sha256,
+                    source_book_snapshot_sha256=plan.source_book_snapshot_sha256,
+                )
+                if write_outcome.budget_charged:
+                    ordinary_writes_sent += 1
+
+        cycle_results.append(GateDCycleResultV1(
+            cycle_index, capability.requests_consumed, dict(actions),
+            selected.quote_slot if selected else None, selected.action if selected else None, write_outcome,
+        ))
+        if budget_stop:
+            break
+    else:
+        stop_reason = "DECISION_CYCLE_BUDGET_EXHAUSTED"
+
+    return GateDLoopResultV1(
+        stop_reason=stop_reason, cycles_executed=len(cycle_results), reads_consumed=capability.requests_consumed,
+        ordinary_writes_sent=ordinary_writes_sent, cleanup_cancels_sent=cleanup_cancels_sent,
+        cycle_results=tuple(cycle_results),
+    )
