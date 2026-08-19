@@ -436,3 +436,81 @@ Entry schema: Decision ID, Candidate ID (if applicable), Bound artifact identiti
 - Superseded decisions: none (Documentation Sync 01 was blocked before reaching canonical effect; this correction does not supersede a `DECISION_LOG.md` entry because Documentation Sync 01's own preparation was never separately logged as a decision prior to being blocked).
 - User approval reference: "PROCEED with the correction."
 - Authorizes further work: `NO` — this decision explicitly does not authorize Gate D, and grants no venue, credential, or execution capability.
+
+### DEC-0036 — Spec-07 acceptance
+- Candidate ID: `KALSHI_DEMO_MINIMAL_TWO_SIDED_MARKET_MAKER_SPEC_07`
+- Bound artifact identities: `KALSHI_DEMO_MINIMAL_TWO_SIDED_MARKET_MAKER_SPEC_07.md` (41916 bytes, sha256 `ec16676b35ab9eb9ca08f0fd54b105dc2086636724f5a4924ea5965794c48360`); `HANDOFF_KALSHI_DEMO_MINIMAL_TWO_SIDED_MARKET_MAKER_SPEC_07.md` (14322 bytes, sha256 `74faabd42e8e8416115700e8812115c11151c7a55f5733b39089ce3b82853796`)
+- Date: 2026-08-19
+- Decision: Marco accepted Spec 07 as the latest controlling Gate-D market-maker specification. Spec 07 incorporates Spec 06 except for its exact explicit supersession map; Spec 06 remains controlling only where Spec 07 preserves it.
+- Status: `ACCEPTED`
+- Rationale: Establishes the exact controlling specification lineage for Gate-D Correction-06 without converting specification acceptance into execution authority.
+- Evidence: ART-0095 through ART-0098 and Marco's accepted-specification provenance supplied in the exact current task dispatch.
+- Scope affected: Gate-D market-maker specification lineage only.
+- Superseded decisions: none; Spec 06 is incorporated subject to Spec 07's exact supersession map.
+- User approval reference: n/a (Marco specification review decision, not a venue authorization).
+- Authorizes further work: `NO` — no execution authorization follows from specification acceptance.
+
+### DEC-0037 — Correction-06 implementation approval
+- Candidate ID: `35916c62a0867e59e3954b4b35b6cfdec597b64c`
+- Candidate tree: `b3d48463cb1334a49dbe3427d127c027dff5e038`
+- Candidate parent: `969bc79c312e45161371d6637e5c54326f349ddb`
+- Date: 2026-08-19
+- Decision: Marco formal decision `APPROVE` of `KALSHI_DEMO_MINIMAL_TWO_SIDED_MARKET_MAKER_RUNNER_GATE_D_ORDINARY_STRATEGY_WRITE_LOOP_IMPLEMENTATION_CORRECTION_06` at the exact candidate identity above.
+- Status: `ACCEPTED`
+- Rationale: Correction-06 conformed to the accepted Spec-07/Spec-06 lineage and the bounded Gate-D implementation scope. Implementation 01 and Corrections 02 through 05 were Marco-blocked, non-canonical, never installed, and absent from Correction-06 ancestry.
+- Evidence: exact candidate/tree/parent and installed path identities in ART-0099 through ART-0102; accepted offline evidence of 774 focused passes and 2734 full-repository passes plus 395 subtests, with zero failures and no venue/credential activity; `project_context/AUTHORIZATION_LOG.md` AUTH-0029.
+- Scope affected: exact Gate-D Correction-06 candidate only.
+- Superseded decisions: none; blocked predecessor candidates remain historical non-canonical lineage.
+- User approval reference: Marco's formal `APPROVE` recorded by the exact current task dispatch.
+- Authorizes further work: `NO` — implementation approval does not authorize Demo or production execution.
+
+### DEC-0038 — Remote-review branch equivalence
+- Candidate ID: `35916c62a0867e59e3954b4b35b6cfdec597b64c`
+- Date: 2026-08-19
+- Decision: Marco formal decision `APPROVE` of temporary branch `review/gate-d-spec07-correction-06-35916c62` as exactly equivalent to the approved Correction-06 candidate.
+- Status: `ACCEPTED`
+- Rationale: Marco independently verified the branch tip was the exact approved candidate; it was one commit ahead of then-current `main`; its merge base was exact `969bc79c312e45161371d6637e5c54326f349ddb`; it changed exactly the four approved Gate-D paths with the four approved blob identities; remote `main` remained unchanged during review; and no PR or merge occurred.
+- Evidence: independent remote review provenance supplied in the exact current task dispatch; ART-0099 through ART-0102; `project_context/AUTHORIZATION_LOG.md` AUTH-0030.
+- Scope affected: remote equivalence of the exact approved Gate-D candidate only.
+- Superseded decisions: none.
+- User approval reference: Marco's independent remote-review `APPROVE`.
+- Authorizes further work: `NO` — remote equivalence alone does not authorize canonical installation or venue execution.
+
+### DEC-0039 — User canonical-installation authorization
+- Candidate ID: `35916c62a0867e59e3954b4b35b6cfdec597b64c`
+- Date: 2026-08-19
+- Decision: Gustavo's direct project-chat instruction "proceed , but provide a prompt for claude to do a remote review install, you will review the temporary branch, then you will commit to main" authorized only the exact bounded flow that occurred: Claude temporary review branch; Marco independent remote review; and, if exact, Marco non-force fast-forward of `main`.
+- Status: `ACCEPTED`
+- Rationale: Separately authorized canonical installation after exact remote equivalence review, without expanding the reviewed commit or venue capability.
+- Evidence: Gustavo's exact direct project-chat instruction; DEC-0038; `project_context/AUTHORIZATION_LOG.md` AUTH-0031.
+- Scope affected: non-force installation of the exact approved Gate-D candidate only.
+- Superseded decisions: none.
+- User approval reference: exact quoted instruction above.
+- Authorizes further work: `YES` only for the completed bounded canonical installation; `NO` for venue execution or any later phase.
+
+### DEC-0040 — Canonical Gate-D installation
+- Candidate ID: `35916c62a0867e59e3954b4b35b6cfdec597b64c`
+- Date: 2026-08-19
+- Decision: Marco performed the authorized non-force update of canonical `main` from `969bc79c312e45161371d6637e5c54326f349ddb` to `35916c62a0867e59e3954b4b35b6cfdec597b64c`.
+- Status: `ACCEPTED`
+- Post-install tree: `b3d48463cb1334a49dbe3427d127c027dff5e038`
+- Post-install parent: `969bc79c312e45161371d6637e5c54326f349ddb`
+- Rationale: Exact non-force fast-forward installation; no merge commit, replacement commit, squash, or rebase. The review branch and `main` were identical after installation.
+- Evidence: exact canonical Git identities independently verified by this documentation task; DEC-0038/DEC-0039; `project_context/AUTHORIZATION_LOG.md` AUTH-0031.
+- Scope affected: canonical installation of Gate-D Correction-06 only.
+- Superseded decisions: none.
+- User approval reference: see DEC-0039.
+- Activity: venue activity `NONE`; credential activity `NONE`.
+- Authorizes further work: `NO` — canonical installation does not authorize execution.
+
+### DEC-0041 — Gate-D documentation-sync authorization
+- Candidate ID: n/a (documentation-only)
+- Date: 2026-08-19
+- Decision: Gustavo's current project-chat instruction `"proceed"`, following Marco's recommendation to perform `ARB_CANONICAL_DOCUMENTATION_STATE_SYNC_THROUGH_GATE_D_01`, authorizes this bounded documentation task only.
+- Status: `ACCEPTED`
+- Rationale: Synchronizes the four canonical governance records through the already-reviewed and already-installed Gate-D state while preserving the historical writer hold and current capability prohibitions.
+- Evidence: Gustavo's exact current-chat instruction and task dispatch; `project_context/AUTHORIZATION_LOG.md` AUTH-0032.
+- Scope affected: exactly `project_context/PROJECT_STATE.md`, `project_context/ARTIFACT_INDEX.md`, `project_context/DECISION_LOG.md`, and `project_context/AUTHORIZATION_LOG.md`.
+- Superseded decisions: none.
+- User approval reference: `"proceed"`; `ARB_CANONICAL_DOCUMENTATION_STATE_SYNC_THROUGH_GATE_D_01`.
+- Authorizes further work: `NO` beyond this exact documentation task; no later technical or venue capability follows.

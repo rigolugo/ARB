@@ -628,3 +628,138 @@ Gate D remains separately gated and requires a separate explicit user authorizat
 Whether Gate D can proceed directly under the existing controlling runner specification lineage, or whether an additional bounded Gate-D specification or same-scope specification correction is required, must be determined by Marco from the existing controlling contracts and the exact proposed Gate-D scope.
 
 This documentation synchronization itself makes no such determination and grants no Gate-D capability.
+
+## 14. Runner Gate D installed — current canonical-state extension
+
+Authority level for this section: canonical current-state snapshot, prepared from exact canonical base `35916c62a0867e59e3954b4b35b6cfdec597b64c` (tree `b3d48463cb1334a49dbe3427d127c027dff5e038`, parent `969bc79c312e45161371d6637e5c54326f349ddb`) by `ARB_CANONICAL_DOCUMENTATION_STATE_SYNC_THROUGH_GATE_D_01`. This section supersedes Section 13 only where later Gate-D facts differ. Section 13 remains the accurate historical Gate-C snapshot.
+
+### 14.1 Confirmed canonical facts
+
+The latest accepted controlling Gate-D market-maker specification is `KALSHI_DEMO_MINIMAL_TWO_SIDED_MARKET_MAKER_SPEC_07.md` (`41916` bytes, sha256 `ec16676b35ab9eb9ca08f0fd54b105dc2086636724f5a4924ea5965794c48360`) with handoff `HANDOFF_KALSHI_DEMO_MINIMAL_TWO_SIDED_MARKET_MAKER_SPEC_07.md` (`14322` bytes, sha256 `74faabd42e8e8416115700e8812115c11151c7a55f5733b39089ce3b82853796`). Spec 07 incorporates `KALSHI_DEMO_MINIMAL_TWO_SIDED_MARKET_MAKER_SPEC_06.md` (`48453` bytes, sha256 `d6f78c4b00f3de57532cfa5e8f30eff2bddd37846752340725bbc5e66e8da07f`) and its handoff (`11172` bytes, sha256 `02dbd926c3959f3edd3c8d231940981d6d696ed73471bb227e90f97376a96990`) except for Spec 07's exact explicit supersession map. Spec 06 remains controlling only where Spec 07 preserves it. Neither specification authorizes venue execution.
+
+Installed implementation task:
+
+`KALSHI_DEMO_MINIMAL_TWO_SIDED_MARKET_MAKER_RUNNER_GATE_D_ORDINARY_STRATEGY_WRITE_LOOP_IMPLEMENTATION_CORRECTION_06`
+
+Canonical installation identity:
+
+- commit: `35916c62a0867e59e3954b4b35b6cfdec597b64c`;
+- tree: `b3d48463cb1334a49dbe3427d127c027dff5e038`;
+- parent: `969bc79c312e45161371d6637e5c54326f349ddb`;
+- installation relation: `NON_FORCE_FAST_FORWARD`;
+- merge commit: `false`;
+- replacement commit: `false`;
+- squash: `false`;
+- rebase: `false`.
+
+Exact installed Gate-D path identities are recorded in ART-0099 through ART-0102. The installed implementation contains the bounded ordinary strategy-write loop and its controlling protections, including:
+
+- one-ticker minimal two-sided strategy integration using canonical `MarketMakerInputV1` / `evaluate_market_maker_input`;
+- exact strategy-owned quote-slot reconciliation and ordinary CREATE/CANCEL decision handling;
+- exact ordinary CANCEL `venue_order_id`, with no cancel-all or fuzzy identity;
+- canonical `WriterEligibilityGate` and genuine one-shot `NormalWriterPermit`;
+- T0 -> T1 -> T2 -> T3 trusted-tail progression, with the ordinary write budget charged only at trusted durable T3 and no transport before trusted T3;
+- fresh final pre-adapter validation;
+- exact two-state CANCEL economics and Spec-07 transformation invariants;
+- protected Cancel-V2 classification, exact validated `reduced_by`, and protected cancel conservation;
+- fresh post-CANCEL exact order/fill reconciliation with raced-fill incorporation;
+- exact terminal-order identity, including mandatory exact `client_order_id`, quote price, FixedPointCount quantities, `subaccount = int(0)`, and `exchange_index = int(0)`;
+- old-slot clearing only after proven terminal closure, preserving canceled/executed distinction and holding ambiguous, unknown, or malformed evidence;
+- cancel-before-replace, no blind write retry, no second writer gate, and no persistence-schema revision.
+
+The fixed installed experiment envelope is: one ticker; at most two quote slots; Decimal-only economics; CREATE quantity `1.00`; post-only maker; at most four ordinary strategy-write sends; at most two cleanup exact-cancel sends; at most twelve decision cycles; at most sixty-four read requests; at most one ordinary write and one cleanup cancel in flight; strategy cutoff `240` seconds; absolute deadline `300` seconds; zero automatic retries; zero redirects; REST only; and no WebSocket, batch CREATE/CANCEL, amend/decrease/replace, first-experiment Order Group, or production activity. These are implementation constraints, not authorization to send requests.
+
+Accepted offline implementation/test evidence records:
+
+- targeted/focused: `774 passed`;
+- full repository: `2734 passed`, `395 subtests passed`, `0 failures`;
+- `git diff --check`: `PASS`;
+- Kalshi Demo requests: `0`;
+- Kalshi production requests: `0`;
+- credential activity: `NONE`;
+- venue activity: `NONE`;
+- CREATE requests: `0`;
+- CANCEL requests: `0`;
+- WebSocket activity: `0`;
+- deployed persistent-state access/mutation: `false`;
+- package installation: `false`.
+
+This is installed implementation behavior plus offline test evidence. It is not evidence that the Gate-D experiment executed against a real Demo account.
+
+### 14.2 Historical facts preserved
+
+The following Gate-D candidates were Marco-blocked, non-canonical, never installed, and are not ancestors of the installed Correction-06 candidate:
+
+- Implementation 01: `34136bcfec4f92f8a35ec9c12cb9dd9819836ac8`;
+- Correction 02: `cedfb6e0f3098b46d787660d276d5dd0b8847517`;
+- Correction 03: `6311dea74b0c80787cf53efbdf8152592ad5d6ce`;
+- Correction 04: `8532486c23cdc9e0fd0336cafc38540cb284b071`;
+- Correction 05: `8afa3c63bf83b7597a0323fe86dbf160a52711de`.
+
+They remain correction/review lineage only. The Correction-06 review package `CLAUDE_GATE_D_SPEC07_IMPLEMENTATION_CORRECTION_06_REVIEW.zip` (`211141` bytes, sha256 `fa5413401522111d09406a3381d58235fdd6fc47db0d1a16dd68d88aaca13d53`) is review evidence only and is not a canonical artifact.
+
+The historical incident remains exactly safety-held:
+
+- `incident_id = KALSHI_DEMO_ONE_ORDER_LIFECYCLE_EXECUTION_01`;
+- `disposition = WRITE_UNRESOLVED_ZERO_MATCH`;
+- `bound_order_id = null`;
+- `created_order_upper_bound = 1`;
+- `active_order_upper_bound = 1`;
+- `unknown_result = true`;
+- `writer_proof_state = HELD`;
+- `writer_proof_release_eligible = false`;
+- `protected_unresolved_legacy_write_count = 1`;
+- `history_completeness = COMPLETE_WITH_PROTECTED_UNRESOLVED_LEGACY_WRITE`;
+- `restart_classification = RESTART_UNRESOLVED_WRITE_HELD`;
+- `normal_writer_handle = NONE`;
+- `historical_incident_cancel_target = NONE`;
+- `historical_unresolved_exposure = UNKNOWN_UNBOUNDED`;
+- `release_eligible = false`.
+
+Installing Gate D does not establish `CREATE_NEVER_EXISTED`, `CREATE_DEFINITELY_FAILED`, `SAFE_TO_RETRY_CREATE`, `SAFE_TO_CANCEL`, `ZERO_EXPOSURE`, `WRITER_PROOF_RELEASED`, or `INCIDENT_CLOSED`.
+
+### 14.3 Installed-versus-executed distinction and current capability state
+
+- `Gate D implementation is installed = true`.
+- `Gate D market-making experiment has executed against Kalshi Demo = false`.
+- `The historical incident has become writer-eligible = false`.
+- `The historical writer proof has been released = false`.
+- `Real historical exposure is bounded/known = false`.
+
+The real historical incident remains unable to satisfy ordinary writer eligibility under its current accepted state. Gate-D installation does not override the historical hold.
+
+Current capability state:
+
+- active venue execution authorization: `NONE`;
+- active credential/signing authorization: `NONE`;
+- Kalshi Demo authenticated/public reads: `PROHIBITED` absent a new explicit task;
+- Kalshi Demo writes: `PROHIBITED` absent a new explicit task and all controlling runtime predicates;
+- production reads/writes: `PROHIBITED` absent separate authorization;
+- WebSocket: `PROHIBITED`;
+- market-maker execution: `NOT YET AUTHORIZED`;
+- profitability accounting execution: `NOT YET AUTHORIZED`;
+- logical arbitrage: `NOT YET AUTHORIZED`.
+
+No capability follows merely from installed code.
+
+### 14.4 Forward-looking sequencing — not authorization
+
+Gate D implementation is complete and installed. The next gating question is:
+
+`GATE_D_REAL_EXECUTION_READINESS`
+
+That later assessment must determine whether a future, separately authorized bounded Demo market-maker execution can legitimately satisfy the canonical writer-eligibility and persistent-state predicates while preserving the current held conflict domain. This section does not authorize a new conflict domain, account/subaccount, alternate ledger namespace, writer-proof bypass, venue read, or venue write, and it does not infer that a clean domain exists.
+
+Forward-looking project sequence only:
+
+1. Gate-D real-execution readiness;
+2. separately authorized bounded Kalshi Demo market-maker experiment, only if all controlling predicates can be satisfied;
+3. exact post-experiment order/fill/event/ledger reconciliation;
+4. authoritative profitability accounting;
+5. one narrow logical-arbitrage relationship;
+6. Kalshi production read-only observation;
+7. Polymarket production read-only observation;
+8. shadow execution;
+9. authenticated production canaries only after a separate explicit user decision.
+
+A future Demo execution would not be production profitability evidence.

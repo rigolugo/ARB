@@ -508,6 +508,70 @@ Candidate 10 correction authorization (AUTH-0008) shall not be represented as an
 - Grants new technical capability: `NO`
 - Bounded exact task only; completion grants no later capability; Gate D not authorized; venue activity not authorized; credentials not authorized.
 
+### AUTH-0029 — Gate-D Correction-06 implementation authorization
+- Authorization ID: `NOT_SEPARATELY_ASSIGNED_IN_ORIGINAL_USER_AUTHORIZATION`
+- Authorizing user: Gustavo
+- Authorized agent: `CLAUDE_CODE`
+- Date: 2026-08-19
+- Task/phase: `KALSHI_DEMO_MINIMAL_TWO_SIDED_MARKET_MAKER_RUNNER_GATE_D_ORDINARY_STRATEGY_WRITE_LOOP_IMPLEMENTATION_CORRECTION_06`
+- Classification: `OFFLINE_IMPLEMENTATION_AND_TEST_ONLY`
+- Exact clean canonical base: `969bc79c312e45161371d6637e5c54326f349ddb`
+- Exact writable paths (four only): `src/arb/venues/kalshi/quote_lifecycle.py`; `src/arb/venues/kalshi/minimal_market_maker_experiment_runner.py`; `tests/test_kalshi_quote_lifecycle.py`; `tests/test_kalshi_minimal_market_maker_experiment_runner.py`
+- User authorization: Gustavo authorized the bounded Correction-06 dispatch by direct project-chat `proceed`.
+- Local candidate commit: `PERMITTED` exactly once; result later Marco-approved at `35916c62a0867e59e3954b4b35b6cfdec597b64c`.
+- Remote writes under this implementation authorization: `PROHIBITED`.
+- Kalshi/Polymarket requests: `PROHIBITED`; credentials/signing/account access: `PROHIBITED`; venue CREATE/CANCEL/amend/decrease/replace/WebSocket: `PROHIBITED`; package installation: `PROHIBITED`.
+- Activity recorded by the implementation task: offline implementation/test only; venue activity `NONE`; credential activity `NONE`.
+- Canonical effect: none under this authorization alone; later review and installation were separate events.
+- Grants new venue capability: `NO`.
+
+### AUTH-0030 — Temporary Gate-D remote review-branch publication
+- Authorization ID: `KALSHI_DEMO_GATE_D_SPEC07_CORRECTION_06_REMOTE_REVIEW_BRANCH_INSTALL_01`
+- Authorizing user: Gustavo
+- Authorized agent: `CLAUDE_CODE`
+- Date: 2026-08-19
+- Task/phase: temporary remote review publication of the exact approved Gate-D Correction-06 candidate.
+- Exact authorized remote write: create only `review/gate-d-spec07-correction-06-35916c62`, pointing directly at `35916c62a0867e59e3954b4b35b6cfdec597b64c`.
+- Remote `main` write: `PROHIBITED`.
+- Force push: `PROHIBITED`.
+- Pull request: `PROHIBITED`.
+- Any other remote ref: `PROHIBITED`.
+- Kalshi/Polymarket requests, credentials, signing, account access, venue writes, WebSocket, package installation, and later execution: `PROHIBITED`.
+- Result: completed as `READY_FOR_MARCO_REMOTE_REVIEW_BRANCH_REVIEW`; the exact branch was created for independent Marco review only.
+- Canonical effect: none from branch publication alone.
+- Grants new venue capability: `NO`.
+
+### AUTH-0031 — Canonical Gate-D installation after Marco remote review
+- Authorization ID: `NOT_SEPARATELY_ASSIGNED_IN_ORIGINAL_USER_AUTHORIZATION`
+- Authorizing user: Gustavo
+- Authorized agent: Marco
+- Date: 2026-08-19
+- User instruction: "proceed , but provide a prompt for claude to do a remote review install, you will review the temporary branch, then you will commit to main"
+- Authorized only after exact remote equivalence review: non-force fast-forward of `main` from `969bc79c312e45161371d6637e5c54326f349ddb` to `35916c62a0867e59e3954b4b35b6cfdec597b64c`.
+- Merge commit: `PROHIBITED`; force: `PROHIBITED`; replacement commit: `PROHIBITED`; any different candidate/ref: `PROHIBITED`.
+- Venue capability: `NONE`.
+- Result: consumed/completed after Marco performed the exact fast-forward; post-install tree `b3d48463cb1334a49dbe3427d127c027dff5e038`, parent `969bc79c312e45161371d6637e5c54326f349ddb`.
+- Grants new venue capability: `NO`.
+
+### AUTH-0032 — Current Gate-D documentation-state sync
+- Authorization ID: `ARB_CANONICAL_DOCUMENTATION_STATE_SYNC_THROUGH_GATE_D_01`
+- Authorizing user: Gustavo
+- Authorized agent: `CLAUDE_CODE`
+- Date: 2026-08-19
+- Task/phase: `DOCUMENTATION_ONLY`; risk tier `LOW`.
+- Exact canonical base: `35916c62a0867e59e3954b4b35b6cfdec597b64c` (tree `b3d48463cb1334a49dbe3427d127c027dff5e038`, parent `969bc79c312e45161371d6637e5c54326f349ddb`).
+- Exact writable paths (four only): `project_context/PROJECT_STATE.md`; `project_context/ARTIFACT_INDEX.md`; `project_context/DECISION_LOG.md`; `project_context/AUTHORIZATION_LOG.md`.
+- Protected paths: every other repository path, including `src/**`, `tests/**`, `specifications/**`, `handoffs/**`, `reviews/**`, `artifacts/**`, both START_HERE files, `project_context/AGENT_ROLES.md`, `project_context/PROJECT_AGENT_DISPATCH_AUTHORITY.md`, and `BROWSER_BRANCH_REPOSITORY_TRANSFER_WORKFLOW.md`.
+- Repository synchronization: `PERMITTED` only for the bounded read-only/fast-forward exact-main verification stated by the task.
+- Local documentation commit: `PERMITTED` exactly once above the exact canonical base.
+- Authorized remote write: create exactly one temporary branch, `review/doc-sync-through-gate-d-01`, pointing directly at the exact documentation candidate; no other remote ref.
+- Remote `main` write: `PROHIBITED`; force push: `PROHIBITED`; PR: `PROHIBITED`; merge: `PROHIBITED`.
+- Technical/source/test changes: `PROHIBITED`; test execution: `PROHIBITED`; project execution/imports: `PROHIBITED`; package installation: `PROHIBITED`.
+- Kalshi Demo/production and Polymarket requests: `PROHIBITED`; credentials/private keys/signing/account access: `PROHIBITED`; deployed persistent-state access/mutation: `PROHIBITED`; CREATE/CANCEL/amend/decrease/replace/WebSocket/market-making/profitability/logical-arbitrage execution: `PROHIBITED`.
+- Canonical effect: none until independent Marco review and a separate installation decision.
+- Later phase: `PROHIBITED`; no later technical or venue capability follows.
+- Grants new venue capability: `NO`.
+
 ## Capability default
 
 All capabilities not explicitly listed as `PERMITTED` by the operative bounded Gustavo authorization are `PROHIBITED`. The canonical entries above are audit history and may evidence an authorization, but they are not a prerequisite to an already-operative exact current-chat dispatch and cannot broaden it retroactively. Kalshi Demo access, Kalshi production access, Polymarket interaction, credentials/signing, account funding, order submission, cancellation, and trading remain prohibited unless the exact active authorization separately permits them.
