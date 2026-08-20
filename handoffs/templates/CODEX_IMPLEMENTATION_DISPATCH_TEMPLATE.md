@@ -69,7 +69,7 @@ The controlling specification remains authoritative.
 - offline source editing: `<YES/NO>`
 - offline test editing: `<YES/NO>`
 - test execution: `<YES/NO>`
-- artifact generation: `<YES/NO>`
+- artifact generation: `YES` for the mandatory Marco review package unless the task explicitly selects an equivalent exact-byte review mechanism
 - local task branch/worktree: `<YES/NO>`
 - local commit: `<YES/NO>`
 - temporary remote review branch: `<YES/NO>`
@@ -117,6 +117,45 @@ Return:
 
 `SPEC REQUIREMENT -> CODE LOCATION -> TEST/EVIDENCE -> STATUS`
 
+## Mandatory Marco review package
+
+Before returning `READY_FOR_MARCO_REVIEW`, create and verify the exact candidate review package defined by:
+
+`MARCO_IMPLEMENTATION_REVIEW_PACKAGE_WORKFLOW.md`
+
+Default filename:
+
+`<TASK_ID>_MARCO_REVIEW.zip`
+
+The package MUST contain:
+
+```text
+repository_payload/
+  <every changed repository path with exact final bytes>
+candidate.patch
+MANIFEST.txt
+TEST_RESULTS.txt
+```
+
+Requirements:
+
+- include every changed path and no unlisted repository path;
+- generate `candidate.patch` from the exact required base to the exact candidate;
+- report bytes/SHA-256/Git blob for each changed file;
+- report candidate commit/tree/parent;
+- report patch bytes/SHA-256;
+- report ZIP bytes/SHA-256;
+- reopen the ZIP after creation;
+- compare every payload member byte-for-byte with the final candidate file;
+- verify the exact member set;
+- preserve the candidate unchanged until Marco reviews it.
+
+A completion report, hashes, Git blobs, test counts, or static conformance matrix do not substitute for the package.
+
+If the package cannot be created or verified, do not return `READY_FOR_MARCO_REVIEW`. Return:
+
+`EXACT_CANDIDATE_REVIEW_PACKAGE_REQUIRED`
+
 ## Completion return
 
 Return:
@@ -137,5 +176,9 @@ Return:
 14. local commit parent
 15. remote review branch if permitted
 16. final `git status --porcelain`
+17. Marco review-package filename
+18. Marco review-package bytes/SHA-256
+19. candidate patch bytes/SHA-256
+20. confirmation that the package was reopened and every payload member verified byte-for-byte
 
-Stop after candidate preparation. Do not update `main`.
+Stop after candidate and review-package preparation. Do not update `main`.

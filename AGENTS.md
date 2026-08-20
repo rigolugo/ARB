@@ -143,14 +143,22 @@ Normal ARB implementation flow:
 2. Codex implements only the authorized scope.
 3. Codex runs the required tests and static self-review.
 4. Codex creates a candidate commit only when the task permits local commits.
-5. Codex reports exact candidate evidence.
-6. Independent project review evaluates that exact candidate.
-7. Only after review returns `APPROVE` may a separately permitted integration step update `main`.
-8. `main` must be advanced by a non-force fast-forward only.
+5. Codex builds and verifies the exact Marco review package defined by `MARCO_IMPLEMENTATION_REVIEW_PACKAGE_WORKFLOW.md`.
+6. Codex reports exact candidate evidence and the review-package byte length/SHA-256.
+7. Only then may Codex return `READY_FOR_MARCO_REVIEW`.
+8. Independent project review evaluates that exact packaged candidate.
+9. Only after review returns `APPROVE` may a separately permitted integration step update `main`.
+10. `main` must be advanced by a non-force fast-forward only.
 
 Passing tests do not equal approval.
 
 Codex must not update `main` merely because implementation is complete.
+
+A local candidate commit SHA, hashes, Git blobs, test counts, or Codex's own conformance matrix do not substitute for the exact candidate bytes in the review package.
+
+If Codex cannot build or verify the required review package, it MUST NOT claim `READY_FOR_MARCO_REVIEW`; report `EXACT_CANDIDATE_REVIEW_PACKAGE_REQUIRED`.
+
+Once a candidate is ready for review, preserve it unchanged until Marco has received and reviewed the exact package. If a correction is later required, produce a new candidate and a new package.
 
 ## 8. Remote review branches
 
@@ -166,6 +174,8 @@ When a task permits a temporary remote review branch:
 
 A remote review branch exists for independent review only. Its existence does not authorize
 integration to `main`.
+
+A remote review branch does not remove the standing Marco review-package requirement unless the active task explicitly selects an equivalent exact-byte review mechanism and Marco can independently retrieve every changed byte and the exact base-to-candidate diff.
 
 ## 9. Writable-path discipline
 
@@ -284,13 +294,19 @@ Every implementation candidate should report, when applicable:
 - local commit SHA;
 - local commit parent;
 - remote review branch if explicitly permitted;
-- final `git status --porcelain`.
+- final `git status --porcelain`;
+- Marco review-package filename;
+- Marco review-package raw byte length;
+- Marco review-package SHA-256;
+- candidate patch raw byte length and SHA-256.
 
 Do not claim zero activity unless the task environment and evidence actually support that claim.
 
 Preferred completion status:
 
 `READY_FOR_MARCO_REVIEW`
+
+That status is valid only after the exact review package has been created, reopened, byte-verified, and made available for Marco review.
 
 ## 15. Stop conditions
 
@@ -307,7 +323,8 @@ Stop rather than guessing on:
 - environment ambiguity;
 - unexpected credential requirement;
 - unexpected venue/network requirement;
-- material contradiction in the controlling specification.
+- material contradiction in the controlling specification;
+- inability to create or verify the required Marco review package.
 
 Report the exact expected condition and the exact observed condition.
 
