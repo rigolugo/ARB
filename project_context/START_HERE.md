@@ -16,7 +16,8 @@ Canonical governance and restart router. This file does not grant capability and
 8. `project_context/AUTHORIZATION_LOG.md`
 9. `project_context/DECISION_LOG.md`
 10. `BROWSER_BRANCH_REPOSITORY_TRANSFER_WORKFLOW.md`
-11. task-specific accepted specifications, handoffs, reviews, artifacts, or evidence only when relevant to the active task
+11. `project_context/MARCO_IMPLEMENTATION_REVIEW_PACKAGE_WORKFLOW.md`
+12. task-specific accepted specifications, handoffs, reviews, artifacts, or evidence only when relevant to the active task
 
 `project_context/ARTIFACT_INDEX.md` remains the canonical artifact-reference ledger and is consulted when task-specific artifact provenance is relevant.
 
@@ -58,6 +59,7 @@ When an active dispatch requires a `current`, `fresh`, `then-current`, or equiva
 - Authorization audit: `AUTHORIZATION_LOG.md`
 - Decision audit: `DECISION_LOG.md`
 - Manual-browser repository transfer and remote verification: `../BROWSER_BRANCH_REPOSITORY_TRANSFER_WORKFLOW.md`
+- Exact implementation-candidate review package and detached container identity: `MARCO_IMPLEMENTATION_REVIEW_PACKAGE_WORKFLOW.md`
 
 ## Fail-closed rule
 

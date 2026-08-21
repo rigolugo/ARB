@@ -143,7 +143,7 @@ Normal ARB implementation flow:
 2. Codex implements only the authorized scope.
 3. Codex runs the required tests and static self-review.
 4. Codex creates a candidate commit only when the task permits local commits.
-5. Codex builds and verifies the exact Marco review package defined by `MARCO_IMPLEMENTATION_REVIEW_PACKAGE_WORKFLOW.md`.
+5. Codex builds and verifies the exact Marco review package defined by `project_context/MARCO_IMPLEMENTATION_REVIEW_PACKAGE_WORKFLOW.md`.
 6. Codex reports exact candidate evidence and the review-package byte length/SHA-256.
 7. Only then may Codex return `READY_FOR_MARCO_REVIEW`.
 8. Independent project review evaluates that exact packaged candidate.

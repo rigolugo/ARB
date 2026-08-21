@@ -174,11 +174,24 @@ Return:
 
 Before returning `READY_FOR_MARCO_REVIEW`, create and verify the exact candidate review package defined by:
 
-`MARCO_IMPLEMENTATION_REVIEW_PACKAGE_WORKFLOW.md`
+`project_context/MARCO_IMPLEMENTATION_REVIEW_PACKAGE_WORKFLOW.md`
 
-Default filename:
+Resolve the final-artifact root before package creation. The ordinary Codex default is:
 
-`<TASK_ID>_MARCO_REVIEW.zip`
+```text
+IMPLEMENTER_FINAL_ARTIFACT_ROOT =
+%ARB_CODEX_ARTIFACT_ROOT%
+```
+
+An active task may specify a different exact Codex root. An unset, unavailable, ambiguous, or
+non-writable root prohibits `READY_FOR_MARCO_REVIEW`.
+
+Default final artifacts:
+
+```text
+<IMPLEMENTER_FINAL_ARTIFACT_ROOT>\<TASK_ID>_MARCO_REVIEW.zip
+<IMPLEMENTER_FINAL_ARTIFACT_ROOT>\<TASK_ID>_MARCO_REVIEW.zip.sha256
+```
 
 The package MUST contain:
 
@@ -197,17 +210,34 @@ Requirements:
 - report bytes/SHA-256/Git blob for each changed file;
 - report candidate commit/tree/parent;
 - report patch bytes/SHA-256;
-- report ZIP bytes/SHA-256;
-- reopen the ZIP after creation;
+- complete `MANIFEST.txt` before ZIP finalization with:
+
+  ```text
+  container_identity_mode = DETACHED_AFTER_FINALIZATION
+  final_zip_bytes = POST_PACKAGE_EXTERNAL
+  final_zip_sha256 = POST_PACKAGE_EXTERNAL
+  ```
+
+- do not embed computed final ZIP bytes/SHA-256 in `MANIFEST.txt`;
+- finalize the ZIP, reopen it read-only, and verify every internal member;
+- compute and externally report final ZIP bytes/SHA-256;
+- create and verify the required detached `.zip.sha256` sidecar;
+- recompute final ZIP bytes/SHA-256 after sidecar creation and require the identity to be unchanged;
 - compare every payload member byte-for-byte with the final candidate file;
 - verify the exact member set;
 - preserve the candidate unchanged until Marco reviews it.
 
 A completion report, hashes, Git blobs, test counts, or static conformance matrix do not substitute for the package.
 
-If the package cannot be created or verified, do not return `READY_FOR_MARCO_REVIEW`. Return:
+If the final-artifact root, package, or sidecar cannot be created or verified, do not return
+`READY_FOR_MARCO_REVIEW`. Return the applicable blocker, including:
 
-`EXACT_CANDIDATE_REVIEW_PACKAGE_REQUIRED`
+```text
+IMPLEMENTER_FINAL_ARTIFACT_ROOT_UNRESOLVED
+REVIEW_PACKAGE_SIDECAR_MISSING
+REVIEW_PACKAGE_SIDECAR_FORMAT_MISMATCH
+EXACT_CANDIDATE_REVIEW_PACKAGE_REQUIRED
+```
 
 ## Completion return
 
@@ -230,8 +260,10 @@ Return:
 15. remote review branch if permitted
 16. final `git status --porcelain`
 17. Marco review-package filename
-18. Marco review-package bytes/SHA-256
-19. candidate patch bytes/SHA-256
-20. confirmation that the package was reopened and every payload member verified byte-for-byte
+18. Marco review ZIP bytes/SHA-256
+19. Marco review sidecar filename and bytes/SHA-256
+20. candidate patch bytes/SHA-256
+21. confirmation that the ZIP was reopened and all internal members were verified, including every payload member byte-for-byte
+22. confirmation that final ZIP identity was recomputed after sidecar creation and remained unchanged
 
 Stop after candidate and review-package preparation. Do not update `main`.
