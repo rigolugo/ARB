@@ -61,6 +61,59 @@ If another path is materially required, stop with:
 
 The controlling specification remains authoritative.
 
+## Codex Python / Windows sandbox preflight
+
+For an ordinary offline ARB Python implementation task, use these defaults unless the task states
+a stricter value:
+
+```text
+Python test execution = YES
+Python interpreter = %ARB_CODEX_PYTHON_EXE%
+network during Python tests = NO
+known WinError-5 sandbox fallback = PERMITTED
+```
+
+The task author must explicitly state each of those four fields as `YES` / `NO` or `PERMITTED` /
+`PROHIBITED`, as applicable. A permitted fallback does not itself authorize tests; the specific
+Python test command must already be authorized by the task.
+
+Before material Python execution, run these `cmd.exe` checks:
+
+```cmd
+echo %ARB_CODEX_PYTHON_EXE%
+"%ARB_CODEX_PYTHON_EXE%" --version
+"%ARB_CODEX_PYTHON_EXE%" -c "import sys; print(sys.executable)"
+"%ARB_CODEX_PYTHON_EXE%" -c "import tempfile; print(tempfile.gettempdir())"
+```
+
+Do not replace `%ARB_CODEX_PYTHON_EXE%` with bare `python` merely because `where python` returns
+an executable. An unset, missing, non-executable, or wrong-environment variable is a stop condition.
+Preserve the Codex-local `TEMP`, `TMP`, and `ARB_CODEX_TEMP_ROOT` values and verify
+`TEMP == TMP == ARB_CODEX_TEMP_ROOT` unless the task explicitly provides another Codex task-local
+root.
+
+Mandatory probe/fallback algorithm:
+
+```text
+A. Validate ARB_CODEX_PYTHON_EXE, TEMP, TMP, and ARB_CODEX_TEMP_ROOT.
+B. With %ARB_CODEX_PYTHON_EXE%, run a nested-temp probe that creates/writes/renames/deletes a
+   child file, creates/removes a nested directory, and shutil.rmtree()s the tempfile.mkdtemp() root.
+C. PASS -> run the authorized Python tests normally inside the filesystem sandbox.
+D. Exact known unelevated-sandbox descendant failure only — correct temp root, mkdtemp succeeds,
+   then PermissionError and/or errno 13 and/or WinError 5 on descendant mutation/cleanup -> run
+   only the authorized offline Python test process outside the filesystem sandbox as the same
+   unelevated user, and only when this task marks the fallback PERMITTED.
+E. Any other probe or environment failure -> STOP.
+F. Clean only exact task-created temp material; use the same narrowly bounded outside-sandbox
+   cleanup only if the exact known WinError-5 condition blocks cleanup.
+G. Verify git status --porcelain and the task's final cleanliness requirement.
+```
+
+The fallback is process-bounded to the authorized Python test command and necessary cleanup. It
+does not grant a shell-wide unrestricted session, administrator rights, global sandbox disable,
+ACL changes, network, credentials, venue access, or additional writable repository paths. Every
+capability remains exactly as stated by the active task.
+
 ## Capability matrix
 
 ### Permitted
@@ -105,9 +158,9 @@ The controlling specification remains authoritative.
 
 Run exactly:
 
-1. `<command>`
-2. `<command>`
-3. `<full regression command>`
+1. `<command; when Python is used, express it as "%ARB_CODEX_PYTHON_EXE%" ...>`
+2. `<command; when Python is used, express it as "%ARB_CODEX_PYTHON_EXE%" ...>`
+3. `<full regression command; when Python is used, express it as "%ARB_CODEX_PYTHON_EXE%" ...>`
 
 Report exact pass/fail counts.
 

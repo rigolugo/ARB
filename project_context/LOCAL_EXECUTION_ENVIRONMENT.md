@@ -41,6 +41,58 @@ python ...
 
 Do not replace it with the Windows `py` launcher unless a task explicitly requires the launcher.
 
+### 1.1 Codex-specific Python and Windows sandbox policy
+
+This subsection applies to Codex only. It does not replace the generic user command conventions in
+this document and does not bind Claude, whose interpreter, temp roots, artifact roots, and sandbox
+environment are configured and resolved independently.
+
+Codex local configuration variables are:
+
+```text
+Codex local interpreter variable = ARB_CODEX_PYTHON_EXE
+Codex temp-root variable = ARB_CODEX_TEMP_ROOT
+Codex final-artifact variable = ARB_CODEX_ARTIFACT_ROOT
+```
+
+For ARB Python processes, Codex must use `%ARB_CODEX_PYTHON_EXE%`. Bare `python` can resolve to the
+Microsoft Store alias and is informational only for Codex, as is `where python`. Before material
+Codex Python execution, verify the variable, Python version, `sys.executable`, and
+`tempfile.gettempdir()` using the interpreter-qualified commands in root `AGENTS.md`. An unset,
+missing, non-executable, or wrong-environment variable is a stop condition; Codex must not silently
+fall back to `python`, `py`, a bundled interpreter, or another Conda environment.
+
+Codex Python test processes preserve `TEMP`, `TMP`, and `ARB_CODEX_TEMP_ROOT`. Unless the active
+task explicitly supplies another Codex task-local root, Codex verifies
+`TEMP == TMP == ARB_CODEX_TEMP_ROOT` before testing. The values are Codex-local configuration, not
+shared Claude requirements.
+
+The current no-admin Codex Windows sandbox is `unelevated`. Before any authorized Python test
+suite, Codex must run the nested-temp environment probe defined in root `AGENTS.md`: create and
+write a child file under a new `tempfile.mkdtemp()` root, rename and delete it, create and remove a
+nested directory, and remove the probe root with `shutil.rmtree()`.
+
+The confirmed fallback condition is narrow: the temp root resolves correctly,
+`tempfile.mkdtemp()` succeeds, and a descendant mutation or recursive cleanup then fails with
+`PermissionError`, errno 13, and/or WinError 5 under the `unelevated` filesystem sandbox. Only when
+the active task already authorizes the exact offline Python test process may Codex run that process
+outside the filesystem sandbox as the same unelevated Windows user. All active-task capability
+limits remain unchanged, including network, credentials, venue access, writable repository paths,
+and persistent-state access. A network-prohibited task remains offline.
+
+This fallback is process-bounded to the already-authorized Python test command and necessary
+cleanup of exact task-created temp material. It is not an unrestricted shell and does not permit
+administrator rights, an elevated sandbox workaround, global sandbox disable, repository or host
+ACL weakening, ownership changes, or deletion of unrelated temp material. Wrong interpreter/temp
+configuration and unrelated syntax, import, dependency, assertion, permission, filesystem,
+network, or credential failures remain hard stops.
+
+After tests, Codex removes owned probe/test temp material, uses the same narrowly bounded
+outside-sandbox cleanup only when the exact known WinError-5 condition blocks cleanup, and verifies
+final repository cleanliness with `git status --porcelain`. Final review artifacts are delivered
+under the task-resolved `%ARB_CODEX_ARTIFACT_ROOT%`; no Codex-local absolute temp or artifact path is
+a shared Claude requirement.
+
 ## 2. Shell rule for Python execution
 
 Python programs, project runners, Python module invocations, Python tests, and Python one-shot execution commands intended for Gustavo to run locally must be provided in `cmd.exe` syntax by default.

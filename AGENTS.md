@@ -217,6 +217,78 @@ Do not change global Git line-ending configuration for ARB tasks.
 When shell syntax matters, state whether commands are for PowerShell or `cmd.exe`.
 Do not mix PowerShell backticks with `cmd.exe` caret continuations.
 
+### 10.1 Codex Python interpreter contract
+
+For Codex ARB Python execution, use `%ARB_CODEX_PYTHON_EXE%`. Do not rely on bare `python`.
+`where python` is informational only and does not select the Codex interpreter.
+
+Before material Codex Python execution, run these `cmd.exe` checks:
+
+```cmd
+echo %ARB_CODEX_PYTHON_EXE%
+"%ARB_CODEX_PYTHON_EXE%" --version
+"%ARB_CODEX_PYTHON_EXE%" -c "import sys; print(sys.executable)"
+"%ARB_CODEX_PYTHON_EXE%" -c "import tempfile; print(tempfile.gettempdir())"
+```
+
+The expected project environment is CPython 3.12 in `pmresearch`; no particular 3.12 patch
+version is a permanent requirement. An unset, missing, non-executable, or wrong-environment
+`%ARB_CODEX_PYTHON_EXE%` is an environment stop condition. Do not automatically fall back to
+bare `python`, `py`, a Microsoft Store alias, Codex-bundled Python, or another Conda environment.
+
+### 10.2 Codex TEMP/TMP and mandatory nested-temp probe
+
+Codex ARB test processes must preserve the configured Codex-local `TEMP`, `TMP`, and
+`ARB_CODEX_TEMP_ROOT` values. Verify `TEMP == TMP == ARB_CODEX_TEMP_ROOT` unless the active task
+explicitly supplies another Codex task-local root. Do not redefine a machine-specific absolute
+Codex temp path as a shared or Claude requirement.
+
+Before any authorized Python test suite, use `%ARB_CODEX_PYTHON_EXE%` to run a synthetic
+nested-temp probe. In one new `tempfile.mkdtemp()` root, the probe must:
+
+1. create and write a child file;
+2. rename and delete the child file;
+3. create and remove a nested directory; and
+4. remove the probe root with `shutil.rmtree()`.
+
+Record whether every operation passed. This probe validates the environment; it is not an ARB
+test.
+
+The known Codex Windows sandbox condition is narrowly limited to all of these facts:
+
+- the Windows sandbox is `unelevated`;
+- the temp root resolves correctly;
+- `tempfile.mkdtemp()` succeeds; and
+- a descendant file/directory mutation or recursive cleanup then fails with `PermissionError`,
+  errno 13, and/or WinError 5.
+
+Only that characterized descendant-write/cleanup failure qualifies for the fallback below.
+Wrong or missing `%ARB_CODEX_PYTHON_EXE%`, wrong `TEMP`/`TMP`, syntax or import failure, a test
+assertion failure, dependency failure, repository permission failure, an unknown filesystem error,
+or a network or credential requirement remains a hard stop and must not be classified as sandbox
+noise.
+
+### 10.3 Process-bounded test fallback
+
+If and only if the active task already authorizes the specific offline Python test command and the
+pre-test probe fails with the exact known condition above, Codex may run only that already-authorized
+offline Python test process outside the filesystem sandbox as the same unelevated Windows user.
+
+The fallback preserves all active-task limits: no elevation or administrator rights, no global
+sandbox disable, no repository or host ACL changes, and no expansion of network, venue, credential,
+repository-path, or other capability. When the task prohibits network access, the outside-sandbox
+Python process remains offline. This is not a shell-wide unrestricted session; it is bounded to the
+authorized Python test command plus necessary cleanup of exact task-created temp material.
+
+After test execution, remove task-created temp files/directories, verify that probe artifacts and
+owned test temp material are gone, and run `git status --porcelain`. If cleanup is blocked by the
+same known WinError-5 condition, it may occur outside the filesystem sandbox as the same unelevated
+user, limited to the exact task-created temp paths. Never delete unrelated temp material.
+
+For normal ARB test execution, do not request or use administrator rights, switch to an elevated
+sandbox when the host cannot install it, disable sandboxing globally, loosen repository or host
+ACLs, or take ownership of repository/system directories.
+
 ## 11. Numerical and identity correctness
 
 Follow the controlling technical specification.
