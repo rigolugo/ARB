@@ -1,4 +1,4 @@
-"""Offline acceptance tests for Revision-02 Kalshi Demo primary-domain
+"""Offline acceptance tests for Revision-04 Kalshi Demo primary-domain
 historical-incident resolution (read-only).
 
 No socket, DNS, HTTP client, environment-secret read, account access, venue
@@ -8,6 +8,7 @@ in-memory fake and every credential-related value is non-secret metadata.
 from __future__ import annotations
 
 import dataclasses
+import hashlib
 import json
 import unittest
 from datetime import datetime, timezone
@@ -841,7 +842,11 @@ class PositionSettlementLimitationTests(unittest.TestCase):
         transport = FakeTransport()
         transport.historical_orders = [_filled_order()]
         transport.historical_fills = [_fill()]
-        transport.settlements = [{"ticker": wr.TICKER, "settled_time": "2026-08-19T00:00:00Z"}]
+        transport.settlements = [{
+            "ticker": wr.TICKER,
+            "exchange_index": 0,
+            "settled_time": "2026-08-19T00:00:00Z",
+        }]
         result = _run(transport)
         self.assertEqual(result.bound_order_id, "order-target-001")
 
@@ -1777,6 +1782,408 @@ class ResultTaxonomyTests(unittest.TestCase):
         self.assertFalse(wr.FILL_DERIVED_POST_BINDING_SECOND_FILL_TRAVERSAL)
         self.assertEqual(wr.THEORETICAL_MAXIMUM_PLANNED_GET_SENDS, 116)
         self.assertEqual(wr.GLOBAL_GET_SEND_MAXIMUM, 116)
+
+
+class Revision04SourceContractTests(unittest.TestCase):
+    def test_revision_02_manifest_is_reconstructed_exactly(self) -> None:
+        self.assertEqual(len(wr.REV02_SOURCE_BINDING_MANIFEST_BYTES), 7056)
+        self.assertEqual(
+            hashlib.sha256(wr.REV02_SOURCE_BINDING_MANIFEST_BYTES).hexdigest(),
+            "22f4b6a8022bfe862536ce03fc21b91520b084c6361bd6c84fa6c51ca749451f",
+        )
+
+    def test_all_118_predecessor_families_are_classified(self) -> None:
+        families = tuple(wr.REV02_PREDECESSOR_FAMILY_DISPOSITIONS)
+        self.assertEqual(len(families), 118)
+        self.assertTrue(wr.validate_predecessor_family_classification(families))
+        self.assertFalse(wr.validate_predecessor_family_classification(families[:-1]))
+        self.assertFalse(wr.validate_predecessor_family_classification(families + ("unclassified.field",)))
+        self.assertFalse(wr.validate_predecessor_family_classification(families + (families[0],)))
+
+    def test_execution_material_coverage_identities_and_missing_atoms(self) -> None:
+        names = (
+            "PREDECESSOR_EXECUTION_MATERIAL",
+            "REV03_ACCEPTED_EXECUTION_MATERIAL",
+            "RUNTIME_CONSUMED_SOURCE_CONTRACT",
+            "REV04_EXECUTION_MATERIAL_PROJECTION",
+        )
+
+        def identity(values: object) -> tuple[int, str]:
+            canonical = json.dumps(
+                sorted(values), separators=(",", ":"), ensure_ascii=False,
+            ).encode("utf-8")
+            return len(values), hashlib.sha256(canonical).hexdigest()
+
+        for name in names:
+            with self.subTest(name=name):
+                self.assertEqual(identity(getattr(wr, name)), wr.COVERAGE_SET_IDENTITIES[name])
+        union_input = (
+            set(wr.PREDECESSOR_EXECUTION_MATERIAL)
+            | set(wr.REV03_ACCEPTED_EXECUTION_MATERIAL)
+            | set(wr.RUNTIME_CONSUMED_SOURCE_CONTRACT)
+        )
+        missing = union_input - set(wr.REV04_EXECUTION_MATERIAL_PROJECTION)
+        self.assertEqual(identity(union_input), wr.COVERAGE_SET_IDENTITIES["UNION_INPUT"])
+        self.assertEqual(identity(missing), wr.COVERAGE_SET_IDENTITIES["MISSING_FROM_REV04_AFTER_EXCLUSIONS"])
+        self.assertEqual(missing, set())
+        self.assertTrue(wr.validate_execution_material_coverage())
+
+    def test_revision_04_manifest_and_operation_identities_are_exact(self) -> None:
+        expected_operations = {
+            "EXACT_ORDER": (15224, "fb7e69cac3119dd396c7bf9b4f54f74f7f71cb5b76ce445895b58a53cc80bcfa"),
+            "HISTORICAL_CUTOFF": (4595, "96ba74f1233c91bcce529a5f59726ce44d166baf990352919e1af5e99855a794"),
+            "HISTORICAL_FILLS": (17130, "56cd493d88b3bd4ca87a2eef7c597beb1a09f5c1626beefc997f1acf9b5fb87e"),
+            "HISTORICAL_ORDERS": (17435, "ce76d532dacb2a7a059fd46d0c4a7d086e539f59e381d7bc97b41956f08bb53f"),
+            "HISTORICAL_POSITIONS": (13001, "dbaa8f62f993110e23a14c8f84d894e52f0f32160693ccba0f10ae55930c6571"),
+            "LIVE_FILLS": (18689, "fdcc527dadeadd57d5512f70a6403876660d25e0f9e7cb21b230d52a52648a38"),
+            "LIVE_ORDERS": (19474, "c8ad464e4a7045b412ec70cec0e9f4e01035103da7aff6b6647624cd35bdf90c"),
+            "LIVE_POSITIONS": (14165, "0c0b8ff3d04102a3083f421ee6914dbbe3f2f37b0021ec44acde83230a35c2ce"),
+            "SETTLEMENTS": (16810, "7ec7b606ef4f5b0ba02eaad2cf6df1994e7e690e0c51b40140c9e20501147229"),
+            "USER_DATA_TIMESTAMP": (1630, "c13419329be995ee5fa72f0967cdc1063289e565eb472d92de36546694355e1c"),
+        }
+        contract = wr.build_revision_04_source_contract()
+        self.assertEqual(
+            contract["schema_id"],
+            "KALSHI_PRIMARY_DOMAIN_HISTORICAL_RESOLUTION_EXECUTION_MATERIAL_SOURCE_CONTRACT_REV4",
+        )
+        self.assertEqual(contract["normalization_revision"], 4)
+        self.assertEqual(len(wr.SOURCE_BINDING_MANIFEST_BYTES), 143868)
+        self.assertEqual(
+            hashlib.sha256(wr.SOURCE_BINDING_MANIFEST_BYTES).hexdigest(),
+            "1df3fbb9e3a7f80a9e1890c2abf552e0a4d945b76cb6455e9fe79a977bb91e2b",
+        )
+        self.assertEqual(dict(wr.OPERATION_BINDING_IDENTITIES), expected_operations)
+        for operation, expected_identity in expected_operations.items():
+            with self.subTest(operation=operation):
+                operation_bytes = wr.operation_source_contract_bytes(operation)
+                self.assertEqual(
+                    (len(operation_bytes), hashlib.sha256(operation_bytes).hexdigest()),
+                    expected_identity,
+                )
+        self.assertIsNone(wr.validate_source_binding_manifest(wr.SOURCE_BINDING_MANIFEST_BYTES))
+
+    def test_every_structural_descriptor_is_complete(self) -> None:
+        required = {
+            "name", "source_type", "source_format", "source_requiredness",
+            "source_nullability", "openapi_observability", "rendered_observability",
+            "source_conflict_rule",
+        }
+        contract = wr.build_revision_04_source_contract()
+        for operation_name, operation in contract["operations"].items():
+            descriptors = list(operation["query_parameters"])
+            descriptors.extend(operation["response_contract"]["container_fields"])
+            descriptors.extend(operation["response_contract"]["fields"])
+            for descriptor in descriptors:
+                with self.subTest(operation=operation_name, field=descriptor["name"]):
+                    self.assertTrue(required.issubset(descriptor))
+
+    def test_structural_drift_matrix_fails_closed(self) -> None:
+        def response_field(contract: dict, operation: str, name: str) -> dict:
+            return next(
+                item for item in contract["operations"][operation]["response_contract"]["fields"]
+                if item["name"] == name
+            )
+
+        def query_field(contract: dict, operation: str, name: str) -> dict:
+            return next(
+                item for item in contract["operations"][operation]["query_parameters"]
+                if item["name"] == name
+            )
+
+        mutations = []
+
+        def remove_field(contract: dict) -> None:
+            fields = contract["operations"]["LIVE_FILLS"]["response_contract"]["fields"]
+            fields.remove(next(item for item in fields if item["name"] == "trade_id"))
+
+        mutations.append(("field removal", remove_field))
+        mutations.extend((
+            ("type drift", lambda c: response_field(c, "LIVE_FILLS", "exchange_index").__setitem__("source_type", "string")),
+            ("required to optional", lambda c: response_field(c, "LIVE_FILLS", "exchange_index").__setitem__("source_requiredness", "SOURCE_OPTIONAL")),
+            ("optional to required", lambda c: response_field(c, "LIVE_FILLS", "ts").__setitem__("source_requiredness", "SOURCE_REQUIRED")),
+            ("nullability drift", lambda c: response_field(c, "LIVE_FILLS", "exchange_index").__setitem__("source_nullability", "NULL_ALLOWED")),
+            ("format drift", lambda c: response_field(c, "LIVE_FILLS", "ts").__setitem__("source_format", "date-time")),
+            ("enum drift", lambda c: response_field(c, "LIVE_ORDERS", "status")["source_enum"].append("unknown")),
+            ("range drift", lambda c: query_field(c, "HISTORICAL_FILLS", "limit").__setitem__("maximum", 999)),
+            ("category addition", lambda c: response_field(c, "LIVE_FILLS", "fill_id")["execution_categories"].append("NEW_EXECUTION_MATERIAL")),
+        ))
+        for name, mutate in mutations:
+            with self.subTest(name=name):
+                current = wr.build_revision_04_source_contract()
+                mutate(current)
+                self.assertEqual(
+                    wr.compare_revision_04_source_contract(current),
+                    wr.HaltCode.AUTHORITATIVE_SOURCE_DRIFT_SPEC_REVISION_REQUIRED,
+                )
+
+    def test_rendered_positive_conflict_and_mutual_drift_are_distinct(self) -> None:
+        baseline = wr.build_revision_04_source_contract()
+        rendered_conflict = {"environment": {"demo_rest_root": "https://conflict.invalid"}}
+        self.assertEqual(
+            wr.compare_revision_04_source_contract(baseline, rendered_conflict),
+            wr.HaltCode.OFFICIAL_SOURCE_CONFLICT,
+        )
+        self.assertIsNone(wr.compare_revision_04_source_contract(baseline, {}))
+
+        mutually_agreeing_drift = wr.build_revision_04_source_contract()
+        mutually_agreeing_drift["environment"]["demo_rest_root"] = "https://drift.invalid"
+        rendered_agreement = {"environment": {"demo_rest_root": "https://drift.invalid"}}
+        self.assertEqual(
+            wr.compare_revision_04_source_contract(mutually_agreeing_drift, rendered_agreement),
+            wr.HaltCode.AUTHORITATIVE_SOURCE_DRIFT_SPEC_REVISION_REQUIRED,
+        )
+
+    def test_all_documented_query_sets_and_mechanical_differences(self) -> None:
+        expected = {
+            "EXACT_ORDER": (),
+            "HISTORICAL_CUTOFF": (),
+            "HISTORICAL_FILLS": ("cursor", "limit", "max_ts", "ticker"),
+            "HISTORICAL_ORDERS": ("cursor", "limit", "max_ts", "ticker"),
+            "HISTORICAL_POSITIONS": ("cursor", "event_ticker", "limit", "ticker"),
+            "LIVE_FILLS": ("cursor", "exchange_index", "limit", "max_ts", "min_ts", "order_id", "subaccount", "ticker"),
+            "LIVE_ORDERS": ("cursor", "event_ticker", "exchange_index", "limit", "max_ts", "min_ts", "status", "subaccount", "ticker"),
+            "LIVE_POSITIONS": ("count_filter", "cursor", "event_ticker", "exchange_index", "limit", "subaccount", "ticker"),
+            "SETTLEMENTS": ("cursor", "event_ticker", "limit", "max_ts", "min_ts", "subaccount", "ticker"),
+            "USER_DATA_TIMESTAMP": (),
+        }
+        self.assertEqual(dict(wr.DOCUMENTED_QUERY_NAME_SETS), expected)
+        self.assertEqual(
+            wr.unsupported_query_fields("HISTORICAL_FILLS"),
+            ("exchange_index", "min_ts", "order_id", "subaccount"),
+        )
+        self.assertEqual(
+            wr.unsupported_query_fields("HISTORICAL_ORDERS"),
+            ("event_ticker", "exchange_index", "min_ts", "status", "subaccount"),
+        )
+        self.assertEqual(
+            wr.unsupported_query_fields("HISTORICAL_POSITIONS"),
+            ("count_filter", "exchange_index", "subaccount"),
+        )
+        self.assertNotIn("client_order_id", wr.unsupported_query_fields("HISTORICAL_FILLS"))
+
+    def test_preserved_source_semantics(self) -> None:
+        contract = wr.build_revision_04_source_contract()
+        operations = contract["operations"]
+        self.assertEqual(contract["environment"], {
+            "credentials_shared": False,
+            "demo_rest_root": "https://external-api.demo.kalshi.co/trade-api/v2",
+            "production_rest_root": "https://external-api.kalshi.com/trade-api/v2",
+        })
+        expected_partitions = {
+            "LIVE_FILLS": "fills before trades_created_ts historical",
+            "LIVE_ORDERS": "resting always live; canceled/fully executed before orders_updated_ts historical",
+            "HISTORICAL_ORDERS": "canceled/executed orders older than orders_updated_ts",
+            "LIVE_POSITIONS": "unsettled positions always live; settled positions may move by whole event to historical",
+            "HISTORICAL_POSITIONS": "settled positions archived per whole event; never split across live/historical; cutoff field market_positions_last_updated_ts",
+        }
+        for operation, semantics in expected_partitions.items():
+            self.assertEqual(operations[operation]["partition_semantics"], semantics)
+        self.assertEqual(operations["EXACT_ORDER"]["documented_http_statuses"], [200, 401, 404, 500])
+        self.assertEqual(
+            [parameter["name"] for parameter in operations["EXACT_ORDER"]["path_parameters"]],
+            ["order_id"],
+        )
+        self.assertEqual(operations["EXACT_ORDER"]["http_404_nonexistence_theorem"], "NOT_EXPOSED")
+        self.assertEqual(operations["USER_DATA_TIMESTAMP"]["negative_semantics"], "NOT_TRANSACTIONALLY_EXACT")
+        self.assertEqual(len(operations["USER_DATA_TIMESTAMP"]["semantic_notes"]), 2)
+        for operation in ("HISTORICAL_FILLS", "HISTORICAL_ORDERS", "HISTORICAL_POSITIONS"):
+            self.assertEqual(operations[operation]["retention_lower_bound"], "NOT_EXPOSED")
+        self.assertEqual(operations["LIVE_ORDERS"]["request_scope_fields"], ["exchange_index", "subaccount", "ticker"])
+        self.assertEqual(operations["LIVE_POSITIONS"]["request_scope_fields"], ["exchange_index", "subaccount", "ticker"])
+        self.assertEqual(operations["SETTLEMENTS"]["request_scope_fields"], ["subaccount", "ticker"])
+        for operation in ("LIVE_POSITIONS", "HISTORICAL_POSITIONS", "SETTLEMENTS"):
+            self.assertEqual(operations[operation]["response_subaccount_field"], "NOT_EXPOSED")
+        market_result = contract["market_result_contract"]
+        self.assertFalse(market_result["a3_parse"])
+        self.assertFalse(market_result["a3_compare"])
+        self.assertFalse(market_result["a3_identity_use"])
+        self.assertFalse(market_result["a3_economic_use"])
+
+
+class Revision04FillTemporalTests(unittest.TestCase):
+    lower = datetime.fromisoformat(wr.INCIDENT_LOWER_BOUND_UTC.replace("Z", "+00:00"))
+    upper = datetime.fromisoformat("2026-08-19T23:42:00+00:00")
+
+    def _parse(self, raw: dict) -> tuple[Optional[wr._FillRecord], Optional[wr.HaltCode]]:
+        observation = wr._Observation("LIVE_FILLS", 1, 1, "0" * 64)
+        return wr._parse_fill(raw, observation=observation)
+
+    def _accepted_and_selected(self, raw: dict) -> bool:
+        fill, halt = self._parse(raw)
+        self.assertIsNone(halt)
+        self.assertIsNotNone(fill)
+        assert fill is not None
+        return wr._fill_in_local_scope(fill, lower_utc=self.lower, upper_utc=self.upper)
+
+    def test_created_time_valid_and_malformed(self) -> None:
+        valid = _fill(ts=None)
+        valid["created_time"] = "2026-08-15T10:00:00Z"
+        self.assertTrue(self._accepted_and_selected(valid))
+        malformed = _fill(ts=None)
+        malformed["created_time"] = "not-a-timestamp"
+        self.assertEqual(self._parse(malformed)[1], wr.HaltCode.AUTHORITATIVE_RESPONSE_MALFORMED)
+
+    def test_ts_integer_string_and_precedence(self) -> None:
+        integer_ts = _fill(ts=None)
+        integer_ts["ts"] = 1
+        self.assertTrue(self._accepted_and_selected(integer_ts))
+        self.assertTrue(self._accepted_and_selected(_fill(ts="2026-08-15T10:00:00Z")))
+
+        string_ts_wins = _fill(ts="2026-08-10T10:00:00Z")
+        string_ts_wins["created_time"] = "2026-08-15T10:00:00Z"
+        self.assertFalse(self._accepted_and_selected(string_ts_wins))
+        integer_falls_back = _fill(ts=None)
+        integer_falls_back["ts"] = 1
+        integer_falls_back["created_time"] = "2026-08-15T10:00:00Z"
+        self.assertTrue(self._accepted_and_selected(integer_falls_back))
+
+    def test_absence_null_timezone_and_naive_matrix(self) -> None:
+        self.assertTrue(self._accepted_and_selected(_fill(ts=None)))
+        null_ts = _fill(ts=None)
+        null_ts["ts"] = None
+        self.assertEqual(self._parse(null_ts)[1], wr.HaltCode.AUTHORITATIVE_RESPONSE_MALFORMED)
+        null_created = _fill(ts=None)
+        null_created["created_time"] = None
+        self.assertEqual(self._parse(null_created)[1], wr.HaltCode.AUTHORITATIVE_RESPONSE_MALFORMED)
+        self.assertTrue(self._accepted_and_selected(_fill(ts="2026-08-15T06:00:00-04:00")))
+        self.assertEqual(
+            self._parse(_fill(ts="2026-08-15T10:00:00"))[1],
+            wr.HaltCode.AUTHORITATIVE_RESPONSE_MALFORMED,
+        )
+
+    def test_interval_boundaries_and_no_equality_requirement(self) -> None:
+        self.assertTrue(self._accepted_and_selected(_fill(ts=wr.INCIDENT_LOWER_BOUND_UTC)))
+        self.assertTrue(self._accepted_and_selected(_fill(ts="2026-08-19T23:42:00Z")))
+        self.assertFalse(self._accepted_and_selected(_fill(ts="2026-08-11T01:22:15Z")))
+        self.assertFalse(self._accepted_and_selected(_fill(ts="2026-08-19T23:42:00.000001Z")))
+        disagreeing = _fill(ts="2026-08-15T10:00:00Z")
+        disagreeing["created_time"] = "2026-08-16T10:00:00Z"
+        self.assertTrue(self._accepted_and_selected(disagreeing))
+
+
+class Revision04ShardTests(unittest.TestCase):
+    def _parse_fill(self, raw: dict) -> tuple[Optional[wr._FillRecord], Optional[wr.HaltCode]]:
+        return wr._parse_fill(raw, observation=wr._Observation("LIVE_FILLS", 1, 1, "0" * 64))
+
+    def test_fill_exchange_index_type_matrix(self) -> None:
+        record, halt = self._parse_fill(_fill(exchange_index=0))
+        self.assertIsNone(halt)
+        self.assertEqual(record.exchange_index if record else None, 0)
+        cases = {
+            "missing": _fill(),
+            "null": _fill(exchange_index=None),
+            "bool": _fill(exchange_index=False),
+            "non-integral": _fill(exchange_index=0.5),
+            "negative": _fill(exchange_index=-1),
+        }
+        cases["missing"].pop("exchange_index")
+        for name, raw in cases.items():
+            with self.subTest(name=name):
+                self.assertEqual(self._parse_fill(raw)[1], wr.HaltCode.AUTHORITATIVE_RESPONSE_MALFORMED)
+
+    def test_wrong_fill_shard_and_duplicate_precedence(self) -> None:
+        wrong_shard = FakeTransport()
+        wrong_shard.live_fills = [_fill(exchange_index=1)]
+        self.assertEqual(_run(wrong_shard).halt_code, wr.HaltCode.FILL_SCOPE_CONFLICT)
+
+        conflict = FakeTransport()
+        conflict.live_fills = [_fill(exchange_index=0)]
+        conflict.historical_fills = [_fill(exchange_index=1)]
+        self.assertEqual(_run(conflict).halt_code, wr.HaltCode.FILL_ID_DUPLICATE_CONFLICT)
+
+    def test_exact_duplicate_same_shard_has_one_economic_contribution(self) -> None:
+        first, first_halt = self._parse_fill(_fill(exchange_index=0))
+        second, second_halt = wr._parse_fill(
+            _fill(exchange_index=0),
+            observation=wr._Observation("HISTORICAL_FILLS", 1, 1, "1" * 64),
+        )
+        self.assertIsNone(first_halt)
+        self.assertIsNone(second_halt)
+        assert first is not None and second is not None
+        deduped, halt, _details = wr._dedupe_fills([first, second])
+        self.assertIsNone(halt)
+        self.assertEqual(len(deduped or []), 1)
+        quantity, principal, fee, economic_halt = wr._compute_economics(deduped or [])
+        self.assertIsNone(economic_halt)
+        self.assertEqual((quantity, principal, fee), (Decimal("1.00"), Decimal("0.010000"), Decimal("0.000000")))
+
+    def test_position_and_settlement_shard_matrix(self) -> None:
+        valid, halt = wr._supporting_row_in_target_shard({"ticker": wr.TICKER, "exchange_index": 0})
+        self.assertTrue(valid)
+        self.assertIsNone(halt)
+        non_target, halt = wr._supporting_row_in_target_shard({"ticker": wr.TICKER, "exchange_index": 1})
+        self.assertFalse(non_target)
+        self.assertIsNone(halt)
+        for operation in ("position", "settlement"):
+            for name, row in (
+                ("missing", {"ticker": wr.TICKER}),
+                ("null", {"ticker": wr.TICKER, "exchange_index": None}),
+                ("bool", {"ticker": wr.TICKER, "exchange_index": False}),
+                ("non-integral", {"ticker": wr.TICKER, "exchange_index": 0.5}),
+                ("negative", {"ticker": wr.TICKER, "exchange_index": -1}),
+            ):
+                with self.subTest(operation=operation, name=name):
+                    self.assertEqual(
+                        wr._supporting_row_in_target_shard(row)[1],
+                        wr.HaltCode.AUTHORITATIVE_RESPONSE_MALFORMED,
+                    )
+
+    def test_nonzero_supporting_rows_are_not_aggregated_and_malformed_target_rows_fail(self) -> None:
+        positions = FakeTransport()
+        positions.historical_orders = [_filled_order()]
+        positions.historical_fills = [_fill()]
+        positions.live_positions = [{"ticker": wr.TICKER, "exchange_index": 1}]
+        position_result = _run(positions)
+        self.assertIsNone(position_result.halt_code)
+        self.assertEqual(json.loads(position_result.evidence_json)["position_evidence"]["market_position_rows"], 0)
+
+        settlements = FakeTransport()
+        settlements.historical_orders = [_filled_order()]
+        settlements.historical_fills = [_fill()]
+        settlements.settlements = [{"ticker": wr.TICKER, "exchange_index": 1}]
+        settlement_result = _run(settlements)
+        self.assertIsNone(settlement_result.halt_code)
+        self.assertEqual(json.loads(settlement_result.evidence_json)["settlement_evidence"]["matching_rows"], 0)
+
+        malformed_position = FakeTransport()
+        malformed_position.historical_orders = [_filled_order()]
+        malformed_position.historical_fills = [_fill()]
+        malformed_position.live_positions = [{"ticker": wr.TICKER}]
+        self.assertEqual(_run(malformed_position).halt_code, wr.HaltCode.AUTHORITATIVE_RESPONSE_MALFORMED)
+        malformed_settlement = FakeTransport()
+        malformed_settlement.historical_orders = [_filled_order()]
+        malformed_settlement.historical_fills = [_fill()]
+        malformed_settlement.settlements = [{"ticker": wr.TICKER}]
+        self.assertEqual(_run(malformed_settlement).halt_code, wr.HaltCode.AUTHORITATIVE_RESPONSE_MALFORMED)
+
+    def test_settlement_remains_supporting_only_and_never_binds_identity(self) -> None:
+        transport = FakeTransport()
+        transport.historical_orders = [_filled_order()]
+        transport.historical_fills = [_fill()]
+        transport.settlements = [{"ticker": wr.TICKER, "exchange_index": 0, "order_id": "invented"}]
+        result = _run(transport)
+        self.assertEqual(result.bound_order_id, "order-target-001")
+        self.assertEqual(json.loads(result.evidence_json)["settlement_evidence"]["matching_rows"], 1)
+
+
+class Revision04PreservedRuntimeInvariantTests(unittest.TestCase):
+    def test_route_a_closed_limits_and_safety_state_remain_exact(self) -> None:
+        self.assertEqual(len(wr.HistoricalResolutionOperation), 10)
+        self.assertEqual(wr.GLOBAL_GET_SEND_MAXIMUM, 116)
+        self.assertEqual(wr.MASTER_DEADLINE_MS, 180000)
+        self.assertEqual(wr.PER_REQUEST_CEILING_MS, 10000)
+        transport = FakeTransport()
+        result = _run(transport)
+        self.assertEqual(result.writer_proof_state_after, "HELD")
+        self.assertFalse(result.persistent_state_accessed)
+        self.assertFalse(result.persistent_state_mutated)
+        self.assertEqual(result.retry_count, 0)
+        self.assertEqual(result.redirect_count, 0)
+        self.assertTrue(all(request.method == "GET" for request in transport.requests))
+        self.assertTrue(all(request.origin == wr.DEMO_REST_ORIGIN for request in transport.requests))
+        request_log = json.loads(result.evidence_json)["request_log"]
+        self.assertTrue(all(entry["retry_count"] == 0 for entry in request_log))
+        self.assertTrue(all(entry["redirect_count"] == 0 for entry in request_log))
 
 
 if __name__ == "__main__":

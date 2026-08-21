@@ -1,6 +1,6 @@
 """Offline-safe Kalshi Demo primary-domain historical-incident resolution.
 
-Revision-02 read-only evidence lane (A2 implementation) for the immutable
+Revision-04 read-only evidence lane (A2 source-binding correction) for the immutable
 ``KALSHI_DEMO_ONE_ORDER_LIFECYCLE_EXECUTION_01`` incident.  This module
 performs no network I/O of its own; every venue observation crosses a
 caller-supplied ``GET``-only transport boundary and every request path/query
@@ -18,7 +18,10 @@ specification; every zero-match run terminates as
 ``READ_ZERO_MATCH_NEGATIVE_THEOREM_NOT_PROVEN`` or a more specific
 source-incompleteness result.
 
-Revision 02 corrects two defects in the blocked predecessor specification:
+Revision 04 preserves the Revision-02 execution architecture while replacing
+its source binding with the accepted execution-material projection and applying
+the Revision-03 shard compatibility rules.  The established Revision-02
+runtime corrections remain unchanged:
 
 * a unique ``DIRECT_MATCH_HISTORICAL_ONLY`` order binds without an
   ``EXACT_ORDER`` reread, while ``DIRECT_MATCH_LIVE_PRESENT`` and
@@ -37,11 +40,13 @@ risk arithmetic uses :class:`decimal.Decimal`.
 
 from __future__ import annotations
 
+import base64
 import enum
 import hashlib
 import json
 import re
 import time
+import zlib
 from dataclasses import dataclass, field
 from datetime import datetime, timedelta, timezone
 from decimal import Decimal
@@ -55,18 +60,18 @@ from typing import Callable, Dict, FrozenSet, List, Mapping, Optional, Protocol,
 # ---------------------------------------------------------------------------
 
 REPOSITORY = "rigolugo/ARB"
-REQUIRED_MAIN = "0d77bd55087a8b63f74f2b4d95f9a63745e30056"
-REQUIRED_TREE = "bfcf137b4805a7c1899e1cff5d47a5c7b129e555"
-REQUIRED_PARENT = "35916c62a0867e59e3954b4b35b6cfdec597b64c"
+REQUIRED_MAIN = "37ddb6adc0f494f3d4e05442d1a1192be6f23b36"
+REQUIRED_TREE = "11eccec38c4d15452e3d43aca382621e8979bdff"
+REQUIRED_PARENT = "89afe409c996784a2c09cd99d83699a36c043b02"
 
-TASK_ID = "KALSHI_DEMO_PRIMARY_DOMAIN_HISTORICAL_INCIDENT_RESOLUTION_READ_ONLY_IMPLEMENTATION_01"
+TASK_ID = "KALSHI_DEMO_PRIMARY_DOMAIN_HISTORICAL_INCIDENT_RESOLUTION_READ_ONLY_A2_SOURCE_BINDING_REV04_IMPLEMENTATION_01"
 
-SPECIFICATION_FILENAME = "KALSHI_DEMO_PRIMARY_DOMAIN_HISTORICAL_INCIDENT_RESOLUTION_READ_ONLY_SPEC_02.md"
-SPECIFICATION_BYTES = 129022
-SPECIFICATION_SHA256 = "d25e0bc51876bd88992c13fd87d644ba8c1084ec121a348a195d361455cd43cf"
-HANDOFF_FILENAME = "HANDOFF_KALSHI_DEMO_PRIMARY_DOMAIN_HISTORICAL_INCIDENT_RESOLUTION_READ_ONLY_SPEC_02.md"
-HANDOFF_BYTES = 22347
-HANDOFF_SHA256 = "b69e8e232c1a49948898ac0f7bfbc866eb702d871667eeed7fc931efe76db981"
+SPECIFICATION_FILENAME = "KALSHI_DEMO_PRIMARY_DOMAIN_HISTORICAL_INCIDENT_RESOLUTION_READ_ONLY_SPEC_04.md"
+SPECIFICATION_BYTES = 583254
+SPECIFICATION_SHA256 = "7973a871048ccccf80cd12307e1f5851ade9c26d8f5446f7cbecc61afead3d2b"
+HANDOFF_FILENAME = "HANDOFF_KALSHI_DEMO_PRIMARY_DOMAIN_HISTORICAL_INCIDENT_RESOLUTION_READ_ONLY_SPEC_04.md"
+HANDOFF_BYTES = 15871
+HANDOFF_SHA256 = "d5aaf0196542b1300113bd544b02dd592b627f00744c477ede6c4b13bfa60350"
 
 PREDECESSOR_SPECIFICATION_FILENAME = "KALSHI_DEMO_PRIMARY_DOMAIN_HISTORICAL_INCIDENT_RESOLUTION_READ_ONLY_SPEC_01.md"
 PREDECESSOR_SPECIFICATION_BYTES = 107697
@@ -200,6 +205,334 @@ OPERATION_BINDING_IDENTITIES: Mapping[str, Tuple[int, str]] = MappingProxyType({
     "HISTORICAL_POSITIONS": (769, "ff85accd0686f8e9b28b19e32b078b6e9aa6c5003b6de1e8402ac7a93c974fcd"),
     "SETTLEMENTS": (645, "5893c3424b996b0da818084074ecfafceaa1926be4af599b7273e80a8cf49301"),
 })
+
+
+# Revision-02 remains embedded above as exact predecessor-audit evidence.
+REV02_SOURCE_BINDING_MANIFEST_ID = SOURCE_BINDING_MANIFEST_ID
+REV02_SOURCE_BINDING_MANIFEST_BYTES = SOURCE_BINDING_MANIFEST_BYTES
+REV02_SOURCE_BINDING_MANIFEST_LENGTH = SOURCE_BINDING_MANIFEST_LENGTH
+REV02_SOURCE_BINDING_MANIFEST_SHA256 = SOURCE_BINDING_MANIFEST_SHA256
+REV02_OPERATION_BINDING_IDENTITIES = OPERATION_BINDING_IDENTITIES
+
+# Exact Revision-04 canonical JSON, compressed for compact source storage.
+_REV04_SOURCE_CONTRACT_ZLIB_BASE64 = (
+    "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"
+)
+SOURCE_BINDING_MANIFEST_BYTES = zlib.decompress(
+    base64.b64decode("".join(_REV04_SOURCE_CONTRACT_ZLIB_BASE64))
+)
+SOURCE_BINDING_MANIFEST_ID = (
+    "KALSHI_PRIMARY_DOMAIN_HISTORICAL_RESOLUTION_EXECUTION_MATERIAL_SOURCE_CONTRACT_REV4"
+)
+SOURCE_BINDING_MANIFEST_LENGTH = 143_868
+SOURCE_BINDING_MANIFEST_SHA256 = (
+    "1df3fbb9e3a7f80a9e1890c2abf552e0a4d945b76cb6455e9fe79a977bb91e2b"
+)
+SOURCE_BINDING_NORMALIZATION_REVISION = 4
+OPERATION_BINDING_IDENTITIES = MappingProxyType({
+    "EXACT_ORDER": (15_224, "fb7e69cac3119dd396c7bf9b4f54f74f7f71cb5b76ce445895b58a53cc80bcfa"),
+    "HISTORICAL_CUTOFF": (4_595, "96ba74f1233c91bcce529a5f59726ce44d166baf990352919e1af5e99855a794"),
+    "HISTORICAL_FILLS": (17_130, "56cd493d88b3bd4ca87a2eef7c597beb1a09f5c1626beefc997f1acf9b5fb87e"),
+    "HISTORICAL_ORDERS": (17_435, "ce76d532dacb2a7a059fd46d0c4a7d086e539f59e381d7bc97b41956f08bb53f"),
+    "HISTORICAL_POSITIONS": (13_001, "dbaa8f62f993110e23a14c8f84d894e52f0f32160693ccba0f10ae55930c6571"),
+    "LIVE_FILLS": (18_689, "fdcc527dadeadd57d5512f70a6403876660d25e0f9e7cb21b230d52a52648a38"),
+    "LIVE_ORDERS": (19_474, "c8ad464e4a7045b412ec70cec0e9f4e01035103da7aff6b6647624cd35bdf90c"),
+    "LIVE_POSITIONS": (14_165, "0c0b8ff3d04102a3083f421ee6914dbbe3f2f37b0021ec44acde83230a35c2ce"),
+    "SETTLEMENTS": (16_810, "7ec7b606ef4f5b0ba02eaad2cf6df1994e7e690e0c51b40140c9e20501147229"),
+    "USER_DATA_TIMESTAMP": (1_630, "c13419329be995ee5fa72f0967cdc1063289e565eb472d92de36546694355e1c"),
+})
+
+
+
+# Exact Appendix-B atom enumerations and the 118-family predecessor audit.
+_REV04_AUDIT_ZLIB_BASE64 = (
+    "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"
+)
+_REV04_AUDIT_DATA = json.loads(
+    zlib.decompress(base64.b64decode("".join(_REV04_AUDIT_ZLIB_BASE64)))
+)
+PREDECESSOR_EXECUTION_MATERIAL = tuple(_REV04_AUDIT_DATA["PREDECESSOR_EXECUTION_MATERIAL"])
+REV03_ACCEPTED_EXECUTION_MATERIAL = tuple(_REV04_AUDIT_DATA["REV03_ACCEPTED_EXECUTION_MATERIAL"])
+RUNTIME_CONSUMED_SOURCE_CONTRACT = tuple(_REV04_AUDIT_DATA["RUNTIME_CONSUMED_SOURCE_CONTRACT"])
+REV04_EXECUTION_MATERIAL_PROJECTION = tuple(_REV04_AUDIT_DATA["REV04_EXECUTION_MATERIAL_PROJECTION"])
+REV02_PREDECESSOR_FAMILY_DISPOSITIONS = MappingProxyType(
+    {
+        **dict(_REV04_AUDIT_DATA["REV02_FAMILY_DISPOSITIONS"]),
+        "operations.EXACT_ORDER.documented_http_statuses[200]": "PRESERVED_EXECUTION_MATERIAL",
+        "operations.EXACT_ORDER.documented_http_statuses[401]": "PRESERVED_EXECUTION_MATERIAL",
+        "operations.EXACT_ORDER.documented_http_statuses[404]": "PRESERVED_EXECUTION_MATERIAL",
+        "operations.EXACT_ORDER.documented_http_statuses[500]": "PRESERVED_EXECUTION_MATERIAL",
+    }
+)
+del _REV04_AUDIT_DATA
+
+COVERAGE_SET_IDENTITIES: Mapping[str, Tuple[int, str]] = MappingProxyType({
+    "PREDECESSOR_EXECUTION_MATERIAL": (
+        199, "559f6575fb71d50584cc6094f73e51b6859f0802b923a22aed6f80c1c3b63f2b",
+    ),
+    "REV03_ACCEPTED_EXECUTION_MATERIAL": (
+        71, "1d74776161ad1c8539783c26380ab53ba36603ca8b27847cafea069e0bd185df",
+    ),
+    "RUNTIME_CONSUMED_SOURCE_CONTRACT": (
+        174, "d943cf97151a7ca2586c832fd198b061dcc22a86c7193652fc33f173d401a043",
+    ),
+    "REV04_EXECUTION_MATERIAL_PROJECTION": (
+        298, "c8d09262f9db8e73095b28ded702708e313d4e8224d070ba879cb7ea95b8ef1f",
+    ),
+    "UNION_INPUT": (
+        291, "15559b719b3deedf4025a2b38065df573bdefce747a47e62de88708cf9f4ed13",
+    ),
+    "MISSING_FROM_REV04_AFTER_EXCLUSIONS": (
+        0, "4f53cda18c2baa0c0354bb5f9a3ecbe5ed12ab4d8e11ba873c2f11161202b945",
+    ),
+})
+
+
+def build_revision_04_source_contract() -> Dict[str, object]:
+    """Return a fresh mutable copy of the exact accepted Revision-04 contract."""
+
+    parsed = json.loads(SOURCE_BINDING_MANIFEST_BYTES)
+    if type(parsed) is not dict:
+        raise AssertionError("embedded Revision-04 source contract is not an object")
+    return parsed
+
+
+def canonical_source_contract_bytes(contract: object) -> bytes:
+    """Serialize normalized source material using RA4-MANIFEST-001."""
+
+    return json.dumps(
+        contract, sort_keys=True, separators=(",", ":"), ensure_ascii=False,
+    ).encode("utf-8")
+
+
+def operation_source_contract_bytes(operation: str) -> bytes:
+    contract = build_revision_04_source_contract()
+    operations = contract["operations"]
+    if type(operations) is not dict or operation not in operations:
+        raise KeyError(operation)
+    return canonical_source_contract_bytes(operations[operation])
+
+
+def validate_predecessor_family_classification(field_families: Sequence[str]) -> bool:
+    """Fail closed unless the exact 118 predecessor families are classified."""
+
+    if any(type(item) is not str or item == "" for item in field_families):
+        return False
+    return (
+        len(field_families) == len(REV02_PREDECESSOR_FAMILY_DISPOSITIONS)
+        and set(field_families) == set(REV02_PREDECESSOR_FAMILY_DISPOSITIONS)
+    )
+
+
+def validate_execution_material_coverage() -> bool:
+    """Recompute the accepted missing-atoms=0 theorem."""
+
+    union_input = (
+        set(PREDECESSOR_EXECUTION_MATERIAL)
+        | set(REV03_ACCEPTED_EXECUTION_MATERIAL)
+        | set(RUNTIME_CONSUMED_SOURCE_CONTRACT)
+    )
+    return len(union_input - set(REV04_EXECUTION_MATERIAL_PROJECTION)) == 0
+
+
+_REV04_OPERATION_OBJECTS = build_revision_04_source_contract()["operations"]
+assert type(_REV04_OPERATION_OBJECTS) is dict
+DOCUMENTED_QUERY_NAME_SETS: Mapping[str, Tuple[str, ...]] = MappingProxyType({
+    name: tuple(operation["query_parameter_names"])
+    for name, operation in _REV04_OPERATION_OBJECTS.items()
+})
+del _REV04_OPERATION_OBJECTS
+
+_HISTORICAL_LIVE_QUERY_PAIRS: Mapping[str, str] = MappingProxyType({
+    "HISTORICAL_FILLS": "LIVE_FILLS",
+    "HISTORICAL_ORDERS": "LIVE_ORDERS",
+    "HISTORICAL_POSITIONS": "LIVE_POSITIONS",
+})
+
+
+def unsupported_query_fields(historical_operation: str) -> Tuple[str, ...]:
+    """Derive the exact live-minus-historical unsupported-query set."""
+
+    if historical_operation not in _HISTORICAL_LIVE_QUERY_PAIRS:
+        raise KeyError(historical_operation)
+    live_operation = _HISTORICAL_LIVE_QUERY_PAIRS[historical_operation]
+    return tuple(sorted(
+        set(DOCUMENTED_QUERY_NAME_SETS[live_operation])
+        - set(DOCUMENTED_QUERY_NAME_SETS[historical_operation])
+    ))
 
 _REQUIRED_CREDENTIAL_REFERENCES = (
     "KALSHI_DEMO_API_KEY_ID",
@@ -815,12 +1148,73 @@ def _json_safe(value: object) -> object:
 # Source/capability/provenance validation
 # ---------------------------------------------------------------------------
 
-def validate_source_binding_manifest(raw: object) -> Optional[HaltCode]:
-    if type(raw) is not bytes or len(raw) == 0:
+def _normalized_source_candidate(candidate: object) -> Optional[Dict[str, object]]:
+    if type(candidate) is bytes:
+        if len(candidate) == 0:
+            return None
+        try:
+            parsed = _strict_json_loads(candidate)
+        except ValueError:
+            return None
+    elif type(candidate) is dict:
+        parsed = candidate
+    else:
+        return None
+    return parsed if type(parsed) is dict else None
+
+
+def _positive_source_claims_agree(primary: object, rendered: object) -> bool:
+    """Compare only positive rendered claims; rendered silence is neutral."""
+
+    if type(rendered) is dict:
+        if type(primary) is not dict:
+            return False
+        for key, rendered_value in rendered.items():
+            if key not in primary:
+                return False
+            if not _positive_source_claims_agree(primary[key], rendered_value):
+                return False
+        return True
+    return type(primary) is type(rendered) and primary == rendered
+
+
+def compare_revision_04_source_contract(
+    current_openapi: object,
+    current_rendered_positive_claims: Optional[Mapping[str, object]] = None,
+) -> Optional[HaltCode]:
+    """Compare caller-supplied current material with the accepted baseline.
+
+    This pure comparator performs no retrieval.  A rendered mapping is a
+    positive-claims subset: omitted keys are silence, while a positive
+    disagreement is an official-source conflict.  Mutual current-source
+    agreement never excuses drift from the accepted Revision-04 contract.
+    """
+
+    current = _normalized_source_candidate(current_openapi)
+    if current is None:
+        if type(current_openapi) is bytes and len(current_openapi) > 0:
+            return HaltCode.AUTHORITATIVE_SOURCE_DRIFT_SPEC_REVISION_REQUIRED
         return HaltCode.TASK_CURRENT_SOURCE_UNAVAILABLE
-    if len(raw) != SOURCE_BINDING_MANIFEST_LENGTH or _sha256(raw) != SOURCE_BINDING_MANIFEST_SHA256:
+    if current_rendered_positive_claims is not None:
+        if type(current_rendered_positive_claims) is not dict:
+            return HaltCode.AUTHORITATIVE_SOURCE_AMBIGUITY
+        if not _positive_source_claims_agree(current, current_rendered_positive_claims):
+            return HaltCode.OFFICIAL_SOURCE_CONFLICT
+    try:
+        current_bytes = canonical_source_contract_bytes(current)
+    except (TypeError, ValueError):
+        return HaltCode.AUTHORITATIVE_SOURCE_AMBIGUITY
+    if current_bytes != SOURCE_BINDING_MANIFEST_BYTES:
         return HaltCode.AUTHORITATIVE_SOURCE_DRIFT_SPEC_REVISION_REQUIRED
-    if raw != SOURCE_BINDING_MANIFEST_BYTES:
+    return None
+
+
+def validate_source_binding_manifest(raw: object) -> Optional[HaltCode]:
+    comparison_halt = compare_revision_04_source_contract(raw)
+    if comparison_halt is not None:
+        return comparison_halt
+    assert type(raw) is bytes
+    if len(raw) != SOURCE_BINDING_MANIFEST_LENGTH or _sha256(raw) != SOURCE_BINDING_MANIFEST_SHA256:
         return HaltCode.AUTHORITATIVE_SOURCE_DRIFT_SPEC_REVISION_REQUIRED
     try:
         parsed = _strict_json_loads(raw)
@@ -828,7 +1222,9 @@ def validate_source_binding_manifest(raw: object) -> Optional[HaltCode]:
         return HaltCode.AUTHORITATIVE_SOURCE_DRIFT_SPEC_REVISION_REQUIRED
     if type(parsed) is not dict:
         return HaltCode.AUTHORITATIVE_SOURCE_DRIFT_SPEC_REVISION_REQUIRED
-    if parsed.get("manifest_id") != SOURCE_BINDING_MANIFEST_ID:
+    if parsed.get("schema_id") != SOURCE_BINDING_MANIFEST_ID:
+        return HaltCode.AUTHORITATIVE_SOURCE_DRIFT_SPEC_REVISION_REQUIRED
+    if parsed.get("normalization_revision") != SOURCE_BINDING_NORMALIZATION_REVISION:
         return HaltCode.AUTHORITATIVE_SOURCE_DRIFT_SPEC_REVISION_REQUIRED
     operations = parsed.get("operations")
     if type(operations) is not dict or set(operations) != set(OPERATION_BINDING_IDENTITIES):
@@ -999,7 +1395,7 @@ class _FillRecord:
     ticker: str
     market_ticker: Optional[str]
     subaccount_number: int
-    exchange_index: Optional[int]
+    exchange_index: int
     count_fp: Decimal
     yes_price_dollars: Decimal
     no_price_dollars: Decimal
@@ -1017,10 +1413,10 @@ _ORDER_OPTIONAL_TYPED = (
     "cancel_order_on_pause", "status", "initial_count_fp", "fill_count_fp", "remaining_count_fp",
 )
 _FILL_REQUIRED = (
-    "fill_id", "trade_id", "order_id", "ticker", "subaccount_number",
+    "fill_id", "trade_id", "order_id", "ticker", "subaccount_number", "exchange_index",
     "count_fp", "yes_price_dollars", "no_price_dollars", "is_taker", "fee_cost",
 )
-_FILL_OPTIONAL_TYPED = ("market_ticker", "exchange_index", "created_time", "ts")
+_FILL_OPTIONAL_TYPED = ("market_ticker", "created_time", "ts")
 
 _ORDER_AUTHORITATIVE_FIELDS = frozenset(_ORDER_REQUIRED + _ORDER_OPTIONAL_TYPED)
 _FILL_AUTHORITATIVE_FIELDS = frozenset(_FILL_REQUIRED + _FILL_OPTIONAL_TYPED)
@@ -1106,6 +1502,9 @@ def _parse_fill(raw: object, *, observation: _Observation) -> Tuple[Optional[_Fi
         order_id = _opaque_identifier(raw["order_id"])
         ticker = _opaque_identifier(raw["ticker"])
         subaccount = _exact_int(raw["subaccount_number"])
+        exchange_index = _exact_int(raw["exchange_index"])
+        if exchange_index < 0:
+            raise ValueError("exchange_index must be non-negative")
         count = _parse_count(raw["count_fp"])
         yes_price = _parse_money(raw["yes_price_dollars"])
         no_price = _parse_money(raw["no_price_dollars"])
@@ -1115,14 +1514,11 @@ def _parse_fill(raw: object, *, observation: _Observation) -> Tuple[Optional[_Fi
         return None, HaltCode.AUTHORITATIVE_RESPONSE_MALFORMED
 
     market_ticker: Optional[str] = None
-    exchange_index: Optional[int] = None
     created_time: Optional[object] = None
     ts: Optional[object] = None
     try:
         if "market_ticker" in raw:
             market_ticker = _opaque_identifier(raw["market_ticker"])
-        if "exchange_index" in raw:
-            exchange_index = _exact_int(raw["exchange_index"])
         if "created_time" in raw:
             created_time = raw["created_time"]
             if not _valid_rfc3339(created_time):
@@ -1140,13 +1536,12 @@ def _parse_fill(raw: object, *, observation: _Observation) -> Tuple[Optional[_Fi
 
     authoritative: Dict[str, object] = {
         "fill_id": fill_id, "trade_id": trade_id, "order_id": order_id, "ticker": ticker,
-        "subaccount_number": subaccount, "count_fp": count, "yes_price_dollars": yes_price,
+        "subaccount_number": subaccount, "exchange_index": exchange_index,
+        "count_fp": count, "yes_price_dollars": yes_price,
         "no_price_dollars": no_price, "is_taker": is_taker, "fee_cost": fee_cost,
     }
     if market_ticker is not None:
         authoritative["market_ticker"] = market_ticker
-    if exchange_index is not None:
-        authoritative["exchange_index"] = exchange_index
     if created_time is not None:
         authoritative["created_time"] = created_time
     if ts is not None:
@@ -1194,7 +1589,7 @@ def _merge_fill_observations(a: _FillRecord, b: _FillRecord) -> _FillRecord:
         fill_id=a.fill_id, trade_id=a.trade_id, order_id=a.order_id, ticker=a.ticker,
         market_ticker=a.market_ticker if a.market_ticker is not None else b.market_ticker,
         subaccount_number=a.subaccount_number,
-        exchange_index=a.exchange_index if a.exchange_index is not None else b.exchange_index,
+        exchange_index=a.exchange_index,
         count_fp=a.count_fp, yes_price_dollars=a.yes_price_dollars, no_price_dollars=a.no_price_dollars,
         is_taker=a.is_taker, fee_cost=a.fee_cost,
         created_time=a.created_time if a.created_time is not None else b.created_time,
@@ -1658,8 +2053,6 @@ def _fill_in_local_scope(fill: _FillRecord, *, lower_utc: datetime, upper_utc: d
         return False
     if fill.subaccount_number != SUBACCOUNT:
         return False
-    if fill.exchange_index is not None and fill.exchange_index != EXCHANGE_INDEX:
-        return False
     fill_time = None
     if type(fill.ts) is str and _valid_rfc3339(fill.ts):
         fill_time = _parse_rfc3339(fill.ts)
@@ -1804,6 +2197,8 @@ def _discover_fills(
     if dedupe_halt is not None:
         return None, live_complete, historical_complete, dedupe_halt, evidence
     assert deduped is not None
+    if any(fill.exchange_index != EXCHANGE_INDEX for fill in deduped):
+        return None, live_complete, historical_complete, HaltCode.FILL_SCOPE_CONFLICT, evidence
     return deduped, live_complete, historical_complete, None, evidence
 
 # ---------------------------------------------------------------------------
@@ -1961,6 +2356,30 @@ def _assess_cutoff_coverage(
 # Position / settlement supporting-evidence collection
 # ---------------------------------------------------------------------------
 
+def _supporting_row_in_target_shard(raw: object) -> Tuple[Optional[bool], Optional[HaltCode]]:
+    """Validate target position/settlement shard identity before aggregation."""
+
+    if type(raw) is not dict:
+        return None, HaltCode.AUTHORITATIVE_RESPONSE_MALFORMED
+    if "ticker" not in raw:
+        return None, HaltCode.AUTHORITATIVE_RESPONSE_MALFORMED
+    try:
+        row_ticker = _opaque_identifier(raw["ticker"])
+    except ValueError:
+        return None, HaltCode.AUTHORITATIVE_RESPONSE_MALFORMED
+    if row_ticker != TICKER:
+        return False, None
+    if "exchange_index" not in raw:
+        return None, HaltCode.AUTHORITATIVE_RESPONSE_MALFORMED
+    try:
+        row_exchange_index = _exact_int(raw["exchange_index"])
+    except ValueError:
+        return None, HaltCode.AUTHORITATIVE_RESPONSE_MALFORMED
+    if row_exchange_index < 0:
+        return None, HaltCode.AUTHORITATIVE_RESPONSE_MALFORMED
+    return row_exchange_index == EXCHANGE_INDEX, None
+
+
 def _collect_supporting_list(
     *, operation: HistoricalResolutionOperation, transport: HistoricalResolutionTransport,
     deadline: _Deadline, state: _ExecutionState, min_ts: Optional[int] = None, max_ts: Optional[int] = None,
@@ -1972,10 +2391,10 @@ def _collect_supporting_list(
         return len(annotated), complete, halt, pages
     count = 0
     for raw, _page, _record, _sha in annotated:
-        if type(raw) is not dict:
-            return count, complete, HaltCode.AUTHORITATIVE_RESPONSE_MALFORMED, pages
-        row_ticker = raw.get("ticker")
-        if row_ticker is not None and row_ticker != TICKER:
+        target_shard, row_halt = _supporting_row_in_target_shard(raw)
+        if row_halt is not None:
+            return count, complete, row_halt, pages
+        if not target_shard:
             continue
         count += 1
     return count, complete, None, pages
@@ -3103,4 +3522,3 @@ def _finish_zero_or_unresolved(
         result_class=ResultClass.READ_ZERO_MATCH_NEGATIVE_THEOREM_NOT_PROVEN, halt_code=None,
         completeness=completeness, negative_closure=negative_closure, planned_branch=state.branch or "ZERO_MATCH",
     )
-
