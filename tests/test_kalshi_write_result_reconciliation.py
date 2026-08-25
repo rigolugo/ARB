@@ -9,10 +9,12 @@ from __future__ import annotations
 
 import dataclasses
 import hashlib
+import inspect
 import json
 import unittest
 from datetime import datetime, timezone
 from decimal import Decimal
+from pathlib import Path
 from typing import Callable, Dict, List, Optional
 
 from arb.venues.kalshi import write_result_reconciliation as wr
@@ -1844,13 +1846,13 @@ class Revision04SourceContractTests(unittest.TestCase):
         contract = wr.build_revision_04_source_contract()
         self.assertEqual(
             contract["schema_id"],
-            "KALSHI_PRIMARY_DOMAIN_HISTORICAL_RESOLUTION_EXECUTION_MATERIAL_SOURCE_CONTRACT_REV4",
+            "KALSHI_PRIMARY_DOMAIN_HISTORICAL_RESOLUTION_EXECUTION_MATERIAL_SOURCE_CONTRACT_REV5",
         )
         self.assertEqual(contract["normalization_revision"], 4)
-        self.assertEqual(len(wr.SOURCE_BINDING_MANIFEST_BYTES), 143868)
+        self.assertEqual(len(wr.SOURCE_BINDING_MANIFEST_BYTES), 143864)
         self.assertEqual(
             hashlib.sha256(wr.SOURCE_BINDING_MANIFEST_BYTES).hexdigest(),
-            "1df3fbb9e3a7f80a9e1890c2abf552e0a4d945b76cb6455e9fe79a977bb91e2b",
+            "dc30bf877ce9ce7d8f65c97357fafe6891ce1af359bc7d2b4c9747278ad9a762",
         )
         self.assertEqual(dict(wr.OPERATION_BINDING_IDENTITIES), expected_operations)
         for operation, expected_identity in expected_operations.items():
@@ -1998,6 +2000,67 @@ class Revision04SourceContractTests(unittest.TestCase):
         self.assertFalse(market_result["a3_compare"])
         self.assertFalse(market_result["a3_identity_use"])
         self.assertFalse(market_result["a3_economic_use"])
+        self.assertFalse(market_result["absence_alone_malformed"])
+        self.assertEqual(
+            market_result["classification"], "NOT_CONFIRMED__NOT_EXECUTION_MATERIAL",
+        )
+        self.assertEqual(
+            market_result["conflict_consequence"],
+            "FULL_SCHEMA_PROVENANCE_ONLY__NO_A3_GATE_FAILURE_UNLESS_A_CONSUMED_SEMANTIC_CHANGES",
+        )
+        self.assertEqual(
+            market_result["rendered_observation"],
+            "POSITIVELY_EXPOSED_AS_CHILD_IN_CURRENT_RENDERED_RESEARCH_INTERFACE",
+        )
+
+    def test_revision_05_accepts_positive_rendered_observation(self) -> None:
+        """The accepted Revision-05 baseline itself is the positively-exposed
+        rendered observation; comparing it against itself must not drift."""
+
+        current = wr.build_revision_04_source_contract()
+        self.assertEqual(
+            current["market_result_contract"]["rendered_observation"],
+            "POSITIVELY_EXPOSED_AS_CHILD_IN_CURRENT_RENDERED_RESEARCH_INTERFACE",
+        )
+        self.assertIsNone(wr.compare_revision_04_source_contract(current))
+
+    def test_revision_04_negative_rendered_observation_now_fails_closed(self) -> None:
+        """The prior Revision-04 negative rendered_observation value is no
+        longer the accepted baseline and must halt as authoritative drift,
+        not silently pass."""
+
+        drifted = wr.build_revision_04_source_contract()
+        drifted["market_result_contract"]["rendered_observation"] = (
+            "NOT_POSITIVELY_EXPOSED_AS_CHILD_IN_CURRENT_RENDERED_RESEARCH_INTERFACE"
+        )
+        self.assertEqual(
+            wr.compare_revision_04_source_contract(drifted),
+            wr.HaltCode.AUTHORITATIVE_SOURCE_DRIFT_SPEC_REVISION_REQUIRED,
+        )
+        drifted_bytes = wr.canonical_source_contract_bytes(drifted)
+        self.assertIsNotNone(wr.validate_source_binding_manifest(drifted_bytes))
+        self.assertEqual(
+            wr.validate_source_binding_manifest(drifted_bytes),
+            wr.HaltCode.AUTHORITATIVE_SOURCE_DRIFT_SPEC_REVISION_REQUIRED,
+        )
+
+    def test_market_result_remains_non_consumed(self) -> None:
+        """``market_result_contract`` is embedded source-contract data only:
+        no module code path parses, compares, identity-binds, or
+        economically consumes it.  Positive rendered-source visibility must
+        not introduce such a consumer."""
+
+        module_path = inspect.getsourcefile(wr)
+        assert module_path is not None
+        module_source = Path(module_path).read_text(encoding="utf-8")
+        for needle in (
+            "market_result_contract[",
+            "market_result_contract.get(",
+            '"rendered_observation"',
+            "'rendered_observation'",
+        ):
+            with self.subTest(needle=needle):
+                self.assertNotIn(needle, module_source)
 
 
 class Revision04FillTemporalTests(unittest.TestCase):
