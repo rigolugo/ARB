@@ -12,15 +12,16 @@ Canonical governance and restart router. This file does not grant capability and
 4. `project_context/PROJECT_AGENT_DISPATCH_AUTHORITY.md`
 5. `project_context/PROJECT_STATE.md`
 6. `project_context/PROJECT_STATE_CHECKPOINT_2026_08_26_ROUTE_A_A4.md`
-7. `project_context/AGENT_ROLES.md`
-8. `project_context/LOCAL_EXECUTION_ENVIRONMENT.md`
-9. `project_context/AUTHORIZATION_LOG.md`
-10. `project_context/DECISION_LOG.md`
-11. `BROWSER_BRANCH_REPOSITORY_TRANSFER_WORKFLOW.md`
-12. `project_context/MARCO_IMPLEMENTATION_REVIEW_PACKAGE_WORKFLOW.md`
-13. task-specific accepted specifications, handoffs, reviews, artifacts, or evidence only when relevant to the active task
+7. `project_archive/route_a_2026_08_26/README.md` and its manifest when exact accepted Route-A specification/handoff bytes are needed
+8. `project_context/AGENT_ROLES.md`
+9. `project_context/LOCAL_EXECUTION_ENVIRONMENT.md`
+10. `project_context/AUTHORIZATION_LOG.md`
+11. `project_context/DECISION_LOG.md`
+12. `BROWSER_BRANCH_REPOSITORY_TRANSFER_WORKFLOW.md`
+13. `project_context/MARCO_IMPLEMENTATION_REVIEW_PACKAGE_WORKFLOW.md`
+14. task-specific accepted specifications, handoffs, reviews, artifacts, or evidence only when relevant to the active task
 
-`project_context/ARTIFACT_INDEX.md` remains the canonical artifact-reference ledger for entries already indexed there. The current-state checkpoint above additionally records exact accepted Revision-05/A3/A4 artifact identities until a later bounded consolidation updates the long-form index.
+`project_context/ARTIFACT_INDEX.md` remains the canonical artifact-reference ledger for entries already indexed there. The current-state checkpoint above records exact accepted Revision-05/A3/A4 identities, and `project_archive/route_a_2026_08_26/` is the lossless repository-resident archive for the accepted public specification/handoff bytes listed by its manifest.
 
 ## Authority hierarchy
 
@@ -56,6 +57,7 @@ When an active dispatch requires a `current`, `fresh`, `then-current`, or equiva
 - Dispatch, same-scope correction, risk-tier evidence, Gustavo-return triggers, and source-binding freshness semantics: `PROJECT_AGENT_DISPATCH_AUTHORITY.md`
 - Long-form project state: `PROJECT_STATE.md`
 - Current routed state overlay for accepted Revision-05/A3/A4 facts: `PROJECT_STATE_CHECKPOINT_2026_08_26_ROUTE_A_A4.md`
+- Lossless accepted public Route-A specification/handoff archive: `../project_archive/route_a_2026_08_26/README.md`
 - Standing roles: `AGENT_ROLES.md`
 - Local Windows/Miniconda execution and shell conventions: `LOCAL_EXECUTION_ENVIRONMENT.md`
 - Authorization audit: `AUTHORIZATION_LOG.md`
