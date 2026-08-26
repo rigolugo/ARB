@@ -22,7 +22,8 @@ Use:
 
 - `project_context/GUARDRAILS.md` for permanent safety constraints;
 - `project_context/PROJECT_AGENT_DISPATCH_AUTHORITY.md` for current-chat dispatch and same-scope correction rules;
-- `project_context/PROJECT_STATE.md` for current accepted project state;
+- `project_context/PROJECT_STATE.md` for the long-form accepted project state;
+- `project_context/PROJECT_STATE_CHECKPOINT_2026_08_26_ROUTE_A_A4.md` as the canonical current-state overlay for accepted Revision-05/A3/A4 facts that post-date older portions of `PROJECT_STATE.md`;
 - `project_context/AGENT_ROLES.md` for standing role boundaries;
 - `project_context/LOCAL_EXECUTION_ENVIRONMENT.md` for Gustavo's default Windows/Miniconda local execution and shell-command conventions;
 - `project_context/AUTHORIZATION_LOG.md` and `project_context/DECISION_LOG.md` for audit history; and
@@ -32,4 +33,4 @@ A bounded exact Gustavo current-chat dispatch may itself be the operative task a
 
 ## Current state
 
-Do not duplicate or infer the current project phase here. Read `project_context/PROJECT_STATE.md` and reverify any task-required canonical base directly against the repository before acting.
+Do not infer the current project phase from this root file alone. Read `project_context/PROJECT_STATE.md`, then apply `project_context/PROJECT_STATE_CHECKPOINT_2026_08_26_ROUTE_A_A4.md` for the exact accepted facts it covers, and reverify any task-required canonical base directly against the repository before acting.

@@ -11,15 +11,16 @@ Canonical governance and restart router. This file does not grant capability and
 3. `project_context/GUARDRAILS.md`
 4. `project_context/PROJECT_AGENT_DISPATCH_AUTHORITY.md`
 5. `project_context/PROJECT_STATE.md`
-6. `project_context/AGENT_ROLES.md`
-7. `project_context/LOCAL_EXECUTION_ENVIRONMENT.md`
-8. `project_context/AUTHORIZATION_LOG.md`
-9. `project_context/DECISION_LOG.md`
-10. `BROWSER_BRANCH_REPOSITORY_TRANSFER_WORKFLOW.md`
-11. `project_context/MARCO_IMPLEMENTATION_REVIEW_PACKAGE_WORKFLOW.md`
-12. task-specific accepted specifications, handoffs, reviews, artifacts, or evidence only when relevant to the active task
+6. `project_context/PROJECT_STATE_CHECKPOINT_2026_08_26_ROUTE_A_A4.md`
+7. `project_context/AGENT_ROLES.md`
+8. `project_context/LOCAL_EXECUTION_ENVIRONMENT.md`
+9. `project_context/AUTHORIZATION_LOG.md`
+10. `project_context/DECISION_LOG.md`
+11. `BROWSER_BRANCH_REPOSITORY_TRANSFER_WORKFLOW.md`
+12. `project_context/MARCO_IMPLEMENTATION_REVIEW_PACKAGE_WORKFLOW.md`
+13. task-specific accepted specifications, handoffs, reviews, artifacts, or evidence only when relevant to the active task
 
-`project_context/ARTIFACT_INDEX.md` remains the canonical artifact-reference ledger and is consulted when task-specific artifact provenance is relevant.
+`project_context/ARTIFACT_INDEX.md` remains the canonical artifact-reference ledger for entries already indexed there. The current-state checkpoint above additionally records exact accepted Revision-05/A3/A4 artifact identities until a later bounded consolidation updates the long-form index.
 
 ## Authority hierarchy
 
@@ -27,7 +28,7 @@ Canonical governance and restart router. This file does not grant capability and
 2. `project_context/GUARDRAILS.md` as the highest standing project operational authority.
 3. Exact active Gustavo task authorization within those guardrails.
 4. `project_context/PROJECT_AGENT_DISPATCH_AUTHORITY.md` and `project_context/AGENT_ROLES.md` for current dispatch/correction and role procedure.
-5. `project_context/PROJECT_STATE.md` for current accepted state facts.
+5. `project_context/PROJECT_STATE.md` plus the latest explicitly routed canonical state checkpoint for current accepted state facts.
 6. `AUTHORIZATION_LOG.md` and `DECISION_LOG.md` as audit history.
 7. Task-specific accepted specifications and evidence within their exact scope.
 
@@ -43,7 +44,7 @@ A named artifact is required when the active task identifies it as a controlling
 
 ## Current-state and source-binding freshness
 
-`PROJECT_STATE.md` is the current accepted-state snapshot. Audit logs are historical records and may lag a later accepted technical state until a bounded governance update records it. Absence of a later event from an audit log is not evidence that the event did not occur; agents must use the authority hierarchy above, exact active Gustavo authorization, current canonical `main`, and task-specific accepted identities.
+`PROJECT_STATE.md` is the long-form accepted-state snapshot. `PROJECT_STATE_CHECKPOINT_2026_08_26_ROUTE_A_A4.md` is the canonical overlay for the exact accepted Revision-05/A3/A4 facts it lists and controls over older state text on those facts until consolidated. Audit logs are historical records and may lag a later accepted technical state until a bounded governance update records it. Absence of a later event from an audit log is not evidence that the event did not occur; agents must use the authority hierarchy above, exact active Gustavo authorization, current canonical `main`, and task-specific accepted identities.
 
 A repository-stored API/OpenAPI/AsyncAPI identity is immutable provenance for the exact source snapshot and operations for which it was reviewed. Its presence in canonical history does **not** make that snapshot a standing "current" venue specification, does not bind a different operation automatically, and does not authorize reuse for a later write surface.
 
@@ -53,7 +54,8 @@ When an active dispatch requires a `current`, `fresh`, `then-current`, or equiva
 
 - Permanent safety and capability floors: `GUARDRAILS.md`
 - Dispatch, same-scope correction, risk-tier evidence, Gustavo-return triggers, and source-binding freshness semantics: `PROJECT_AGENT_DISPATCH_AUTHORITY.md`
-- Current project state: `PROJECT_STATE.md`
+- Long-form project state: `PROJECT_STATE.md`
+- Current routed state overlay for accepted Revision-05/A3/A4 facts: `PROJECT_STATE_CHECKPOINT_2026_08_26_ROUTE_A_A4.md`
 - Standing roles: `AGENT_ROLES.md`
 - Local Windows/Miniconda execution and shell conventions: `LOCAL_EXECUTION_ENVIRONMENT.md`
 - Authorization audit: `AUTHORIZATION_LOG.md`
