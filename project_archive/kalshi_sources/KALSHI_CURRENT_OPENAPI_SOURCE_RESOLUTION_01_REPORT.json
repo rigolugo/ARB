@@ -1,0 +1,26 @@
+{
+  "api_key_subaccount": {
+    "absent_null_means_unrestricted_explicit": true,
+    "api_key_schema_found": true,
+    "description": "If set, the API key is restricted to this single sub-account and may only read and trade on it. Absent/null means the key is unrestricted.",
+    "subaccount_maximum": 63,
+    "subaccount_minimum": 0,
+    "subaccount_nullable": true,
+    "subaccount_property_found": true,
+    "subaccount_required": false
+  },
+  "authority": "OFFICIAL_KALSHI_SOURCE_NONCONTROLLING",
+  "content_type": "text/yaml",
+  "credential_activity": "NONE",
+  "current_semantic_resolution": "CURRENT_OFFICIAL_SOURCE_EXPLICITLY_PROVES_ABSENT_NULL_UNRESTRICTED",
+  "http_status": 200,
+  "kalshi_demo_api_activity": "NONE",
+  "network_activity": "PUBLIC_OFFICIAL_DOCUMENTATION_ONLY",
+  "openapi_info_version": "3.29.0",
+  "openapi_raw_bytes": 325930,
+  "openapi_raw_sha256": "99bdf4093d7eced607ba8b48cc99e3da862c35d99afa2a0c0f63f14eab9237ed",
+  "production_api_activity": "NONE",
+  "source_url": "https://docs.kalshi.com/openapi.yaml",
+  "task_id": "KALSHI_DEMO_ROUTE_B_B1_CURRENT_OPENAPI_SOURCE_RESOLUTION_01",
+  "venue_write_activity": "NONE"
+}
