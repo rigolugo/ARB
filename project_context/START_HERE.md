@@ -70,11 +70,11 @@ Use existing checkpoints, the artifact index, and existing owner artifacts befor
 
 `PROJECT_STATE_CHECKPOINT_2026_08_28_ROUTE_B_B1_AUTHENTICATED_EXECUTION.md` is the later canonical overlay for B1 runtime/execution facts. It supersedes the earlier B1 implementation checkpoint only where that earlier checkpoint states that authenticated B1 execution was `NOT_RUN`, not authorized by installation, or had no route result. It does not replace the implementation checkpoint's installation provenance.
 
-`PROJECT_STATE_CHECKPOINT_2026_08_28_ROUTE_B_B1_CURRENT_OPENAPI_SOURCE_RESOLUTION.md` is the latest B1 source overlay. It records the exact current official OpenAPI 3.29.0 snapshot, resolves the `ApiKey.subaccount` absent/null semantic to `UNRESTRICTED` for task-current source purposes, preserves Local Operator 02 as the historical execution result under its older exact source binding, and routes the project to the narrow source/evidence-binding correction before any further authenticated B1 execution.
+`PROJECT_STATE_CHECKPOINT_2026_08_28_ROUTE_B_B1_CURRENT_OPENAPI_SOURCE_RESOLUTION.md` is the latest B1 source overlay. It records the exact externally retained official OpenAPI 3.29.0 raw identity, the canonical sanitized source-resolution report, resolves the `ApiKey.subaccount` absent/null semantic to `UNRESTRICTED` for task-current source purposes, preserves Local Operator 02 as the historical execution result under its older exact source binding, records the correction of a prior invalid repository snapshot installation, and routes the project to the narrow source/evidence-binding correction before any further authenticated B1 execution.
 
 Each checkpoint controls over older state text on its exact listed facts until consolidated. Audit logs and `ARTIFACT_INDEX.md` are historical/reference records and may lag a later accepted technical state until a bounded governance update records it. Absence of a later event from an audit log or index is not evidence that the event did not occur; agents must use the authority hierarchy above, exact active Gustavo authorization, current canonical `main`, and task-specific accepted identities.
 
-A repository-stored API/OpenAPI/AsyncAPI identity is immutable provenance for the exact source snapshot and operations for which it was reviewed. Its presence in canonical history does **not** make that snapshot a standing "current" venue specification, does not bind a different operation automatically, and does not authorize reuse for a later write surface.
+A repository-stored API/OpenAPI/AsyncAPI identity is immutable provenance for the exact source snapshot and operations for which it was reviewed. A canonical record may instead identify exact external/local source bytes by byte length and SHA-256 when the raw source is intentionally not repository-resident. Neither form makes a historical snapshot a standing "current" venue specification, binds a different operation automatically, or authorizes reuse for a later write surface.
 
 When an active dispatch requires a `current`, `fresh`, `then-current`, or equivalent official source binding, the authorized agent must obtain or otherwise directly observe the official source during that task and record the task-current retrieval/observation identity required by the dispatch. A retained or historical source snapshot may substitute only when the exact active dispatch explicitly permits that substitution. If the required current source cannot be obtained or its identity cannot be established, halt rather than silently reusing an older canonical hash.
 
@@ -90,8 +90,9 @@ Before obtaining fresh evidence, the continuity workflow requires inspection of 
 - Accepted manual resting/cancel canary and domain-readiness overlay: `PROJECT_STATE_CHECKPOINT_2026_08_27_MANUAL_RESTING_CANCEL_CANARY.md`
 - Accepted Route-B B1 specification and approved offline implementation overlay: `PROJECT_STATE_CHECKPOINT_2026_08_28_ROUTE_B_B1_ACCOUNT_SUBACCOUNT_CAPABILITY_AND_FACTS_IMPLEMENTATION.md`
 - Route-B B1 authenticated execution overlay: `PROJECT_STATE_CHECKPOINT_2026_08_28_ROUTE_B_B1_AUTHENTICATED_EXECUTION.md`
-- Latest Route-B B1 current-source resolution and next-task overlay: `PROJECT_STATE_CHECKPOINT_2026_08_28_ROUTE_B_B1_CURRENT_OPENAPI_SOURCE_RESOLUTION.md`
-- Exact current B1 OpenAPI source snapshot: `../project_archive/kalshi_sources/KALSHI_CURRENT_OPENAPI_SOURCE_RESOLUTION_01.yaml`
+- Latest Route-B B1 current-source resolution, provenance correction, and next-task overlay: `PROJECT_STATE_CHECKPOINT_2026_08_28_ROUTE_B_B1_CURRENT_OPENAPI_SOURCE_RESOLUTION.md`
+- Canonical sanitized B1 current-source report: `../project_archive/kalshi_sources/KALSHI_CURRENT_OPENAPI_SOURCE_RESOLUTION_01_REPORT.json`
+- Exact raw B1 current OpenAPI source: LOCAL_ONLY external evidence identified by the latest B1 source-resolution checkpoint
 - Lossless accepted public Route-A specification/handoff archive: `../project_archive/route_a_2026_08_26/README.md`
 - Standing roles: `AGENT_ROLES.md`
 - Local Windows/Miniconda execution and PowerShell command conventions: `LOCAL_EXECUTION_ENVIRONMENT.md`
