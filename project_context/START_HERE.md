@@ -16,14 +16,15 @@ Canonical governance and restart router. This file does not grant capability and
 8. `project_context/PROJECT_STATE_CHECKPOINT_2026_08_27_MANUAL_RESTING_CANCEL_CANARY.md`
 9. `project_context/PROJECT_STATE_CHECKPOINT_2026_08_28_ROUTE_B_B1_ACCOUNT_SUBACCOUNT_CAPABILITY_AND_FACTS_IMPLEMENTATION.md`
 10. `project_context/PROJECT_STATE_CHECKPOINT_2026_08_28_ROUTE_B_B1_AUTHENTICATED_EXECUTION.md`
-11. `project_archive/route_a_2026_08_26/README.md` and its manifest when exact accepted Route-A specification/handoff bytes are needed
-12. `project_context/AGENT_ROLES.md`
-13. `project_context/LOCAL_EXECUTION_ENVIRONMENT.md`
-14. `project_context/AUTHORIZATION_LOG.md`
-15. `project_context/DECISION_LOG.md`
-16. `BROWSER_BRANCH_REPOSITORY_TRANSFER_WORKFLOW.md`
-17. `project_context/MARCO_IMPLEMENTATION_REVIEW_PACKAGE_WORKFLOW.md`
-18. task-specific accepted specifications, handoffs, reviews, artifacts, or evidence only when relevant to the active task
+11. `project_context/PROJECT_STATE_CHECKPOINT_2026_08_28_ROUTE_B_B1_CURRENT_OPENAPI_SOURCE_RESOLUTION.md`
+12. `project_archive/route_a_2026_08_26/README.md` and its manifest when exact accepted Route-A specification/handoff bytes are needed
+13. `project_context/AGENT_ROLES.md`
+14. `project_context/LOCAL_EXECUTION_ENVIRONMENT.md`
+15. `project_context/AUTHORIZATION_LOG.md`
+16. `project_context/DECISION_LOG.md`
+17. `BROWSER_BRANCH_REPOSITORY_TRANSFER_WORKFLOW.md`
+18. `project_context/MARCO_IMPLEMENTATION_REVIEW_PACKAGE_WORKFLOW.md`
+19. task-specific accepted specifications, handoffs, reviews, artifacts, or evidence only when relevant to the active task
 
 `project_context/ARTIFACT_INDEX.md` remains the canonical artifact-reference ledger for entries already indexed there. The routed current-state checkpoints record accepted state facts that post-date portions of `PROJECT_STATE.md` and `ARTIFACT_INDEX.md` until a later bounded consolidation folds those facts into the long-form state/index. `project_archive/route_a_2026_08_26/` is the lossless repository-resident archive for the accepted public Route-A specification/handoff bytes listed by its manifest.
 
@@ -69,6 +70,8 @@ Use existing checkpoints, the artifact index, and existing owner artifacts befor
 
 `PROJECT_STATE_CHECKPOINT_2026_08_28_ROUTE_B_B1_AUTHENTICATED_EXECUTION.md` is the later canonical overlay for B1 runtime/execution facts. It supersedes the earlier B1 implementation checkpoint only where that earlier checkpoint states that authenticated B1 execution was `NOT_RUN`, not authorized by installation, or had no route result. It does not replace the implementation checkpoint's installation provenance.
 
+`PROJECT_STATE_CHECKPOINT_2026_08_28_ROUTE_B_B1_CURRENT_OPENAPI_SOURCE_RESOLUTION.md` is the latest B1 source overlay. It records the exact current official OpenAPI 3.29.0 snapshot, resolves the `ApiKey.subaccount` absent/null semantic to `UNRESTRICTED` for task-current source purposes, preserves Local Operator 02 as the historical execution result under its older exact source binding, and routes the project to the narrow source/evidence-binding correction before any further authenticated B1 execution.
+
 Each checkpoint controls over older state text on its exact listed facts until consolidated. Audit logs and `ARTIFACT_INDEX.md` are historical/reference records and may lag a later accepted technical state until a bounded governance update records it. Absence of a later event from an audit log or index is not evidence that the event did not occur; agents must use the authority hierarchy above, exact active Gustavo authorization, current canonical `main`, and task-specific accepted identities.
 
 A repository-stored API/OpenAPI/AsyncAPI identity is immutable provenance for the exact source snapshot and operations for which it was reviewed. Its presence in canonical history does **not** make that snapshot a standing "current" venue specification, does not bind a different operation automatically, and does not authorize reuse for a later write surface.
@@ -86,7 +89,9 @@ Before obtaining fresh evidence, the continuity workflow requires inspection of 
 - Accepted Route-A/A3/A4 state overlay: `PROJECT_STATE_CHECKPOINT_2026_08_26_ROUTE_A_A4.md`
 - Accepted manual resting/cancel canary and domain-readiness overlay: `PROJECT_STATE_CHECKPOINT_2026_08_27_MANUAL_RESTING_CANCEL_CANARY.md`
 - Accepted Route-B B1 specification and approved offline implementation overlay: `PROJECT_STATE_CHECKPOINT_2026_08_28_ROUTE_B_B1_ACCOUNT_SUBACCOUNT_CAPABILITY_AND_FACTS_IMPLEMENTATION.md`
-- Current Route-B B1 authenticated execution overlay: `PROJECT_STATE_CHECKPOINT_2026_08_28_ROUTE_B_B1_AUTHENTICATED_EXECUTION.md`
+- Route-B B1 authenticated execution overlay: `PROJECT_STATE_CHECKPOINT_2026_08_28_ROUTE_B_B1_AUTHENTICATED_EXECUTION.md`
+- Latest Route-B B1 current-source resolution and next-task overlay: `PROJECT_STATE_CHECKPOINT_2026_08_28_ROUTE_B_B1_CURRENT_OPENAPI_SOURCE_RESOLUTION.md`
+- Exact current B1 OpenAPI source snapshot: `../project_archive/kalshi_sources/KALSHI_CURRENT_OPENAPI_SOURCE_RESOLUTION_01.yaml`
 - Lossless accepted public Route-A specification/handoff archive: `../project_archive/route_a_2026_08_26/README.md`
 - Standing roles: `AGENT_ROLES.md`
 - Local Windows/Miniconda execution and PowerShell command conventions: `LOCAL_EXECUTION_ENVIRONMENT.md`
