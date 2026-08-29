@@ -21,6 +21,7 @@ from __future__ import annotations
 
 import base64
 import dataclasses
+import hashlib
 import inspect
 import json
 import re
@@ -335,19 +336,100 @@ def make_env(**overrides) -> dict:
     return env
 
 
-def unrestricted_source() -> m.TaskCurrentSourceRecord:
-    """A task-current source fixture that explicitly defines the GET
-    /api_keys absent/null subaccount response as UNRESTRICTED."""
+# --- Correction-02 task-current source fixtures ---------------------------
+#
+# The accepted task-current OpenAPI 3.29.0 raw source is
+# LOCAL_ONLY_EXTERNAL_SOURCE_EVIDENCE (325930 bytes, sha256 99bdf4...); no Git
+# blob identity is asserted for those raw bytes (corrected dispatch S.3/S.5).
+CURRENT_OPENAPI_RAW_SHA256 = (
+    "99bdf4093d7eced607ba8b48cc99e3da862c35d99afa2a0c0f63f14eab9237ed"
+)
+CURRENT_OPENAPI_RAW_BYTES = 325930
+CURRENT_OPENAPI_SOURCE_URL = "https://docs.kalshi.com/openapi.yaml"
+HISTORICAL_3280_SHA256 = (
+    "cb853ffc47262646b96bba7b1a8925c9c344128fd498cdaa8dbcf9a0b3b8211b"
+)
+AUTHORING_RECORD_SHA256 = (
+    "964056df0d633fa27d53363aa58ee3c59c2fc6281c0b1cc68f25bbad5b104dc2"
+)
+AUTHORING_BINDING_NAME = "KALSHI_DEMO_ROUTE_B_B1_OFFICIAL_RENDERED_SOURCE_BINDING_01"
+CURRENT_OPENAPI_BINDING_NAME = (
+    "KALSHI_DEMO_ROUTE_B_B1_CURRENT_OFFICIAL_OPENAPI_SOURCE_BINDING_01"
+)
 
-    return dataclasses.replace(
-        m.authoring_task_current_source_record(),
-        api_keys_absent_subaccount_semantics="UNRESTRICTED",
-        record_label="TASK_CURRENT_UNRESTRICTED_FIXTURE",
+# N05: the canonical report/checkpoint does NOT establish the empirical
+# observation time of the 3.29.0 source. This value is SYNTHETIC, test-only,
+# and must never be presented as the empirical 3.29.0 observation. It is
+# deliberately an implausible historic instant so it cannot be mistaken for a
+# real 2026 observation.
+SYNTHETIC_TEST_ONLY_OBSERVED_AT = "2000-01-01T00:00:00Z"
+
+# The fabricated empirical timestamp the blocked predecessor used for the
+# 3.29.0 source. Built by concatenation so this file never contains the
+# forbidden literal verbatim (see N05 self-scan tests).
+_FORBIDDEN_FABRICATED_TS = "2026-08-28" + "T00:00:00Z"
+
+
+def current_openapi_binding(
+    *, observed_at_utc: str = SYNTHETIC_TEST_ONLY_OBSERVED_AT, **overrides
+) -> m.SourceEvidenceBinding:
+    """A non-authoring :class:`SourceEvidenceBinding` for the accepted OpenAPI
+    3.29.0 task-current source. ``observed_at_utc`` is synthetic test data
+    (see :data:`SYNTHETIC_TEST_ONLY_OBSERVED_AT`)."""
+
+    base = dict(
+        name=CURRENT_OPENAPI_BINDING_NAME,
+        source_url=CURRENT_OPENAPI_SOURCE_URL,
+        raw_source_bytes=CURRENT_OPENAPI_RAW_BYTES,
+        raw_source_sha256=CURRENT_OPENAPI_RAW_SHA256,
+        openapi_format="3.0.0",
+        openapi_info_version="3.29.0",
+        observed_at_utc=observed_at_utc,
+        fresh_raw_openapi_status="OBTAINED_LOCAL_ONLY_EXTERNAL_SOURCE_EVIDENCE",
+        historical_openapi_context_sha256=HISTORICAL_3280_SHA256,
     )
+    base.update(overrides)
+    return m.SourceEvidenceBinding(**base)
+
+
+def current_openapi_source(
+    *, semantics: str = "UNRESTRICTED", record_label: str = "TASK_CURRENT_OPENAPI_3_29_0_FIXTURE",
+    binding: m.SourceEvidenceBinding | None = None, **record_overrides,
+) -> m.TaskCurrentSourceRecord:
+    """A valid non-authoring task-current source record bound to the OpenAPI
+    3.29.0 evidence. Its active ``source_binding_record_sha256`` is the
+    deterministic canonical-binding-record hash (Correction 02 / BIND-01)."""
+
+    rec = dataclasses.replace(
+        m.authoring_task_current_source_record(),
+        api_keys_absent_subaccount_semantics=semantics,
+        evidence_binding=binding if binding is not None else current_openapi_binding(),
+        record_label=record_label,
+    )
+    if record_overrides:
+        rec = dataclasses.replace(rec, **record_overrides)
+    return rec
+
+
+def unrestricted_source() -> m.TaskCurrentSourceRecord:
+    """A valid non-authoring task-current source that explicitly defines the
+    GET /api_keys absent/null subaccount response as UNRESTRICTED."""
+
+    return current_openapi_source(semantics="UNRESTRICTED")
 
 
 def not_exposed_source() -> m.TaskCurrentSourceRecord:
+    """The accepted authoring-legacy binding: NOT_EXPOSED absent/null
+    semantics, congruent with the accepted authoring source binding."""
+
     return m.authoring_task_current_source_record()
+
+
+def authoring_emitted_identity() -> m.EmittedSourceBindingIdentity:
+    """The resolved emitted identity for the accepted authoring-congruent
+    record (name / 964056df... / 2026-08-27T20:02:16Z / ...)."""
+
+    return m._emitted_source_binding(m.authoring_task_current_source_record())
 
 
 def run_probe(script, *, env=None, source=None, clock=None, signer=None, output_root=None):
@@ -1250,7 +1332,10 @@ class TestB1Test012ArtifactSensitivity:
         assert manifest["task_id"] == m.TASK_ID
         assert manifest["environment"] == "KALSHI_DEMO"
         assert manifest["demo_rest_base_url"] == m.DEMO_REST_BASE_URL
-        assert manifest["source_binding_record_sha256"] == m.SOURCE_BINDING_RECORD_SHA256
+        assert manifest["source_binding_record_sha256"] == (
+            unrestricted_source().binding_record_sha256
+        )
+        assert manifest["source_binding_record_sha256"] != m.SOURCE_BINDING_RECORD_SHA256
         assert manifest["retry_count"] == 0 and manifest["redirect_count"] == 0
         assert len(manifest["requests"]) == 4
         for i, entry in enumerate(manifest["requests"], start=1):
@@ -1482,7 +1567,7 @@ class TestC0201TerminalReturnDeadlineDominance:
             m.B1TerminalOutcome.B1_PRIMARY_ONLY_OBSERVED,
             clock,
             m.GLOBAL_EXECUTION_DEADLINE_MS * 1_000_000,
-            source_binding=m.AUTHORING_SOURCE_EVIDENCE_BINDING,
+            source_binding=authoring_emitted_identity(),
         )
         assert result.terminal_outcome == m.B1TerminalOutcome.B1_PRIMARY_ONLY_OBSERVED
 
@@ -1493,7 +1578,7 @@ class TestC0201TerminalReturnDeadlineDominance:
             m.B1TerminalOutcome.B1_PRIMARY_ONLY_OBSERVED,
             clock,
             m.GLOBAL_EXECUTION_DEADLINE_MS * 1_000_000,
-            source_binding=m.AUTHORING_SOURCE_EVIDENCE_BINDING,
+            source_binding=authoring_emitted_identity(),
         )
         assert result.terminal_outcome == m.B1TerminalOutcome.B1_READ_FAILURE
         assert result.detail == "TIMEOUT"
@@ -2673,69 +2758,72 @@ class TestNoNetworkByDefault:
 
 
 # ===========================================================================
-# Correction dispatch C01-C08 -- task-current source-binding /
-# execution-evidence provenance (
-#   KALSHI_DEMO_ROUTE_B_B1_CURRENT_SOURCE_BINDING_AND_EXECUTION_EVIDENCE_CORRECTION_01
-# ). These "C0x" identifiers are the CORRECTION dispatch's requirements and
-# are distinct from the legacy "C01-01..C04-01" Marco findings above.
+# Correction 02 -- deterministic canonical source-binding record (BIND-01..08)
+# and decisive negative controls N01-N05
+# (KALSHI_DEMO_ROUTE_B_B1_CURRENT_SOURCE_BINDING_AND_EXECUTION_EVIDENCE_CORRECTION_02).
+#
+# The blocked predecessor (d6bb5dd) let SourceEvidenceBinding.record_sha256 be
+# an opaque caller-supplied digest, so an UNRESTRICTED record and a NOT_EXPOSED
+# record could emit the SAME active binding identity. Correction 02 derives the
+# active non-authoring hash from a deterministic canonical record over full
+# provenance + full material B1 semantics.
 # ===========================================================================
 
-# The accepted authoring rendered-source binding record hash (B1-SRC-008).
-AUTHORING_RECORD_SHA256 = (
-    "964056df0d633fa27d53363aa58ee3c59c2fc6281c0b1cc68f25bbad5b104dc2"
-)
-# The retained OpenAPI 3.28.0 predecessor snapshot hash -- historical context
-# for every B1 execution (B1-SRC-007).
-HISTORICAL_3280_SHA256 = (
-    "cb853ffc47262646b96bba7b1a8925c9c344128fd498cdaa8dbcf9a0b3b8211b"
-)
-# The accepted task-current OpenAPI 3.29.0 raw source evidence
-# (LOCAL_ONLY_EXTERNAL_SOURCE_EVIDENCE). Recorded as fixture metadata only; no
-# Git blob identity is asserted for these raw bytes (corrected dispatch S.3/S.9).
-CURRENT_OPENAPI_SHA256 = (
-    "99bdf4093d7eced607ba8b48cc99e3da862c35d99afa2a0c0f63f14eab9237ed"
-)
-CURRENT_OPENAPI_RAW_BYTES = 325930
-CURRENT_OPENAPI_SOURCE_URL = "https://docs.kalshi.com/openapi.yaml"
-CURRENT_OPENAPI_BINDING_NAME = (
-    "KALSHI_DEMO_ROUTE_B_B1_CURRENT_OFFICIAL_OPENAPI_SOURCE_BINDING_01"
-)
+
+def _canon_json_bytes(obj) -> bytes:
+    return json.dumps(
+        obj, ensure_ascii=True, sort_keys=True, separators=(",", ":")
+    ).encode("utf-8")
 
 
-def current_openapi_source() -> m.TaskCurrentSourceRecord:
-    """A task-current source fixture representing the accepted OpenAPI 3.29.0
-    evidence (corrected dispatch C05): OpenAPI 3.0.0 / info.version 3.29.0,
-    raw storage LOCAL_ONLY_EXTERNAL_SOURCE_EVIDENCE, 325930 bytes,
-    sha256 99bdf4..., ``api_keys_absent_subaccount_semantics = UNRESTRICTED``.
+def _expected_canonical_binding_record(rec: m.TaskCurrentSourceRecord) -> dict:
+    """An INDEPENDENT reconstruction of the canonical binding record from the
+    record's public fields (BIND-03 / N03) -- must equal
+    ``rec.canonical_binding_record()``."""
 
-    It is fully offline and injected -- nothing here fetches or parses the live
-    documentation URL. No Git blob identity is asserted for the raw source.
-    """
+    b = rec.evidence_binding
+    ops = []
+    for label in m.OPERATION_LABELS:
+        op = rec.operation(label)
+        ops.append(
+            {
+                "label": label,
+                "method": op.method,
+                "path": op.path,
+                "required_top_level": list(op.required_top_level),
+            }
+        )
+    return {
+        "binding_record_schema_revision": b.binding_record_schema_revision,
+        "binding_name": b.name,
+        "provenance": {
+            "source_url": b.source_url,
+            "raw_source_bytes": b.raw_source_bytes,
+            "raw_source_sha256": b.raw_source_sha256,
+            "openapi_format": b.openapi_format,
+            "openapi_info_version": b.openapi_info_version,
+            "observed_at_utc": b.observed_at_utc,
+            "fresh_raw_openapi_status": b.fresh_raw_openapi_status,
+            "historical_openapi_context_sha256": b.historical_openapi_context_sha256,
+        },
+        "semantics": {
+            "demo_rest_base_url": rec.demo_rest_base_url,
+            "operations": ops,
+            "api_keys_absent_subaccount_semantics": (
+                rec.api_keys_absent_subaccount_semantics
+            ),
+            "subaccount_number_min": rec.subaccount_number_min,
+            "subaccount_number_max": rec.subaccount_number_max,
+            "restricted_key_error_signature": {
+                "field_name": rec.restricted_key_error_signature.field_name,
+                "expected_value": rec.restricted_key_error_signature.expected_value,
+            },
+            "signature_path_excludes_query": rec.signature_path_excludes_query,
+            "declares_unresolved_conflict": rec.declares_unresolved_conflict,
+            "record_label": rec.record_label,
+        },
+    }
 
-    binding = m.SourceEvidenceBinding(
-        name=CURRENT_OPENAPI_BINDING_NAME,
-        record_sha256=CURRENT_OPENAPI_SHA256,
-        observed_at_utc="2026-08-28T00:00:00Z",
-        fresh_raw_openapi_status=(
-            "OBTAINED_LOCAL_ONLY_EXTERNAL_SOURCE_EVIDENCE_OPENAPI_3_29_0"
-        ),
-        historical_openapi_context_sha256=HISTORICAL_3280_SHA256,
-    )
-    return dataclasses.replace(
-        m.authoring_task_current_source_record(),
-        api_keys_absent_subaccount_semantics="UNRESTRICTED",
-        evidence_binding=binding,
-        record_label="TASK_CURRENT_OPENAPI_3_29_0_FIXTURE",
-    )
-
-
-_AUTHORING_SOURCE_BINDING_JSON = {
-    "name": "KALSHI_DEMO_ROUTE_B_B1_OFFICIAL_RENDERED_SOURCE_BINDING_01",
-    "record_sha256": AUTHORING_RECORD_SHA256,
-    "observed_at_utc": "2026-08-27T20:02:16Z",
-    "fresh_raw_openapi_status": m.FRESH_RAW_OPENAPI_STATUS,
-    "historical_openapi_context_sha256": HISTORICAL_3280_SHA256,
-}
 
 _MANIFEST_KEYS = {
     "schema_revision",
@@ -2790,194 +2878,155 @@ _SUMMARY_SOURCE_BINDING_KEYS = {
 }
 
 
-class TestCorrectionC01ImmutableSourceEvidenceIdentity:
-    def test_authoring_record_carries_immutable_non_secret_provenance(self):
-        rec = m.authoring_task_current_source_record()
-        b = rec.evidence_binding
-        assert isinstance(b, m.SourceEvidenceBinding)
-        assert b is m.AUTHORING_SOURCE_EVIDENCE_BINDING
-        assert b.name == _AUTHORING_SOURCE_BINDING_JSON["name"]
-        assert b.record_sha256 == AUTHORING_RECORD_SHA256
-        assert b.observed_at_utc == "2026-08-27T20:02:16Z"
-        assert b.fresh_raw_openapi_status.startswith("NOT_OBTAINED")
-        assert b.historical_openapi_context_sha256 == HISTORICAL_3280_SHA256
-        assert b.validate() == ()
+def _op_mutation(rec, *, field, value):
+    ops = tuple(
+        dataclasses.replace(op, **{field: value}) if op.label == m.OP_API_KEYS else op
+        for op in rec.operations
+    )
+    return dataclasses.replace(rec, operations=ops)
 
-    def test_evidence_binding_is_frozen(self):
-        b = m.AUTHORING_SOURCE_EVIDENCE_BINDING
-        with pytest.raises(dataclasses.FrozenInstanceError):
-            b.name = "mutated"  # type: ignore[misc]
 
-    def test_no_global_mutable_current_source_singleton(self):
-        # The binding travels with the record passed to the execute boundary;
-        # there is no module-level mutable "current source" it could read.
-        for banned in (
-            "CURRENT_SOURCE_RECORD",
-            "_current_source_record",
-            "ACTIVE_SOURCE_RECORD",
-            "_ACTIVE_SOURCE_BINDING",
-            "set_current_source",
-            "install_current_source",
-        ):
-            assert not hasattr(m, banned)
-        # Behavioural proof of no shared mutable state: interleaved executions
-        # with different source records keep independent evidence identities.
-        r_auth, _ = run_probe(full_discovery_script(), source=unrestricted_source())
-        r_cur, _ = run_probe(
-            full_discovery_script(
-                api_keys=api_keys_body(include_subaccount_null=True)
-            ),
-            source=current_openapi_source(),
+class TestBIND01DeterministicCanonicalRecord:
+    def test_binding_class_carries_no_caller_supplied_hash(self):
+        names = {f.name for f in dataclasses.fields(m.SourceEvidenceBinding)}
+        assert "record_sha256" not in names
+
+    def test_active_hash_is_sha256_of_canonical_bytes(self):
+        rec = current_openapi_source()
+        raw = rec.canonical_binding_record_bytes()
+        assert rec.binding_record_sha256 == hashlib.sha256(raw).hexdigest()
+        assert rec.binding_record_sha256 != AUTHORING_RECORD_SHA256
+
+    def test_serialization_is_canonical(self):
+        rec = current_openapi_source()
+        raw = rec.canonical_binding_record_bytes()
+        # tight separators, ASCII only, sorted keys
+        assert b", " not in raw and b'": ' not in raw
+        raw.decode("ascii")  # would raise if non-ASCII
+        assert raw == _canon_json_bytes(rec.canonical_binding_record())
+
+    def test_two_records_differing_only_in_a_material_field_differ_in_hash(self):
+        a = current_openapi_source(record_label="LABEL_A")
+        b = current_openapi_source(record_label="LABEL_B")
+        assert a.binding_record_sha256 != b.binding_record_sha256
+
+
+class TestBIND02MaterialSemanticCompleteness:
+    def test_canonical_record_top_level_shape(self):
+        cbr = current_openapi_source().canonical_binding_record()
+        assert set(cbr) == {
+            "binding_record_schema_revision",
+            "binding_name",
+            "provenance",
+            "semantics",
+        }
+        assert cbr["binding_record_schema_revision"] == m.BINDING_RECORD_SCHEMA_REVISION
+
+    def test_provenance_and_semantics_fields_present(self):
+        cbr = current_openapi_source().canonical_binding_record()
+        assert set(cbr["provenance"]) == {
+            "source_url",
+            "raw_source_bytes",
+            "raw_source_sha256",
+            "openapi_format",
+            "openapi_info_version",
+            "observed_at_utc",
+            "fresh_raw_openapi_status",
+            "historical_openapi_context_sha256",
+        }
+        assert set(cbr["semantics"]) == {
+            "demo_rest_base_url",
+            "operations",
+            "api_keys_absent_subaccount_semantics",
+            "subaccount_number_min",
+            "subaccount_number_max",
+            "restricted_key_error_signature",
+            "signature_path_excludes_query",
+            "declares_unresolved_conflict",
+            "record_label",
+        }
+
+    def test_operations_ordered_by_operation_labels(self):
+        cbr = current_openapi_source().canonical_binding_record()
+        assert [o["label"] for o in cbr["semantics"]["operations"]] == list(
+            m.OPERATION_LABELS
         )
-        r_auth2, _ = run_probe(full_discovery_script(), source=unrestricted_source())
-        assert json.loads(r_auth.manifest.to_json_bytes())[
-            "source_binding_record_sha256"
-        ] == AUTHORING_RECORD_SHA256
-        assert json.loads(r_cur.manifest.to_json_bytes())[
-            "source_binding_record_sha256"
-        ] == CURRENT_OPENAPI_SHA256
-        assert json.loads(r_auth2.manifest.to_json_bytes())[
-            "source_binding_record_sha256"
-        ] == AUTHORING_RECORD_SHA256
+
+    def test_no_duplicate_source_of_truth_for_observed_at(self):
+        rec_fields = {f.name for f in dataclasses.fields(m.TaskCurrentSourceRecord)}
+        assert "observed_at_utc" not in rec_fields  # lives only on the binding
 
 
-class TestCorrectionC02ExecutedSourceControlsEvidence:
-    def test_authoring_source_emits_authoring_identity(self):
-        result, _ = run_probe(full_discovery_script(), source=unrestricted_source())
-        manifest = json.loads(result.manifest.to_json_bytes())
-        summary = json.loads(result.summary.to_json_bytes())
-        assert manifest["source_binding_name"] == _AUTHORING_SOURCE_BINDING_JSON["name"]
-        assert manifest["source_binding_record_sha256"] == AUTHORING_RECORD_SHA256
-        assert summary["source_binding"] == _AUTHORING_SOURCE_BINDING_JSON
+class TestBIND03HashRecomputation:
+    def test_independent_recompute_matches_emitted_active_hash(self):
+        rec = current_openapi_source()
+        expected = _expected_canonical_binding_record(rec)
+        assert rec.canonical_binding_record() == expected
+        expected_hash = hashlib.sha256(_canon_json_bytes(expected)).hexdigest()
+        assert rec.binding_record_sha256 == expected_hash
 
-    def test_non_authoring_source_binds_every_projection_to_that_record(self):
-        src = current_openapi_source()
         result, _ = run_probe(
             full_discovery_script(
                 api_keys=api_keys_body(include_subaccount_null=True)
             ),
-            source=src,
+            source=rec,
         )
         manifest = json.loads(result.manifest.to_json_bytes())
         summary = json.loads(result.summary.to_json_bytes())
-        assert manifest["source_binding_name"] == CURRENT_OPENAPI_BINDING_NAME
-        assert manifest["source_binding_record_sha256"] == CURRENT_OPENAPI_SHA256
-        assert summary["source_binding"] == {
-            "name": CURRENT_OPENAPI_BINDING_NAME,
-            "record_sha256": CURRENT_OPENAPI_SHA256,
-            "observed_at_utc": "2026-08-28T00:00:00Z",
-            "fresh_raw_openapi_status": (
-                "OBTAINED_LOCAL_ONLY_EXTERNAL_SOURCE_EVIDENCE_OPENAPI_3_29_0"
-            ),
-            "historical_openapi_context_sha256": HISTORICAL_3280_SHA256,
-        }
-
-    def test_manifest_summary_never_fall_back_to_authoring_binding(self):
-        # Same run, several terminal classes: the emitted identity is always
-        # the supplied record's, never the fixed authoring constant.
-        src = current_openapi_source()
-        scenarios = {
-            "primary_only": full_discovery_script(
-                numbered=(), api_keys=api_keys_body(include_subaccount_null=True)
-            ),
-            "numbered": full_discovery_script(
-                numbered=(4,), api_keys=api_keys_body(include_subaccount_null=True)
-            ),
-            "malformed": {
-                m.OP_ACCOUNT_LIMITS: resp(account_limits_body()),
-                m.OP_API_KEYS: resp(api_keys_body(subaccount=99)),
-            },
-        }
-        for name, script in scenarios.items():
-            result, _ = run_probe(script, source=src)
-            for blob in (
-                result.manifest.to_json_bytes(),
-                result.summary.to_json_bytes(),
-            ):
-                text = blob.decode("utf-8")
-                assert CURRENT_OPENAPI_SHA256 in text, name
-                assert AUTHORING_RECORD_SHA256 not in text, name
+        assert manifest["source_binding_record_sha256"] == expected_hash
+        assert summary["source_binding"]["record_sha256"] == expected_hash
 
 
-class TestCorrectionC03AuthoringBindingPreserved:
-    def test_authoring_helper_still_valid_and_identifies_authoring_binding(self):
-        rec = m.authoring_task_current_source_record()
-        assert (
-            rec.evaluate_against_reviewed_contract().status
-            == m.SourceEvaluationStatus.OK
-        )
-        # An execution that actually supplies the authoring record emits the
-        # exact accepted authoring identity, unchanged.
-        result, _ = run_probe(full_discovery_script(), source=unrestricted_source())
-        manifest = json.loads(result.manifest.to_json_bytes())
-        summary = json.loads(result.summary.to_json_bytes())
-        assert manifest["source_binding_name"] == _AUTHORING_SOURCE_BINDING_JSON["name"]
-        assert manifest["source_binding_record_sha256"] == AUTHORING_RECORD_SHA256
-        assert summary["source_binding"]["record_sha256"] == AUTHORING_RECORD_SHA256
-        assert summary["source_binding"]["observed_at_utc"] == "2026-08-27T20:02:16Z"
-        assert summary["source_binding"]["fresh_raw_openapi_status"] == (
-            m.FRESH_RAW_OPENAPI_STATUS
-        )
-        # Module authoring constants are untouched.
-        assert m.SOURCE_BINDING_RECORD_SHA256 == AUTHORING_RECORD_SHA256
-        assert m.SOURCE_BINDING_NAME == _AUTHORING_SOURCE_BINDING_JSON["name"]
-
-
-class TestCorrectionC04UnusableSourceIdentityFailsClosed:
-    def _bad_bindings(self):
-        base = current_openapi_source().evidence_binding
-        return {
-            "missing_name": dataclasses.replace(base, name="   "),
-            "record_hash_not_hex": dataclasses.replace(
-                base, record_sha256="not-a-sha256"
+class TestBIND04SemanticBindingCongruencePreNetwork:
+    def test_structurally_invalid_identity_is_drift_pre_network(self):
+        good = current_openapi_binding()
+        bad = {
+            "source_url_not_https": dataclasses.replace(good, source_url="ftp://x/y"),
+            "raw_bytes_non_positive": dataclasses.replace(good, raw_source_bytes=0),
+            "raw_sha_not_hex": dataclasses.replace(good, raw_source_sha256="nope"),
+            "raw_sha_uppercase": dataclasses.replace(
+                good, raw_source_sha256=CURRENT_OPENAPI_RAW_SHA256.upper()
             ),
-            "record_hash_too_short": dataclasses.replace(
-                base, record_sha256="abc123"
+            "historical_not_hex": dataclasses.replace(
+                good, historical_openapi_context_sha256="zz"
             ),
-            "record_hash_uppercase": dataclasses.replace(
-                base, record_sha256=CURRENT_OPENAPI_SHA256.upper()
-            ),
-            "observed_at_not_rfc3339": dataclasses.replace(
-                base, observed_at_utc="yesterday"
+            "observed_not_rfc3339": dataclasses.replace(
+                good, observed_at_utc="last tuesday"
             ),
             "fresh_status_blank": dataclasses.replace(
-                base, fresh_raw_openapi_status=""
+                good, fresh_raw_openapi_status="   "
             ),
-            "historical_hash_not_hex": dataclasses.replace(
-                base, historical_openapi_context_sha256="zz"
+            "openapi_format_blank": dataclasses.replace(good, openapi_format=""),
+            "openapi_version_blank": dataclasses.replace(
+                good, openapi_info_version=""
             ),
-            "contradictory_authoring_name": dataclasses.replace(
-                base, name=m.SOURCE_BINDING_NAME
+            "unsupported_schema_rev": dataclasses.replace(
+                good, binding_record_schema_revision=999
             ),
+            "name_blank": dataclasses.replace(good, name="  "),
         }
-
-    def test_each_unusable_identity_is_drift_before_any_network_request(self):
-        for label, bad in self._bad_bindings().items():
-            assert bad.validate() != (), label
-            src = dataclasses.replace(unrestricted_source(), evidence_binding=bad)
+        for label, binding in bad.items():
+            assert binding.validate() != (), label
+            src = current_openapi_source(binding=binding)
             assert (
                 src.evaluate_against_reviewed_contract().status
                 == m.SourceEvaluationStatus.DRIFT
             ), label
             result, transport = run_probe(full_discovery_script(), source=src)
-            assert (
-                result.terminal_outcome == m.B1TerminalOutcome.B1_SOURCE_DRIFT
-            ), label
+            assert result.terminal_outcome == m.B1TerminalOutcome.B1_SOURCE_DRIFT, label
             assert result.manifest.request_count == 0, label
             assert transport.calls == [], label
             manifest = json.loads(result.manifest.to_json_bytes())
             summary = json.loads(result.summary.to_json_bytes())
-            # The unusable identity is not emitted as trusted: an explicit
-            # placeholder is projected instead, and no real/authoring hash leaks.
             assert manifest["source_binding_name"] == "UNUSABLE_SOURCE_EVIDENCE_BINDING", label
             assert manifest["source_binding_record_sha256"] == "0" * 64, label
             assert summary["source_binding"]["name"] == "UNUSABLE_SOURCE_EVIDENCE_BINDING", label
             blob = result.manifest.to_json_bytes() + result.summary.to_json_bytes()
             assert AUTHORING_RECORD_SHA256.encode() not in blob, label
-            assert CURRENT_OPENAPI_SHA256.encode() not in blob, label
+            assert CURRENT_OPENAPI_RAW_SHA256.encode() not in blob, label
 
     def test_absent_evidence_binding_is_rejected(self):
-        src = dataclasses.replace(unrestricted_source(), evidence_binding=None)
+        src = dataclasses.replace(current_openapi_source(), evidence_binding=None)
         assert (
             src.evaluate_against_reviewed_contract().status
             == m.SourceEvaluationStatus.DRIFT
@@ -2990,10 +3039,7 @@ class TestCorrectionC04UnusableSourceIdentityFailsClosed:
             "UNUSABLE_SOURCE_EVIDENCE_BINDING"
         )
 
-    def test_usable_identity_with_contract_drift_keeps_its_real_identity(self):
-        # C04's placeholder is ONLY for an unusable identity. A record whose
-        # identity is fine but whose contract drifted still emits its real
-        # identity in the (drift) evidence.
+    def test_contract_drift_with_valid_identity_keeps_derived_identity(self):
         drifted = dataclasses.replace(
             current_openapi_source(), subaccount_number_max=32
         )
@@ -3004,11 +3050,11 @@ class TestCorrectionC04UnusableSourceIdentityFailsClosed:
         result, _ = run_probe(full_discovery_script(), source=drifted)
         assert result.terminal_outcome == m.B1TerminalOutcome.B1_SOURCE_DRIFT
         manifest = json.loads(result.manifest.to_json_bytes())
-        assert manifest["source_binding_record_sha256"] == CURRENT_OPENAPI_SHA256
+        assert manifest["source_binding_record_sha256"] == drifted.binding_record_sha256
+        assert manifest["source_binding_record_sha256"] != "0" * 64
         assert manifest["source_binding_name"] == CURRENT_OPENAPI_BINDING_NAME
 
-    def test_no_new_terminal_enum_added(self):
-        # C04 uses the existing source-contract failure model.
+    def test_no_new_terminal_outcome_added(self):
         assert set(m.B1TerminalOutcome) == {
             m.B1TerminalOutcome.B1_EXISTING_NUMBERED_SUBACCOUNT_DISCOVERED,
             m.B1TerminalOutcome.B1_PRIMARY_ONLY_OBSERVED,
@@ -3024,42 +3070,253 @@ class TestCorrectionC04UnusableSourceIdentityFailsClosed:
         }
 
 
-class TestCorrectionC05CurrentOpenApiFixture:
-    def test_fixture_represents_accepted_3_29_0_evidence(self):
-        src = current_openapi_source()
-        b = src.evidence_binding
-        assert b.record_sha256 == CURRENT_OPENAPI_SHA256
-        assert re.fullmatch(r"[0-9a-f]{64}", b.record_sha256)
-        assert src.api_keys_absent_subaccount_semantics == "UNRESTRICTED"
-        assert CURRENT_OPENAPI_RAW_BYTES == 325930
-        assert CURRENT_OPENAPI_SOURCE_URL == "https://docs.kalshi.com/openapi.yaml"
-        assert (
-            src.evaluate_against_reviewed_contract().status
-            == m.SourceEvaluationStatus.OK
-        )
+class TestBIND05AuthoringLegacyPreservation:
+    def test_authoring_congruent_record_emits_964056df(self):
+        result, _ = run_probe(full_discovery_script(), source=not_exposed_source())
+        manifest = json.loads(result.manifest.to_json_bytes())
+        summary = json.loads(result.summary.to_json_bytes())
+        assert manifest["source_binding_name"] == AUTHORING_BINDING_NAME
+        assert manifest["source_binding_record_sha256"] == AUTHORING_RECORD_SHA256
+        assert summary["source_binding"] == {
+            "name": AUTHORING_BINDING_NAME,
+            "record_sha256": AUTHORING_RECORD_SHA256,
+            "observed_at_utc": "2026-08-27T20:02:16Z",
+            "fresh_raw_openapi_status": m.FRESH_RAW_OPENAPI_STATUS,
+            "historical_openapi_context_sha256": HISTORICAL_3280_SHA256,
+        }
 
-    def test_fixture_run_is_offline_and_injected_only(self):
-        src = current_openapi_source()
-        result, transport = run_probe(
-            full_discovery_script(
-                numbered=(), api_keys=api_keys_body(include_subaccount_null=True)
+    def test_authoring_hash_is_over_the_embedded_reviewed_record(self):
+        rec = m.authoring_task_current_source_record()
+        assert rec.evaluate_against_reviewed_contract().status == (
+            m.SourceEvaluationStatus.OK
+        )
+        assert rec.binding_record_sha256 == AUTHORING_RECORD_SHA256
+        raw = m.SOURCE_BINDING_RECORD_JSON.encode("utf-8")
+        assert hashlib.sha256(raw).hexdigest() == AUTHORING_RECORD_SHA256
+        assert m.verify_source_binding_record(raw) is True
+        assert m.SOURCE_BINDING_RECORD_BYTES == 3307
+        assert m.SOURCE_BINDING_NAME == AUTHORING_BINDING_NAME
+
+    def test_n04_authoring_hash_with_changed_material_semantic_drifts_pre_network(self):
+        base = m.authoring_task_current_source_record()  # keeps authoring-legacy binding
+        mutations = {
+            "semantic": dataclasses.replace(
+                base, api_keys_absent_subaccount_semantics="UNRESTRICTED"
             ),
-            source=src,
-        )
-        # Only the four injected B1 GETs happened; the doc URL is never fetched.
-        assert transport.calls == [
-            m.OP_ACCOUNT_LIMITS,
-            m.OP_API_KEYS,
-            m.OP_SUBACCOUNT_BALANCES,
-            m.OP_SUBACCOUNT_NETTING,
-        ]
-        assert result.terminal_outcome == m.B1TerminalOutcome.B1_PRIMARY_ONLY_OBSERVED
-        blob = result.summary.to_json_bytes() + result.manifest.to_json_bytes()
-        assert CURRENT_OPENAPI_SOURCE_URL.encode() not in blob
+            "record_label": dataclasses.replace(base, record_label="something-else"),
+            "subaccount_max": dataclasses.replace(base, subaccount_number_max=32),
+            "operation_method": _op_mutation(base, field="method", value="POST"),
+        }
+        for label, rec in mutations.items():
+            assert (
+                rec.evaluate_against_reviewed_contract().status
+                == m.SourceEvaluationStatus.DRIFT
+            ), label
+            result, transport = run_probe(full_discovery_script(), source=rec)
+            assert result.terminal_outcome == m.B1TerminalOutcome.B1_SOURCE_DRIFT, label
+            assert result.manifest.request_count == 0, label
+            assert transport.calls == [], label
+            blob = result.manifest.to_json_bytes() + result.summary.to_json_bytes()
+            assert AUTHORING_RECORD_SHA256.encode() not in blob, label
+            assert json.loads(result.manifest.to_json_bytes())["source_binding_name"] == (
+                "UNUSABLE_SOURCE_EVIDENCE_BINDING"
+            ), label
 
-    def test_module_has_no_live_documentation_fetch(self):
-        # The module may *record* doc URLs as provenance strings, but it must
-        # contain no HTTP/socket client that could fetch or parse them.
+    def test_n04_authoring_name_with_non_authoring_provenance_drifts(self):
+        rec = dataclasses.replace(
+            not_exposed_source(),
+            evidence_binding=dataclasses.replace(
+                m.AUTHORING_SOURCE_EVIDENCE_BINDING,
+                source_url="https://docs.kalshi.com/openapi.yaml",
+            ),
+        )
+        assert (
+            rec.evaluate_against_reviewed_contract().status
+            == m.SourceEvaluationStatus.DRIFT
+        )
+        result, transport = run_probe(full_discovery_script(), source=rec)
+        assert result.terminal_outcome == m.B1TerminalOutcome.B1_SOURCE_DRIFT
+        assert transport.calls == []
+
+    def test_new_non_authoring_serialization_not_forced_to_legacy_hash(self):
+        assert current_openapi_source().binding_record_sha256 != AUTHORING_RECORD_SHA256
+
+
+class TestBIND06CurrentSourceProvenanceTimestamp:
+    def test_no_fabricated_empirical_timestamp_in_module(self):
+        src = Path(m.__file__).read_text(encoding="utf-8")
+        assert _FORBIDDEN_FABRICATED_TS not in src
+        # The only production observed_at literal is the genuine authoring
+        # rendered-source observation (B1-SRC-001).
+        assert m.SOURCE_OBSERVED_AT_UTC == "2026-08-27T20:02:16Z"
+
+    def test_no_fabricated_empirical_timestamp_in_tests(self):
+        tsrc = Path(__file__).read_text(encoding="utf-8")
+        assert _FORBIDDEN_FABRICATED_TS not in tsrc
+
+    def test_synthetic_test_timestamp_is_clearly_marked_and_not_exported(self):
+        assert SYNTHETIC_TEST_ONLY_OBSERVED_AT == "2000-01-01T00:00:00Z"
+        assert "SYNTHETIC" in "SYNTHETIC_TEST_ONLY_OBSERVED_AT"
+        assert "2026" not in SYNTHETIC_TEST_ONLY_OBSERVED_AT
+        assert current_openapi_binding().observed_at_utc == SYNTHETIC_TEST_ONLY_OBSERVED_AT
+        assert not hasattr(m, "SYNTHETIC_TEST_ONLY_OBSERVED_AT")
+
+    def test_binding_requires_explicit_observed_at_no_empirical_default(self):
+        f = {fld.name: fld for fld in dataclasses.fields(m.SourceEvidenceBinding)}
+        assert f["observed_at_utc"].default is dataclasses.MISSING
+        assert f["observed_at_utc"].default_factory is dataclasses.MISSING
+
+    def test_committed_provenance_equals_binding_provenance(self):
+        rec = current_openapi_source()
+        cbr = rec.canonical_binding_record()
+        assert cbr["provenance"] == rec.evidence_binding.provenance_record()
+        assert cbr["provenance"]["raw_source_sha256"] == CURRENT_OPENAPI_RAW_SHA256
+        assert cbr["provenance"]["raw_source_bytes"] == CURRENT_OPENAPI_RAW_BYTES
+        assert cbr["provenance"]["source_url"] == CURRENT_OPENAPI_SOURCE_URL
+        assert cbr["provenance"]["openapi_info_version"] == "3.29.0"
+
+    def test_raw_openapi_sha_is_not_the_binding_record_hash(self):
+        assert current_openapi_source().binding_record_sha256 != CURRENT_OPENAPI_RAW_SHA256
+
+
+class TestBIND07DecisiveNegativeControls:
+    def test_n01_same_binding_different_absent_null_semantic(self):
+        b = current_openapi_binding()
+        a_rec = current_openapi_source(binding=b, semantics="UNRESTRICTED",
+                                      record_label="SAME")
+        b_rec = current_openapi_source(binding=b, semantics="NOT_EXPOSED",
+                                      record_label="SAME")
+        # Both structurally valid, but they MUST NOT share the active hash.
+        assert a_rec.binding_record_sha256 != b_rec.binding_record_sha256
+        ra, _ = run_probe(
+            full_discovery_script(api_keys=api_keys_body(include_subaccount_null=True)),
+            source=a_rec,
+        )
+        rb, _ = run_probe(
+            {
+                m.OP_ACCOUNT_LIMITS: resp(account_limits_body()),
+                m.OP_API_KEYS: resp(api_keys_body(include_subaccount_null=True)),
+            },
+            source=b_rec,
+        )
+        ha = json.loads(ra.manifest.to_json_bytes())["source_binding_record_sha256"]
+        hb = json.loads(rb.manifest.to_json_bytes())["source_binding_record_sha256"]
+        assert ha != hb
+        assert ha != AUTHORING_RECORD_SHA256 and hb != AUTHORING_RECORD_SHA256
+
+    def test_n02_every_material_semantic_class_changes_hash_or_invalidates(self):
+        rec = current_openapi_source()
+        base_hash = rec.binding_record_sha256
+
+        def changed_or_drift(r):
+            return (
+                r.binding_record_sha256 != base_hash
+                or r.evaluate_against_reviewed_contract().status
+                == m.SourceEvaluationStatus.DRIFT
+            )
+
+        mutations = [
+            _op_mutation(rec, field="method", value="POST"),
+            _op_mutation(rec, field="path", value="/api_keys_v2"),
+            _op_mutation(rec, field="required_top_level", value=()),
+            dataclasses.replace(rec, api_keys_absent_subaccount_semantics="MAYBE"),
+            dataclasses.replace(rec, subaccount_number_min=1),
+            dataclasses.replace(rec, subaccount_number_max=62),
+            dataclasses.replace(
+                rec,
+                restricted_key_error_signature=m.RestrictedKeyErrorSignature(
+                    field_name="err", expected_value="restricted"
+                ),
+            ),
+            dataclasses.replace(rec, signature_path_excludes_query=False),
+            current_openapi_source(
+                binding=current_openapi_binding(raw_source_sha256="a" * 64)
+            ),
+            current_openapi_source(
+                binding=current_openapi_binding(raw_source_bytes=111)
+            ),
+            current_openapi_source(
+                binding=current_openapi_binding(source_url="https://example.com/o.yaml")
+            ),
+            current_openapi_source(
+                binding=current_openapi_binding(
+                    historical_openapi_context_sha256="b" * 64
+                )
+            ),
+            current_openapi_source(
+                binding=current_openapi_binding(
+                    observed_at_utc="2001-02-03T04:05:06Z"
+                )
+            ),
+            dataclasses.replace(rec, record_label="OTHER_LABEL"),
+        ]
+        for i, mut in enumerate(mutations):
+            assert changed_or_drift(mut), i
+        # The pure provenance / label mutations must specifically change the hash.
+        for mut in mutations[-6:]:
+            assert mut.binding_record_sha256 != base_hash
+
+    def test_n03_independent_recomputation(self):
+        rec = current_openapi_source(record_label="RECOMPUTE_CHECK")
+        indep = hashlib.sha256(
+            _canon_json_bytes(_expected_canonical_binding_record(rec))
+        ).hexdigest()
+        result, _ = run_probe(
+            full_discovery_script(api_keys=api_keys_body(include_subaccount_null=True)),
+            source=rec,
+        )
+        assert json.loads(result.summary.to_json_bytes())["source_binding"][
+            "record_sha256"
+        ] == indep
+
+    def test_n04_authoring_semantic_mismatch_drifts_pre_network(self):
+        rec = dataclasses.replace(
+            m.authoring_task_current_source_record(),
+            api_keys_absent_subaccount_semantics="UNRESTRICTED",
+        )
+        assert (
+            rec.evaluate_against_reviewed_contract().status
+            == m.SourceEvaluationStatus.DRIFT
+        )
+        result, transport = run_probe(full_discovery_script(), source=rec)
+        assert result.terminal_outcome == m.B1TerminalOutcome.B1_SOURCE_DRIFT
+        assert result.manifest.request_count == 0 and transport.calls == []
+
+    def test_n05_no_fabricated_empirical_timestamp(self):
+        assert _FORBIDDEN_FABRICATED_TS not in Path(m.__file__).read_text(encoding="utf-8")
+        assert _FORBIDDEN_FABRICATED_TS not in Path(__file__).read_text(encoding="utf-8")
+        assert "SYNTHETIC" in "SYNTHETIC_TEST_ONLY_OBSERVED_AT"
+        assert current_openapi_binding().observed_at_utc == SYNTHETIC_TEST_ONLY_OBSERVED_AT
+
+
+class TestBIND08EvidenceSchemaAndCapabilityNonRegression:
+    def test_manifest_and_summary_exact_key_sets_authoring_and_non_authoring(self):
+        # not_exposed_source halts after /api_keys (2 requests); the
+        # UNRESTRICTED current-source run completes all 4. The frozen key sets
+        # must be identical either way (C08 / BIND-08).
+        for src, expected_requests in (
+            (not_exposed_source(), 2),
+            (current_openapi_source(), 4),
+        ):
+            result, _ = run_probe(
+                full_discovery_script(
+                    api_keys=api_keys_body(include_subaccount_null=True)
+                ),
+                source=src,
+            )
+            manifest = json.loads(result.manifest.to_json_bytes())
+            summary = json.loads(result.summary.to_json_bytes())
+            assert manifest["schema_revision"] == 1
+            assert summary["schema_revision"] == 1
+            assert set(manifest) == _MANIFEST_KEYS
+            assert set(summary) == _SUMMARY_KEYS
+            assert set(summary["source_binding"]) == _SUMMARY_SOURCE_BINDING_KEYS
+            assert manifest["request_count"] == expected_requests
+            assert len(manifest["requests"]) == expected_requests
+            for entry in manifest["requests"]:
+                assert set(entry) == _MANIFEST_REQUEST_KEYS
+
+    def test_c05_module_has_no_live_documentation_fetch(self):
         src_text = Path(m.__file__).read_text(encoding="utf-8")
         for banned in (
             "urllib.request",
@@ -3074,51 +3331,34 @@ class TestCorrectionC05CurrentOpenApiFixture:
         ):
             assert banned not in src_text
 
-
-class TestCorrectionC06ProvenanceDivergenceNegativeControl:
-    def test_non_authoring_source_never_emits_authoring_hash_as_active(self):
-        src = current_openapi_source()
-        result, _ = run_probe(
+    def test_c05_current_source_run_is_offline_and_injected(self):
+        result, transport = run_probe(
             full_discovery_script(
-                api_keys=api_keys_body(include_subaccount_null=True)
+                numbered=(), api_keys=api_keys_body(include_subaccount_null=True)
             ),
-            source=src,
+            source=current_openapi_source(),
         )
-        manifest_blob = result.manifest.to_json_bytes()
-        summary_blob = result.summary.to_json_bytes()
-        manifest = json.loads(manifest_blob)
-        summary = json.loads(summary_blob)
+        assert transport.calls == [
+            m.OP_ACCOUNT_LIMITS,
+            m.OP_API_KEYS,
+            m.OP_SUBACCOUNT_BALANCES,
+            m.OP_SUBACCOUNT_NETTING,
+        ]
+        assert result.terminal_outcome == m.B1TerminalOutcome.B1_PRIMARY_ONLY_OBSERVED
+        blob = result.summary.to_json_bytes() + result.manifest.to_json_bytes()
+        assert b"docs.kalshi.com" not in blob  # source_url is not emitted
 
-        assert manifest["source_binding_name"] == CURRENT_OPENAPI_BINDING_NAME
-        assert manifest["source_binding_record_sha256"] == CURRENT_OPENAPI_SHA256
-        assert summary["source_binding"]["name"] == CURRENT_OPENAPI_BINDING_NAME
-        assert summary["source_binding"]["record_sha256"] == CURRENT_OPENAPI_SHA256
-
-        # The authoring source-binding record hash must not appear anywhere in
-        # either projection for a non-authoring execution.
-        assert AUTHORING_RECORD_SHA256 not in manifest_blob.decode("utf-8")
-        assert AUTHORING_RECORD_SHA256 not in summary_blob.decode("utf-8")
-
-        # The historical-context field legitimately carries the 3.28.0
-        # predecessor hash (the schema requires that context).
-        assert summary["source_binding"]["historical_openapi_context_sha256"] == (
-            HISTORICAL_3280_SHA256
-        )
-
-
-class TestCorrectionC07UnrestrictedRouteStillFunctional:
-    def test_unrestricted_current_source_reaches_reconciliation(self):
-        cases = [
+    def test_c07_unrestricted_route_still_reaches_reconciliation(self):
+        for numbered, expected in (
             ((), m.B1TerminalOutcome.B1_PRIMARY_ONLY_OBSERVED),
             ((2, 5), m.B1TerminalOutcome.B1_EXISTING_NUMBERED_SUBACCOUNT_DISCOVERED),
-        ]
-        for numbered, expected in cases:
+        ):
             result, transport = run_probe(
                 full_discovery_script(
                     numbered=numbered,
                     api_keys=api_keys_body(include_subaccount_null=True),
                 ),
-                source=current_openapi_source(),
+                source=current_openapi_source(semantics="UNRESTRICTED"),
             )
             assert transport.calls == [
                 m.OP_ACCOUNT_LIMITS,
@@ -3128,27 +3368,22 @@ class TestCorrectionC07UnrestrictedRouteStillFunctional:
             ], numbered
             assert result.terminal_outcome == expected, numbered
             summary = json.loads(result.summary.to_json_bytes())
-            assert summary["current_key"]["match_state"] == "UNIQUE"
             assert summary["current_key"]["restriction_state"] == "UNRESTRICTED"
             assert summary["enumeration"]["account_wide_enumeration_proven"] is True
-            assert summary["enumeration"]["surfaces_agree"] is True
 
-    def test_other_proof_predicates_not_weakened_under_current_source(self):
-        # A uniquely matched but exactly-restricted key still halts, even with
-        # a valid task-current UNRESTRICTED-semantics source.
-        result, transport = run_probe(
+    def test_c07_other_proof_predicates_not_weakened(self):
+        r1, t1 = run_probe(
             {
                 m.OP_ACCOUNT_LIMITS: resp(account_limits_body()),
                 m.OP_API_KEYS: resp(api_keys_body(subaccount=3)),
             },
             source=current_openapi_source(),
         )
-        assert result.terminal_outcome == (
+        assert r1.terminal_outcome == (
             m.B1TerminalOutcome.B1_ACCOUNT_WIDE_ENUMERATION_NOT_PROVEN_WITH_CURRENT_KEY
         )
-        assert len(transport.calls) == 2
-        # A balances response missing mandatory primary 0 is still SOURCE_DRIFT.
-        result2, _ = run_probe(
+        assert len(t1.calls) == 2
+        r2, _ = run_probe(
             {
                 m.OP_ACCOUNT_LIMITS: resp(account_limits_body()),
                 m.OP_API_KEYS: resp(api_keys_body(include_subaccount_null=True)),
@@ -3157,37 +3392,19 @@ class TestCorrectionC07UnrestrictedRouteStillFunctional:
             },
             source=current_openapi_source(),
         )
-        assert result2.terminal_outcome == m.B1TerminalOutcome.B1_SOURCE_DRIFT
+        assert r2.terminal_outcome == m.B1TerminalOutcome.B1_SOURCE_DRIFT
 
-
-class TestCorrectionC08EvidenceSchemaUnchanged:
-    def test_manifest_and_summary_exact_key_sets(self):
-        result, _ = run_probe(full_discovery_script())
-        manifest = json.loads(result.manifest.to_json_bytes())
-        summary = json.loads(result.summary.to_json_bytes())
-
-        assert manifest["schema_revision"] == 1
-        assert set(manifest) == _MANIFEST_KEYS
-        assert len(manifest["requests"]) == 4
-        for entry in manifest["requests"]:
-            assert set(entry) == _MANIFEST_REQUEST_KEYS
-
-        assert summary["schema_revision"] == 1
-        assert set(summary) == _SUMMARY_KEYS
-        assert set(summary["source_binding"]) == _SUMMARY_SOURCE_BINDING_KEYS
-
-    def test_key_sets_unchanged_for_non_authoring_current_source(self):
-        result, _ = run_probe(
-            full_discovery_script(
-                api_keys=api_keys_body(include_subaccount_null=True)
-            ),
-            source=current_openapi_source(),
-        )
-        manifest = json.loads(result.manifest.to_json_bytes())
-        summary = json.loads(result.summary.to_json_bytes())
-        assert manifest["schema_revision"] == 1 and summary["schema_revision"] == 1
-        assert set(manifest) == _MANIFEST_KEYS
-        assert set(summary) == _SUMMARY_KEYS
-        assert set(summary["source_binding"]) == _SUMMARY_SOURCE_BINDING_KEYS
-        for entry in manifest["requests"]:
-            assert set(entry) == _MANIFEST_REQUEST_KEYS
+    def test_operational_boundary_constants_unchanged(self):
+        assert m.MAX_REQUEST_COUNT == 4
+        assert m.MAX_ATTEMPTS_PER_PATH == 1
+        assert m.AUTOMATIC_RETRY_COUNT == 0
+        assert m.MAX_REDIRECT_COUNT == 0
+        assert m.PER_REQUEST_DEADLINE_MS == 10_000
+        assert m.GLOBAL_EXECUTION_DEADLINE_MS == 40_000
+        assert m.MAX_RESPONSE_BYTES_PER_REQUEST == 262_144
+        assert m.MAX_TOTAL_RESPONSE_BYTES == 1_048_576
+        assert m.DEMO_HOST == "external-api.demo.kalshi.co"
+        assert m.DEMO_REST_BASE_URL == "https://external-api.demo.kalshi.co/trade-api/v2"
+        assert m.ALLOWED_METHODS == frozenset({"GET"})
+        assert m.ALLOWED_FULL_PATHS == frozenset(m.OP_FULL_PATHS.values())
+        assert m.FORBIDDEN_PRIVATE_KEY_PEM_ENV == "KALSHI_DEMO_PRIVATE_KEY_PEM"

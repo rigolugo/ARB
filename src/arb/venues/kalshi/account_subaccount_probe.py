@@ -62,7 +62,9 @@ __all__ = [
     "HISTORICAL_CORROBORATING_OPERATION_IDS",
     "SIGNING_PROFILE",
     "SourceEvidenceBinding",
+    "EmittedSourceBindingIdentity",
     "AUTHORING_SOURCE_EVIDENCE_BINDING",
+    "BINDING_RECORD_SCHEMA_REVISION",
     # Enums
     "B1TerminalOutcome",
     "B1NextRouteClass",
@@ -728,30 +730,194 @@ class SourceEvaluation:
     findings: Tuple[str, ...]
 
 
+# Binding-record schema revision for the deterministic NON-authoring
+# task-current binding record (Correction 02 / BIND-01). Bumping it changes
+# every non-authoring active source_binding_record_sha256.
+BINDING_RECORD_SCHEMA_REVISION = 1
+
+# Explicit "raw OpenAPI not obtained" sentinel for a rendered-documentation
+# (authoring-legacy) binding, which never retrieved raw OpenAPI bytes.
+_RAW_SOURCE_NOT_OBTAINED = "NOT_OBTAINED_BY_RENDERED_SOURCE"
+
+
 @dataclass(frozen=True, slots=True)
 class SourceEvidenceBinding:
-    """Immutable, non-secret provenance that deterministically identifies the
-    task-current source binding an execution actually evaluated (C01).
+    """Immutable, non-secret source *provenance* a caller attaches to a
+    :class:`TaskCurrentSourceRecord` (C01).
 
-    It is owned by :class:`TaskCurrentSourceRecord` and is the single source of
-    the frozen B1-EVID-003/004 identity fields:
+    It carries provenance ONLY. It deliberately does **not** carry a
+    caller-supplied ``record_sha256``: the active
+    ``source_binding_record_sha256`` emitted into evidence is *derived*
+    (Correction 02 / BIND-01):
 
-    * evidence manifest -- ``source_binding_name`` / ``source_binding_record_sha256``;
-    * sanitized summary -- ``source_binding.name`` / ``.record_sha256`` /
-      ``.observed_at_utc`` / ``.fresh_raw_openapi_status`` /
-      ``.historical_openapi_context_sha256``.
+    * non-authoring binding -> ``sha256`` of the deterministic canonical
+      binding record that commits to this provenance PLUS the complete
+      material B1 semantics of the owning :class:`TaskCurrentSourceRecord`
+      (:meth:`TaskCurrentSourceRecord.canonical_binding_record_bytes`);
+    * authoring-legacy binding (``is_authoring_legacy=True``) -> the exact
+      embedded reviewed authoring record hash
+      (:data:`SOURCE_BINDING_RECORD_SHA256`), and only when the owning
+      record's material semantics/provenance are congruent with the accepted
+      authoring binding -- otherwise ``B1_SOURCE_DRIFT`` before request 1
+      (BIND-05).
 
-    There is deliberately no module-global mutable "current source" singleton:
-    the binding travels with the record passed to
-    :func:`execute_b1_account_subaccount_probe`, and every terminal projection
-    for that execution is built from this exact object (C02).
+    Because the active hash is derived from both provenance and material
+    semantics, two records differing in any material field (e.g.
+    ``UNRESTRICTED`` vs ``NOT_EXPOSED`` absent/null semantics) can never emit
+    the same active binding identity.
 
-    ``record_sha256`` identifies whatever the task-current binding treats as its
-    canonical source record (for the authoring rendered binding, the derived
-    B1-SRC-008 record hash; for a task-current OpenAPI binding, the exact raw
-    source SHA-256). No Git blob identity is asserted for raw external source
-    bytes.
+    There is no module-global mutable "current source": the binding travels
+    with the record passed to :func:`execute_b1_account_subaccount_probe`, and
+    every terminal projection for that execution is built from it (C02).
     """
+
+    name: str
+    source_url: str
+    raw_source_bytes: int
+    raw_source_sha256: str
+    openapi_format: str
+    openapi_info_version: str
+    observed_at_utc: str
+    fresh_raw_openapi_status: str
+    historical_openapi_context_sha256: str
+    is_authoring_legacy: bool = False
+    binding_record_schema_revision: int = BINDING_RECORD_SCHEMA_REVISION
+
+    def provenance_record(self) -> dict:
+        """The deterministic provenance sub-object committed by the canonical
+        binding record (BIND-02). Non-secret only."""
+
+        return {
+            "source_url": self.source_url,
+            "raw_source_bytes": self.raw_source_bytes,
+            "raw_source_sha256": self.raw_source_sha256,
+            "openapi_format": self.openapi_format,
+            "openapi_info_version": self.openapi_info_version,
+            "observed_at_utc": self.observed_at_utc,
+            "fresh_raw_openapi_status": self.fresh_raw_openapi_status,
+            "historical_openapi_context_sha256": (
+                self.historical_openapi_context_sha256
+            ),
+        }
+
+    def validate(self) -> Tuple[str, ...]:
+        """Structural findings for this provenance identity (empty == usable).
+        A non-empty result is folded into ``B1_SOURCE_DRIFT`` before request 1
+        (C04 / BIND-04). ``is_authoring_legacy`` bindings are checked against
+        the accepted authoring provenance shape; every other binding needs
+        full task-current OpenAPI provenance."""
+
+        f: list[str] = []
+        if not isinstance(self.name, str) or not self.name.strip():
+            f.append("source-binding name is missing")
+        if (
+            not isinstance(self.binding_record_schema_revision, int)
+            or isinstance(self.binding_record_schema_revision, bool)
+            or self.binding_record_schema_revision != BINDING_RECORD_SCHEMA_REVISION
+        ):
+            f.append("source-binding binding_record_schema_revision is unsupported")
+        if (
+            not isinstance(self.historical_openapi_context_sha256, str)
+            or _SHA256_HEX_PATTERN.fullmatch(self.historical_openapi_context_sha256)
+            is None
+        ):
+            f.append(
+                "source-binding historical_openapi_context_sha256 is not a "
+                "lowercase 64-hex digest"
+            )
+        if (
+            not isinstance(self.observed_at_utc, str)
+            or _RFC3339_UTC_PATTERN.fullmatch(self.observed_at_utc) is None
+        ):
+            f.append("source-binding observed_at_utc is not an RFC3339 UTC instant")
+        if not isinstance(self.fresh_raw_openapi_status, str) or not (
+            self.fresh_raw_openapi_status.strip()
+        ):
+            f.append("source-binding fresh_raw_openapi_status is missing")
+
+        if self.is_authoring_legacy:
+            if self.name != SOURCE_BINDING_NAME:
+                f.append("authoring-legacy binding name is not the accepted authoring name")
+            if self.observed_at_utc != SOURCE_OBSERVED_AT_UTC:
+                f.append("authoring-legacy binding observed_at_utc is not the accepted value")
+            if self.fresh_raw_openapi_status != FRESH_RAW_OPENAPI_STATUS:
+                f.append(
+                    "authoring-legacy binding fresh_raw_openapi_status is not the "
+                    "accepted value"
+                )
+            if (
+                self.historical_openapi_context_sha256
+                != HISTORICAL_OPENAPI_SNAPSHOT_SHA256
+            ):
+                f.append(
+                    "authoring-legacy binding historical context hash is not the "
+                    "accepted value"
+                )
+            if (
+                self.source_url != ""
+                or self.raw_source_bytes != 0
+                or self.raw_source_sha256 != ""
+                or self.openapi_format != _RAW_SOURCE_NOT_OBTAINED
+                or self.openapi_info_version != _RAW_SOURCE_NOT_OBTAINED
+            ):
+                f.append(
+                    "authoring-legacy binding must not assert task-current raw "
+                    "OpenAPI provenance"
+                )
+        else:
+            if not isinstance(self.source_url, str) or not self.source_url.startswith(
+                "https://"
+            ):
+                f.append("source-binding source_url is not an https URL")
+            if (
+                not isinstance(self.raw_source_bytes, int)
+                or isinstance(self.raw_source_bytes, bool)
+                or self.raw_source_bytes <= 0
+            ):
+                f.append("source-binding raw_source_bytes is not a positive integer")
+            if (
+                not isinstance(self.raw_source_sha256, str)
+                or _SHA256_HEX_PATTERN.fullmatch(self.raw_source_sha256) is None
+            ):
+                f.append(
+                    "source-binding raw_source_sha256 is not a lowercase 64-hex digest"
+                )
+            if not isinstance(self.openapi_format, str) or not self.openapi_format.strip():
+                f.append("source-binding openapi_format is missing")
+            if (
+                not isinstance(self.openapi_info_version, str)
+                or not self.openapi_info_version.strip()
+            ):
+                f.append("source-binding openapi_info_version is missing")
+        return tuple(f)
+
+
+# Provenance identity for the accepted authoring rendered-source binding
+# (B1-SRC-003/004/008). Its active hash is the exact embedded reviewed record
+# hash SOURCE_BINDING_RECORD_SHA256 (964056df...), emitted only for an
+# authoring-congruent record (BIND-05, C03). The embedded record and
+# verify_source_binding_record() remain untouched protected provenance.
+AUTHORING_SOURCE_EVIDENCE_BINDING = SourceEvidenceBinding(
+    name=SOURCE_BINDING_NAME,
+    source_url="",
+    raw_source_bytes=0,
+    raw_source_sha256="",
+    openapi_format=_RAW_SOURCE_NOT_OBTAINED,
+    openapi_info_version=_RAW_SOURCE_NOT_OBTAINED,
+    observed_at_utc=SOURCE_OBSERVED_AT_UTC,
+    fresh_raw_openapi_status=FRESH_RAW_OPENAPI_STATUS,
+    historical_openapi_context_sha256=HISTORICAL_OPENAPI_SNAPSHOT_SHA256,
+    is_authoring_legacy=True,
+)
+
+
+@dataclass(frozen=True, slots=True)
+class EmittedSourceBindingIdentity:
+    """The resolved, non-secret source-binding identity written into the
+    evidence manifest and sanitized summary (C02). Built once per execution by
+    :func:`_emitted_source_binding` from the exact supplied source record; its
+    ``record_sha256`` is the deterministic active binding-record hash, never a
+    caller-supplied digest."""
 
     name: str
     record_sha256: str
@@ -759,73 +925,13 @@ class SourceEvidenceBinding:
     fresh_raw_openapi_status: str
     historical_openapi_context_sha256: str
 
-    def validate(self) -> Tuple[str, ...]:
-        """Return findings describing why this evidence-binding identity is
-        unusable (empty tuple == usable). Missing, malformed, or internally
-        contradictory identity is rejected before any network request (C04);
-        no new terminal enum is introduced -- the caller folds a non-empty
-        result into the existing ``B1_SOURCE_DRIFT`` model.
-        """
 
-        findings: list[str] = []
-        if not isinstance(self.name, str) or not self.name.strip():
-            findings.append("source-binding name is missing")
-        if (
-            not isinstance(self.record_sha256, str)
-            or _SHA256_HEX_PATTERN.fullmatch(self.record_sha256) is None
-        ):
-            findings.append(
-                "source-binding record_sha256 is not a lowercase 64-hex digest"
-            )
-        if (
-            not isinstance(self.observed_at_utc, str)
-            or _RFC3339_UTC_PATTERN.fullmatch(self.observed_at_utc) is None
-        ):
-            findings.append("source-binding observed_at_utc is not an RFC3339 UTC instant")
-        if (
-            not isinstance(self.fresh_raw_openapi_status, str)
-            or not self.fresh_raw_openapi_status.strip()
-        ):
-            findings.append("source-binding fresh_raw_openapi_status is missing")
-        if (
-            not isinstance(self.historical_openapi_context_sha256, str)
-            or _SHA256_HEX_PATTERN.fullmatch(self.historical_openapi_context_sha256)
-            is None
-        ):
-            findings.append(
-                "source-binding historical_openapi_context_sha256 is not a "
-                "lowercase 64-hex digest"
-            )
-        # Contradiction: a record that claims the accepted authoring binding
-        # name but carries a different record hash (or vice versa) is unusable.
-        claims_authoring_name = self.name == SOURCE_BINDING_NAME
-        claims_authoring_hash = self.record_sha256 == SOURCE_BINDING_RECORD_SHA256
-        if claims_authoring_name != claims_authoring_hash:
-            findings.append(
-                "source-binding name and record_sha256 disagree about whether this "
-                "is the accepted authoring binding"
-            )
-        return tuple(findings)
-
-
-# The evidence-binding identity for the accepted authoring rendered-source
-# binding (B1-SRC-003/004/008). Preserved verbatim so a real execution that
-# actually supplies ``authoring_task_current_source_record()`` still emits this
-# exact identity (C03).
-AUTHORING_SOURCE_EVIDENCE_BINDING = SourceEvidenceBinding(
-    name=SOURCE_BINDING_NAME,
-    record_sha256=SOURCE_BINDING_RECORD_SHA256,
-    observed_at_utc=SOURCE_OBSERVED_AT_UTC,
-    fresh_raw_openapi_status=FRESH_RAW_OPENAPI_STATUS,
-    historical_openapi_context_sha256=HISTORICAL_OPENAPI_SNAPSHOT_SHA256,
-)
-
-# Explicit placeholder emitted -- only inside a ``B1_SOURCE_DRIFT`` terminal
-# with ``request_count == 0`` -- when a task-current record carries a missing,
-# malformed, or internally contradictory evidence-binding identity. It is
-# deliberately not a real identity, so an unusable identity is never echoed
-# into evidence as though it were trusted (C04).
-_UNUSABLE_SOURCE_EVIDENCE_BINDING = SourceEvidenceBinding(
+# Emitted only inside a ``B1_SOURCE_DRIFT`` terminal with ``request_count == 0``
+# when a record's binding identity is missing, structurally invalid, or an
+# authoring-legacy claim over non-congruent semantics/provenance. It is
+# deliberately not a real identity, so an unusable/contradictory identity is
+# never echoed into evidence as trusted (C04 / BIND-04).
+_UNUSABLE_SOURCE_EVIDENCE_BINDING = EmittedSourceBindingIdentity(
     name="UNUSABLE_SOURCE_EVIDENCE_BINDING",
     record_sha256="0" * 64,
     observed_at_utc="1970-01-01T00:00:00Z",
@@ -834,19 +940,101 @@ _UNUSABLE_SOURCE_EVIDENCE_BINDING = SourceEvidenceBinding(
 )
 
 
-def _emitted_source_binding(source_record: "TaskCurrentSourceRecord") -> SourceEvidenceBinding:
-    """The evidence-binding identity every terminal projection for an
+def _material_semantics_key(rec: "TaskCurrentSourceRecord") -> tuple:
+    """A hashable snapshot of the complete material B1 source semantics of
+    *rec*, deterministically ordered by ``OPERATION_LABELS`` (BIND-02). Used
+    for authoring-congruence comparison; mirrors the ``semantics`` sub-object
+    of :meth:`TaskCurrentSourceRecord.canonical_binding_record`."""
+
+    ops = []
+    for label in OPERATION_LABELS:
+        op = rec.operation(label)
+        if op is None:
+            ops.append((label, None, None, None))
+        else:
+            ops.append(
+                (label, op.method, op.path, tuple(op.required_top_level))
+            )
+    rk = rec.restricted_key_error_signature
+    return (
+        rec.demo_rest_base_url,
+        tuple(ops),
+        rec.api_keys_absent_subaccount_semantics,
+        rec.subaccount_number_min,
+        rec.subaccount_number_max,
+        (getattr(rk, "field_name", None), getattr(rk, "expected_value", None)),
+        rec.signature_path_excludes_query,
+        rec.declares_unresolved_conflict,
+        rec.record_label,
+    )
+
+
+def _authoring_congruence_findings(rec: "TaskCurrentSourceRecord") -> list[str]:
+    """Findings when an ``is_authoring_legacy`` record is NOT congruent with
+    the accepted authoring binding (BIND-05, N04): reusing ``964056df...`` for
+    any changed material semantic or provenance field must fail before
+    request 1."""
+
+    ref = authoring_task_current_source_record()
+    f: list[str] = []
+    if _material_semantics_key(rec) != _material_semantics_key(ref):
+        f.append(
+            "authoring-legacy binding reused with non-congruent material source "
+            "semantics"
+        )
+    if rec.evidence_binding != ref.evidence_binding:
+        f.append(
+            "authoring-legacy binding provenance differs from the accepted "
+            "authoring binding"
+        )
+    return f
+
+
+def _binding_identity_findings(rec: "TaskCurrentSourceRecord") -> Tuple[str, ...]:
+    """Every finding that makes *rec*'s source-binding identity unusable
+    (structural + authoring-legacy congruence). Non-empty -> ``B1_SOURCE_DRIFT``
+    before request 1 (C04 / BIND-04)."""
+
+    binding = getattr(rec, "evidence_binding", None)
+    if not isinstance(binding, SourceEvidenceBinding):
+        return ("record carries no usable source evidence-binding identity",)
+    f = list(binding.validate())
+    if binding.is_authoring_legacy:
+        f.extend(_authoring_congruence_findings(rec))
+    return tuple(f)
+
+
+def _emitted_source_binding(
+    source_record: "TaskCurrentSourceRecord",
+) -> EmittedSourceBindingIdentity:
+    """The single resolved binding identity every terminal projection for this
     execution is bound to (C02).
 
-    It is the record's own ``evidence_binding`` when that identity is usable;
-    otherwise the explicit unusable-identity placeholder, so a rejected
-    (``B1_SOURCE_DRIFT``, pre-network) record never emits its malformed or
-    contradictory identity as trusted evidence (C04)."""
+    * unusable / non-congruent identity  -> explicit placeholder (BIND-04);
+    * authoring-congruent legacy binding -> the exact accepted authoring
+      identity (964056df..., C03 / BIND-05);
+    * otherwise                          -> the deterministic non-authoring
+      binding-record hash derived from provenance + material semantics
+      (BIND-01)."""
 
-    binding = getattr(source_record, "evidence_binding", None)
-    if isinstance(binding, SourceEvidenceBinding) and not binding.validate():
-        return binding
-    return _UNUSABLE_SOURCE_EVIDENCE_BINDING
+    if _binding_identity_findings(source_record):
+        return _UNUSABLE_SOURCE_EVIDENCE_BINDING
+    binding = source_record.evidence_binding
+    if binding.is_authoring_legacy:
+        return EmittedSourceBindingIdentity(
+            name=SOURCE_BINDING_NAME,
+            record_sha256=SOURCE_BINDING_RECORD_SHA256,
+            observed_at_utc=SOURCE_OBSERVED_AT_UTC,
+            fresh_raw_openapi_status=FRESH_RAW_OPENAPI_STATUS,
+            historical_openapi_context_sha256=HISTORICAL_OPENAPI_SNAPSHOT_SHA256,
+        )
+    return EmittedSourceBindingIdentity(
+        name=binding.name,
+        record_sha256=source_record.binding_record_sha256,
+        observed_at_utc=binding.observed_at_utc,
+        fresh_raw_openapi_status=binding.fresh_raw_openapi_status,
+        historical_openapi_context_sha256=binding.historical_openapi_context_sha256,
+    )
 
 
 @dataclass(frozen=True, slots=True)
@@ -860,11 +1048,14 @@ class TaskCurrentSourceRecord:
     may be treated as ``UNRESTRICTED`` (B1-SRC-004, B1-KEY-001). The
     authoring rendered-source binding leaves it ``NOT_EXPOSED``.
 
-    ``evidence_binding`` is the immutable, non-secret provenance identity that
-    every terminal projection for an execution is bound to (C01/C02). It
-    defaults to nothing: a genuine task-current record must supply it, and
-    :meth:`evaluate_against_reviewed_contract` rejects a missing/unusable one
-    before any network request (C04).
+    ``evidence_binding`` is the immutable, non-secret *provenance* identity a
+    caller attaches (C01/C02). The active ``source_binding_record_sha256`` is
+    NOT taken from it directly -- it is derived by :meth:`binding_record_sha256`
+    from a deterministic canonical record over provenance PLUS every material
+    field below (Correction 02 / BIND-01). ``observed_at_utc`` lives only on
+    ``evidence_binding`` -- there is no second, independently mutable copy.
+    :meth:`evaluate_against_reviewed_contract` rejects a missing/unusable/
+    non-congruent binding before any network request (C04 / BIND-04).
     """
 
     demo_rest_base_url: str
@@ -877,7 +1068,6 @@ class TaskCurrentSourceRecord:
     evidence_binding: SourceEvidenceBinding
     declares_unresolved_conflict: bool = False
     record_label: str = ""
-    observed_at_utc: str = ""
 
     def operation(self, label: str) -> Optional[SourceOperation]:
         for op in self.operations:
@@ -885,14 +1075,103 @@ class TaskCurrentSourceRecord:
                 return op
         return None
 
+    def canonical_binding_record(self) -> dict:
+        """The deterministic canonical binding record (BIND-01/BIND-02).
+
+        Commits to the complete non-secret source provenance PLUS the complete
+        material B1 source semantics, ``operations`` ordered by
+        ``OPERATION_LABELS``. Serialize with :func:`_canonical_json_bytes`
+        (UTF-8, ``ensure_ascii``, ``sort_keys``, tight separators); its
+        SHA-256 is the active non-authoring ``source_binding_record_sha256``
+        (BIND-03). Changing any material field necessarily changes these bytes
+        (or the record fails validation before request 1)."""
+
+        b = self.evidence_binding
+        ops = []
+        for label in OPERATION_LABELS:
+            op = self.operation(label)
+            if op is None:
+                ops.append(
+                    {
+                        "label": label,
+                        "method": None,
+                        "path": None,
+                        "required_top_level": None,
+                    }
+                )
+            else:
+                ops.append(
+                    {
+                        "label": label,
+                        "method": op.method,
+                        "path": op.path,
+                        "required_top_level": list(op.required_top_level),
+                    }
+                )
+        rk = self.restricted_key_error_signature
+        return {
+            "binding_record_schema_revision": (
+                b.binding_record_schema_revision
+                if isinstance(b, SourceEvidenceBinding)
+                else None
+            ),
+            "binding_name": (
+                b.name if isinstance(b, SourceEvidenceBinding) else None
+            ),
+            "provenance": (
+                b.provenance_record()
+                if isinstance(b, SourceEvidenceBinding)
+                else None
+            ),
+            "semantics": {
+                "demo_rest_base_url": self.demo_rest_base_url,
+                "operations": ops,
+                "api_keys_absent_subaccount_semantics": (
+                    self.api_keys_absent_subaccount_semantics
+                ),
+                "subaccount_number_min": self.subaccount_number_min,
+                "subaccount_number_max": self.subaccount_number_max,
+                "restricted_key_error_signature": {
+                    "field_name": getattr(rk, "field_name", None),
+                    "expected_value": getattr(rk, "expected_value", None),
+                },
+                "signature_path_excludes_query": self.signature_path_excludes_query,
+                "declares_unresolved_conflict": self.declares_unresolved_conflict,
+                "record_label": self.record_label,
+            },
+        }
+
+    def canonical_binding_record_bytes(self) -> bytes:
+        """Canonical UTF-8 bytes of :meth:`canonical_binding_record` (BIND-03).
+        A pure helper so tests can independently recompute the active hash."""
+
+        return _canonical_json_bytes(self.canonical_binding_record())
+
+    @property
+    def binding_record_sha256(self) -> str:
+        """The active ``source_binding_record_sha256`` for this record
+        (BIND-01/BIND-03): the exact embedded reviewed authoring record hash
+        for an authoring-legacy binding, otherwise
+        ``sha256(canonical_binding_record_bytes())``. Gating of a non-congruent
+        authoring-legacy claim happens in
+        :meth:`evaluate_against_reviewed_contract` / :func:`_emitted_source_binding`."""
+
+        b = self.evidence_binding
+        if isinstance(b, SourceEvidenceBinding) and b.is_authoring_legacy:
+            return SOURCE_BINDING_RECORD_SHA256
+        return hashlib.sha256(self.canonical_binding_record_bytes()).hexdigest()
+
     def evaluate_against_reviewed_contract(self) -> SourceEvaluation:
         """Classify this record against the reviewed B1 contract
         (B1-SRC-009, B1-FAIL-001/002, B1-TEST-011).
 
-        C04: a missing, malformed, or internally contradictory
-        ``evidence_binding`` identity is folded into ``DRIFT`` here -- i.e.
-        rejected before any network request -- using the existing
-        source-contract failure model rather than a new terminal enum.
+        C04 / BIND-04: a missing, structurally invalid, or non-congruent
+        authoring-legacy ``evidence_binding`` identity is folded into ``DRIFT``
+        here -- rejected before any network request -- using the existing
+        source-contract failure model rather than a new terminal enum. Because
+        the active binding hash is *derived* from provenance + material
+        semantics, a materially different record cannot reuse another record's
+        active identity.
         """
 
         findings: list[str] = []
@@ -903,10 +1182,7 @@ class TaskCurrentSourceRecord:
                 findings=("record declares an unresolved official-source conflict",),
             )
 
-        if not isinstance(self.evidence_binding, SourceEvidenceBinding):
-            findings.append("record carries no usable source evidence-binding identity")
-        else:
-            findings.extend(self.evidence_binding.validate())
+        findings.extend(_binding_identity_findings(self))
 
         if self.api_keys_absent_subaccount_semantics not in (
             "UNRESTRICTED",
@@ -981,7 +1257,6 @@ def authoring_task_current_source_record() -> TaskCurrentSourceRecord:
         signature_path_excludes_query=True,
         evidence_binding=AUTHORING_SOURCE_EVIDENCE_BINDING,
         record_label="AUTHORING_RENDERED_SOURCE_BINDING_EQUIVALENT",
-        observed_at_utc=SOURCE_OBSERVED_AT_UTC,
     )
 
 
@@ -2108,7 +2383,7 @@ class B1EvidenceManifest:
     completed_at_utc: str
     request_count: int
     requests: Tuple[RequestEvidence, ...]
-    source_binding: SourceEvidenceBinding
+    source_binding: EmittedSourceBindingIdentity
 
     def to_json_obj(self) -> dict:
         return {
@@ -2174,7 +2449,7 @@ class B1SanitizedSummary:
 
     terminal_outcome: B1TerminalOutcome
     next_route_class: B1NextRouteClass
-    source_binding: SourceEvidenceBinding
+    source_binding: EmittedSourceBindingIdentity
     request_count: int
     usage_tier: Optional[str]
     relevant_grants: Tuple[GrantProjection, ...]
@@ -2399,7 +2674,7 @@ def _project_terminal(
     outcome: B1TerminalOutcome,
     completed_at: str,
     detail: str,
-    source_binding: SourceEvidenceBinding,
+    source_binding: EmittedSourceBindingIdentity,
 ) -> B1Result:
     """Pure terminal projection for *outcome*: build the evidence manifest,
     the sanitized summary, and the :class:`B1Result`.
@@ -2467,7 +2742,7 @@ def _finish(
     outcome: B1TerminalOutcome,
     clock: Clock,
     global_deadline_ns: int,
-    source_binding: SourceEvidenceBinding,
+    source_binding: EmittedSourceBindingIdentity,
     detail: str = "",
 ) -> B1Result:
     """Build and return exactly one terminal :class:`B1Result`.
@@ -3158,7 +3433,7 @@ def _reconcile_and_finish(
     state: _RunState,
     clock: Clock,
     global_deadline_ns: int,
-    source_binding: SourceEvidenceBinding,
+    source_binding: EmittedSourceBindingIdentity,
 ) -> B1Result:
     """Sections 11-14: identity-set reconciliation, account-wide proof, and
     the deterministic terminal theorem."""
