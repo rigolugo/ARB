@@ -2,18 +2,50 @@
 
 Authority level: canonical current-state overlay.
 
-This checkpoint records the accepted credential-free task-current official-source resolution performed after the Route-B B1 Local Operator 02 execution. It supplements, and does not rewrite, `PROJECT_STATE_CHECKPOINT_2026_08_28_ROUTE_B_B1_AUTHENTICATED_EXECUTION.md`.
+This checkpoint records the accepted credential-free task-current official-source
+resolution performed after Route-B B1 Local Operator 02 and also records the
+provenance correction required after the first repository installation of this
+milestone.
 
-This checkpoint grants no credential use, authenticated Kalshi request, venue write, production access, persistent-state mutation, writer-proof release, or later-stage capability.
+It supplements, and does not rewrite,
+`PROJECT_STATE_CHECKPOINT_2026_08_28_ROUTE_B_B1_AUTHENTICATED_EXECUTION.md`.
 
-## 1. Canonical base before this source milestone
+This checkpoint grants no credential use, authenticated Kalshi request, venue
+write, production access, persistent-state mutation, writer-proof release, or
+later-stage capability.
+
+## 1. Canonical provenance correction
+
+The first source-milestone commit:
 
 ```text
-repository = rigolugo/ARB
-canonical_main_before_source_install = 311899ec0769b2b30e0ac53598092ed0c260f62c
-canonical_tree_before_source_install = e485663e4aac862e949c9fa0c4badb0b00f3d729
-canonical_parent_before_source_install = 60e4af9123f0e3d791ec8095911ed00760960d61
+e1179f7c527e5a1a3b0b5b0620861ed1655e3071
 ```
+
+correctly recorded the externally observed raw OpenAPI identity in prose, but
+incorrectly claimed that exact raw bytes had been installed at:
+
+```text
+project_archive/kalshi_sources/KALSHI_CURRENT_OPENAPI_SOURCE_RESOLUTION_01.yaml
+```
+
+The repository object actually installed at that path was:
+
+```text
+raw_bytes = 65640
+sha256 = a2bb972f75518baacaa6cdff9dfcc13dd376c744c007552acf30ddede0f1aae1
+git_blob = b8d0e168da84f2a483ae9bcc30d68a5b329e7324
+```
+
+That object is not the exact retrieved OpenAPI and is not authoritative source
+evidence. It is removed by the provenance-correction commit that installs this
+revised checkpoint.
+
+No technical conclusion in this checkpoint relies on the removed object.
+
+The exact retrieved raw OpenAPI remains noncanonical/local evidence identified
+below. Its deterministic sanitized source-resolution report is installed
+canonically.
 
 ## 2. Public official-source probe
 
@@ -29,7 +61,7 @@ Only this public official source was retrieved:
 https://docs.kalshi.com/openapi.yaml
 ```
 
-Observed activity classification:
+Observed activity:
 
 ```text
 network_activity = PUBLIC_OFFICIAL_DOCUMENTATION_ONLY
@@ -41,27 +73,51 @@ http_status = 200
 content_type = text/yaml
 ```
 
-The exact lossless source snapshot is installed at:
+Exact retrieved raw source identity:
 
 ```text
-project_archive/kalshi_sources/KALSHI_CURRENT_OPENAPI_SOURCE_RESOLUTION_01.yaml
+filename = KALSHI_CURRENT_OPENAPI_SOURCE_RESOLUTION_01.yaml
+storage = LOCAL_ONLY_EXTERNAL_SOURCE_EVIDENCE
 raw_bytes = 325930
 sha256 = 99bdf4093d7eced607ba8b48cc99e3da862c35d99afa2a0c0f63f14eab9237ed
 OpenAPI = 3.0.0
 info.version = 3.29.0
 ```
 
-Authority of the external source itself:
+The exact raw bytes are NOT represented as a repository-resident Git blob by
+this checkpoint. Future byte-level reinspection therefore requires the exact
+local/noncanonical artifact with the identity above.
+
+Canonical sanitized source-resolution report:
+
+```text
+project_archive/kalshi_sources/KALSHI_CURRENT_OPENAPI_SOURCE_RESOLUTION_01_REPORT.json
+raw_bytes = 1151
+sha256 = 85a6f371dbbe026198cff39366978b133a67c41b15f4abfd180b2077a268577a
+git_blob = 3d1d45b0a53dedba1e054456fb498040d8c7deac
+```
+
+Detached local sidecar identity:
+
+```text
+KALSHI_CURRENT_OPENAPI_SOURCE_RESOLUTION_01.yaml.sha256
+storage = LOCAL_ONLY_DERIVED_EVIDENCE
+raw_bytes = 115
+sha256 = 75ba80de1a512b685d9396eebf6af7b6d76bcf2081740eda2e29dbeff70abb5b
+```
+
+Authority of the external source:
 
 ```text
 OFFICIAL_KALSHI_SOURCE_NONCONTROLLING
 ```
 
-Its conclusions become current ARB state here only to the extent explicitly accepted by this canonical checkpoint or a later controlling artifact.
+The report is an accepted canonical projection of the direct public-source
+observation; it does not itself become an external controlling requirement.
 
 ## 3. Exact ApiKey.subaccount semantic resolved
 
-The task-current official `ApiKey` schema establishes:
+The exact retrieved 3.29.0 source and the canonical report establish:
 
 ```text
 ApiKey.required = [api_key_id, name, scopes]
@@ -72,32 +128,36 @@ subaccount_minimum = 0
 subaccount_maximum = 63
 ```
 
-The exact material schema description is:
+Material source description:
 
 ```text
 If set, the API key is restricted to this single sub-account and may only read
 and trade on it. Absent/null means the key is unrestricted.
 ```
 
-Therefore the previously unresolved B1 source question is now resolved as:
+Accepted B1 source theorem:
 
 ```text
 GET_API_KEYS_RESPONSE_SUBACCOUNT_ABSENCE_SEMANTICS = UNRESTRICTED
 CURRENT_OFFICIAL_SOURCE_EXPLICITLY_PROVES_ABSENT_NULL_UNRESTRICTED = true
 ```
 
-This satisfies the source-semantic condition anticipated by B1-SRC-004 for a future task-current source binding. It does not retroactively alter the exact source binding used by Local Operator 02.
+This satisfies the source-semantic condition anticipated by B1-SRC-004 for a
+future task-current source binding.
+
+It does not retroactively alter Local Operator 02.
 
 ## 4. B1-relevant source drift check
 
-Marco compared the exact current OpenAPI 3.29.0 snapshot above against the exact supplied historical OpenAPI 3.28.0 snapshot:
+Marco compared the exact current OpenAPI 3.29.0 raw artifact above against the
+exact supplied historical OpenAPI 3.28.0 snapshot:
 
 ```text
 historical_raw_bytes = 333315
 historical_sha256 = cb853ffc47262646b96bba7b1a8925c9c344128fd498cdaa8dbcf9a0b3b8211b
 ```
 
-For these exact B1 GET operation objects:
+The compared B1 GET operation objects were:
 
 ```text
 GET /account/limits
@@ -106,7 +166,7 @@ GET /portfolio/subaccounts/balances
 GET /portfolio/subaccounts/netting
 ```
 
-and these exact schemas:
+The compared schemas were:
 
 ```text
 ApiKey
@@ -119,9 +179,9 @@ SubaccountNettingConfig
 FixedPointDollars
 ```
 
-the parsed OpenAPI objects were byte-independent structurally equal after YAML parsing.
+Those selected parsed objects were structurally equal after YAML parsing.
 
-A deterministic canonical JSON projection of exactly those selected current objects had:
+A deterministic canonical JSON projection of the selected current objects had:
 
 ```text
 projection_raw_bytes = 6020
@@ -134,29 +194,13 @@ Disposition:
 MATERIAL_B1_OPENAPI_DRIFT_ON_SELECTED_SURFACE = NONE_OBSERVED
 ```
 
-This comparison is a `DIRECT_EMPIRICAL_OBSERVATION` over the two exact source snapshots. It does not claim that the entire OpenAPI 3.28.0 and 3.29.0 documents are identical.
+This is a `DIRECT_EMPIRICAL_OBSERVATION` over the two exact source artifacts.
+It does not claim whole-document equality.
 
-## 5. Supplied derived artifacts
+## 5. Relationship to Local Operator 02
 
-The local probe also produced:
-
-```text
-KALSHI_CURRENT_OPENAPI_SOURCE_RESOLUTION_01.yaml.sha256
-raw_bytes = 115
-sha256 = 75ba80de1a512b685d9396eebf6af7b6d76bcf2081740eda2e29dbeff70abb5b
-
-KALSHI_CURRENT_OPENAPI_SOURCE_RESOLUTION_01_REPORT.json
-raw_bytes = 1151
-sha256 = 85a6f371dbbe026198cff39366978b133a67c41b15f4abfd180b2077a268577a
-```
-
-The detached sidecar correctly names the YAML SHA-256 above. The report is a derived projection of the canonical raw YAML and does not add independent source authority.
-
-To minimize file proliferation, these two derived artifacts are not separately installed in the repository; their exact identities and material facts are preserved by this checkpoint.
-
-## 6. Relationship to Local Operator 02
-
-Local Operator 02 remains historically correct under its exact execution-time source binding:
+Local Operator 02 remains historically correct under its exact execution-time
+source binding:
 
 ```text
 current_key_match_state = UNIQUE
@@ -165,33 +209,35 @@ terminal_outcome = B1_ACCOUNT_WIDE_ENUMERATION_NOT_PROVEN_WITH_CURRENT_KEY
 request_count = 2
 ```
 
-This checkpoint MUST NOT rewrite that historical execution result to `UNRESTRICTED`.
+This checkpoint MUST NOT rewrite that result to `UNRESTRICTED`.
 
-Instead, the new theorem is:
+The new source theorem is prospective:
 
 ```text
-Local Operator 02 observed the uniquely matched current key with no bound
-subaccount value in its sanitized projection.
-
-A later task-current official source now explicitly establishes that an
-ApiKey.subaccount value that is absent/null means that key is unrestricted.
+A later B1 execution may classify an absent/null ApiKey.subaccount response
+state as UNRESTRICTED only when it explicitly binds to this task-current
+official-source evidence (or a later valid task-current source).
 ```
 
-Any future execution that relies on this semantic must bind its evidence to the exact current source used for that execution.
+## 6. Evidence-binding implementation gap
 
-## 7. Evidence-binding implementation gap
-
-The accepted B1 core implementation can evaluate a task-current source record whose:
+The accepted B1 core implementation can evaluate a `TaskCurrentSourceRecord`
+whose:
 
 ```text
 api_keys_absent_subaccount_semantics = UNRESTRICTED
 ```
 
-and can continue to the account-wide balances/netting reads when all other controlling predicates pass.
+and can continue to balances/netting when all other controlling predicates pass.
 
-However, the installed implementation's sanitized execution summary/manifest retains the earlier embedded authoring source-binding identity. A future execution must not make an inference from OpenAPI 3.29.0 while emitting evidence that identifies only the older rendered-source binding.
+However, its sanitized manifest/summary currently serialize the fixed authoring
+source-binding identity instead of the exact task-current source record supplied
+to execution.
 
-Therefore the next bounded implementation task is:
+A future execution must not infer from OpenAPI 3.29.0 while emitting evidence
+that identifies only the older rendered-source binding.
+
+Therefore the next bounded implementation task remains:
 
 ```text
 KALSHI_DEMO_ROUTE_B_B1_CURRENT_SOURCE_BINDING_AND_EXECUTION_EVIDENCE_CORRECTION_01
@@ -200,23 +246,26 @@ KALSHI_DEMO_ROUTE_B_B1_CURRENT_SOURCE_BINDING_AND_EXECUTION_EVIDENCE_CORRECTION_
 Required purpose only:
 
 ```text
-1. bind the exact task-current OpenAPI source identity used for execution;
+1. bind the exact task-current source identity used for execution;
 2. permit the already-supported UNRESTRICTED source semantic to be supplied;
-3. make sanitized execution evidence identify the actual task-current source
-   record used for the inference;
+3. make sanitized execution evidence identify the actual task-current source;
 4. preserve the historical authoring source binding separately;
-5. add offline tests that fail if evaluated source and emitted evidence source
-   diverge.
+5. add offline tests that fail if evaluated source and emitted source diverge.
 ```
 
-The correction must not broaden B1 endpoints, request count, retries, redirects, credentials, parsers, account-wide proof predicates, Demo/production separation, or any venue-write capability.
+The correction must not broaden B1 endpoints, request count, retries, redirects,
+credentials, parsers, account-wide proof predicates, Demo/production
+separation, or venue-write capability.
 
-## 8. Current state after source resolution
+## 7. Current state
 
 ```text
 B1_CURRENT_SOURCE_GAP = RESOLVED
 B1_CURRENT_OPENAPI_VERSION = 3.29.0
+B1_CURRENT_OPENAPI_RAW_STORAGE = LOCAL_ONLY_EXTERNAL_SOURCE_EVIDENCE
+B1_CURRENT_OPENAPI_RAW_BYTES = 325930
 B1_CURRENT_OPENAPI_SHA256 = 99bdf4093d7eced607ba8b48cc99e3da862c35d99afa2a0c0f63f14eab9237ed
+B1_CURRENT_SOURCE_REPORT = CANONICAL
 B1_CURRENT_APIKEY_ABSENT_NULL_SEMANTIC = UNRESTRICTED
 B1_SELECTED_SURFACE_SOURCE_DRIFT = NONE_OBSERVED
 B1_OPERATOR_02_HISTORICAL_TERMINAL = B1_ACCOUNT_WIDE_ENUMERATION_NOT_PROVEN_WITH_CURRENT_KEY
@@ -226,7 +275,7 @@ B1_PRIMARY_ONLY = UNKNOWN
 B1_NEXT_TASK = KALSHI_DEMO_ROUTE_B_B1_CURRENT_SOURCE_BINDING_AND_EXECUTION_EVIDENCE_CORRECTION_01
 ```
 
-The historical primary remains unchanged:
+Historical primary remains:
 
 ```text
 writer_proof_state = HELD
@@ -236,10 +285,13 @@ CANARY_EXECUTION_DOMAIN_READINESS = NO_VALID_CANARY_EXECUTION_DOMAIN_PROVEN
 CANARY_REAL_EXECUTION_ELIGIBLE = false
 ```
 
-## 9. Execution boundary
+## 8. Execution boundary
 
 No further authenticated B1 execution is authorized by this checkpoint.
 
-After the evidence-binding correction is implemented, independently reviewed, and canonically installed, a separate explicit task may authorize a fresh bounded B1 read-only execution.
+After the evidence-binding correction is implemented, independently reviewed,
+and canonically installed, a separate explicit task may authorize a fresh
+bounded B1 read-only execution.
 
-That future execution must not be described as an automatic retry of Local Operator 02.
+That future execution must not be described as an automatic retry of Local
+Operator 02.
