@@ -61,6 +61,8 @@ __all__ = [
     "HISTORICAL_OPENAPI_SNAPSHOT_SHA256",
     "HISTORICAL_CORROBORATING_OPERATION_IDS",
     "SIGNING_PROFILE",
+    "SourceEvidenceBinding",
+    "AUTHORING_SOURCE_EVIDENCE_BINDING",
     # Enums
     "B1TerminalOutcome",
     "B1NextRouteClass",
@@ -457,6 +459,14 @@ _BALANCE_PATTERN = re.compile(r"-?(0|[1-9][0-9]*)(\.[0-9]{1,6})?")
 # digits, no leading zero, strictly positive.
 _TIMESTAMP_MS_PATTERN = re.compile(r"[1-9][0-9]*")
 
+# Lowercase 64-hex SHA-256 and a minimal RFC3339 UTC instant. Used to validate
+# the non-secret evidence-binding identity carried by a task-current source
+# record before any network request (C04).
+_SHA256_HEX_PATTERN = re.compile(r"[0-9a-f]{64}")
+_RFC3339_UTC_PATTERN = re.compile(
+    r"[0-9]{4}-[0-9]{2}-[0-9]{2}T[0-9]{2}:[0-9]{2}:[0-9]{2}(?:\.[0-9]+)?Z"
+)
+
 
 # ---------------------------------------------------------------------------
 # Closed enums.
@@ -719,6 +729,127 @@ class SourceEvaluation:
 
 
 @dataclass(frozen=True, slots=True)
+class SourceEvidenceBinding:
+    """Immutable, non-secret provenance that deterministically identifies the
+    task-current source binding an execution actually evaluated (C01).
+
+    It is owned by :class:`TaskCurrentSourceRecord` and is the single source of
+    the frozen B1-EVID-003/004 identity fields:
+
+    * evidence manifest -- ``source_binding_name`` / ``source_binding_record_sha256``;
+    * sanitized summary -- ``source_binding.name`` / ``.record_sha256`` /
+      ``.observed_at_utc`` / ``.fresh_raw_openapi_status`` /
+      ``.historical_openapi_context_sha256``.
+
+    There is deliberately no module-global mutable "current source" singleton:
+    the binding travels with the record passed to
+    :func:`execute_b1_account_subaccount_probe`, and every terminal projection
+    for that execution is built from this exact object (C02).
+
+    ``record_sha256`` identifies whatever the task-current binding treats as its
+    canonical source record (for the authoring rendered binding, the derived
+    B1-SRC-008 record hash; for a task-current OpenAPI binding, the exact raw
+    source SHA-256). No Git blob identity is asserted for raw external source
+    bytes.
+    """
+
+    name: str
+    record_sha256: str
+    observed_at_utc: str
+    fresh_raw_openapi_status: str
+    historical_openapi_context_sha256: str
+
+    def validate(self) -> Tuple[str, ...]:
+        """Return findings describing why this evidence-binding identity is
+        unusable (empty tuple == usable). Missing, malformed, or internally
+        contradictory identity is rejected before any network request (C04);
+        no new terminal enum is introduced -- the caller folds a non-empty
+        result into the existing ``B1_SOURCE_DRIFT`` model.
+        """
+
+        findings: list[str] = []
+        if not isinstance(self.name, str) or not self.name.strip():
+            findings.append("source-binding name is missing")
+        if (
+            not isinstance(self.record_sha256, str)
+            or _SHA256_HEX_PATTERN.fullmatch(self.record_sha256) is None
+        ):
+            findings.append(
+                "source-binding record_sha256 is not a lowercase 64-hex digest"
+            )
+        if (
+            not isinstance(self.observed_at_utc, str)
+            or _RFC3339_UTC_PATTERN.fullmatch(self.observed_at_utc) is None
+        ):
+            findings.append("source-binding observed_at_utc is not an RFC3339 UTC instant")
+        if (
+            not isinstance(self.fresh_raw_openapi_status, str)
+            or not self.fresh_raw_openapi_status.strip()
+        ):
+            findings.append("source-binding fresh_raw_openapi_status is missing")
+        if (
+            not isinstance(self.historical_openapi_context_sha256, str)
+            or _SHA256_HEX_PATTERN.fullmatch(self.historical_openapi_context_sha256)
+            is None
+        ):
+            findings.append(
+                "source-binding historical_openapi_context_sha256 is not a "
+                "lowercase 64-hex digest"
+            )
+        # Contradiction: a record that claims the accepted authoring binding
+        # name but carries a different record hash (or vice versa) is unusable.
+        claims_authoring_name = self.name == SOURCE_BINDING_NAME
+        claims_authoring_hash = self.record_sha256 == SOURCE_BINDING_RECORD_SHA256
+        if claims_authoring_name != claims_authoring_hash:
+            findings.append(
+                "source-binding name and record_sha256 disagree about whether this "
+                "is the accepted authoring binding"
+            )
+        return tuple(findings)
+
+
+# The evidence-binding identity for the accepted authoring rendered-source
+# binding (B1-SRC-003/004/008). Preserved verbatim so a real execution that
+# actually supplies ``authoring_task_current_source_record()`` still emits this
+# exact identity (C03).
+AUTHORING_SOURCE_EVIDENCE_BINDING = SourceEvidenceBinding(
+    name=SOURCE_BINDING_NAME,
+    record_sha256=SOURCE_BINDING_RECORD_SHA256,
+    observed_at_utc=SOURCE_OBSERVED_AT_UTC,
+    fresh_raw_openapi_status=FRESH_RAW_OPENAPI_STATUS,
+    historical_openapi_context_sha256=HISTORICAL_OPENAPI_SNAPSHOT_SHA256,
+)
+
+# Explicit placeholder emitted -- only inside a ``B1_SOURCE_DRIFT`` terminal
+# with ``request_count == 0`` -- when a task-current record carries a missing,
+# malformed, or internally contradictory evidence-binding identity. It is
+# deliberately not a real identity, so an unusable identity is never echoed
+# into evidence as though it were trusted (C04).
+_UNUSABLE_SOURCE_EVIDENCE_BINDING = SourceEvidenceBinding(
+    name="UNUSABLE_SOURCE_EVIDENCE_BINDING",
+    record_sha256="0" * 64,
+    observed_at_utc="1970-01-01T00:00:00Z",
+    fresh_raw_openapi_status="UNUSABLE_SOURCE_EVIDENCE_BINDING",
+    historical_openapi_context_sha256="0" * 64,
+)
+
+
+def _emitted_source_binding(source_record: "TaskCurrentSourceRecord") -> SourceEvidenceBinding:
+    """The evidence-binding identity every terminal projection for an
+    execution is bound to (C02).
+
+    It is the record's own ``evidence_binding`` when that identity is usable;
+    otherwise the explicit unusable-identity placeholder, so a rejected
+    (``B1_SOURCE_DRIFT``, pre-network) record never emits its malformed or
+    contradictory identity as trusted evidence (C04)."""
+
+    binding = getattr(source_record, "evidence_binding", None)
+    if isinstance(binding, SourceEvidenceBinding) and not binding.validate():
+        return binding
+    return _UNUSABLE_SOURCE_EVIDENCE_BINDING
+
+
+@dataclass(frozen=True, slots=True)
 class TaskCurrentSourceRecord:
     """A task-current official source record for the four B1 GET operations
     (B1-SRC-009). Offline tests supply matching and materially drifted
@@ -728,6 +859,12 @@ class TaskCurrentSourceRecord:
     absent/null ``subaccount`` field in a ``GET /api_keys`` response element
     may be treated as ``UNRESTRICTED`` (B1-SRC-004, B1-KEY-001). The
     authoring rendered-source binding leaves it ``NOT_EXPOSED``.
+
+    ``evidence_binding`` is the immutable, non-secret provenance identity that
+    every terminal projection for an execution is bound to (C01/C02). It
+    defaults to nothing: a genuine task-current record must supply it, and
+    :meth:`evaluate_against_reviewed_contract` rejects a missing/unusable one
+    before any network request (C04).
     """
 
     demo_rest_base_url: str
@@ -737,6 +874,7 @@ class TaskCurrentSourceRecord:
     subaccount_number_max: int
     restricted_key_error_signature: RestrictedKeyErrorSignature
     signature_path_excludes_query: bool
+    evidence_binding: SourceEvidenceBinding
     declares_unresolved_conflict: bool = False
     record_label: str = ""
     observed_at_utc: str = ""
@@ -749,7 +887,13 @@ class TaskCurrentSourceRecord:
 
     def evaluate_against_reviewed_contract(self) -> SourceEvaluation:
         """Classify this record against the reviewed B1 contract
-        (B1-SRC-009, B1-FAIL-001/002, B1-TEST-011)."""
+        (B1-SRC-009, B1-FAIL-001/002, B1-TEST-011).
+
+        C04: a missing, malformed, or internally contradictory
+        ``evidence_binding`` identity is folded into ``DRIFT`` here -- i.e.
+        rejected before any network request -- using the existing
+        source-contract failure model rather than a new terminal enum.
+        """
 
         findings: list[str] = []
 
@@ -758,6 +902,11 @@ class TaskCurrentSourceRecord:
                 status=SourceEvaluationStatus.CONFLICT,
                 findings=("record declares an unresolved official-source conflict",),
             )
+
+        if not isinstance(self.evidence_binding, SourceEvidenceBinding):
+            findings.append("record carries no usable source evidence-binding identity")
+        else:
+            findings.extend(self.evidence_binding.validate())
 
         if self.api_keys_absent_subaccount_semantics not in (
             "UNRESTRICTED",
@@ -830,6 +979,7 @@ def authoring_task_current_source_record() -> TaskCurrentSourceRecord:
             field_name="code", expected_value="subaccount_restricted"
         ),
         signature_path_excludes_query=True,
+        evidence_binding=AUTHORING_SOURCE_EVIDENCE_BINDING,
         record_label="AUTHORING_RENDERED_SOURCE_BINDING_EQUIVALENT",
         observed_at_utc=SOURCE_OBSERVED_AT_UTC,
     )
@@ -1946,12 +2096,19 @@ class RequestEvidence:
 
 @dataclass(frozen=True, slots=True)
 class B1EvidenceManifest:
-    """B1-EVID-003 local evidence manifest. No secret/header fields."""
+    """B1-EVID-003 local evidence manifest. No secret/header fields.
+
+    ``source_binding`` is the exact evidence-binding identity of the source
+    record the execution evaluated; the two ``source_binding_*`` manifest
+    fields are projected from it, never from a fixed authoring constant (C02).
+    The frozen ``schema_revision = 1`` field set is unchanged (C08).
+    """
 
     started_at_utc: str
     completed_at_utc: str
     request_count: int
     requests: Tuple[RequestEvidence, ...]
+    source_binding: SourceEvidenceBinding
 
     def to_json_obj(self) -> dict:
         return {
@@ -1959,8 +2116,8 @@ class B1EvidenceManifest:
             "task_id": TASK_ID,
             "environment": ENVIRONMENT,
             "demo_rest_base_url": DEMO_REST_BASE_URL,
-            "source_binding_name": SOURCE_BINDING_NAME,
-            "source_binding_record_sha256": SOURCE_BINDING_RECORD_SHA256,
+            "source_binding_name": self.source_binding.name,
+            "source_binding_record_sha256": self.source_binding.record_sha256,
             "started_at_utc": self.started_at_utc,
             "completed_at_utc": self.completed_at_utc,
             "request_count": self.request_count,
@@ -2008,10 +2165,16 @@ class B1SanitizedSummary:
     """B1-EVID-004 closed sanitized projection. Contains no exact dollar
     balances, no real API key IDs, no unrelated key IDs/names, no private-key
     path value, no key bytes, no signature, no auth headers, no raw
-    environment."""
+    environment.
+
+    ``source_binding`` is the exact evidence-binding identity of the source
+    record the execution evaluated; the frozen ``source_binding`` sub-object is
+    projected from it, never from a fixed authoring constant (C02). The frozen
+    ``schema_revision = 1`` key set is unchanged (C08)."""
 
     terminal_outcome: B1TerminalOutcome
     next_route_class: B1NextRouteClass
+    source_binding: SourceEvidenceBinding
     request_count: int
     usage_tier: Optional[str]
     relevant_grants: Tuple[GrantProjection, ...]
@@ -2037,11 +2200,13 @@ class B1SanitizedSummary:
             "environment": ENVIRONMENT,
             "demo_rest_base_url": DEMO_REST_BASE_URL,
             "source_binding": {
-                "name": SOURCE_BINDING_NAME,
-                "record_sha256": SOURCE_BINDING_RECORD_SHA256,
-                "observed_at_utc": SOURCE_OBSERVED_AT_UTC,
-                "fresh_raw_openapi_status": FRESH_RAW_OPENAPI_STATUS,
-                "historical_openapi_context_sha256": HISTORICAL_OPENAPI_SNAPSHOT_SHA256,
+                "name": self.source_binding.name,
+                "record_sha256": self.source_binding.record_sha256,
+                "observed_at_utc": self.source_binding.observed_at_utc,
+                "fresh_raw_openapi_status": self.source_binding.fresh_raw_openapi_status,
+                "historical_openapi_context_sha256": (
+                    self.source_binding.historical_openapi_context_sha256
+                ),
             },
             "terminal_outcome": self.terminal_outcome.value,
             "next_route_class": self.next_route_class.value,
@@ -2234,6 +2399,7 @@ def _project_terminal(
     outcome: B1TerminalOutcome,
     completed_at: str,
     detail: str,
+    source_binding: SourceEvidenceBinding,
 ) -> B1Result:
     """Pure terminal projection for *outcome*: build the evidence manifest,
     the sanitized summary, and the :class:`B1Result`.
@@ -2241,19 +2407,25 @@ def _project_terminal(
     No deadline logic and no filesystem persistence happen here. Every field
     is derived from the already-observed *state*, so the projection stays
     internally consistent with whatever *outcome* is passed (C02-01
-    requirement 7)."""
+    requirement 7).
+
+    *source_binding* is the exact evidence-binding identity of the source
+    record supplied to this execution; both evidence projections are bound to
+    it, never to a fixed authoring constant (C02)."""
 
     manifest = B1EvidenceManifest(
         started_at_utc=state.started_at_utc,
         completed_at_utc=completed_at,
         request_count=state.request_count,
         requests=tuple(state.request_evidence),
+        source_binding=source_binding,
     )
     manifest_bytes = manifest.to_json_bytes()
     next_route = _NEXT_ROUTE_BY_OUTCOME[outcome]
     summary = B1SanitizedSummary(
         terminal_outcome=outcome,
         next_route_class=next_route,
+        source_binding=source_binding,
         request_count=state.request_count,
         usage_tier=state.usage_tier,
         relevant_grants=state.relevant_grants,
@@ -2295,6 +2467,7 @@ def _finish(
     outcome: B1TerminalOutcome,
     clock: Clock,
     global_deadline_ns: int,
+    source_binding: SourceEvidenceBinding,
     detail: str = "",
 ) -> B1Result:
     """Build and return exactly one terminal :class:`B1Result`.
@@ -2317,7 +2490,7 @@ def _finish(
     outcome, detail = _enforce_global_deadline(
         clock, global_deadline_ns, outcome, detail
     )
-    result = _project_terminal(state, outcome, completed_at, detail)
+    result = _project_terminal(state, outcome, completed_at, detail, source_binding)
 
     # Final gate: re-check the immutable global deadline AFTER all nontrivial
     # terminal projection and immediately before returning. A crossing during
@@ -2337,7 +2510,9 @@ def _finish(
     # (requirement 7); nothing success-labelled is left behind because no
     # evidence is serialized here (requirement 8).
     completed_at = clock.now_utc_rfc3339()
-    return _project_terminal(state, final_outcome, completed_at, final_detail)
+    return _project_terminal(
+        state, final_outcome, completed_at, final_detail, source_binding
+    )
 
 
 def _summarize_balance_classes(
@@ -2468,6 +2643,12 @@ def execute_b1_account_subaccount_probe(
 
     state = _RunState(started_at_utc=clock.now_utc_rfc3339())
 
+    # C02: the evidence-binding identity every terminal projection for THIS
+    # execution is bound to -- the supplied record's own identity when usable,
+    # otherwise the explicit unusable-identity placeholder (C04). Never a fixed
+    # module authoring constant.
+    source_binding = _emitted_source_binding(source_record)
+
     # --- Credential-source contract (B1-CRED-001, B1-IMPL-003). -------------
     try:
         creds = load_b1_credentials(credentials_env)
@@ -2477,6 +2658,7 @@ def execute_b1_account_subaccount_probe(
             B1TerminalOutcome.B1_CAPABILITY_OR_SCOPE_VIOLATION,
             clock,
             global_deadline_ns,
+            source_binding=source_binding,
             detail=str(exc),
         )
 
@@ -2490,6 +2672,7 @@ def execute_b1_account_subaccount_probe(
             B1TerminalOutcome.B1_OFFICIAL_SOURCE_CONFLICT,
             clock,
             global_deadline_ns,
+            source_binding=source_binding,
             detail="; ".join(evaluation.findings),
         )
     if evaluation.status is SourceEvaluationStatus.DRIFT:
@@ -2498,6 +2681,7 @@ def execute_b1_account_subaccount_probe(
             B1TerminalOutcome.B1_SOURCE_DRIFT,
             clock,
             global_deadline_ns,
+            source_binding=source_binding,
             detail="; ".join(evaluation.findings),
         )
 
@@ -2512,6 +2696,7 @@ def execute_b1_account_subaccount_probe(
                 B1TerminalOutcome.B1_CAPABILITY_OR_SCOPE_VIOLATION,
                 clock,
                 global_deadline_ns,
+                source_binding=source_binding,
                 detail="request budget exceeded",
             )
 
@@ -2532,6 +2717,7 @@ def execute_b1_account_subaccount_probe(
                 terminal,
                 clock,
                 global_deadline_ns,
+                source_binding=source_binding,
                 detail=detail,
             )
 
@@ -2545,11 +2731,12 @@ def execute_b1_account_subaccount_probe(
                     terminal,
                     clock,
                     global_deadline_ns,
+                    source_binding=source_binding,
                     detail=detail,
                 )
 
     # --- Reconciliation and terminal theorem (Sections 11-14). ------------
-    return _reconcile_and_finish(state, clock, global_deadline_ns)
+    return _reconcile_and_finish(state, clock, global_deadline_ns, source_binding)
 
 
 def _perform_one_request(
@@ -2971,6 +3158,7 @@ def _reconcile_and_finish(
     state: _RunState,
     clock: Clock,
     global_deadline_ns: int,
+    source_binding: SourceEvidenceBinding,
 ) -> B1Result:
     """Sections 11-14: identity-set reconciliation, account-wide proof, and
     the deterministic terminal theorem."""
@@ -2986,6 +3174,7 @@ def _reconcile_and_finish(
             B1TerminalOutcome.B1_SUBACCOUNT_ENUMERATION_DISAGREEMENT,
             clock,
             global_deadline_ns,
+            source_binding=source_binding,
             detail="balances and netting subaccount identity sets differ",
         )
 
@@ -3005,6 +3194,7 @@ def _reconcile_and_finish(
             B1TerminalOutcome.B1_ACCOUNT_WIDE_ENUMERATION_NOT_PROVEN_WITH_CURRENT_KEY,
             clock,
             global_deadline_ns,
+            source_binding=source_binding,
             detail="account-wide enumeration predicate not satisfied",
         )
 
@@ -3016,6 +3206,7 @@ def _reconcile_and_finish(
             B1TerminalOutcome.B1_EXISTING_NUMBERED_SUBACCOUNT_DISCOVERED,
             clock,
             global_deadline_ns,
+            source_binding=source_binding,
             detail="one or more numbered subaccount identities exposed",
         )
     return _finish(
@@ -3023,5 +3214,6 @@ def _reconcile_and_finish(
         B1TerminalOutcome.B1_PRIMARY_ONLY_OBSERVED,
         clock,
         global_deadline_ns,
+        source_binding=source_binding,
         detail="only primary subaccount 0 exposed",
     )
