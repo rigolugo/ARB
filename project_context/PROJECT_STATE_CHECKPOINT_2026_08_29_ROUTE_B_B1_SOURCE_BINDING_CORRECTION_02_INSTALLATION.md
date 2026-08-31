@@ -308,3 +308,265 @@ PREPARE_SEPARATELY_AUTHORIZED_FRESH_B1_READ_ONLY_EXECUTION_WITH_TASK_CURRENT_SOU
 
 A future execution is a new bounded execution, not an automatic retry of Local
 Operator 02.
+
+## 10. Execution 02 accepted empirical result — current-state override
+
+This section records the later accepted direct empirical result from the
+separately authorized fresh B1 read-only execution and supersedes Sections 8 and
+9 only where those sections describe the then-current pre-Execution-02 state or
+next action. Historical Local Operator 02 facts remain unchanged.
+
+Marco accepted the Execution-02 finding after exact sanitized-evidence review:
+
+```text
+execution_id =
+KALSHI_DEMO_ROUTE_B_B1_ACCOUNT_SUBACCOUNT_CAPABILITY_AND_FACTS_EXECUTION_02
+
+evidence_class = DIRECT_EMPIRICAL_OBSERVATION
+storage = LOCAL_ONLY_EXTERNAL_ACCEPTED_EVIDENCE
+
+sanitized_evidence =
+KALSHI_DEMO_ROUTE_B_B1_ACCOUNT_SUBACCOUNT_CAPABILITY_AND_FACTS_EXECUTION_02_SANITIZED_MARCO_REVIEW.zip
+
+raw_bytes = 50249
+sha256 = e8ae4ddf30bb91c19a2167d31be284474440e75919a724262f67a64d47a3889c
+zip_crc = PASS
+
+sidecar_raw_bytes = 170
+sidecar_sha256 = c8b56882152411680b4fca1bf0d9557c28c33cc2eee9209c9b00bbfa71299112
+```
+
+Exact execution substrate:
+
+```text
+canonical_commit = 2fed77a33e3a4be7cbded90a1f8f0d015fcc8a16
+canonical_tree = 81b91ca4c45b7f68a41850a1b492468049a35475
+canonical_parent = 8fe1d3cd1f9e05d5c32c58d896b6aef818a3e22a
+
+execution_package =
+KALSHI_DEMO_ROUTE_B_B1_ACCOUNT_SUBACCOUNT_CAPABILITY_AND_FACTS_EXECUTION_02_LOCAL_OPERATOR_06
+
+execution_package_sha256 =
+cc1844835af536e923674858a202d3a829b45df63a4753ed40b3db495f50d84f
+
+execution_package_review_sha256 =
+6d9d6c6a6b2aa181bb09a088574d24a3e5704d005d3e7029d2f17561f80a16c7
+
+execution_02_live_invocation = CONSUMED
+automatic_rerun = PROHIBITED
+```
+
+Task-current official source observed by that execution:
+
+```text
+source_url = https://docs.kalshi.com/openapi.yaml
+retrieval_started_at_utc = 2026-08-31T03:05:56.784037Z
+observed_at_utc = 2026-08-31T03:05:58.839441Z
+body_complete_proof = CHUNKED_FRAMING_COMPLETE
+
+raw_bytes = 325930
+raw_sha256 = 99bdf4093d7eced607ba8b48cc99e3da862c35d99afa2a0c0f63f14eab9237ed
+OpenAPI = 3.0.0
+info.version = 3.29.0
+
+ApiKey.subaccount_structure = integer / min 0 / max 63 / nullable true / not required
+ApiKey.subaccount_absent_null_semantic = UNRESTRICTED
+
+binding_name =
+KALSHI_DEMO_ROUTE_B_B1_EXECUTION_02_TASK_CURRENT_OPENAPI_BINDING
+
+binding_record_sha256 =
+7782f8ded7c09f115c2380a83928572841882185db990496a417f1a670119bfa
+
+source_record_evaluation_status = OK
+```
+
+The exact authenticated Demo read-only execution performed four requests:
+
+```text
+request_count = 4
+retry_count = 0
+redirect_count = 0
+production_activity = NONE
+venue_write_activity = NONE
+
+1. GET /trade-api/v2/account/limits
+   HTTP 200
+   raw_response_bytes = 133
+   raw_response_sha256 = da2c1adab14b7b7253e6c1925c118553b28a1f6829ded584523199cd8abee05d
+
+2. GET /trade-api/v2/api_keys
+   HTTP 200
+   raw_response_bytes = 110
+   raw_response_sha256 = 13a68703876355181e59e2d162e5a34118dab999d8d9b86ed364036ddd5abb07
+
+3. GET /trade-api/v2/portfolio/subaccounts/balances
+   HTTP 200
+   raw_response_bytes = 199
+   raw_response_sha256 = 37c6195ccd8ee6f5861d5c718e62c138ab467608c0797879dd4907c99c6a668a
+
+4. GET /trade-api/v2/portfolio/subaccounts/netting
+   HTTP 200
+   raw_response_bytes = 139
+   raw_response_sha256 = 3880855785bcf407eb26c0c8c72e9ac454bad1320a21d8f0b7db2ae62cb36394
+```
+
+Raw authenticated response bodies remain local-only and are not repository
+artifacts.
+
+Accepted B1 account/key theorem:
+
+```text
+usage_tier = basic
+relevant_grants = []
+
+current_key_match_state = UNIQUE
+current_key_restriction_state = UNRESTRICTED
+current_key_restricted_subaccount_number = null
+current_key_scopes = ["read", "write"]
+
+balance_subaccount_numbers = [0]
+netting_subaccount_numbers = [0]
+surfaces_agree = true
+account_wide_enumeration_proven = true
+numbered_subaccounts = []
+
+create_subaccount_capability = NOT_PROVEN_BY_B1_READ_ONLY_FACTS
+documented_create_subaccount_tier_rule = ADVANCED_OR_ABOVE
+documented_tier_rule_match = NO
+```
+
+The observed `write` key scope is account metadata only. It is not ARB venue-write
+authorization.
+
+Accepted terminal theorem:
+
+```text
+B1_EXECUTION_02 = ACCEPTED_DIRECT_EMPIRICAL_OBSERVATION
+B1_EXECUTION_02_TERMINAL = B1_PRIMARY_ONLY_OBSERVED
+B1_NEXT_ROUTE_CLASS = NO_NUMBERED_DOMAIN_CURRENTLY_OBSERVED
+B1_ACCOUNT_WIDE_ENUMERATION_PROVEN = true
+B1_NUMBERED_SUBACCOUNT_EXISTENCE = NONE_CURRENTLY_OBSERVED
+B1_PRIMARY_ONLY_OBSERVED = true
+B1_EXECUTION_02_LIVE_INVOCATION = CONSUMED
+```
+
+The existing-numbered-subaccount Route-B branch is therefore closed for the
+Execution-02 observation. No existing numbered subaccount `N > 0` is currently
+observed by the two agreeing account-wide enumeration surfaces.
+
+Historical primary remains unchanged and unusable for the clean Route-B path:
+
+```text
+historical primary domain =
+KALSHI|KALSHI_DEMO|ARB_KALSHI_DEMO_PRIMARY_ACCOUNT|SUBACCOUNT=0
+
+writer_proof_state = HELD
+historical_unresolved_exposure = UNKNOWN_UNBOUNDED
+normal_writer_eligible = false
+historical_primary_safe_to_reuse_proven = false
+historical_primary_incident_resolved = false
+historical_primary_writer_proof_released = false
+CANARY_EXECUTION_DOMAIN_READINESS = NO_VALID_CANARY_EXECUTION_DOMAIN_PROVEN
+CANARY_REAL_EXECUTION_ELIGIBLE = false
+```
+
+No B1 fact reconciles the historical unresolved primary-domain write or releases
+writer proof.
+
+## 11. Canonical routing recommendation after Execution 02
+
+The current project bottleneck is now the lack of a proven clean Kalshi Demo
+economic execution domain, not the absence of the basic execution spine.
+
+Canonical routing decision:
+
+```text
+FIRST:
+  preserve/canonicalize B1 Execution 02 and its accepted route theorem
+
+THEN:
+  evaluate Route 1 versus Route 2 at the specification level
+
+BEFORE:
+  any further Kalshi venue activity
+```
+
+No further Kalshi request is authorized by this checkpoint.
+
+### Route 1 — clean numbered-subaccount path
+
+At specification level, evaluate a bounded account-tier / clean-numbered-domain
+route whose eventual objective would be a genuine venue-side subaccount
+`N > 0`, followed by exact clean-domain proof.
+
+Current controlling facts before that evaluation are:
+
+```text
+existing numbered subaccount = NONE_CURRENTLY_OBSERVED
+current account usage tier = basic
+documented CreateSubaccount tier rule = ADVANCED_OR_ABOVE
+documented tier match = NO
+CreateSubaccount capability = NOT_PROVEN_BY_B1_READ_ONLY_FACTS
+```
+
+A future Route-1 specification MUST NOT infer write capability from the observed
+key metadata or documentation. Any later account-tier change, subaccount create,
+or other venue write requires its own controlling specification and separately
+explicit execution capability.
+
+Before a future CreateSubaccount request could be authorized, the controlling
+design must include durable creation-result reconciliation. An ambiguous create
+result MUST NOT be interpreted as a failed create or as permission to resend
+automatically.
+
+A newly created numbered subaccount, if ever separately authorized and proven,
+would still be only a candidate clean domain until identity, inception/history,
+access, inventory/exposure, ledger/risk binding, and absence of unresolved writes
+are established.
+
+Funding/transfer is not part of this route decision and remains a separate later
+write problem.
+
+### Route 2 — historical primary-domain resolution/reclamation path
+
+At specification level, separately evaluate whether the existing durable
+reconciliation, persistent-ledger, restart-recovery, and risk-control
+architecture can support a bounded path to resolve the historical primary-domain
+incident strongly enough to change the current hold theorem.
+
+Route 2 MUST begin from the current state:
+
+```text
+writer_proof_state = HELD
+historical_unresolved_exposure = UNKNOWN_UNBOUNDED
+normal_writer_eligible = false
+historical_primary_safe_to_reuse_proven = false
+```
+
+The purpose of Route-2 evaluation is to determine whether a controlling proof
+path exists. The existence of reconciliation machinery does not itself release
+the hold, prove zero exposure, or authorize venue activity.
+
+### Decision boundary
+
+Current next-action class:
+
+```text
+ROUTE_B_SPEC_LEVEL_ALTERNATIVE_EVALUATION_REQUIRED
+```
+
+The next project action is therefore to compare Route 1 and Route 2 using
+canonical evidence and non-controlling research, then choose the narrower
+controlling specification path.
+
+Until that comparison is completed and the user separately selects/authorizes a
+next task:
+
+```text
+FURTHER_KALSHI_VENUE_ACTIVITY = NOT_AUTHORIZED
+SUBACCOUNT_CREATE = NOT_AUTHORIZED
+ACCOUNT_TIER_WRITE = NOT_AUTHORIZED
+PRIMARY_DOMAIN_REUSE = NOT_AUTHORIZED
+REAL_DEMO_MARKET_MAKING_EXPERIMENT = NOT_READY
+```
