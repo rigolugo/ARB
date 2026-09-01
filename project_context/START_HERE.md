@@ -18,14 +18,15 @@ Canonical governance and restart router. This file does not grant capability and
 10. `project_context/PROJECT_STATE_CHECKPOINT_2026_08_28_ROUTE_B_B1_AUTHENTICATED_EXECUTION.md`
 11. `project_context/PROJECT_STATE_CHECKPOINT_2026_08_28_ROUTE_B_B1_CURRENT_OPENAPI_SOURCE_RESOLUTION.md`
 12. `project_context/PROJECT_STATE_CHECKPOINT_2026_08_29_ROUTE_B_B1_SOURCE_BINDING_CORRECTION_02_INSTALLATION.md`
-13. `project_archive/route_a_2026_08_26/README.md` and its manifest when exact accepted Route-A specification/handoff bytes are needed
-14. `project_context/AGENT_ROLES.md`
-15. `project_context/LOCAL_EXECUTION_ENVIRONMENT.md`
-16. `project_context/AUTHORIZATION_LOG.md`
-17. `project_context/DECISION_LOG.md`
-18. `BROWSER_BRANCH_REPOSITORY_TRANSFER_WORKFLOW.md`
-19. `project_context/MARCO_IMPLEMENTATION_REVIEW_PACKAGE_WORKFLOW.md`
-20. task-specific accepted specifications, handoffs, reviews, artifacts, or evidence only when relevant to the active task
+13. `project_context/PROJECT_STATE_CHECKPOINT_2026_09_01_KALSHI_DEMO_SUBACCOUNT1_EMPIRICAL_QUALIFICATION.md`
+14. `project_archive/route_a_2026_08_26/README.md` and its manifest when exact accepted Route-A specification/handoff bytes are needed
+15. `project_context/AGENT_ROLES.md`
+16. `project_context/LOCAL_EXECUTION_ENVIRONMENT.md`
+17. `project_context/AUTHORIZATION_LOG.md`
+18. `project_context/DECISION_LOG.md`
+19. `BROWSER_BRANCH_REPOSITORY_TRANSFER_WORKFLOW.md`
+20. `project_context/MARCO_IMPLEMENTATION_REVIEW_PACKAGE_WORKFLOW.md`
+21. task-specific accepted specifications, handoffs, reviews, artifacts, or evidence only when relevant to the active task
 
 `project_context/ARTIFACT_INDEX.md` remains the canonical artifact-reference ledger for entries already indexed there. The routed current-state checkpoints record accepted state facts that post-date portions of `PROJECT_STATE.md` and `ARTIFACT_INDEX.md` until a later bounded consolidation folds those facts into the long-form state/index. `project_archive/route_a_2026_08_26/` is the lossless repository-resident archive for the accepted public Route-A specification/handoff bytes listed by its manifest.
 
@@ -75,6 +76,8 @@ Use existing checkpoints, the artifact index, and existing owner artifacts befor
 
 `PROJECT_STATE_CHECKPOINT_2026_08_29_ROUTE_B_B1_SOURCE_BINDING_CORRECTION_02_INSTALLATION.md` is the latest Route-B B1 overlay. It records Marco approval and exact canonical installation of Correction 02 at commit `8fe1d3cd1f9e05d5c32c58d896b6aef818a3e22a`, closes the source/evidence-binding implementation gap, preserves the blocked predecessor in canonical history, and routes any future B1 authenticated read-only execution through a separately authorized task-current source binding with truthful explicit `observed_at_utc`.
 
+`PROJECT_STATE_CHECKPOINT_2026_09_01_KALSHI_DEMO_SUBACCOUNT1_EMPIRICAL_QUALIFICATION.md` is the latest Route-1 execution-domain overlay. It preserves the direct empirical creation and controlled inception of Demo `SUBACCOUNT=1`, its funded exchange-index-0 state, ticker-auto-routed CreateOrder binding to `SUBACCOUNT=1`, observed top-level HTTP-201 CreateOrder response shape, exact-order read-after-write visibility, live queue-position behavior, and explicit exact DELETE cancellation. It preserves the historical primary `SUBACCOUNT=0` hold unchanged and records executable fill/readback/position isolation as the remaining material empirical gap before N=1 can be treated as a fully proven execution domain.
+
 Each checkpoint controls over older state text on its exact listed facts until consolidated. Audit logs and `ARTIFACT_INDEX.md` are historical/reference records and may lag a later accepted technical state until a bounded governance update records it. Absence of a later event from an audit log or index is not evidence that the event did not occur; agents must use the authority hierarchy above, exact active Gustavo authorization, current canonical `main`, and task-specific accepted identities.
 
 A repository-stored API/OpenAPI/AsyncAPI identity is immutable provenance for the exact source snapshot and operations for which it was reviewed. A canonical record may instead identify exact external/local source bytes by byte length and SHA-256 when the raw source is intentionally not repository-resident. Neither form makes a historical snapshot a standing "current" venue specification, binds a different operation automatically, or authorizes reuse for a later write surface.
@@ -95,6 +98,7 @@ Before obtaining fresh evidence, the continuity workflow requires inspection of 
 - Route-B B1 authenticated execution overlay: `PROJECT_STATE_CHECKPOINT_2026_08_28_ROUTE_B_B1_AUTHENTICATED_EXECUTION.md`
 - Route-B B1 current-source resolution and provenance correction: `PROJECT_STATE_CHECKPOINT_2026_08_28_ROUTE_B_B1_CURRENT_OPENAPI_SOURCE_RESOLUTION.md`
 - Latest Route-B B1 approved source-binding correction installation and next-action overlay: `PROJECT_STATE_CHECKPOINT_2026_08_29_ROUTE_B_B1_SOURCE_BINDING_CORRECTION_02_INSTALLATION.md`
+- Latest Route-1 N=1 empirical qualification and next-action overlay: `PROJECT_STATE_CHECKPOINT_2026_09_01_KALSHI_DEMO_SUBACCOUNT1_EMPIRICAL_QUALIFICATION.md`
 - Canonical sanitized B1 current-source report: `../project_archive/kalshi_sources/KALSHI_CURRENT_OPENAPI_SOURCE_RESOLUTION_01_REPORT.json`
 - Exact raw B1 current OpenAPI source: LOCAL_ONLY external evidence identified by the latest B1 source-resolution checkpoint
 - Lossless accepted public Route-A specification/handoff archive: `../project_archive/route_a_2026_08_26/README.md`
