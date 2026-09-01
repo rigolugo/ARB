@@ -648,10 +648,12 @@ No market-making profitability or logical-arbitrage claim is established by this
 
 ## 15. Canonicalization status of this file
 
-Until a verified repository commit installs this file and updates the canonical router/index:
+This file and its canonical router/index entries were installed on `main` by the verified
+documentation-only canonicalization commit:
 
 ```text
-CANONICALIZATION_STATUS = PENDING
+CANONICALIZATION_STATUS = INSTALLED
+CANONICAL_COMMIT = 59708872e7200c550c13afa392a4a94e72ddb1cb
 ```
 
 The canonicalization task itself performs **repository documentation writes only**. It must perform
