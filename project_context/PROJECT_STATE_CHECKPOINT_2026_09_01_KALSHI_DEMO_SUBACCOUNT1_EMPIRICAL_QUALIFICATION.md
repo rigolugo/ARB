@@ -3,17 +3,19 @@
 Authority level: canonical current-state overlay **once installed on canonical `main`**.
 
 This checkpoint preserves the material direct empirical findings obtained after
-`PROJECT_STATE_CHECKPOINT_2026_08_29_ROUTE_B_B1_SOURCE_BINDING_CORRECTION_02_INSTALLATION.md`
-and routes the next bounded Route-1 action.
+`PROJECT_STATE_CHECKPOINT_2026_08_29_ROUTE_B_B1_SOURCE_BINDING_CORRECTION_02_INSTALLATION.md`,
+including the successful executable N=1 fill/readback/position-isolation canary, and routes the
+next bounded Route-1 action.
 
 It supersedes older checkpoint statements only where those statements say that no numbered
 subaccount is observed, that Route 1 remains merely speculative, that explicit N=1 cancellation is
 unproven, or that the next action is only Route-1/Route-2 comparison. Historical primary-domain
-safety facts remain unchanged.
+safety facts remain unchanged. The executable canary's intentionally retained N=1 position is
+recorded as controlled post-probe state; no automatic flattening is authorized by this checkpoint.
 
 This checkpoint grants no production capability, no primary-domain reuse, no writer-proof release,
-no additional funding, no additional CreateOrder, no executable fill canary, no market-making
-execution, and no profitability or arbitrage claim by itself.
+no additional funding, no additional CreateOrder, no additional executable fill canary, no
+market-making execution, and no profitability or arbitrage claim by itself.
 
 ## 1. Canonical base for this pending installation
 
@@ -335,9 +337,85 @@ corresponding primary-0 fill spillover = NONE OBSERVED
 This does not prove executable-fill isolation because the canary was intentionally post-only and
 unfilled.
 
+## 9A. Final executable N=1 fill/readback/position-isolation canary — accepted finding
+
+A separately authorized one-shot executable canary directly tested whether a marketable N=1
+CreateOrder fills and remains isolated from the historical primary domain.
+
+Probe:
+
+```text
+KALSHI_DEMO_SUBACCOUNT1_EXECUTABLE_FILL_ISOLATION_CANARY_12
+completed_at_utc = 2026-09-01T23:34:46.398722Z
+environment = KALSHI_DEMO
+selected ticker = KXAAAGASD-26SEP02-4.1200
+selected exchange_index = 0
+selected subaccount = 1
+```
+
+Selection and health gates:
+
+```text
+exchange_active = true
+trading_active = true
+N=1 exchange_index 0 balance >= $1 = true
+live YES top = 0.4900 bid / 0.5000 ask
+live YES ask depth = 3999.96
+seconds to close = 15856
+```
+
+Create and exact readback:
+
+```text
+CreateOrder POST count = 1
+CreateOrder HTTP = 201
+HTTP-201 order identity durably bound = true
+exact read sequence = HTTP 404, HTTP 404, HTTP 200 / status=executed
+```
+
+Final isolation readback:
+
+```text
+N=1 fill count = 1
+N=1 filled quantity = 1.00
+N=1 position row count = 2 (including the controlled market-position row)
+primary-0 fill count = 0
+primary-0 position row count before = 0
+primary-0 position row count after = 0
+primary-0 positions unchanged = true
+N=1 balance decreased = true
+resting remainder = false
+cleanup DELETE = not needed
+```
+
+Accepted direct empirical theorem for the exact observed Demo target/account/interface/time:
+
+```text
+marketable one-contract CreateOrder on SUBACCOUNT=1 / exchange_index=0 = PROVEN
+exact executed-order readback = PROVEN
+exact N=1 fill readback = PROVEN
+exact N=1 position readback = PROVEN
+corresponding primary-0 fill spillover = NONE OBSERVED
+corresponding primary-0 position spillover = NONE OBSERVED
+executable fill/readback/position isolation = PROVEN
+```
+
+The canary intentionally left the one-contract N=1 position in place. Automatic flattening was
+not authorized and was not attempted. This proves isolation; it does not authorize another order,
+an automatic flatten, production use, or a profitability claim.
+
+Evidence identity:
+
+```text
+EXECUTABLE_FILL_ISOLATION_RESULT.json
+bytes = 5978
+sha256 = da301946c745b6ccac321a71e97683375bca9e103b649906c95999bc5587e360
+terminal = EXECUTABLE_FILL_CONFIRMED_ISOLATED_TO_N1
+```
+
 ## 10. Current Route-1 economic-domain theorem
 
-Current accepted theorem after the final cancellation canary:
+Current accepted theorem after the final cancellation and executable-fill canaries:
 
 ```text
 Kalshi Demo SUBACCOUNT=0
@@ -363,7 +441,8 @@ Kalshi Demo SUBACCOUNT=1
     explicit exact DELETE cancel = PROVEN
     no-fill cancel reconciliation = PROVEN
     primary-fill spillover in cancel canary = NONE OBSERVED
-    executable fill/readback/position isolation = NOT YET PROVEN
+    executable fill/readback/position isolation = PROVEN
+    primary-position spillover in executable canary = NONE OBSERVED
 ```
 
 Route decision:
@@ -376,25 +455,27 @@ ROUTE_2_PRIMARY_RECLAMATION = DEFERRED_FALLBACK
 Advanced account tier is not a practical Route-1 `CreateSubaccount` blocker for the exact observed
 Demo account/time. This statement must not be extrapolated to production.
 
-N=1 is now a **qualified candidate execution domain**, not yet a fully proven execution domain,
-because deliberately executable fill/position isolation remains untested.
+N=1 is now a **qualified execution domain for the exact tested one-contract flow**, subject to the
+existing ARB ledger/risk/restart controls and the unchanged historical primary-domain hold. This
+does not authorize additional writes or imply production behavior.
 
-## 11. Remaining material empirical gap
+## 11. Current post-canary state and remaining bounded work
 
-Do not repeat prior CreateSubaccount, funding, resting-create, queue-position, or cancel probes merely
-because a later chat lacks this history. The only major pre-stack-binding empirical write behavior
-still unresolved is:
+Do not repeat prior CreateSubaccount, funding, resting-create, queue-position, cancel, or executable
+fill probes merely because a later chat lacks this history. The executable N=1 isolation question is
+now closed for the exact tested flow. The known post-probe economic state is:
 
 ```text
-1. one deliberately executable one-contract N=1 order/fill
-2. exact N=1 fill readback for that exact order
-3. exact resulting N=1 position readback
-4. prove no corresponding primary-0 fill spillover
-5. prove no corresponding primary-0 position spillover
+N=1 controlled position = 1.00 on ticker KXAAAGASD-26SEP02-4.1200
+N=1 position was intentionally created by the canary
+automatic flatten order = PROHIBITED_NOT_AUTHORIZED
+primary-0 position row count = 0 before and after the canary
+primary-domain historical unresolved hold = unchanged
 ```
 
-That fill canary requires a separate explicit task authorization after this checkpoint is canonically
-installed. It is not authorized by this checkpoint.
+The remaining work is stack integration and risk-control binding, not another standalone empirical
+fill probe. Any further write, cancellation/flattening action, or market-making activity requires a
+separate explicit authorization and current task-specific controls.
 
 ## 12. External evidence identities and retention
 
@@ -480,6 +561,14 @@ FINAL_EXPLICIT_CANCEL_RESULT.json
   original raw bytes = NOT_REESTABLISHED_IN_CURRENT_HANDOFF
   original raw sha256 = NOT_REESTABLISHED_IN_CURRENT_HANDOFF
   material content = captured in Section 9
+
+EXECUTABLE_FILL_ISOLATION_RESULT.json
+  bytes = 5978
+  sha256 = da301946c745b6ccac321a71e97683375bca9e103b649906c95999bc5587e360
+  original File Library/local operator item = RETAINED
+  material content = captured in Section 9A
+  terminal = EXECUTABLE_FILL_CONFIRMED_ISOLATED_TO_N1
+  raw evidence remains external/local-only; no raw JSON committed
 ```
 
 Additional operator-transcript evidence from the failed Probe-08 process is retained as accepted
@@ -532,7 +621,7 @@ establish production behavior.
 Current next-action class:
 
 ```text
-KALSHI_DEMO_SUBACCOUNT1_EXECUTABLE_FILL_AND_ISOLATION_EMPIRICAL_CANARY
+KALSHI_DEMO_SUBACCOUNT1_STACK_BINDING_AND_RISK_CONTROL_REVIEW
 ```
 
 Required ordering:
@@ -542,17 +631,13 @@ FIRST:
     canonically install this checkpoint/router/index update
 
 THEN, only under separate explicit authorization:
-    one deliberately executable one-contract N=1 fill canary
-    exact fill + position reconciliation
-    prove no corresponding primary-0 economic spillover
-
-THEN:
-    canonicalize the completed N=1 execution-domain theorem
-
-THEN:
     bind existing ARB ledger/risk/restart/execution machinery explicitly to SUBACCOUNT=1
+    preserve the historical primary SUBACCOUNT=0 hold and the intentionally retained N=1 position
 
 THEN:
+    review and validate the bound stack offline
+
+THEN, only under a new separate explicit authorization:
     one tiny bounded order-lifecycle canary under that bound stack
 
 THEN:
