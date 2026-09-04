@@ -390,9 +390,57 @@ class VenueBindingV1:
             raise QuoteLifecycleError("MM_INPUT_INVALID")
 
 
+_EXCHANGE_INDEX_WIRE_POLICIES = frozenset({"EXPLICIT_EXCHANGE_INDEX", "EMPIRICALLY_BOUND_AUTOROUTE"})
+
+
+@dataclass(frozen=True, slots=True, init=False)
+class VenueBindingV2:
+    """Active-path venue binding (DSB-QUOTE-001..004).  Its domain fields
+    (``subaccount`` / ``exchange_index`` / ``conflict_domain_ref`` /
+    ``domain_binding_sha256``) are derived *only* from an immutable
+    ``ExecutionDomainBindingV1``; strategy code never chooses them.  The
+    non-domain source-bound constants (schema id, time-in-force,
+    self-trade-prevention, post-only) remain source-bound exactly as in
+    ``VenueBindingV1``."""
+
+    subaccount: int
+    exchange_index: int
+    conflict_domain_ref: str
+    domain_binding_id: str
+    domain_binding_sha256: str
+    exchange_index_wire_policy: str
+    self_trade_prevention_type: str
+    time_in_force: str
+    adapter_payload_schema_id: str
+
+    def __init__(
+        self,
+        *,
+        domain_binding: object,
+        exchange_index_wire_policy: str,
+        adapter_payload_schema_id: str,
+    ) -> None:
+        from arb.venues.kalshi.ledger_binding import ExecutionDomainBindingV1
+        if type(domain_binding) is not ExecutionDomainBindingV1:
+            raise QuoteLifecycleError("MM_INPUT_INVALID")
+        if exchange_index_wire_policy not in _EXCHANGE_INDEX_WIRE_POLICIES:
+            raise QuoteLifecycleError("DOMAIN_ROUTE_SEMANTICS_UNQUALIFIED")
+        if type(adapter_payload_schema_id) is not str or not adapter_payload_schema_id:
+            raise QuoteLifecycleError("MM_INPUT_INVALID")
+        object.__setattr__(self, "subaccount", domain_binding.subaccount)
+        object.__setattr__(self, "exchange_index", domain_binding.exchange_index)
+        object.__setattr__(self, "conflict_domain_ref", domain_binding.conflict_domain_ref)
+        object.__setattr__(self, "domain_binding_id", domain_binding.binding_id)
+        object.__setattr__(self, "domain_binding_sha256", domain_binding.binding_sha256)
+        object.__setattr__(self, "exchange_index_wire_policy", exchange_index_wire_policy)
+        object.__setattr__(self, "self_trade_prevention_type", _SOURCE_BOUND_SELF_TRADE_PREVENTION_TYPE)
+        object.__setattr__(self, "time_in_force", _SOURCE_BOUND_TIME_IN_FORCE)
+        object.__setattr__(self, "adapter_payload_schema_id", adapter_payload_schema_id)
+
+
 def build_mm_create_order_body(
     *, ticker: str, client_order_id: str, venue_side: str, yes_price: Decimal, quantity: Decimal,
-    expiration_time: int, venue_binding: VenueBindingV1,
+    expiration_time: int, venue_binding: "VenueBindingV1 | VenueBindingV2",
 ) -> dict:
     if venue_side not in ("bid", "ask"):
         raise QuoteLifecycleError("MM_INPUT_INVALID")
@@ -422,9 +470,29 @@ def build_mm_create_order_body(
     return body
 
 
+def active_prepared_request_domain_metadata(
+    venue_binding: VenueBindingV2, *, canonical_request_sha256: str,
+) -> dict:
+    """Logical active-domain commitment carried alongside a prepared request
+    (DSB-QUOTE-003 / DSB-WRITER-008 ``prepared_request.*``).  It is not part of
+    the frozen Spec-03 REQUEST_PREPARED canonical identity; the runner binds it
+    to the ``NormalWriterPermit`` domain commitment before transport."""
+    if type(venue_binding) is not VenueBindingV2:
+        raise QuoteLifecycleError("MM_INPUT_INVALID")
+    return {
+        "conflict_domain_ref": venue_binding.conflict_domain_ref,
+        "domain_binding_id": venue_binding.domain_binding_id,
+        "domain_binding_sha256": venue_binding.domain_binding_sha256,
+        "exchange_index": venue_binding.exchange_index,
+        "exchange_index_wire_policy": venue_binding.exchange_index_wire_policy,
+        "canonical_request_sha256": canonical_request_sha256,
+        "subaccount": venue_binding.subaccount,
+    }
+
+
 def build_create_prepared_payload(
     *, request_id: str, environment: str, client_order_id: str, canonical_body: Mapping[str, object],
-    venue_binding: VenueBindingV1,
+    venue_binding: "VenueBindingV1 | VenueBindingV2",
 ) -> dict:
     canonical_query: dict = {}
     canonical_query_sha256 = sha256_hex(canonical_json_bytes(canonical_query))
@@ -487,6 +555,40 @@ def candidate_for_desired_quote(*, market_ticker: str, desired: DesiredQuoteV1) 
     return CandidateOrderV1(market_ticker, desired.outcome_side, desired.quantity, desired.yes_price)
 
 
+def _active_commitment_fields(
+    active_domain_commitment: Mapping[str, object] | None,
+    *, trusted_dynamic_read_set_id: str | None = None,
+) -> dict:
+    """DSB-WRITER-007: for an active runtime every active commitment field
+    MUST be present and non-``None``; the legacy path passes ``None`` and the
+    assessment keeps ``None`` active fields.
+
+    Correction 02 (DSB-WRITER-007 / DSB-QUOTE-003): an active assessment
+    also requires the exact private trusted dynamic read-set identity
+    (``ADRS2_<64hex>``) so a permit/assessment is bound to one current-read
+    acquisition."""
+    if active_domain_commitment is None:
+        return {}
+    from arb.venues.kalshi.ledger_binding import validate_active_domain_commitment
+    c = validate_active_domain_commitment(active_domain_commitment)
+    if (
+        type(trusted_dynamic_read_set_id) is not str
+        or trusted_dynamic_read_set_id[:6] != "ADRS2_"
+        or len(trusted_dynamic_read_set_id) != 70
+    ):
+        raise QuoteLifecycleError("MM_INPUT_INVALID")
+    return {
+        "domain_binding_id": c["domain_binding_id"], "domain_binding_sha256": c["domain_binding_sha256"],
+        "active_contract_id": c["active_contract_id"], "active_contract_sha256": c["active_contract_sha256"],
+        "bootstrap_contract_sha256": c["bootstrap_contract_sha256"],
+        "conflict_domain_ref": c["conflict_domain_ref"], "account_scope_ref": c["account_scope_ref"],
+        "subaccount": c["subaccount"], "exchange_index": c["exchange_index"],
+        "environment": c["environment"], "incident_id": c["incident_id"],
+        "writer_proof_id": c["writer_proof_id"],
+        "trusted_dynamic_read_set_id": trusted_dynamic_read_set_id,
+    }
+
+
 def build_writer_eligibility_assessment(
     *,
     risk_assessment_id: str,
@@ -502,11 +604,24 @@ def build_writer_eligibility_assessment(
     reconciliation_freshness_identity_sha256: str,
     risk_state_epoch: int,
     freshness_deadline_monotonic_ns: int,
+    active_domain_commitment: Mapping[str, object] | None = None,
+    trusted_dynamic_read_set_id: str | None = None,
 ) -> WriterEligibilityAssessment:
-    candidate_economic_sha256 = sha256_hex(canonical_json_bytes({
+    active_fields = _active_commitment_fields(
+        active_domain_commitment, trusted_dynamic_read_set_id=trusted_dynamic_read_set_id,
+    )
+    economic_preimage = {
         "market": candidate.market, "outcome_side": candidate.outcome_side,
         "quantity": candidate.quantity, "yes_price": candidate.yes_price,
-    }))
+    }
+    if active_fields:
+        # DSB-WRITER-007: the active risk-assessment hash preimage MUST
+        # include active_contract_sha256 + domain_binding_sha256 and, under
+        # Correction 02, the trusted dynamic read-set identity.
+        economic_preimage["active_contract_sha256"] = active_fields["active_contract_sha256"]
+        economic_preimage["domain_binding_sha256"] = active_fields["domain_binding_sha256"]
+        economic_preimage["trusted_dynamic_read_set_id"] = active_fields["trusted_dynamic_read_set_id"]
+    candidate_economic_sha256 = sha256_hex(canonical_json_bytes(economic_preimage))
     try:
         projected = project_candidate_risk(market_economic_state, candidate, unresolved_exposure)
         enforce_projected_limits(projected, candidate, risk_config)
@@ -518,6 +633,7 @@ def build_writer_eligibility_assessment(
         risk_config.sha256, market_data_snapshot_sha256, market_data_freshness_identity_sha256,
         reconciliation_snapshot_sha256, reconciliation_freshness_identity_sha256, risk_state_epoch,
         freshness_deadline_monotonic_ns, eligible,
+        **active_fields,
     )
 
 
@@ -681,6 +797,8 @@ def build_cancel_writer_eligibility_assessment(
     reconciliation_freshness_identity_sha256: str,
     risk_state_epoch: int,
     freshness_deadline_monotonic_ns: int,
+    active_domain_commitment: Mapping[str, object] | None = None,
+    trusted_dynamic_read_set_id: str | None = None,
 ) -> WriterEligibilityAssessment:
     """Ordinary strategy-driven CANCEL_ORDER_V2 assessment (Spec 06 Section
     8, corrected rationale in Spec 07 Sections 5-9): the exact two-outcome
@@ -697,6 +815,10 @@ def build_cancel_writer_eligibility_assessment(
     -- satisfy every configured per-market limit (MM06-ECON-002..004,007;
     MM07-ECON-005..009)."""
 
+    active_fields = _active_commitment_fields(
+        active_domain_commitment, trusted_dynamic_read_set_id=trusted_dynamic_read_set_id,
+    )
+
     def _ineligible(reason: str) -> WriterEligibilityAssessment:
         candidate_economic_sha256 = _cancel_ineligible_economic_sha256(
             request_id=request_id, target_venue_order_id=target_venue_order_id, reason=reason,
@@ -706,6 +828,7 @@ def build_cancel_writer_eligibility_assessment(
             risk_config.sha256, market_data_snapshot_sha256, market_data_freshness_identity_sha256,
             reconciliation_snapshot_sha256, reconciliation_freshness_identity_sha256, risk_state_epoch,
             freshness_deadline_monotonic_ns, False,
+            **active_fields,
         )
 
     if unresolved_exposure_usd == UNKNOWN_UNBOUNDED:
@@ -755,6 +878,13 @@ def build_cancel_writer_eligibility_assessment(
         "post_target_removed_market_economic_state": _market_economic_state_object(post_target_removed_state),
         "unresolved_exposure_usd": unresolved_exposure_usd,
     }
+    if active_fields:
+        # DSB-WRITER-007: the active CANCEL risk-assessment hash preimage
+        # MUST include active_contract_sha256 + domain_binding_sha256 and,
+        # under Correction 02, the trusted dynamic read-set identity.
+        cancel_operation_economic_object["active_contract_sha256"] = active_fields["active_contract_sha256"]
+        cancel_operation_economic_object["domain_binding_sha256"] = active_fields["domain_binding_sha256"]
+        cancel_operation_economic_object["trusted_dynamic_read_set_id"] = active_fields["trusted_dynamic_read_set_id"]
     candidate_economic_sha256 = sha256_hex(canonical_json_bytes(cancel_operation_economic_object))
 
     # MM07-ECON-005..009 (Correction 03 Defect 01): every applicable
@@ -778,6 +908,7 @@ def build_cancel_writer_eligibility_assessment(
         risk_config.sha256, market_data_snapshot_sha256, market_data_freshness_identity_sha256,
         reconciliation_snapshot_sha256, reconciliation_freshness_identity_sha256, risk_state_epoch,
         freshness_deadline_monotonic_ns, eligible,
+        **active_fields,
     )
 
 

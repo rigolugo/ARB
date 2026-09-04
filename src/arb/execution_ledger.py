@@ -41,6 +41,26 @@ EVENT_HASH_DOMAIN = b"ARB_LEDGER_EVENT_V1\x00"
 PRELEDGER_HISTORY_MODE = "LEGACY_IMPORT_REQUIRED"
 LOCK_MODEL = "AUTHORITY_THEN_LEDGER_SQLITE_EXCLUSIVE_V1"
 
+# Active execution-domain (dynamic numbered-subaccount) persistence.  The
+# revision-1 historical ledger above is never migrated; a separately qualified
+# active domain uses this parallel revision-2 ledger schema.  The append-only
+# ``ledger_events`` table and its event-hash/canonical-JSON contract are
+# preserved exactly; only ``ledger_meta`` gains the immutable domain-binding
+# columns and ``preledger_history_mode`` widens to the two accepted
+# bootstrap-class values.
+ACTIVE_LEDGER_SCHEMA_REVISION = 2
+EXECUTION_DOMAIN_BINDING_SCHEMA_REVISION = 1
+EXECUTION_DOMAIN_BOOTSTRAP_RECORDED_DOMAIN = b"ARB_EXECUTION_DOMAIN_BOOTSTRAP_RECORDED_V1\x00"
+ACTIVE_PRELEDGER_HISTORY_MODES = frozenset({
+    "CONTROLLED_FRESH_INCEPTION",
+    "KNOWN_NONEMPTY_PRESTACK",
+})
+BOOTSTRAP_CLASS_TO_COMPLETENESS = MappingProxyType({
+    "CONTROLLED_FRESH_INCEPTION": "COMPLETE_CONTROLLED_FROM_INCEPTION",
+    "KNOWN_NONEMPTY_PRESTACK": "COMPLETE_KNOWN_NONEMPTY_PRESTACK",
+})
+_ACTIVE_HISTORY_COMPLETENESS_VALUES = frozenset(BOOTSTRAP_CLASS_TO_COMPLETENESS.values())
+
 _HEX64_RE = re.compile(r"^[0-9a-f]{64}$")
 _EVENT_ID_RE = re.compile(r"^evt_[0-9a-f]{32}$")
 _LEGACY_EVENT_ID_RE = re.compile(r"^legacy_[0-9a-f]{64}$")
@@ -124,6 +144,47 @@ class FailureCode(enum.StrEnum):
     CURRENT_PROCESS_RELEASE_COMPLETION_PROCESS_MISMATCH = "CURRENT_PROCESS_RELEASE_COMPLETION_PROCESS_MISMATCH"
     CURRENT_PROCESS_RELEASE_COMPLETION_STALE = "CURRENT_PROCESS_RELEASE_COMPLETION_STALE"
     CURRENT_PROCESS_RELEASE_COMPLETION_NOT_ISSUED = "CURRENT_PROCESS_RELEASE_COMPLETION_NOT_ISSUED"
+    # Active execution-domain binding / revision-2 ledger / bootstrap taxonomy
+    # (KALSHI_DEMO_DYNAMIC_SUBACCOUNT_EXECUTION_DOMAIN_BINDING_AND_RISK_CONTROL
+    # _SPEC_01_CORRECTION_02, sections 5-6 and DSB-FAIL-001 in section 25).
+    EXECUTION_DOMAIN_BINDING_MISSING = "EXECUTION_DOMAIN_BINDING_MISSING"
+    EXECUTION_DOMAIN_BINDING_MALFORMED = "EXECUTION_DOMAIN_BINDING_MALFORMED"
+    EXECUTION_DOMAIN_BINDING_MISMATCH = "EXECUTION_DOMAIN_BINDING_MISMATCH"
+    EXECUTION_DOMAIN_UNQUALIFIED = "EXECUTION_DOMAIN_UNQUALIFIED"
+    LEGACY_PRIMARY_DOMAIN_SELECTED = "LEGACY_PRIMARY_DOMAIN_SELECTED"
+    ACTIVE_DOMAIN_LEDGER_SCHEMA_REQUIRED = "ACTIVE_DOMAIN_LEDGER_SCHEMA_REQUIRED"
+    DOMAIN_LEDGER_BINDING_MISMATCH = "DOMAIN_LEDGER_BINDING_MISMATCH"
+    DOMAIN_BOOTSTRAP_HISTORY_INCOMPLETE = "DOMAIN_BOOTSTRAP_HISTORY_INCOMPLETE"
+    DOMAIN_BOOTSTRAP_EVIDENCE_MISMATCH = "DOMAIN_BOOTSTRAP_EVIDENCE_MISMATCH"
+    DOMAIN_BOOTSTRAP_COMPLETENESS_MISMATCH = "DOMAIN_BOOTSTRAP_COMPLETENESS_MISMATCH"
+    DOMAIN_BOOTSTRAP_CONFLICT = "DOMAIN_BOOTSTRAP_CONFLICT"
+    DOMAIN_BOOTSTRAP_AUTHORITY_BINDING_INCOMPLETE = "DOMAIN_BOOTSTRAP_AUTHORITY_BINDING_INCOMPLETE"
+    HISTORICAL_LEGACY_CONTRACT_MUTATION_DETECTED = "HISTORICAL_LEGACY_CONTRACT_MUTATION_DETECTED"
+    ACTIVE_DOMAIN_CONTRACT_REQUIRED = "ACTIVE_DOMAIN_CONTRACT_REQUIRED"
+    ACTIVE_DOMAIN_CONTRACT_MALFORMED = "ACTIVE_DOMAIN_CONTRACT_MALFORMED"
+    ACTIVE_DOMAIN_CONTRACT_MISMATCH = "ACTIVE_DOMAIN_CONTRACT_MISMATCH"
+    ACTIVE_PATH_LEGACY_CONTRACT_REJECTED = "ACTIVE_PATH_LEGACY_CONTRACT_REJECTED"
+    ACTIVE_DOMAIN_INCIDENT_MISMATCH = "ACTIVE_DOMAIN_INCIDENT_MISMATCH"
+    ACTIVE_DOMAIN_WRITER_PROOF_MISMATCH = "ACTIVE_DOMAIN_WRITER_PROOF_MISMATCH"
+    ACTIVE_DOMAIN_BOOTSTRAP_COMMITMENT_MISMATCH = "ACTIVE_DOMAIN_BOOTSTRAP_COMMITMENT_MISMATCH"
+    DOMAIN_SCOPE_RESPONSE_MISMATCH = "DOMAIN_SCOPE_RESPONSE_MISMATCH"
+    DOMAIN_SCOPE_RESPONSE_AMBIGUOUS = "DOMAIN_SCOPE_RESPONSE_AMBIGUOUS"
+    DOMAIN_ROUTE_EXCHANGE_INDEX_MISMATCH = "DOMAIN_ROUTE_EXCHANGE_INDEX_MISMATCH"
+    DOMAIN_ROUTE_SEMANTICS_UNQUALIFIED = "DOMAIN_ROUTE_SEMANTICS_UNQUALIFIED"
+    SUBACCOUNT_WIDE_COMPLETENESS_UNPROVEN = "SUBACCOUNT_WIDE_COMPLETENESS_UNPROVEN"
+    N1_RETAINED_POSITION_NOT_RECONCILED = "N1_RETAINED_POSITION_NOT_RECONCILED"
+    NORMAL_WRITER_PERMIT_DOMAIN_MISMATCH = "NORMAL_WRITER_PERMIT_DOMAIN_MISMATCH"
+    EMERGENCY_CANCEL_DOMAIN_MISMATCH = "EMERGENCY_CANCEL_DOMAIN_MISMATCH"
+    RESTART_DOMAIN_BINDING_MISMATCH = "RESTART_DOMAIN_BINDING_MISMATCH"
+    DOMAIN_BINDING_CHANGE_REQUIRES_NEW_SESSION = "DOMAIN_BINDING_CHANGE_REQUIRES_NEW_SESSION"
+    IMPLEMENTATION_PATH_ENVELOPE_INSUFFICIENT = "IMPLEMENTATION_PATH_ENVELOPE_INSUFFICIENT"
+    # Correction 02 accepted-evidence-role failures (DSB-N1-002 / DSB-SETTLE-004 /
+    # DSB-FAIL-001).  The trusted dynamic pre-release read failures themselves are
+    # runner-local (RunnerFailureCode) because the trusted capability lives in the
+    # runner module; these two are raised through ``LedgerError`` from the
+    # ledger-binding accepted-evidence contracts.
+    STATIC_COMPLETENESS_THEOREM_NOT_ACCEPTED = "STATIC_COMPLETENESS_THEOREM_NOT_ACCEPTED"
+    P02_TERMINAL_SETTLEMENT_EVIDENCE_MISMATCH = "P02_TERMINAL_SETTLEMENT_EVIDENCE_MISMATCH"
 
 
 class RestartClassification(enum.StrEnum):
@@ -175,6 +236,7 @@ class EventType(enum.StrEnum):
     RESTRICTED_SESSION_STARTED = "RESTRICTED_SESSION_STARTED"
     RESTRICTED_SESSION_ENDED = "RESTRICTED_SESSION_ENDED"
     RESTRICTED_SESSION_ABANDONED = "RESTRICTED_SESSION_ABANDONED"
+    EXECUTION_DOMAIN_BOOTSTRAP_RECORDED = "EXECUTION_DOMAIN_BOOTSTRAP_RECORDED"
 
 
 class AuthorityLedgerRelation(enum.StrEnum):
@@ -218,6 +280,7 @@ _NEW_EVENT_DOMAINS = MappingProxyType({
     EventType.RESTRICTED_SESSION_STARTED: b"ARB_RESTRICTED_SESSION_STARTED_V1\x00",
     EventType.RESTRICTED_SESSION_ENDED: b"ARB_RESTRICTED_SESSION_ENDED_V1\x00",
     EventType.RESTRICTED_SESSION_ABANDONED: b"ARB_RESTRICTED_SESSION_ABANDONED_V1\x00",
+    EventType.EXECUTION_DOMAIN_BOOTSTRAP_RECORDED: EXECUTION_DOMAIN_BOOTSTRAP_RECORDED_DOMAIN,
 })
 
 
@@ -240,6 +303,11 @@ def _new_event_logical_identity(event_type: EventType, payload: Mapping[str, obj
         return {"restricted_session_id": payload.get("restricted_session_id"), "stage": "END"}
     if event_type is EventType.RESTRICTED_SESSION_ABANDONED:
         return {"abandoned_restricted_session_id": payload.get("abandoned_restricted_session_id"), "stage": "ABANDON"}
+    if event_type is EventType.EXECUTION_DOMAIN_BOOTSTRAP_RECORDED:
+        return {
+            "bootstrap_contract_sha256": payload.get("bootstrap_contract_sha256"),
+            "domain_binding_sha256": payload.get("domain_binding_sha256"),
+        }
     raise LedgerError(FailureCode.LEDGER_SCHEMA_UNSUPPORTED_EVENT_TYPE)
 
 
@@ -619,6 +687,31 @@ class LedgerMeta:
 
 
 @dataclass(frozen=True, slots=True)
+class ActiveLedgerMeta:
+    """Revision-2 active execution-domain ``ledger_meta`` projection.
+
+    Structurally distinct from ``LedgerMeta``: it additionally commits the
+    immutable ``ExecutionDomainBindingV1`` identity/JSON and constrains
+    ``preledger_history_mode`` to the two accepted bootstrap classes.
+    """
+
+    ledger_instance_id: str
+    ledger_schema_revision: int
+    created_at_utc: str
+    environment_classification: str
+    conflict_domain_ref: str
+    preledger_history_mode: str
+    authority_instance_id: str
+    authority_namespace_id: str
+    authority_store_path_identity_sha256: str
+    ledger_path_identity_sha256: str
+    execution_domain_binding_schema_revision: int
+    execution_domain_binding_id: str
+    execution_domain_binding_sha256: str
+    execution_domain_binding_json: str
+
+
+@dataclass(frozen=True, slots=True)
 class LedgerEvent:
     sequence: int
     event_id: str
@@ -889,6 +982,38 @@ _LEDGER_TABLE_SQL = {
     "ledger_events": "CREATE TABLE ledger_events (sequence INTEGER PRIMARY KEY CHECK (sequence >= 1), event_id TEXT NOT NULL UNIQUE, ledger_instance_id TEXT NOT NULL, event_type TEXT NOT NULL, event_schema_revision INTEGER NOT NULL CHECK (event_schema_revision = 1), writer_session_id TEXT, incident_id TEXT, execution_attempt_id TEXT, recorded_at_utc TEXT NOT NULL, payload_json TEXT NOT NULL, payload_sha256 TEXT NOT NULL, previous_event_hash TEXT NOT NULL, event_hash TEXT NOT NULL UNIQUE, FOREIGN KEY (ledger_instance_id) REFERENCES ledger_meta(ledger_instance_id))",
 }
 
+# Revision-2 active execution-domain ledger.  ``ledger_events`` is byte-identical
+# to revision 1 (append-only, event_schema_revision = 1, same triggers); only
+# ``ledger_meta`` changes: revision pinned to 2, environment pinned to
+# KALSHI_DEMO, ``preledger_history_mode`` widened to the two accepted bootstrap
+# classes, and four immutable execution-domain-binding columns added.
+_ACTIVE_LEDGER_TABLE_COLUMNS = {
+    "ledger_meta": (
+        "singleton", "ledger_instance_id", "ledger_schema_revision", "created_at_utc",
+        "environment_classification", "conflict_domain_ref", "preledger_history_mode",
+        "authority_instance_id", "authority_namespace_id",
+        "authority_store_path_identity_sha256", "ledger_path_identity_sha256",
+        "execution_domain_binding_schema_revision", "execution_domain_binding_id",
+        "execution_domain_binding_sha256", "execution_domain_binding_json",
+    ),
+    "ledger_events": _LEDGER_TABLE_COLUMNS["ledger_events"],
+}
+_ACTIVE_LEDGER_TRIGGERS = _LEDGER_TRIGGERS
+_ACTIVE_LEDGER_TRIGGER_SQL = _LEDGER_TRIGGER_SQL
+_ACTIVE_LEDGER_TABLE_SQL = {
+    "ledger_meta": "CREATE TABLE ledger_meta (singleton INTEGER PRIMARY KEY CHECK (singleton = 1), ledger_instance_id TEXT NOT NULL UNIQUE, ledger_schema_revision INTEGER NOT NULL CHECK (ledger_schema_revision = 2), created_at_utc TEXT NOT NULL, environment_classification TEXT NOT NULL CHECK (environment_classification = 'KALSHI_DEMO'), conflict_domain_ref TEXT NOT NULL, preledger_history_mode TEXT NOT NULL CHECK (preledger_history_mode IN ('CONTROLLED_FRESH_INCEPTION', 'KNOWN_NONEMPTY_PRESTACK')), authority_instance_id TEXT NOT NULL, authority_namespace_id TEXT NOT NULL, authority_store_path_identity_sha256 TEXT NOT NULL, ledger_path_identity_sha256 TEXT NOT NULL, execution_domain_binding_schema_revision INTEGER NOT NULL CHECK (execution_domain_binding_schema_revision = 1), execution_domain_binding_id TEXT NOT NULL UNIQUE, execution_domain_binding_sha256 TEXT NOT NULL UNIQUE, execution_domain_binding_json TEXT NOT NULL)",
+    "ledger_events": _LEDGER_TABLE_SQL["ledger_events"],
+}
+_ACTIVE_LEDGER_SCHEMA = (
+    _ACTIVE_LEDGER_TABLE_SQL["ledger_meta"] + ";\n"
+    + _ACTIVE_LEDGER_TABLE_SQL["ledger_events"] + ";\n"
+    + _LEDGER_TRIGGER_SQL["trg_ledger_events_no_update"] + ";\n"
+    + _LEDGER_TRIGGER_SQL["trg_ledger_events_no_delete"] + ";\n"
+    + _LEDGER_TRIGGER_SQL["trg_ledger_meta_no_update"] + ";\n"
+    + _LEDGER_TRIGGER_SQL["trg_ledger_meta_no_delete"] + ";\n"
+    + "PRAGMA user_version=2;\n"
+)
+
 
 def _normalize_schema_sql(value: str) -> str:
     return "".join(value.split()).rstrip(";").lower()
@@ -905,8 +1030,14 @@ def _validate_integrity(connection: sqlite3.Connection, *, authority: bool) -> N
         raise LedgerError(failure)
 
 
-def _validate_schema(connection: sqlite3.Connection, *, authority: bool) -> None:
-    expected_revision = AUTHORITY_SCHEMA_REVISION if authority else LEDGER_SCHEMA_REVISION
+def _validate_schema(
+    connection: sqlite3.Connection,
+    *,
+    authority: bool,
+    ledger_revision: int = LEDGER_SCHEMA_REVISION,
+) -> None:
+    active = (not authority) and ledger_revision == ACTIVE_LEDGER_SCHEMA_REVISION
+    expected_revision = AUTHORITY_SCHEMA_REVISION if authority else ledger_revision
     observed = _pragma_scalar(connection, "PRAGMA user_version")
     if observed != expected_revision:
         if type(observed) is int and observed > expected_revision:
@@ -916,10 +1047,15 @@ def _validate_schema(connection: sqlite3.Connection, *, authority: bool) -> None
         else:
             code = FailureCode.AUTHORITY_SCHEMA_IDENTITY_MISMATCH if authority else FailureCode.LEDGER_SCHEMA_IDENTITY_MISMATCH
         raise LedgerError(code)
-    tables = _AUTHORITY_TABLE_COLUMNS if authority else _LEDGER_TABLE_COLUMNS
-    expected_table_sql = _AUTHORITY_TABLE_SQL if authority else _LEDGER_TABLE_SQL
-    triggers = _AUTHORITY_TRIGGERS if authority else _LEDGER_TRIGGERS
-    expected_trigger_sql = _AUTHORITY_TRIGGER_SQL if authority else _LEDGER_TRIGGER_SQL
+    if authority:
+        tables, expected_table_sql = _AUTHORITY_TABLE_COLUMNS, _AUTHORITY_TABLE_SQL
+        triggers, expected_trigger_sql = _AUTHORITY_TRIGGERS, _AUTHORITY_TRIGGER_SQL
+    elif active:
+        tables, expected_table_sql = _ACTIVE_LEDGER_TABLE_COLUMNS, _ACTIVE_LEDGER_TABLE_SQL
+        triggers, expected_trigger_sql = _ACTIVE_LEDGER_TRIGGERS, _ACTIVE_LEDGER_TRIGGER_SQL
+    else:
+        tables, expected_table_sql = _LEDGER_TABLE_COLUMNS, _LEDGER_TABLE_SQL
+        triggers, expected_trigger_sql = _LEDGER_TRIGGERS, _LEDGER_TRIGGER_SQL
     schema_code = FailureCode.AUTHORITY_SCHEMA_IDENTITY_MISMATCH if authority else FailureCode.LEDGER_SCHEMA_IDENTITY_MISMATCH
     for table, columns in tables.items():
         actual = tuple(row[1] for row in connection.execute(f"PRAGMA table_info({table})"))
@@ -983,6 +1119,52 @@ def _ledger_meta(connection: sqlite3.Connection) -> LedgerMeta:
         raise LedgerError(FailureCode.LEDGER_SCHEMA_IDENTITY_MISMATCH)
     if not _HEX64_RE.fullmatch(meta.authority_store_path_identity_sha256) or not _HEX64_RE.fullmatch(meta.ledger_path_identity_sha256):
         raise LedgerError(FailureCode.LEDGER_SCHEMA_IDENTITY_MISMATCH)
+    return meta
+
+
+def _active_ledger_meta(connection: sqlite3.Connection) -> ActiveLedgerMeta:
+    rows = connection.execute(
+        "SELECT ledger_instance_id,ledger_schema_revision,created_at_utc,"
+        "environment_classification,conflict_domain_ref,preledger_history_mode,"
+        "authority_instance_id,authority_namespace_id,"
+        "authority_store_path_identity_sha256,ledger_path_identity_sha256,"
+        "execution_domain_binding_schema_revision,execution_domain_binding_id,"
+        "execution_domain_binding_sha256,execution_domain_binding_json FROM ledger_meta"
+    ).fetchall()
+    if len(rows) != 1:
+        raise LedgerError(FailureCode.LEDGER_SCHEMA_IDENTITY_MISMATCH)
+    meta = ActiveLedgerMeta(*rows[0])
+    _uuid4_text(meta.ledger_instance_id)
+    _uuid4_text(meta.authority_instance_id)
+    validate_canonical_timestamp(meta.created_at_utc)
+    if (
+        meta.ledger_schema_revision != ACTIVE_LEDGER_SCHEMA_REVISION
+        or meta.environment_classification != "KALSHI_DEMO"
+        or meta.preledger_history_mode not in ACTIVE_PRELEDGER_HISTORY_MODES
+        or type(meta.execution_domain_binding_schema_revision) is not int
+        or meta.execution_domain_binding_schema_revision != EXECUTION_DOMAIN_BINDING_SCHEMA_REVISION
+        or type(meta.execution_domain_binding_id) is not str
+        or not meta.execution_domain_binding_id
+        or not _HEX64_RE.fullmatch(meta.execution_domain_binding_sha256)
+        or type(meta.execution_domain_binding_json) is not str
+    ):
+        raise LedgerError(FailureCode.LEDGER_SCHEMA_IDENTITY_MISMATCH)
+    if not _HEX64_RE.fullmatch(meta.authority_store_path_identity_sha256) or not _HEX64_RE.fullmatch(meta.ledger_path_identity_sha256):
+        raise LedgerError(FailureCode.LEDGER_SCHEMA_IDENTITY_MISMATCH)
+    # ``execution_domain_binding_json`` must be exact canonical JSON whose
+    # recomputed identity equals the stored id/hash columns.
+    parsed = parse_canonical_json(meta.execution_domain_binding_json)
+    if type(parsed) is not dict:
+        raise LedgerError(FailureCode.DOMAIN_LEDGER_BINDING_MISMATCH)
+    recomputed_sha = sha256_hex(canonical_json_bytes(parsed))
+    if (
+        canonical_json_text(parsed) != meta.execution_domain_binding_json
+        or recomputed_sha != meta.execution_domain_binding_sha256
+        or meta.execution_domain_binding_id != "KEDB1_" + recomputed_sha
+        or parsed.get("conflict_domain_ref") != meta.conflict_domain_ref
+        or parsed.get("environment") != meta.environment_classification
+    ):
+        raise LedgerError(FailureCode.DOMAIN_LEDGER_BINDING_MISMATCH)
     return meta
 
 
@@ -1111,7 +1293,9 @@ def _row_to_event(row: Sequence[object]) -> LedgerEvent:
     )
 
 
-def load_and_validate_events(connection: sqlite3.Connection, meta: LedgerMeta) -> tuple[LedgerEvent, ...]:
+def load_and_validate_events(
+    connection: sqlite3.Connection, meta: "LedgerMeta | ActiveLedgerMeta"
+) -> tuple[LedgerEvent, ...]:
     rows = connection.execute("SELECT sequence,event_id,ledger_instance_id,event_type,event_schema_revision,writer_session_id,incident_id,execution_attempt_id,recorded_at_utc,payload_json,payload_sha256,previous_event_hash,event_hash FROM ledger_events ORDER BY sequence").fetchall()
     events: list[LedgerEvent] = []
     seen_ids: dict[str, LedgerEvent] = {}
@@ -1146,9 +1330,102 @@ def load_and_validate_events(connection: sqlite3.Connection, meta: LedgerMeta) -
         previous = event.event_hash
     if not events or events[0].event_type is not EventType.LEDGER_INITIALIZED:
         raise LedgerError(FailureCode.LEDGER_SEQUENCE_INTEGRITY_FAILURE)
-    _validate_initialization_event(meta, events[0])
+    if type(meta) is ActiveLedgerMeta:
+        _validate_active_initialization_event(meta, events[0])
+        _validate_active_bootstrap_genesis(events)
+    else:
+        _validate_initialization_event(meta, events[0])
     _validate_event_semantics(events)
     return tuple(events)
+
+
+def _validate_active_initialization_event(meta: ActiveLedgerMeta, event: LedgerEvent) -> None:
+    expected = {
+        "authority_instance_id": meta.authority_instance_id,
+        "authority_namespace_id": meta.authority_namespace_id,
+        "authority_store_path_identity_sha256": meta.authority_store_path_identity_sha256,
+        "conflict_domain_ref": meta.conflict_domain_ref,
+        "created_at_utc": meta.created_at_utc,
+        "environment_classification": meta.environment_classification,
+        "execution_domain_binding_id": meta.execution_domain_binding_id,
+        "execution_domain_binding_json": meta.execution_domain_binding_json,
+        "execution_domain_binding_schema_revision": EXECUTION_DOMAIN_BINDING_SCHEMA_REVISION,
+        "execution_domain_binding_sha256": meta.execution_domain_binding_sha256,
+        "ledger_instance_id": meta.ledger_instance_id,
+        "ledger_path_identity_sha256": meta.ledger_path_identity_sha256,
+        "ledger_schema_revision": ACTIVE_LEDGER_SCHEMA_REVISION,
+        "preledger_history_mode": meta.preledger_history_mode,
+    }
+    if (
+        dict(event.payload) != expected
+        or type(event.payload.get("ledger_schema_revision")) is not int
+        or type(event.payload.get("execution_domain_binding_schema_revision")) is not int
+        or event.sequence != 1
+        or event.writer_session_id is not None
+        or event.incident_id is not None
+        or event.execution_attempt_id is not None
+    ):
+        raise LedgerError(FailureCode.LEDGER_SCHEMA_IDENTITY_MISMATCH)
+
+
+def _validate_active_bootstrap_genesis(events: Sequence[LedgerEvent]) -> None:
+    """Enforce the exact revision-2 genesis ordering (DSB-BOOT-007/008/009):
+
+    ``LEDGER_INITIALIZED`` -> ``EXECUTION_DOMAIN_BOOTSTRAP_RECORDED`` ->
+    ``WRITER_PROOF_HELD``.  Exactly one bootstrap event is permitted, its
+    persisted completeness value must match its bootstrap class, and its
+    canonical-hash commitment must be self-consistent.
+    """
+    bootstrap_indices = [
+        i for i, e in enumerate(events)
+        if e.event_type is EventType.EXECUTION_DOMAIN_BOOTSTRAP_RECORDED
+    ]
+    if len(bootstrap_indices) != 1:
+        raise LedgerError(FailureCode.DOMAIN_BOOTSTRAP_CONFLICT)
+    if bootstrap_indices[0] != 1 or len(events) < 3:
+        raise LedgerError(FailureCode.DOMAIN_BOOTSTRAP_HISTORY_INCOMPLETE)
+    bootstrap = events[1]
+    hold = events[2]
+    payload = bootstrap.payload
+    if (
+        bootstrap.writer_session_id is not None
+        or bootstrap.incident_id is not None
+        or bootstrap.execution_attempt_id is not None
+        or type(payload.get("bootstrap_schema_revision")) is not int
+        or payload.get("bootstrap_schema_revision") != 1
+        or type(payload.get("automatic_flatten_authorized")) is not bool
+        or payload.get("automatic_flatten_authorized") is not False
+        or type(payload.get("unresolved_write_count")) is not int
+        or payload.get("unresolved_write_count") < 0
+        or type(payload.get("unresolved_cancel_count")) is not int
+        or payload.get("unresolved_cancel_count") < 0
+        or payload.get("working_order_truth") not in {"COMPLETE_ZERO", "COMPLETE_KNOWN_NONZERO"}
+        or payload.get("fill_truth") not in {"COMPLETE_ZERO", "COMPLETE_KNOWN_NONZERO"}
+        or payload.get("position_truth") not in {"COMPLETE_ZERO", "COMPLETE_KNOWN_NONZERO"}
+    ):
+        raise LedgerError(FailureCode.DOMAIN_BOOTSTRAP_EVIDENCE_MISMATCH)
+    bootstrap_class = payload.get("bootstrap_class")
+    completeness = payload.get("prestack_activity_completeness")
+    if (
+        bootstrap_class not in BOOTSTRAP_CLASS_TO_COMPLETENESS
+        or BOOTSTRAP_CLASS_TO_COMPLETENESS[bootstrap_class] != completeness
+    ):
+        raise LedgerError(FailureCode.DOMAIN_BOOTSTRAP_COMPLETENESS_MISMATCH)
+    if not _HEX64_RE.fullmatch(str(payload.get("domain_binding_sha256"))) or not _HEX64_RE.fullmatch(str(payload.get("bootstrap_contract_sha256"))):
+        raise LedgerError(FailureCode.DOMAIN_BOOTSTRAP_EVIDENCE_MISMATCH)
+    validate_canonical_timestamp(payload.get("bootstrap_cutoff_at_utc"))
+    if (
+        hold.event_type is not EventType.WRITER_PROOF_HELD
+        or hold.writer_session_id is not None
+        or hold.execution_attempt_id is not None
+        or type(hold.incident_id) is not str
+        or not hold.incident_id
+        or set(hold.payload) != {"writer_proof_id", "conflict_domain_ref", "held_reason", "protected_unresolved_write_event_ids"}
+        or hold.payload.get("held_reason") != "ACTIVE_DOMAIN_BOOTSTRAP_REQUIRES_CURRENT_RELEASE"
+        or hold.payload.get("protected_unresolved_write_event_ids") != []
+        or hold.payload.get("conflict_domain_ref") != payload.get("conflict_domain_ref")
+    ):
+        raise LedgerError(FailureCode.DOMAIN_BOOTSTRAP_EVIDENCE_MISMATCH)
 
 
 def _validate_initialization_event(meta: LedgerMeta, event: LedgerEvent) -> None:
@@ -1257,6 +1534,15 @@ _NEW_EVENT_PAYLOAD_KEYS = MappingProxyType({
         "abandoned_restricted_session_id", "acquisition_mode", "reason",
         "observed_trusted_sequence", "observed_trusted_event_hash",
         "observed_ledger_sequence", "observed_ledger_event_hash",
+    }),
+    EventType.EXECUTION_DOMAIN_BOOTSTRAP_RECORDED: frozenset({
+        "bootstrap_schema_revision", "domain_binding_id", "domain_binding_sha256",
+        "conflict_domain_ref", "bootstrap_class", "bootstrap_contract_sha256",
+        "bootstrap_cutoff_at_utc", "inception_evidence", "prestack_evidence",
+        "prestack_activity_completeness", "unresolved_write_count",
+        "unresolved_cancel_count", "working_order_truth", "fill_truth",
+        "position_truth", "retained_position_ticker",
+        "retained_position_floor_contracts", "automatic_flatten_authorized",
     }),
 })
 
@@ -1947,6 +2233,172 @@ def initialize_ledger_binding(
         authority.close()
 
 
+def initialize_execution_domain_ledger_v2(
+    binding: AuthorityNamespaceBinding,
+    *,
+    conflict_domain_ref: str,
+    ledger_path: str | os.PathLike[str],
+    canonical_repository_root: str | os.PathLike[str],
+    preledger_history_mode: str,
+    execution_domain_binding_id: str,
+    execution_domain_binding_sha256: str,
+    execution_domain_binding_json: str,
+    bootstrap_event_payload: Mapping[str, object],
+    active_incident_id: str,
+    active_writer_proof_id: str,
+    clock: Clock = _utc_now,
+    uuid_factory: UuidFactory = uuid.uuid4,
+    fault_hook: FaultHook = _noop_fault_hook,
+) -> AuthorityRow:
+    """Initialize a separate revision-2 active execution-domain ledger.
+
+    The historical revision-1 ledger is never migrated (DSB-PERSIST-002/004).
+    The genesis event ordering is exactly ``LEDGER_INITIALIZED`` ->
+    ``EXECUTION_DOMAIN_BOOTSTRAP_RECORDED`` -> ``WRITER_PROOF_HELD``
+    (DSB-BOOT-009); the active held proof is release-ineligible until the
+    active current-release predicates pass.
+    """
+    conflict = _require_canonical_text(conflict_domain_ref)
+    _require_canonical_text(execution_domain_binding_id)
+    _require_canonical_text(active_incident_id)
+    _require_canonical_text(active_writer_proof_id)
+    if preledger_history_mode not in ACTIVE_PRELEDGER_HISTORY_MODES:
+        raise LedgerError(FailureCode.DOMAIN_BOOTSTRAP_COMPLETENESS_MISMATCH)
+    if not _HEX64_RE.fullmatch(execution_domain_binding_sha256):
+        raise LedgerError(FailureCode.EXECUTION_DOMAIN_BINDING_MALFORMED)
+    parsed_binding = parse_canonical_json(execution_domain_binding_json)
+    if (
+        type(parsed_binding) is not dict
+        or canonical_json_text(parsed_binding) != execution_domain_binding_json
+        or sha256_hex(canonical_json_bytes(parsed_binding)) != execution_domain_binding_sha256
+        or execution_domain_binding_id != "KEDB1_" + execution_domain_binding_sha256
+        or parsed_binding.get("conflict_domain_ref") != conflict
+    ):
+        raise LedgerError(FailureCode.EXECUTION_DOMAIN_BINDING_MISMATCH)
+    environment = parsed_binding.get("environment")
+    if environment != "KALSHI_DEMO":
+        raise LedgerError(FailureCode.LEDGER_ENVIRONMENT_MISMATCH)
+    bootstrap_payload = dict(bootstrap_event_payload)
+    if set(bootstrap_payload) != _NEW_EVENT_PAYLOAD_KEYS[EventType.EXECUTION_DOMAIN_BOOTSTRAP_RECORDED]:
+        raise LedgerError(FailureCode.DOMAIN_BOOTSTRAP_EVIDENCE_MISMATCH)
+    if (
+        bootstrap_payload.get("domain_binding_id") != execution_domain_binding_id
+        or bootstrap_payload.get("domain_binding_sha256") != execution_domain_binding_sha256
+        or bootstrap_payload.get("conflict_domain_ref") != conflict
+        or bootstrap_payload.get("bootstrap_class") != preledger_history_mode
+        or BOOTSTRAP_CLASS_TO_COMPLETENESS.get(preledger_history_mode)
+        != bootstrap_payload.get("prestack_activity_completeness")
+    ):
+        raise LedgerError(FailureCode.DOMAIN_BOOTSTRAP_COMPLETENESS_MISMATCH)
+    repository_root = Path(canonical_repository_root).resolve(strict=True)
+    ledger_resolved, ledger_normalized, ledger_identity = path_identity(ledger_path, must_exist=False)
+    if _is_within(ledger_resolved, repository_root):
+        raise LedgerError(FailureCode.LEDGER_PATH_INSIDE_CANONICAL_REPOSITORY)
+    if ledger_resolved.exists():
+        raise LedgerError(FailureCode.LEDGER_ALREADY_EXISTS)
+    authority = _connect_existing(binding.authority_store_resolved_path, authority=True)
+    ledger: sqlite3.Connection | None = None
+    try:
+        authority.execute("BEGIN EXCLUSIVE")
+        authority_meta = _validate_authority_open(authority, binding)
+        if authority.execute("SELECT 1 FROM conflict_domain_authority WHERE conflict_domain_ref=?", (conflict,)).fetchone() is not None:
+            raise LedgerError(FailureCode.AUTHORITY_CONFLICT_DOMAIN_ALREADY_BOUND)
+        ledger = _connect_new(ledger_resolved, authority=False)
+        ledger.executescript("BEGIN EXCLUSIVE;\n" + _ACTIVE_LEDGER_SCHEMA)
+        ledger_instance = str(uuid_factory())
+        _uuid4_text(ledger_instance)
+        created = canonical_timestamp(clock())
+        ledger.execute(
+            "INSERT INTO ledger_meta VALUES (1,?,?,?,?,?,?,?,?,?,?,?,?,?,?)",
+            (
+                ledger_instance, ACTIVE_LEDGER_SCHEMA_REVISION, created, environment,
+                conflict, preledger_history_mode, authority_meta.authority_instance_id,
+                binding.authority_namespace_id, binding.authority_store_path_identity_sha256,
+                ledger_identity, EXECUTION_DOMAIN_BINDING_SCHEMA_REVISION,
+                execution_domain_binding_id, execution_domain_binding_sha256,
+                execution_domain_binding_json,
+            ),
+        )
+        meta = _active_ledger_meta(ledger)
+        initial = _construct_event(meta=meta, sequence=1, previous_hash=ZERO_HASH, event_input=EventInput(EventType.LEDGER_INITIALIZED, {
+            "authority_instance_id": authority_meta.authority_instance_id,
+            "authority_namespace_id": binding.authority_namespace_id,
+            "authority_store_path_identity_sha256": binding.authority_store_path_identity_sha256,
+            "conflict_domain_ref": conflict,
+            "created_at_utc": created,
+            "environment_classification": environment,
+            "execution_domain_binding_id": execution_domain_binding_id,
+            "execution_domain_binding_json": execution_domain_binding_json,
+            "execution_domain_binding_schema_revision": EXECUTION_DOMAIN_BINDING_SCHEMA_REVISION,
+            "execution_domain_binding_sha256": execution_domain_binding_sha256,
+            "ledger_instance_id": ledger_instance,
+            "ledger_path_identity_sha256": ledger_identity,
+            "ledger_schema_revision": ACTIVE_LEDGER_SCHEMA_REVISION,
+            "preledger_history_mode": preledger_history_mode,
+        }), clock=clock, uuid_factory=uuid_factory)
+        bootstrap = _construct_event(
+            meta=meta, sequence=2, previous_hash=initial.event_hash,
+            event_input=EventInput(EventType.EXECUTION_DOMAIN_BOOTSTRAP_RECORDED, bootstrap_payload),
+            clock=clock, uuid_factory=uuid_factory,
+        )
+        hold = _construct_event(
+            meta=meta, sequence=3, previous_hash=bootstrap.event_hash,
+            event_input=EventInput(
+                EventType.WRITER_PROOF_HELD,
+                {
+                    "conflict_domain_ref": conflict,
+                    "held_reason": "ACTIVE_DOMAIN_BOOTSTRAP_REQUIRES_CURRENT_RELEASE",
+                    "protected_unresolved_write_event_ids": [],
+                    "writer_proof_id": active_writer_proof_id,
+                },
+                writer_session_id=None,
+                incident_id=active_incident_id,
+                execution_attempt_id=None,
+            ),
+            clock=clock, uuid_factory=uuid_factory,
+        )
+        for event in (initial, bootstrap, hold):
+            _insert_event(ledger, event)
+        fault_hook("before_ledger_initialization_commit")
+        ledger.commit()
+        fault_hook("after_ledger_initialization_commit")
+        _validate_schema(ledger, authority=False, ledger_revision=ACTIVE_LEDGER_SCHEMA_REVISION)
+        _validate_integrity(ledger, authority=False)
+        load_and_validate_events(ledger, meta)
+        updated = canonical_timestamp(clock())
+        authority.execute(
+            "INSERT INTO conflict_domain_authority VALUES (?,?,?,?,?,?,?,?)",
+            (conflict, environment, ledger_instance, ledger_normalized, ledger_identity, 3, hold.event_hash, updated),
+        )
+        fault_hook("before_authority_binding_commit")
+        authority.commit()
+        fault_hook("after_authority_binding_commit")
+        row = _authority_row(authority, conflict)
+        if row.trusted_sequence != 3 or row.trusted_event_hash != hold.event_hash:
+            raise LedgerError(FailureCode.DOMAIN_BOOTSTRAP_AUTHORITY_BINDING_INCOMPLETE)
+        return row
+    except CommitResultUnknown:
+        raise
+    except LedgerError:
+        if ledger is not None and ledger.in_transaction:
+            ledger.rollback()
+        if authority.in_transaction:
+            authority.rollback()
+        raise
+    except sqlite3.Error as exc:
+        if ledger is not None and ledger.in_transaction:
+            ledger.rollback()
+        if authority.in_transaction:
+            authority.rollback()
+        if ledger_resolved.exists():
+            raise LedgerError(FailureCode.DOMAIN_BOOTSTRAP_AUTHORITY_BINDING_INCOMPLETE) from exc
+        raise LedgerError(FailureCode.LEDGER_COMMIT_FAILURE) from exc
+    finally:
+        if ledger is not None:
+            ledger.close()
+        authority.close()
+
+
 def _insert_event(connection: sqlite3.Connection, event: LedgerEvent) -> None:
     connection.execute(
         "INSERT INTO ledger_events VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?)",
@@ -2133,6 +2585,7 @@ def _open_locked(
     uuid_factory: UuidFactory = uuid.uuid4,
     fault_hook: FaultHook = _noop_fault_hook,
     history_validator: HistoryValidator | None = None,
+    ledger_revision: int = LEDGER_SCHEMA_REVISION,
 ) -> LockedLedger:
     conflict = _require_canonical_text(conflict_domain_ref)
     environment = _require_canonical_text(expected_environment)
@@ -2160,8 +2613,12 @@ def _open_locked(
                 raise LedgerError(FailureCode.LEDGER_AUTHORITY_BINDING_MISMATCH)
         ledger = _connect_existing(resolved, authority=False)
         ledger.execute("BEGIN EXCLUSIVE")
-        _validate_schema(ledger, authority=False)
-        ledger_meta = _ledger_meta(ledger)
+        _validate_schema(ledger, authority=False, ledger_revision=ledger_revision)
+        ledger_meta = (
+            _active_ledger_meta(ledger)
+            if ledger_revision == ACTIVE_LEDGER_SCHEMA_REVISION
+            else _ledger_meta(ledger)
+        )
         if ledger_meta.ledger_instance_id != row.ledger_instance_id:
             raise LedgerError(FailureCode.LEDGER_INSTANCE_ID_MISMATCH)
         if ledger_meta.environment_classification != environment:
@@ -2252,7 +2709,12 @@ def replay_projection(authority_meta: AuthorityMeta, authority_row: AuthorityRow
     cancel_may_sent: dict[str, bool] = {}
     cancel_result_revision: dict[str, int] = {}
     release_records: dict[str, Mapping[str, object]] = {}
+    bootstrap_completeness: str | None = None
     for event in events:
+        if event.event_type is EventType.EXECUTION_DOMAIN_BOOTSTRAP_RECORDED:
+            candidate = event.payload.get("prestack_activity_completeness")
+            if candidate in _ACTIVE_HISTORY_COMPLETENESS_VALUES:
+                bootstrap_completeness = str(candidate)
         if event.incident_id is not None:
             incidents.add(event.incident_id)
         if event.execution_attempt_id is not None:
@@ -2372,13 +2834,18 @@ def replay_projection(authority_meta: AuthorityMeta, authority_row: AuthorityRow
             if proof_eligible.get(only_proof) is True:
                 continue
         protected_unresolved_legacy_write_count += 1
-    if not imported_incident_ids:
+    if bootstrap_completeness is not None:
+        # Revision-2 active execution domain: history completeness is the
+        # persisted, hash-committed bootstrap completeness value, never the
+        # legacy-import derivation.
+        history = bootstrap_completeness
+    elif not imported_incident_ids:
         history = "INCOMPLETE"
     elif protected_unresolved_legacy_write_count > 0:
         history = "COMPLETE_WITH_PROTECTED_UNRESOLVED_LEGACY_WRITE"
     else:
         history = "COMPLETE"
-    if history == "INCOMPLETE":
+    if bootstrap_completeness is None and history == "INCOMPLETE":
         restart = RestartClassification.LEGACY_HISTORY_INCOMPLETE
     elif unresolved or protected_unresolved_legacy_write_count or any(state == "HELD" for state in proofs.values()):
         restart = RestartClassification.UNRESOLVED_WRITE_HELD
@@ -2586,11 +3053,12 @@ def _acquire_local_state_internal(
     uuid_factory: UuidFactory = uuid.uuid4,
     fault_hook: FaultHook = _noop_fault_hook,
     history_validator: HistoryValidator | None = None,
+    ledger_revision: int = LEDGER_SCHEMA_REVISION,
 ) -> OpenResult:
     if type(acquisition_mode) is not AcquisitionMode:
         return OpenResult(None, RestartClassification.LEDGER_INTEGRITY_FAILURE, None, FailureCode.LEGACY_IMPORT_ONLY_ACQUISITION_REJECTED)
     try:
-        locked = _open_locked(binding, conflict_domain_ref=conflict_domain_ref, expected_environment=expected_environment, canonical_repository_root=canonical_repository_root, expected_ledger_path=expected_ledger_path, clock=clock, uuid_factory=uuid_factory, fault_hook=fault_hook, history_validator=history_validator)
+        locked = _open_locked(binding, conflict_domain_ref=conflict_domain_ref, expected_environment=expected_environment, canonical_repository_root=canonical_repository_root, expected_ledger_path=expected_ledger_path, clock=clock, uuid_factory=uuid_factory, fault_hook=fault_hook, history_validator=history_validator, ledger_revision=ledger_revision)
         projection = locked.projection()
         if acquisition_mode is AcquisitionMode.NORMAL_WRITER:
             # Revision 03 has no supported empty-history proof; current imported
@@ -2667,6 +3135,7 @@ def _acquire_normal_writer_candidate(
     uuid_factory: UuidFactory = uuid.uuid4,
     fault_hook: FaultHook = _noop_fault_hook,
     history_validator: HistoryValidator | None = None,
+    ledger_revision: int = LEDGER_SCHEMA_REVISION,
 ) -> OpenResult:
     """Private normal-writer candidate bridge (ER-NW-001).
 
@@ -2695,7 +3164,7 @@ def _acquire_normal_writer_candidate(
             canonical_repository_root=canonical_repository_root,
             expected_ledger_path=expected_ledger_path, clock=clock,
             uuid_factory=uuid_factory, fault_hook=fault_hook,
-            history_validator=history_validator,
+            history_validator=history_validator, ledger_revision=ledger_revision,
         )
     except LedgerError as exc:
         return OpenResult(None, _classify_error(exc), None, exc.code)
@@ -2752,6 +3221,7 @@ def _acquire_restricted_state(
     uuid_factory: UuidFactory = uuid.uuid4,
     fault_hook: FaultHook = _noop_fault_hook,
     history_validator: HistoryValidator | None = None,
+    ledger_revision: int = LEDGER_SCHEMA_REVISION,
 ) -> _RestrictedInternalResult:
     """Private bridge for narrow emergency/release binding handles."""
     if acquisition_mode not in {AcquisitionMode.EMERGENCY_CONTROL_ONLY, AcquisitionMode.RELEASE_ONLY}:
@@ -2770,6 +3240,7 @@ def _acquire_restricted_state(
         uuid_factory=uuid_factory,
         fault_hook=fault_hook,
         history_validator=history_validator,
+        ledger_revision=ledger_revision,
     )
     if opened.handle is None:
         return _RestrictedInternalResult(
@@ -2861,4 +3332,7 @@ __all__ = [
     "initialize_authority_namespace", "initialize_ledger_binding", "load_and_validate_events",
     "parse_canonical_json", "path_identity", "replay_projection", "sha256_hex", "sqlite_posture",
     "start_writer_session", "RISK_CONTROL_STATES", "RISK_CONTROL_TRANSITIONS",
+    "ACTIVE_LEDGER_SCHEMA_REVISION", "EXECUTION_DOMAIN_BINDING_SCHEMA_REVISION",
+    "ACTIVE_PRELEDGER_HISTORY_MODES", "BOOTSTRAP_CLASS_TO_COMPLETENESS",
+    "ActiveLedgerMeta", "initialize_execution_domain_ledger_v2",
 ]

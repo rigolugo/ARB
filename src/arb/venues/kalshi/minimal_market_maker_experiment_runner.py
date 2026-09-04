@@ -57,16 +57,19 @@ import os
 import re
 import threading
 import uuid
-from dataclasses import dataclass
-from datetime import datetime
+from dataclasses import dataclass, field, fields, replace as _dataclass_replace
+from datetime import datetime, timezone
 from decimal import Decimal, InvalidOperation
+from types import MappingProxyType
 from typing import Callable, Mapping, Sequence, Tuple
 
 from arb.execution_ledger import (
+    ActiveLedgerMeta,
     AuthorityLedgerRelation,
     AuthorityNamespaceBinding,
     EventInput,
     EventType,
+    FailureCode,
     LedgerError,
     LockedLedger,
     OpenResult,
@@ -80,8 +83,16 @@ from arb.execution_ledger import (
     validate_canonical_timestamp,
 )
 from arb.venues.kalshi.ledger_binding import (
+    ACCEPTED_TERMINAL_SETTLEMENT_ID,
+    CURRENT_ACCOUNT_SCOPE_REF,
     CURRENT_LEGACY_INCIDENT_CONTRACT,
+    AcceptedTerminalSettlementEvidenceV1,
+    ActiveExecutionDomainContractV1,
+    ActiveReleaseEvaluationStateV1,
     CurrentProcessReleaseCompletionV1,
+    CurrentProcessReleaseCompletionV2,
+    ExecutionDomainBindingV1,
+    active_domain_commitment,
     LegacyIncidentContract,
     NormalWriterAcquisition,
     ReleaseEvaluationStateV1,
@@ -90,8 +101,15 @@ from arb.venues.kalshi.ledger_binding import (
     ReleaseLedgerHandle,
     TrustedReleaseEvidenceProjectionV1,
     TrustedReleaseEvidenceReadResultV1,
+    acquire_active_normal_writer_state_v1,
+    acquire_active_release_only_v1,
     acquire_normal_writer_state,
     acquire_release_only,
+    issue_active_current_process_release_completion_v2,
+    n1_accepted_terminal_settlement_evidence,
+    read_active_local_safety_state_v1,
+    read_active_trusted_release_evidence_projection_v1,
+    reconcile_retained_bootstrap_floor_v1,
 )
 from arb.venues.kalshi.risk_control import (
     EconomicFillV1,
@@ -105,6 +123,7 @@ from arb.venues.kalshi.risk_control import (
     WriterEligibilityGate,
     build_orderbook_reference,
     compute_market_economic_state,
+    compute_permit_domain_commitment_sha256,
     validate_price_ranges,
 )
 from arb.venues.kalshi.emergency_cancel import EmergencyCancelGate
@@ -142,6 +161,8 @@ from arb.venues.kalshi.quote_lifecycle import (
     ReconstructedSlotOwnershipV1,
     SelectedWriteV1,
     VenueBindingV1,
+    VenueBindingV2,
+    active_prepared_request_domain_metadata,
     allocate_client_order_id,
     build_cancel_prepared_payload,
     build_cancel_writer_eligibility_assessment,
@@ -184,7 +205,36 @@ __all__ = [
     "RawOperationResponseV1",
     "PreReleaseReadCapabilityV1",
     "ExperimentRunnerRuntimeV1",
+    "ExperimentRunnerRuntimeV2",
+    "build_active_experiment_runner_runtime_v2",
     "ExperimentRunnerInvocationV1",
+    "ExperimentRunnerInvocationV2",
+    "ActiveRouteQualificationV1",
+    "ActiveDomainAcceptedEvidenceContractV1",
+    "n1_accepted_evidence_contract",
+    "SubaccountWideCompletenessTheoremV1",
+    "ProvenAccountWideReadV1",
+    "ActiveAccountWidePartitionV1",
+    "ExchangeIndexStatusObservationV1",
+    "UserDataFreshnessWatermarkV1",
+    "PerIndexSurfaceTraversalV1",
+    "PerIndexTraversalV1",
+    "RetainedPositionSettlementReconciliationV1",
+    "DynamicIndexDomainAccountWideReadV1",
+    "compute_dynamic_index_domain_read_set_identity",
+    "require_dynamic_index_domain_completeness",
+    "active_scope_classify_row",
+    "partition_active_account_wide_rows",
+    "require_subaccount_wide_completeness",
+    "require_complete_active_pagination",
+    "collect_active_authoritative_read_truth",
+    "assemble_active_release_evaluation_state_v1",
+    "ActivePreReleaseReadOperationV2",
+    "ActivePreReleaseReadAuthClassV2",
+    "PRE_RELEASE_READ_REQUEST_MAX_V2",
+    "PreReleaseReadPhaseResultV2",
+    "run_pre_release_read_phase_v2",
+    "run_active_experiment_stage3_and_gate_d",
     "AuthoritativeReadTruthV1",
     "PreReleaseReadPhaseResultV1",
     "LOCAL_GATE_HISTORICAL_INCIDENT_CONTEXT",
@@ -211,10 +261,34 @@ class RunnerOperation(enum.StrEnum):
     GET_ORDER = "GET_ORDER"
     GET_FILLS = "GET_FILLS"
     GET_POSITIONS = "GET_POSITIONS"
+    # Correction 06 (BLOCK-05-01 / CL-4 as corrected): CLOSED INTERNAL
+    # active-V2 transport identifiers ONLY.  They exist so the two active-V2
+    # pre-release bookend GETs flow through the SAME ``send_operation_request``
+    # boundary and the SAME strict generic JSON response decoder as every
+    # other read, WITHOUT a new runtime callback and WITHOUT passing arbitrary
+    # strings.  They are UNREACHABLE through the legacy V1 surface: they are
+    # NOT in ``PRE_RELEASE_READ_OPERATIONS``, NOT in
+    # ``_GENERIC_REQUEST_OPERATIONS``, NOT in ``_ROUTE_TEMPLATES``, and
+    # ``prepare_runner_operation_request`` / ``PreReleaseReadCapabilityV1``
+    # reject them.  They are consumed ONLY by the active-V2 closed transport
+    # mapping (``_ACTIVE_V2_TRANSPORT_OPERATIONS`` / ``_ACTIVE_V2_OP_TO_RUNNER_
+    # OP`` / ``_prepare_active_v2_request``).  The controlling SEMANTIC read
+    # surface remains ``ActivePreReleaseReadOperationV2`` (exactly 8 members).
+    # Static check (Correction 06): no inherited contract fixes the
+    # ``RunnerOperation`` enum universe -- ``OPERATION_BINDING_INDEX_SHA256``
+    # derives from the string literal ``_OPERATION_BINDING_ORDER`` +
+    # ``_OPERATION_BINDING_RECORDS`` (verified at import), never from
+    # ``list(RunnerOperation)``; the only test over the enum universe is a
+    # negative ``"PRODUCTION" not in [op.value ...]`` assertion.
+    GET_EXCHANGE_STATUS = "GET_EXCHANGE_STATUS"
+    GET_USER_DATA_TIMESTAMP = "GET_USER_DATA_TIMESTAMP"
     CREATE_ORDER_V2 = "CREATE_ORDER_V2"
     CANCEL_ORDER_V2 = "CANCEL_ORDER_V2"
 
 
+# Preserved legacy V1 six-read allowlist -- byte/semantically UNCHANGED.
+# ``GET_EXCHANGE_STATUS`` / ``GET_USER_DATA_TIMESTAMP`` are deliberately NOT
+# here: they are active-V2-only closed transport identifiers.
 PRE_RELEASE_READ_OPERATIONS = frozenset({
     RunnerOperation.GET_MARKET,
     RunnerOperation.GET_MARKET_ORDERBOOK,
@@ -303,6 +377,52 @@ class RunnerFailureCode(enum.StrEnum):
     GATE_D_CANCEL_TARGET_BINDING_INVALID = "GATE_D_CANCEL_TARGET_BINDING_INVALID"
     GATE_D_FRESHNESS_EXPIRED_BEFORE_ADAPTER = "GATE_D_FRESHNESS_EXPIRED_BEFORE_ADAPTER"
     GATE_D_STRATEGY_INPUT_CONSTRUCTION_FAILED = "GATE_D_STRATEGY_INPUT_CONSTRUCTION_FAILED"
+
+    # Revision-2 active execution-domain path (KALSHI_DEMO_DYNAMIC_SUBACCOUNT
+    # _EXECUTION_DOMAIN_BINDING_AND_RISK_CONTROL_SPEC_01_CORRECTION_02,
+    # DSB-WRITER-003..010 / DSB-DYN-001..006 / DSB-OPS-001..012 /
+    # DSB-BUDGET-001..007 / DSB-DOMAIN/FRESH/PAGE / DSB-READSET-001..005 /
+    # DSB-RISK-003..008 / DSB-READ-001..006 / DSB-RUN-001..006 /
+    # DSB-FAIL-001..003).
+    ACTIVE_GATE_ENTRY_PRECONDITION_FAILED = "ACTIVE_GATE_ENTRY_PRECONDITION_FAILED"
+    DOMAIN_SCOPE_RESPONSE_MISMATCH = "DOMAIN_SCOPE_RESPONSE_MISMATCH"
+    DOMAIN_SCOPE_RESPONSE_AMBIGUOUS = "DOMAIN_SCOPE_RESPONSE_AMBIGUOUS"
+    DOMAIN_ROUTE_EXCHANGE_INDEX_MISMATCH = "DOMAIN_ROUTE_EXCHANGE_INDEX_MISMATCH"
+    DOMAIN_ROUTE_SEMANTICS_UNQUALIFIED = "DOMAIN_ROUTE_SEMANTICS_UNQUALIFIED"
+    SUBACCOUNT_WIDE_COMPLETENESS_UNPROVEN = "SUBACCOUNT_WIDE_COMPLETENESS_UNPROVEN"
+    N1_RETAINED_POSITION_NOT_RECONCILED = "N1_RETAINED_POSITION_NOT_RECONCILED"
+    ACTIVE_DOMAIN_CONTRACT_MISMATCH = "ACTIVE_DOMAIN_CONTRACT_MISMATCH"
+    ACTIVE_DOMAIN_PERMIT_MISMATCH = "ACTIVE_DOMAIN_PERMIT_MISMATCH"
+    NORMAL_WRITER_PERMIT_DOMAIN_MISMATCH = "NORMAL_WRITER_PERMIT_DOMAIN_MISMATCH"
+    ACTIVE_PATH_LEGACY_CONTRACT_REJECTED = "ACTIVE_PATH_LEGACY_CONTRACT_REJECTED"
+    ACTIVE_ACCEPTED_EVIDENCE_CONTRACT_INVALID = "ACTIVE_ACCEPTED_EVIDENCE_CONTRACT_INVALID"
+
+    # Correction 02 DSB-FAIL-001 -- stable trusted dynamic pre-release read
+    # failure taxonomy.  A generic dynamic-read failure never masks a more
+    # precise existing predecessor classification (DSB-FAIL-001 final para).
+    TRUSTED_DYNAMIC_READ_CAPABILITY_REQUIRED = "TRUSTED_DYNAMIC_READ_CAPABILITY_REQUIRED"
+    TRUSTED_DYNAMIC_READ_CAPABILITY_INVALID = "TRUSTED_DYNAMIC_READ_CAPABILITY_INVALID"
+    CALLER_SUPPLIED_DYNAMIC_READ_SET_REJECTED = "CALLER_SUPPLIED_DYNAMIC_READ_SET_REJECTED"
+    DYNAMIC_READ_SOURCE_MISMATCH = "DYNAMIC_READ_SOURCE_MISMATCH"
+    DYNAMIC_READ_BUDGET_EXHAUSTED = "DYNAMIC_READ_BUDGET_EXHAUSTED"
+    DYNAMIC_READ_DEADLINE_EXHAUSTED = "DYNAMIC_READ_DEADLINE_EXHAUSTED"
+    DYNAMIC_READ_STATUS_DOMAIN_MALFORMED = "DYNAMIC_READ_STATUS_DOMAIN_MALFORMED"
+    DYNAMIC_READ_STATUS_DOMAIN_DUPLICATE = "DYNAMIC_READ_STATUS_DOMAIN_DUPLICATE"
+    DYNAMIC_READ_STATUS_DOMAIN_BOUND_EXCEEDED = "DYNAMIC_READ_STATUS_DOMAIN_BOUND_EXCEEDED"
+    DYNAMIC_READ_STATUS_DOMAIN_CHANGED = "DYNAMIC_READ_STATUS_DOMAIN_CHANGED"
+    DYNAMIC_READ_SELECTED_INDEX_NOT_IN_DOMAIN = "DYNAMIC_READ_SELECTED_INDEX_NOT_IN_DOMAIN"
+    DYNAMIC_READ_FRESHNESS_MALFORMED = "DYNAMIC_READ_FRESHNESS_MALFORMED"
+    DYNAMIC_READ_FRESHNESS_REGRESSION = "DYNAMIC_READ_FRESHNESS_REGRESSION"
+    DYNAMIC_READ_FRESHNESS_STALE = "DYNAMIC_READ_FRESHNESS_STALE"
+    DYNAMIC_READ_FRESHNESS_FUTURE_SKEW = "DYNAMIC_READ_FRESHNESS_FUTURE_SKEW"
+    DYNAMIC_READ_CLOCK_REGRESSION = "DYNAMIC_READ_CLOCK_REGRESSION"
+    DYNAMIC_READ_PAGINATION_INCOMPLETE = "DYNAMIC_READ_PAGINATION_INCOMPLETE"
+    DYNAMIC_READ_CURSOR_CYCLE = "DYNAMIC_READ_CURSOR_CYCLE"
+    DYNAMIC_READ_RESPONSE_SCOPE_MISMATCH = "DYNAMIC_READ_RESPONSE_SCOPE_MISMATCH"
+    DYNAMIC_READ_POSITION_EVENT_SCOPE_UNPROVEN = "DYNAMIC_READ_POSITION_EVENT_SCOPE_UNPROVEN"
+    DYNAMIC_READ_COMPOSITE_IDENTITY_MISMATCH = "DYNAMIC_READ_COMPOSITE_IDENTITY_MISMATCH"
+    STATIC_COMPLETENESS_THEOREM_NOT_ACCEPTED = "STATIC_COMPLETENESS_THEOREM_NOT_ACCEPTED"
+    P02_TERMINAL_SETTLEMENT_EVIDENCE_MISMATCH = "P02_TERMINAL_SETTLEMENT_EVIDENCE_MISMATCH"
 
 
 class RunnerError(RuntimeError):
@@ -452,6 +572,10 @@ _ROUTE_TEMPLATES: Mapping[RunnerOperation, str] = {
     RunnerOperation.GET_FILLS: "/portfolio/fills",
     RunnerOperation.GET_POSITIONS: "/portfolio/positions",
 }
+# NOTE (Correction 06): the active-V2 status / user_data_timestamp paths are
+# NOT added to this legacy V1 route table.  Active V2 renders its exact
+# DSB-OPS-003 paths from ``_ACTIVE_V2_OP_BINDING`` inside
+# ``_prepare_active_v2_request`` only.
 
 _TICKER_PATTERN = re.compile(r"[A-Za-z0-9._~-]{1,200}")
 _ORDER_ID_PATTERN = re.compile(r"[A-Za-z0-9._~-]{1,200}")
@@ -603,28 +727,33 @@ class PreparedRunnerOperationRequestV1:
 
 def _first_page_query(
     operation: RunnerOperation, *, ticker: str | None, order_id: str | None,
+    subaccount: int = _SUBACCOUNT, exchange_index: int = _EXCHANGE_INDEX,
 ) -> list[Tuple[str, str]]:
+    # `subaccount`/`exchange_index` default to the legacy source-bound
+    # SUBACCOUNT=0 route (V1 wire behaviour byte-identical).  The active
+    # revision-2 path passes runtime.domain_binding.subaccount /
+    # .exchange_index instead -- no literal 0/1 in the active call site.
     if operation is RunnerOperation.GET_ORDERS:
         return [
             ("ticker", ticker or ""),
             ("status", "resting"),
             ("limit", str(_GET_ORDERS_LIMIT)),
-            ("subaccount", str(_SUBACCOUNT)),
-            ("exchange_index", str(_EXCHANGE_INDEX)),
+            ("subaccount", str(subaccount)),
+            ("exchange_index", str(exchange_index)),
         ]
     if operation is RunnerOperation.GET_FILLS:
         return [
             ("order_id", order_id or ""),
             ("limit", str(_GET_FILLS_LIMIT)),
-            ("subaccount", str(_SUBACCOUNT)),
-            ("exchange_index", str(_EXCHANGE_INDEX)),
+            ("subaccount", str(subaccount)),
+            ("exchange_index", str(exchange_index)),
         ]
     if operation is RunnerOperation.GET_POSITIONS:
         return [
             ("ticker", ticker or ""),
             ("limit", str(_GET_POSITIONS_LIMIT)),
-            ("subaccount", str(_SUBACCOUNT)),
-            ("exchange_index", str(_EXCHANGE_INDEX)),
+            ("subaccount", str(subaccount)),
+            ("exchange_index", str(exchange_index)),
         ]
     return []
 
@@ -638,6 +767,8 @@ def prepare_runner_operation_request(
     cursor: str | None = None,
     request_ordinal: int,
     uuid_factory: Callable[[], "uuid.UUID"] = uuid.uuid4,
+    subaccount: int = _SUBACCOUNT,
+    exchange_index: int = _EXCHANGE_INDEX,
 ) -> PreparedRunnerOperationRequestV1:
     """Pure and offline: derives method/route/full path/wire URL/signed path
     from the closed operation contract. Caller-supplied values are limited
@@ -651,7 +782,10 @@ def prepare_runner_operation_request(
     relative_route = _render_route(operation, path_parameters)
     full_path = DEMO_BASE_PATH + relative_route
 
-    query_pairs = _first_page_query(operation, ticker=ticker, order_id=order_id)
+    query_pairs = _first_page_query(
+        operation, ticker=ticker, order_id=order_id,
+        subaccount=subaccount, exchange_index=exchange_index,
+    )
     if cursor is not None:
         if operation not in (
             RunnerOperation.GET_ORDERS, RunnerOperation.GET_FILLS, RunnerOperation.GET_POSITIONS,
@@ -901,7 +1035,9 @@ def _parse_price_ranges(raw: object) -> Tuple[PriceRangeV1, ...]:
     return tuple(ranges)
 
 
-def _parse_market(raw: object, *, expected_ticker: str) -> Mapping[str, object]:
+def _parse_market(
+    raw: object, *, expected_ticker: str, expected_exchange_index: int = _EXCHANGE_INDEX,
+) -> Mapping[str, object]:
     obj = _require_dict(raw, code=RunnerFailureCode.RESPONSE_SCHEMA_INVALID, detail="top level")
     market = _require_dict(
         _require_field(obj, "market", code=RunnerFailureCode.RESPONSE_SCHEMA_INVALID),
@@ -923,7 +1059,7 @@ def _parse_market(raw: object, *, expected_ticker: str) -> Mapping[str, object]:
         raise RunnerError(RunnerFailureCode.MARKET_IDENTITY_INVALID, detail="ticker mismatch")
     if status != "active":
         raise RunnerError(RunnerFailureCode.MARKET_IDENTITY_INVALID, detail="not active")
-    if exchange_index != _EXCHANGE_INDEX:
+    if exchange_index != expected_exchange_index:
         raise RunnerError(RunnerFailureCode.MARKET_IDENTITY_INVALID, detail="exchange_index mismatch")
 
     price_ranges = _parse_price_ranges(_require_field(market, "price_ranges", code=RunnerFailureCode.MARKET_GRID_INVALID))
@@ -937,7 +1073,15 @@ def _parse_market(raw: object, *, expected_ticker: str) -> Mapping[str, object]:
     return market
 
 
-def _working_order_from_raw(raw: object, *, expected_ticker: str) -> WorkingOrderV1 | None:
+def _working_order_from_raw(
+    raw: object, *, expected_ticker: str,
+    expected_subaccount: int = _SUBACCOUNT, expected_exchange_index: "int | None" = _EXCHANGE_INDEX,
+) -> WorkingOrderV1 | None:
+    # ``expected_exchange_index=None`` means "any exchange_index for the
+    # expected subaccount" -- used ONLY by the proven subaccount-wide
+    # aggregate pass (DSB-RISK-004 path A) so same-subaccount other-index
+    # working orders can feed aggregate risk.  The scoped selected-route
+    # reads always pass an exact integer.
     order = _require_dict(raw, code=RunnerFailureCode.RESPONSE_SCHEMA_INVALID, detail="order row")
     order_id = _require_exact_str(
         _require_field(order, "order_id", code=RunnerFailureCode.RESPONSE_SCHEMA_INVALID),
@@ -957,7 +1101,10 @@ def _working_order_from_raw(raw: object, *, expected_ticker: str) -> WorkingOrde
         _require_field(order, "exchange_index", code=RunnerFailureCode.RESPONSE_SCHEMA_INVALID),
         code=RunnerFailureCode.ORDER_IDENTITY_INVALID, detail="exchange_index type",
     )
-    if ticker != expected_ticker or subaccount != _SUBACCOUNT or exchange_index != _EXCHANGE_INDEX:
+    if (
+        ticker != expected_ticker or subaccount != expected_subaccount
+        or (expected_exchange_index is not None and exchange_index != expected_exchange_index)
+    ):
         raise RunnerError(RunnerFailureCode.ORDER_IDENTITY_INVALID, detail="cross-ticker or scope conflict")
     status = _require_exact_str(
         _require_field(order, "status", code=RunnerFailureCode.RESPONSE_SCHEMA_INVALID),
@@ -977,7 +1124,10 @@ def _working_order_from_raw(raw: object, *, expected_ticker: str) -> WorkingOrde
     )
 
 
-def _fill_from_raw(raw: object, *, expected_ticker: str, expected_order_id: str) -> EconomicFillV1:
+def _fill_from_raw(
+    raw: object, *, expected_ticker: str, expected_order_id: str,
+    expected_subaccount: int = _SUBACCOUNT, expected_exchange_index: "int | None" = _EXCHANGE_INDEX,
+) -> EconomicFillV1:
     fill = _require_dict(raw, code=RunnerFailureCode.RESPONSE_SCHEMA_INVALID, detail="fill row")
     fill_id = _require_exact_str(
         _require_field(fill, "fill_id", code=RunnerFailureCode.RESPONSE_SCHEMA_INVALID),
@@ -1003,7 +1153,8 @@ def _fill_from_raw(raw: object, *, expected_ticker: str, expected_order_id: str)
     )
     if (
         order_id != expected_order_id or ticker != expected_ticker
-        or subaccount != _SUBACCOUNT or exchange_index != _EXCHANGE_INDEX
+        or subaccount != expected_subaccount
+        or (expected_exchange_index is not None and exchange_index != expected_exchange_index)
     ):
         raise RunnerError(RunnerFailureCode.ORDER_IDENTITY_INVALID, detail="fill scope mismatch")
     side = _require_field(fill, "side", code=RunnerFailureCode.RESPONSE_SCHEMA_INVALID)
@@ -1114,6 +1265,688 @@ class ExperimentRunnerRuntimeV1:
             raise RunnerError(RunnerFailureCode.PRE_RELEASE_CAPABILITY_NOT_AUTHORIZED, detail="contract type")
 
 
+_ROUTE_WIRE_POLICIES = frozenset({"EXPLICIT_EXCHANGE_INDEX", "EMPIRICALLY_BOUND_AUTOROUTE"})
+# One immutable route-contract shape covering the active Gate-D CREATE/CANCEL
+# routing semantics for a single (subaccount, exchange_index) route.
+_ACTIVE_ROUTE_REQUEST_SHAPE_ID = "KALSHI_MM_ACTIVE_GATE_D_ROUTE_V1"
+
+# The exact accepted account-wide authoritative-read source classification.
+_ACCOUNT_WIDE_SOURCE_CLASSIFICATION_V1 = "KALSHI_DEMO_ACCOUNT_WIDE_AUTHORITATIVE_READ_V1"
+_ACCOUNT_WIDE_REQUEST_CLASSIFICATION = "ACCOUNT_WIDE"
+
+# Task-controlled accepted-evidence registry (Correction 03 / DSB-N1-002 /
+# DSB-STOP-001).  An evidence identity is "accepted" ONLY when it is a value
+# in this frozenset.  This set is changed only by an authorized, reviewed
+# code change -- NEVER by a caller-provided argument at run time.  It
+# currently holds exactly the two spec-fixed accepted N=1 evidence
+# identities named by DSB-N1-002 of the controlling specification:
+#   PROJECT_STATE_CHECKPOINT_2026_09_01_KALSHI_DEMO_SUBACCOUNT1_EMPIRICAL_QUALIFICATION.md
+#     sha256 = 879d311420d2f6a4e2c20b8f96e8107f3753a30923f0e2afdfb7f5668bcb9068
+#   EXECUTABLE_FILL_ISOLATION_RESULT.json
+#     sha256 = da301946c745b6ccac321a71e97683375bca9e103b649906c95999bc5587e360
+# A future subaccount's route/completeness evidence gets its own identity
+# added here by the task that separately accepts it.
+_N1_CANONICAL_EMPIRICAL_CHECKPOINT_SHA256 = (
+    "879d311420d2f6a4e2c20b8f96e8107f3753a30923f0e2afdfb7f5668bcb9068"
+)
+_N1_EXECUTABLE_FILL_ISOLATION_RESULT_SHA256 = (
+    "da301946c745b6ccac321a71e97683375bca9e103b649906c95999bc5587e360"
+)
+# Correction 04 accepted empirical inputs (R1-B03-P01 / R1-B03-P02).
+#   P01  KALSHI_DEMO_SUBACCOUNT1_SUBACCOUNT_WIDE_COMPLETENESS_DIAGNOSTIC_01_RESULT.json
+#        bytes = 36076 ; sha256 = aeb07275f62ce295a131a07c5d2c9604728be58b416a9ff1d3d7517c8d0d6138
+#        -- NEGATIVE completeness evidence: proves that OMITTING exchange_index
+#        does NOT prove all-index enumeration.  It may NEVER satisfy a positive
+#        completeness / index-domain / settlement predicate.
+#   P02  KALSHI_DEMO_SUBACCOUNT1_EXCHANGE_INDEX_DOMAIN_COMPLETENESS_DIAGNOSTIC_02_RESULT.json
+#        bytes = 26321 ; sha256 = 2fc189b2a807a6c22ab3e71e41a6cfa66415e3bda87e6c8e66c3eb6e8029c69b
+#        -- POSITIVE interface-capability evidence: qualifies the exact dynamic
+#        /exchange/status index-domain + explicit per-index orders/fills/
+#        positions read capability AND the exact accepted N1 controlled
+#        retained-position settlement-reconciliation.  Its HISTORICAL economic
+#        rows may NEVER mint current writer eligibility -- current release
+#        always requires a fresh dynamically enumerated read set.
+_P01_NEGATIVE_COMPLETENESS_EVIDENCE_SHA256 = (
+    "aeb07275f62ce295a131a07c5d2c9604728be58b416a9ff1d3d7517c8d0d6138"
+)
+_P02_INDEX_DOMAIN_ENUMERATION_EVIDENCE_SHA256 = (
+    "2fc189b2a807a6c22ab3e71e41a6cfa66415e3bda87e6c8e66c3eb6e8029c69b"
+)
+_TASK_CONTROLLED_ACCEPTED_EVIDENCE_SHA256 = frozenset({
+    _N1_CANONICAL_EMPIRICAL_CHECKPOINT_SHA256,
+    _N1_EXECUTABLE_FILL_ISOLATION_RESULT_SHA256,
+    _P01_NEGATIVE_COMPLETENESS_EVIDENCE_SHA256,
+    _P02_INDEX_DOMAIN_ENUMERATION_EVIDENCE_SHA256,
+})
+# Identities that are NEGATIVE evidence -- present in the outer registry only
+# so they can be explicitly RECOGNISED and REFUSED by every positive role.
+_NEGATIVE_COMPLETENESS_EVIDENCE_SHA256 = frozenset({
+    _P01_NEGATIVE_COMPLETENESS_EVIDENCE_SHA256,
+})
+# Role-specific accepted-evidence sets.  Registry membership alone is NOT
+# sufficient -- every positive predicate consults ONLY its own role set.
+#
+# Correction 02 (DSB-N1-002 / DSB-STOP-001) narrows these decisively for the
+# current N1 domain:
+#   * the N1 canonical empirical checkpoint is ROUTE / PRE-STACK evidence only;
+#   * the N1 executable-fill-isolation result is ROUTE / PRE-STACK evidence
+#     only and is NOT bound into ANY positive completeness role;
+#   * ``static_positive_completeness_theorem_evidence`` is EMPTY -- current
+#     N1 Path B is UNAVAILABLE.  An empty static positive set is valid and
+#     MUST NOT cause a legacy-hash substitution.
+_ACCEPTED_ROUTE_EVIDENCE_SHA256 = frozenset({
+    _N1_CANONICAL_EMPIRICAL_CHECKPOINT_SHA256,
+})
+# DSB-RISK-004 Path B / DSB-N1-002: no accepted static positive completeness
+# theorem instance exists for current N1.  The Path-B *structure* remains
+# supported (future domains), but nothing is accepted into it now.
+_ACCEPTED_STATIC_POSITIVE_COMPLETENESS_EVIDENCE_SHA256: frozenset = frozenset()
+_ACCEPTED_INDEX_DOMAIN_ENUMERATION_EVIDENCE_SHA256 = frozenset({
+    _P02_INDEX_DOMAIN_ENUMERATION_EVIDENCE_SHA256,
+})
+_ACCEPTED_SETTLEMENT_RECONCILIATION_EVIDENCE_SHA256 = frozenset({
+    _P02_INDEX_DOMAIN_ENUMERATION_EVIDENCE_SHA256,
+})
+# DSB-DOMAIN-002 / DSB-BUDGET-001.
+#
+# ``_ACTIVE_EXCHANGE_INDEX_VALUE_MAX`` is a per-VALUE ceiling only: an
+# individual validated ``exchange_index`` is a bounded exact non-negative int
+# ``0 <= value <= 2147483647``.  It is NOT a P02-derived "highest allowed
+# index"; a domain member value of 17 or 2147483647 is perfectly valid.
+#
+# The number of UNIQUE indices in one current domain is a separate COUNT
+# bound: 1..8 inclusive.  A ninth unique index fails closed BEFORE the first
+# per-index portfolio traversal (DYNAMIC_READ_STATUS_DOMAIN_BOUND_EXCEEDED).
+# P02 empirically observed [0,1,2,3]; that is a fixture, never a compiled
+# domain / allowlist, and no category / ticker determines a shard or index.
+_ACTIVE_EXCHANGE_INDEX_VALUE_MAX = 2147483647
+_ACTIVE_EXCHANGE_INDEX_ENTRY_MIN = 1
+_ACTIVE_EXCHANGE_INDEX_ENTRY_MAX = 8
+_ACTIVE_INDEX_DOMAIN_ENUMERATION_SOURCE_V1 = "KALSHI_DEMO_DYNAMIC_EXCHANGE_STATUS_INDEX_DOMAIN_V1"
+_ACCEPTED_PROVENANCE_CLASSES = ("PROJECT_EVIDENCE_RECORDED", "INDEPENDENTLY_VERIFIED")
+
+# Private construction key: an ``ActiveDomainAcceptedEvidenceContractV1`` can
+# be built ONLY by an in-module onboarding constructor (currently
+# ``n1_accepted_evidence_contract``).  A caller cannot construct one directly
+# for any domain -- so a future subaccount cannot "self-accept" its own
+# evidence by instantiating a dataclass.
+_ACCEPTED_EVIDENCE_CONTRACT_KEY = object()
+
+
+def _canonical_evidence_tuple(
+    values: object, *, role_allowed: "frozenset", role: str, allow_empty: bool = False,
+) -> "Tuple[str, ...]":
+    """Sorted, de-duplicated tuple of 64-hex identities that are ALL present
+    in the task-controlled accepted-evidence registry AND in the exact
+    ROLE-SPECIFIC accepted set ``role_allowed`` (registry membership alone is
+    not sufficient).  A NEGATIVE-evidence identity (e.g. P01) can never
+    appear in a positive role.  Anything else -> the contract is invalid
+    (fails closed); a caller cannot introduce a new 'accepted' identity here.
+
+    Correction 02: ``allow_empty=True`` permits an EMPTY tuple, which is the
+    valid current-N1 state for the static positive completeness role
+    (DSB-N1-002).  An empty set never triggers a legacy-hash fallback."""
+    if type(values) not in (tuple, list, frozenset, set):
+        raise RunnerError(
+            RunnerFailureCode.ACTIVE_ACCEPTED_EVIDENCE_CONTRACT_INVALID, detail=role + " accepted-evidence set type")
+    out = sorted({v for v in values})
+    if not out:
+        if allow_empty:
+            return ()
+        raise RunnerError(
+            RunnerFailureCode.ACTIVE_ACCEPTED_EVIDENCE_CONTRACT_INVALID, detail=role + " accepted-evidence identity format")
+    if any(not _is_hex64(v) for v in out):
+        raise RunnerError(
+            RunnerFailureCode.ACTIVE_ACCEPTED_EVIDENCE_CONTRACT_INVALID, detail=role + " accepted-evidence identity format")
+    if any(v in _NEGATIVE_COMPLETENESS_EVIDENCE_SHA256 for v in out):
+        raise RunnerError(
+            RunnerFailureCode.ACTIVE_ACCEPTED_EVIDENCE_CONTRACT_INVALID,
+            detail=role + " accepted-evidence set contains a negative-evidence identity")
+    if any(v not in _TASK_CONTROLLED_ACCEPTED_EVIDENCE_SHA256 for v in out):
+        raise RunnerError(
+            RunnerFailureCode.ACTIVE_ACCEPTED_EVIDENCE_CONTRACT_INVALID,
+            detail=role + " evidence identity not in the task-controlled accepted registry")
+    if any(v not in role_allowed for v in out):
+        raise RunnerError(
+            RunnerFailureCode.ACTIVE_ACCEPTED_EVIDENCE_CONTRACT_INVALID,
+            detail=role + " evidence identity not accepted for this role")
+    return tuple(out)
+
+
+def _validate_retained_bootstrap_position(
+    value: object, *, conflict_domain_ref: str,
+) -> "Mapping[str, object] | None":
+    """Correction 04 R06: an accepted-evidence contract may declare exactly
+    one immutable retained-bootstrap-position fact for its domain (ticker,
+    exchange_index, floor_contracts, conflict_domain_ref).  ``None`` means the
+    domain has no retained bootstrap position.  The historical bootstrap
+    inception is NOT rewritten -- this only names the fact that must be
+    settlement-reconciled by a fresh current read set before it stops
+    contributing to current risk."""
+    if value is None:
+        return None
+    if not isinstance(value, Mapping):
+        raise RunnerError(RunnerFailureCode.ACTIVE_ACCEPTED_EVIDENCE_CONTRACT_INVALID, detail="retained bootstrap position type")
+    ticker = value.get("ticker")
+    idx = value.get("exchange_index")
+    floor_raw = value.get("floor_contracts_fp")
+    ref = value.get("conflict_domain_ref")
+    if (
+        set(value) != {"ticker", "exchange_index", "floor_contracts_fp", "conflict_domain_ref"}
+        or type(ticker) is not str or _TICKER_PATTERN.fullmatch(ticker) is None
+        or type(idx) is not int or type(idx) is bool or idx < 0
+        or type(floor_raw) is not str
+        or ref != conflict_domain_ref
+    ):
+        raise RunnerError(RunnerFailureCode.ACTIVE_ACCEPTED_EVIDENCE_CONTRACT_INVALID, detail="retained bootstrap position fields")
+    try:
+        floor = Decimal(floor_raw)
+    except InvalidOperation as exc:
+        raise RunnerError(RunnerFailureCode.ACTIVE_ACCEPTED_EVIDENCE_CONTRACT_INVALID, detail="retained bootstrap floor value") from exc
+    if not floor.is_finite() or floor <= 0:
+        raise RunnerError(RunnerFailureCode.ACTIVE_ACCEPTED_EVIDENCE_CONTRACT_INVALID, detail="retained bootstrap floor range")
+    return {"ticker": ticker, "exchange_index": idx, "floor_contracts_fp": floor_raw, "conflict_domain_ref": ref}
+
+
+@dataclass(frozen=True, slots=True)
+class ActiveDomainAcceptedEvidenceContractV1:
+    """DSB-N1-002 / DSB-STOP-001 / DSB-RISK-004: a trusted immutable
+    onboarding/config contract that binds -- BEFORE any active Gate-B/C/D run
+    -- the exact accepted route-evidence and completeness-evidence identities
+    for ONE active execution domain.
+
+    It is not caller-forgeable for an arbitrary domain: it can be built ONLY
+    via an in-module onboarding constructor (``n1_accepted_evidence_contract``)
+    holding ``_ACCEPTED_EVIDENCE_CONTRACT_KEY``, and every bound identity MUST
+    already be in ``_TASK_CONTROLLED_ACCEPTED_EVIDENCE_SHA256`` (changed only
+    by a reviewed code change).  A future subaccount has no such onboarding
+    constructor / anchor, so its runtime cannot be built and the active path
+    fails closed (DOMAIN_ROUTE_SEMANTICS_UNQUALIFIED /
+    SUBACCOUNT_WIDE_COMPLETENESS_UNPROVEN)."""
+
+    environment: str
+    account_scope_ref: str
+    conflict_domain_ref: str
+    subaccount: int
+    selected_exchange_index: int
+    account_wide_source_classification: str
+    accepted_route_evidence_sha256: "Tuple[str, ...]"
+    accepted_completeness_evidence_sha256: "Tuple[str, ...]"
+    accepted_index_domain_enumeration_evidence_sha256: "Tuple[str, ...]"
+    accepted_settlement_reconciliation_evidence_sha256: "Tuple[str, ...]"
+    index_domain_enumeration_source: str
+    # Correction 06 (BLOCK-05-02): a COUNT bound only -- the maximum number of
+    # UNIQUE current exchange indices.  There is NO maximum-index-VALUE field.
+    dynamic_exchange_index_entry_max: int
+    retained_bootstrap_position: "Mapping[str, object] | None"
+    accepted_provenance_class: str
+    contract_identity_sha256: str = field(init=False, default="")
+
+    def __init__(
+        self, key: object, *, environment: str, account_scope_ref: str, conflict_domain_ref: str,
+        subaccount: int, selected_exchange_index: int, account_wide_source_classification: str,
+        accepted_route_evidence_sha256: "Tuple[str, ...]",
+        accepted_completeness_evidence_sha256: "Tuple[str, ...]",
+        accepted_index_domain_enumeration_evidence_sha256: "Tuple[str, ...]",
+        accepted_settlement_reconciliation_evidence_sha256: "Tuple[str, ...]",
+        index_domain_enumeration_source: str,
+        dynamic_exchange_index_entry_max: int,
+        retained_bootstrap_position: "Mapping[str, object] | None",
+        accepted_provenance_class: str,
+    ) -> None:
+        if key is not _ACCEPTED_EVIDENCE_CONTRACT_KEY:
+            raise RunnerError(
+                RunnerFailureCode.ACTIVE_ACCEPTED_EVIDENCE_CONTRACT_INVALID,
+                detail="accepted-evidence contract has no in-module onboarding constructor for this domain")
+        if (
+            environment != "KALSHI_DEMO"
+            or type(account_scope_ref) is not str or not account_scope_ref
+            or type(conflict_domain_ref) is not str or not conflict_domain_ref
+            or type(subaccount) is not int or type(subaccount) is bool or not 0 <= subaccount <= 63
+            or type(selected_exchange_index) is not int or type(selected_exchange_index) is bool
+            or not 0 <= selected_exchange_index <= _ACTIVE_EXCHANGE_INDEX_VALUE_MAX
+            or account_wide_source_classification != _ACCOUNT_WIDE_SOURCE_CLASSIFICATION_V1
+            or index_domain_enumeration_source != _ACTIVE_INDEX_DOMAIN_ENUMERATION_SOURCE_V1
+            # Correction 06: exact built-in int, bool prohibited, count bound in
+            # [1, 8].  The selected index is validated later as a MEMBER of the
+            # observed domain -- never as ``<= dynamic_exchange_index_entry_max``.
+            or type(dynamic_exchange_index_entry_max) is not int
+            or type(dynamic_exchange_index_entry_max) is bool
+            or not _ACTIVE_EXCHANGE_INDEX_ENTRY_MIN <= dynamic_exchange_index_entry_max <= _ACTIVE_EXCHANGE_INDEX_ENTRY_MAX
+            or accepted_provenance_class not in _ACCEPTED_PROVENANCE_CLASSES
+        ):
+            raise RunnerError(
+                RunnerFailureCode.ACTIVE_ACCEPTED_EVIDENCE_CONTRACT_INVALID, detail="contract fields")
+        route = _canonical_evidence_tuple(
+            accepted_route_evidence_sha256, role_allowed=_ACCEPTED_ROUTE_EVIDENCE_SHA256, role="route")
+        # Correction 02 DSB-N1-002 / DSB-RISK-004: the static positive
+        # completeness role is a SEPARATE, currently EMPTY accepted set.  An
+        # empty tuple is valid and is the current N1 state (Path B UNAVAILABLE).
+        completeness = _canonical_evidence_tuple(
+            accepted_completeness_evidence_sha256,
+            role_allowed=_ACCEPTED_STATIC_POSITIVE_COMPLETENESS_EVIDENCE_SHA256,
+            role="static-positive-completeness-theorem", allow_empty=True)
+        index_domain = _canonical_evidence_tuple(
+            accepted_index_domain_enumeration_evidence_sha256,
+            role_allowed=_ACCEPTED_INDEX_DOMAIN_ENUMERATION_EVIDENCE_SHA256, role="index-domain-enumeration")
+        settlement = _canonical_evidence_tuple(
+            accepted_settlement_reconciliation_evidence_sha256,
+            role_allowed=_ACCEPTED_SETTLEMENT_RECONCILIATION_EVIDENCE_SHA256, role="settlement-reconciliation")
+        retained = _validate_retained_bootstrap_position(retained_bootstrap_position, conflict_domain_ref=conflict_domain_ref)
+        object.__setattr__(self, "environment", environment)
+        object.__setattr__(self, "account_scope_ref", account_scope_ref)
+        object.__setattr__(self, "conflict_domain_ref", conflict_domain_ref)
+        object.__setattr__(self, "subaccount", subaccount)
+        object.__setattr__(self, "selected_exchange_index", selected_exchange_index)
+        object.__setattr__(self, "account_wide_source_classification", account_wide_source_classification)
+        object.__setattr__(self, "accepted_route_evidence_sha256", route)
+        object.__setattr__(self, "accepted_completeness_evidence_sha256", completeness)
+        object.__setattr__(self, "accepted_index_domain_enumeration_evidence_sha256", index_domain)
+        object.__setattr__(self, "accepted_settlement_reconciliation_evidence_sha256", settlement)
+        object.__setattr__(self, "index_domain_enumeration_source", index_domain_enumeration_source)
+        object.__setattr__(self, "dynamic_exchange_index_entry_max", dynamic_exchange_index_entry_max)
+        object.__setattr__(self, "retained_bootstrap_position", retained)
+        object.__setattr__(self, "accepted_provenance_class", accepted_provenance_class)
+        object.__setattr__(self, "contract_identity_sha256", sha256_hex(canonical_json_bytes({
+            # Correction 06: bumped schema tag + the count-bound key so the
+            # contract identity commits to the NEW field name/value.
+            "schema": "ARB_ACTIVE_DOMAIN_ACCEPTED_EVIDENCE_CONTRACT_V3",
+            "environment": environment,
+            "account_scope_ref": account_scope_ref,
+            "conflict_domain_ref": conflict_domain_ref,
+            "subaccount": subaccount,
+            "selected_exchange_index": selected_exchange_index,
+            "account_wide_source_classification": account_wide_source_classification,
+            "accepted_route_evidence_sha256": list(route),
+            "accepted_completeness_evidence_sha256": list(completeness),
+            "accepted_index_domain_enumeration_evidence_sha256": list(index_domain),
+            "accepted_settlement_reconciliation_evidence_sha256": list(settlement),
+            "index_domain_enumeration_source": index_domain_enumeration_source,
+            "dynamic_exchange_index_entry_max": dynamic_exchange_index_entry_max,
+            "retained_bootstrap_position": retained,
+            "accepted_provenance_class": accepted_provenance_class,
+        })))
+
+    def applies_to(self, domain_binding: "ExecutionDomainBindingV1") -> bool:
+        return (
+            self.environment == domain_binding.environment
+            and self.account_scope_ref == domain_binding.account_scope_ref
+            and self.conflict_domain_ref == domain_binding.conflict_domain_ref
+            and self.subaccount == domain_binding.subaccount
+            and self.selected_exchange_index == domain_binding.exchange_index
+        )
+
+
+def n1_accepted_evidence_contract(
+    domain_binding: "ExecutionDomainBindingV1",
+) -> ActiveDomainAcceptedEvidenceContractV1:
+    """Explicit N=1 onboarding object (NOT generic active code).
+
+    Correction 02 (DSB-N1-002 / DSB-STOP-001): binds ONLY the N1 canonical
+    empirical checkpoint into the ROUTE / pre-stack role.  The
+    executable-fill-isolation result is route/pre-stack evidence and is NOT
+    bound into any positive completeness role.  The static positive
+    completeness set is EMPTY -- current N1 Path B is UNAVAILABLE and current
+    writer-release completeness is a fresh trusted Path A read-set only.
+    Raises DOMAIN_ROUTE_SEMANTICS_UNQUALIFIED for any non-N=1 domain."""
+    if (
+        type(domain_binding) is not ExecutionDomainBindingV1
+        or domain_binding.environment != "KALSHI_DEMO"
+        or domain_binding.account_scope_ref != CURRENT_ACCOUNT_SCOPE_REF
+        or domain_binding.subaccount != 1
+        or domain_binding.exchange_index != 0
+    ):
+        raise RunnerError(
+            RunnerFailureCode.DOMAIN_ROUTE_SEMANTICS_UNQUALIFIED,
+            detail="N=1 accepted-evidence contract requested for a non-N=1 domain")
+    return ActiveDomainAcceptedEvidenceContractV1(
+        _ACCEPTED_EVIDENCE_CONTRACT_KEY,
+        environment=domain_binding.environment,
+        account_scope_ref=domain_binding.account_scope_ref,
+        conflict_domain_ref=domain_binding.conflict_domain_ref,
+        subaccount=1,
+        selected_exchange_index=0,
+        account_wide_source_classification=_ACCOUNT_WIDE_SOURCE_CLASSIFICATION_V1,
+        accepted_route_evidence_sha256=(_N1_CANONICAL_EMPIRICAL_CHECKPOINT_SHA256,),
+        # DSB-N1-002: static_positive_completeness_theorem_evidence = EMPTY.
+        accepted_completeness_evidence_sha256=(),
+        accepted_index_domain_enumeration_evidence_sha256=(
+            _P02_INDEX_DOMAIN_ENUMERATION_EVIDENCE_SHA256,
+        ),
+        accepted_settlement_reconciliation_evidence_sha256=(
+            _P02_INDEX_DOMAIN_ENUMERATION_EVIDENCE_SHA256,
+        ),
+        index_domain_enumeration_source=_ACTIVE_INDEX_DOMAIN_ENUMERATION_SOURCE_V1,
+        # Correction 06 (BLOCK-05-02): a COUNT bound of exactly 8 unique
+        # current exchange indices.  There is no maximum-index-value concept
+        # for current N1; P02's observed [0,1,2,3] is a fixture only, and the
+        # fifth through eighth stable index is traversed automatically.
+        dynamic_exchange_index_entry_max=_ACTIVE_EXCHANGE_INDEX_ENTRY_MAX,
+        # DSB-N1-003 / P02: the historical controlled N=1 retained position.
+        retained_bootstrap_position={
+            "ticker": "KXAAAGASD-26SEP02-4.1200",
+            "exchange_index": 0,
+            "floor_contracts_fp": "1.00",
+            "conflict_domain_ref": domain_binding.conflict_domain_ref,
+        },
+        accepted_provenance_class="PROJECT_EVIDENCE_RECORDED",
+    )
+
+
+@dataclass(frozen=True, slots=True)
+class ActiveRouteQualificationV1:
+    """DSB-QUOTE-004 / DSB-N1-001 / DSB-FUTURE-003 / DSB-STOP-002: an
+    explicit, immutable, qualified route-policy contract bound BEFORE Gate D.
+
+    The active execution code never infers a route policy from
+    ``subaccount == 1`` (or any literal).  A route policy is valid only when
+    this contract's provenance/qualification identity proves the selected
+    ``exchange_index_wire_policy`` applies to the exact
+    environment/account-scope/subaccount/exchange_index/operation-request
+    shape.  A future subaccount without its own qualification is
+    ``DOMAIN_ROUTE_SEMANTICS_UNQUALIFIED``."""
+
+    environment: str
+    account_scope_ref: str
+    subaccount: int
+    exchange_index: int
+    operation_request_shape_id: str
+    exchange_index_wire_policy: str  # one of _ROUTE_WIRE_POLICIES
+    qualification_evidence_identity_sha256: str  # identity of an accepted evidence artifact (64 hex)
+    provenance_class: str  # PROJECT_EVIDENCE_RECORDED | INDEPENDENTLY_VERIFIED
+
+    def __post_init__(self) -> None:
+        if (
+            self.environment != "KALSHI_DEMO"
+            or type(self.account_scope_ref) is not str or not self.account_scope_ref
+            or type(self.subaccount) is not int or type(self.subaccount) is bool or not 0 <= self.subaccount <= 63
+            or type(self.exchange_index) is not int or type(self.exchange_index) is bool or self.exchange_index < 0
+            or self.operation_request_shape_id != _ACTIVE_ROUTE_REQUEST_SHAPE_ID
+            or self.exchange_index_wire_policy not in _ROUTE_WIRE_POLICIES
+            or type(self.qualification_evidence_identity_sha256) is not str
+            or len(self.qualification_evidence_identity_sha256) != 64
+            or any(ch not in "0123456789abcdef" for ch in self.qualification_evidence_identity_sha256)
+            or self.provenance_class not in ("PROJECT_EVIDENCE_RECORDED", "INDEPENDENTLY_VERIFIED")
+        ):
+            raise RunnerError(RunnerFailureCode.DOMAIN_ROUTE_SEMANTICS_UNQUALIFIED, detail="route qualification malformed")
+
+    def applies_to(self, *, domain_binding: ExecutionDomainBindingV1, operation_request_shape_id: str) -> bool:
+        return (
+            self.operation_request_shape_id == operation_request_shape_id
+            and self.environment == domain_binding.environment
+            and self.account_scope_ref == domain_binding.account_scope_ref
+            and self.subaccount == domain_binding.subaccount
+            and self.exchange_index == domain_binding.exchange_index
+        )
+
+
+def _require_active_route_qualified(runtime: "ExperimentRunnerRuntimeV2") -> None:
+    """DSB-STOP-002: an active route must be explicitly qualified for its
+    exact domain before permit issuance / transport."""
+    rq = runtime.route_qualification
+    if type(rq) is not ActiveRouteQualificationV1 or not rq.applies_to(
+        domain_binding=runtime.domain_binding, operation_request_shape_id=_ACTIVE_ROUTE_REQUEST_SHAPE_ID,
+    ):
+        raise RunnerError(RunnerFailureCode.DOMAIN_ROUTE_SEMANTICS_UNQUALIFIED, detail="active route not qualified for this domain")
+    _require_active_accepted_evidence_contract(
+        runtime.accepted_evidence_contract, domain_binding=runtime.domain_binding, route_qualification=rq,
+    )
+
+
+def _require_active_accepted_evidence_contract(
+    contract: "ActiveDomainAcceptedEvidenceContractV1 | None",
+    *,
+    domain_binding: "ExecutionDomainBindingV1",
+    route_qualification: "ActiveRouteQualificationV1",
+) -> None:
+    """Correction 03 F4: the route qualification's evidence identity +
+    provenance class must be members of a separately bound, trusted,
+    domain-scoped ``ActiveDomainAcceptedEvidenceContractV1`` -- not merely a
+    syntactically valid 64-hex string.  A future subaccount without an
+    accepted route-evidence contract is ``DOMAIN_ROUTE_SEMANTICS_UNQUALIFIED``
+    before permit issuance / transport."""
+    if type(contract) is not ActiveDomainAcceptedEvidenceContractV1 or not contract.applies_to(domain_binding):
+        raise RunnerError(
+            RunnerFailureCode.DOMAIN_ROUTE_SEMANTICS_UNQUALIFIED,
+            detail="accepted-evidence contract missing or does not apply to this active domain")
+    if (
+        route_qualification.qualification_evidence_identity_sha256 not in contract.accepted_route_evidence_sha256
+        or route_qualification.provenance_class != contract.accepted_provenance_class
+    ):
+        raise RunnerError(
+            RunnerFailureCode.DOMAIN_ROUTE_SEMANTICS_UNQUALIFIED,
+            detail="route qualification evidence identity/provenance not separately accepted for this domain")
+
+
+@dataclass(frozen=True, slots=True)
+class ExperimentRunnerRuntimeV2:
+    """Active revision-2 execution-domain runtime (DSB-WRITER-003 / DSB-RUN-001).
+
+    Preserves every non-legacy ``ExperimentRunnerRuntimeV1`` dependency field
+    with the same names/types/semantics, but replaces the V1 legacy contract
+    field with an immutable ``ExecutionDomainBindingV1`` + matching
+    ``ActiveExecutionDomainContractV1``.  It cannot define, store, default,
+    embed, or indirectly carry ``LegacyIncidentContract``, and it does not
+    accept an independently caller-selected Gate-D incident id or active
+    writer-proof id -- both derive only from ``active_contract``.
+    """
+
+    normal_gate: WriterEligibilityGate
+    emergency_gate: EmergencyCancelGate
+    read_local_safety_state: Callable[[], OpenResult]
+    read_trusted_release_evidence: Callable[[], "TrustedReleaseEvidenceReadResultV1"]
+    send_operation_request: Callable[
+        [RunnerOperation, PreparedRunnerOperationRequestV1, OperationDeadlineV1], RawOperationResponseV1
+    ]
+    fetch_orderbook: Callable[[str, OperationDeadlineV1], object]
+    monotonic_clock_ns: Callable[[], int]
+    wall_clock: Callable[[], datetime]
+    uuid_factory: Callable[[], "uuid.UUID"]
+    risk_config: RiskLimitConfigV1 | None
+    experiment_absolute_end_monotonic_ns: int
+    authority_binding: AuthorityNamespaceBinding
+    canonical_repository_root: str
+    expected_ledger_path: str | None
+    domain_binding: ExecutionDomainBindingV1
+    active_contract: ActiveExecutionDomainContractV1
+    route_qualification: "ActiveRouteQualificationV1 | None" = None
+    accepted_evidence_contract: "ActiveDomainAcceptedEvidenceContractV1 | None" = None
+    strategy_instance_id: str | None = None
+    minimum_spread_usd: Decimal | None = None
+    gate_d_capability_reference_id: str | None = None
+    normal_write_transport: Callable[[object], object] | None = None
+    # Correction 02 DSB-DYN-004: the ONLY synthetic-current-read seam.  It is
+    # ``None`` for every production runtime -- ``build_active_experiment_
+    # runner_runtime_v2`` (the production factory) has NO parameter for it, so
+    # production Stage 3E always binds ``_LiveTrustedDynamicReadAcquirerV2``.
+    # A dedicated module-private test factory
+    # (``_build_active_experiment_runner_runtime_v2_for_test``) is the only
+    # thing that may set it, and only to a ``_FakeTrustedDynamicReadAcquirerV2``.
+    # It is not an arbitrary acquirer/callback slot.
+    trusted_dynamic_read_acquirer_test_seam: object | None = None
+
+    def __post_init__(self) -> None:
+        if type(self.normal_gate) is not WriterEligibilityGate:
+            raise RunnerError(RunnerFailureCode.PROCESS_INSTANCE_ID_INCONSISTENT, detail="normal_gate type")
+        if type(self.emergency_gate) is not EmergencyCancelGate:
+            raise RunnerError(RunnerFailureCode.PROCESS_INSTANCE_ID_INCONSISTENT, detail="emergency_gate type")
+        if self.normal_gate.process_instance_id != self.emergency_gate.process_instance_id:
+            raise RunnerError(RunnerFailureCode.PROCESS_INSTANCE_ID_INCONSISTENT, detail="gate mismatch")
+        if (
+            not callable(self.read_local_safety_state) or not callable(self.send_operation_request)
+            or not callable(self.fetch_orderbook) or not callable(self.read_trusted_release_evidence)
+        ):
+            raise RunnerError(RunnerFailureCode.PRE_RELEASE_CAPABILITY_NOT_AUTHORIZED, detail="runtime callables")
+        if type(self.authority_binding) is not AuthorityNamespaceBinding:
+            raise RunnerError(RunnerFailureCode.PRE_RELEASE_CAPABILITY_NOT_AUTHORIZED, detail="authority_binding type")
+        if type(self.canonical_repository_root) is not str or not self.canonical_repository_root:
+            raise RunnerError(RunnerFailureCode.PRE_RELEASE_CAPABILITY_NOT_AUTHORIZED, detail="canonical_repository_root")
+        if self.expected_ledger_path is not None and type(self.expected_ledger_path) is not str:
+            raise RunnerError(RunnerFailureCode.PRE_RELEASE_CAPABILITY_NOT_AUTHORIZED, detail="expected_ledger_path type")
+        # An ``ExperimentRunnerRuntimeV2`` may never carry a legacy contract in
+        # any field: a ``LegacyIncidentContract`` presented anywhere fails
+        # during local construction, before repository-state release
+        # evaluation and before venue access (DSB-WRITER-003).
+        for value in (self.domain_binding, self.active_contract, self.risk_config,
+                      self.accepted_evidence_contract,
+                      self.strategy_instance_id, self.minimum_spread_usd,
+                      self.gate_d_capability_reference_id, self.normal_write_transport):
+            if type(value) is LegacyIncidentContract:
+                raise RunnerError(
+                    RunnerFailureCode.PRE_RELEASE_CAPABILITY_NOT_AUTHORIZED,
+                    detail=FailureCode.ACTIVE_PATH_LEGACY_CONTRACT_REJECTED.value,
+                )
+        if type(self.domain_binding) is not ExecutionDomainBindingV1:
+            raise RunnerError(RunnerFailureCode.PRE_RELEASE_CAPABILITY_NOT_AUTHORIZED, detail="domain_binding type")
+        if type(self.active_contract) is not ActiveExecutionDomainContractV1:
+            raise RunnerError(RunnerFailureCode.PRE_RELEASE_CAPABILITY_NOT_AUTHORIZED, detail="active_contract type")
+        b, c = self.domain_binding, self.active_contract
+        if (
+            b.binding_id != c.domain_binding_id
+            or b.binding_sha256 != c.domain_binding_sha256
+            or b.venue != c.venue
+            or b.environment != c.environment
+            or b.account_scope_ref != c.account_scope_ref
+            or b.subaccount != c.subaccount
+            or b.exchange_index != c.exchange_index
+            or b.conflict_domain_ref != c.conflict_domain_ref
+        ):
+            raise RunnerError(
+                RunnerFailureCode.PRE_RELEASE_CAPABILITY_NOT_AUTHORIZED,
+                detail=FailureCode.ACTIVE_DOMAIN_CONTRACT_MISMATCH.value,
+            )
+        # DSB-QUOTE-004 / DSB-STOP-002: an active runtime is unusable without
+        # an explicit route qualification that applies to its exact domain.
+        # There is NO N=1 (or any) literal route-selection rule in this code.
+        if type(self.route_qualification) is not ActiveRouteQualificationV1 or not self.route_qualification.applies_to(
+            domain_binding=self.domain_binding, operation_request_shape_id=_ACTIVE_ROUTE_REQUEST_SHAPE_ID,
+        ):
+            raise RunnerError(
+                RunnerFailureCode.DOMAIN_ROUTE_SEMANTICS_UNQUALIFIED,
+                detail="route_qualification missing or does not apply to this domain",
+            )
+        # Correction 03 / DSB-N1-002 / DSB-STOP-001: the accepted route- and
+        # completeness-evidence identities MUST be bound BEFORE this run by a
+        # trusted immutable acceptance contract for this exact active domain.
+        # The route qualification's evidence identity + provenance class are
+        # only valid when they are in that separately bound accepted set --
+        # a syntactically valid 64-hex string is not enough.
+        _require_active_accepted_evidence_contract(
+            self.accepted_evidence_contract, domain_binding=self.domain_binding,
+            route_qualification=self.route_qualification,
+        )
+        # DSB-DYN-004: the production constructor MUST NOT accept an arbitrary
+        # acquirer/callback.  The only accepted non-``None`` value is a
+        # ``_FakeTrustedDynamicReadAcquirerV2`` supplied by the module-private
+        # test factory.
+        seam = self.trusted_dynamic_read_acquirer_test_seam
+        if seam is not None and not isinstance(seam, _FakeTrustedDynamicReadAcquirerV2):
+            raise RunnerError(
+                RunnerFailureCode.TRUSTED_DYNAMIC_READ_CAPABILITY_INVALID,
+                detail="ExperimentRunnerRuntimeV2 does not accept an arbitrary trusted-read acquirer/callback",
+            )
+
+    @property
+    def gate_d_incident_id(self) -> str:
+        """Derived only from the active contract; never caller-selectable."""
+        return self.active_contract.incident_id
+
+    @property
+    def gate_d_writer_proof_id(self) -> str:
+        return self.active_contract.writer_proof_id
+
+    @property
+    def contract(self):  # pragma: no cover - explicit non-legacy guard
+        raise RunnerError(
+            RunnerFailureCode.PRE_RELEASE_CAPABILITY_NOT_AUTHORIZED,
+            detail=FailureCode.ACTIVE_PATH_LEGACY_CONTRACT_REJECTED.value,
+        )
+
+    def active_venue_binding_v2(
+        self, *, exchange_index_wire_policy: str, adapter_payload_schema_id: str,
+    ) -> VenueBindingV2:
+        return VenueBindingV2(
+            domain_binding=self.domain_binding,
+            exchange_index_wire_policy=exchange_index_wire_policy,
+            adapter_payload_schema_id=adapter_payload_schema_id,
+        )
+
+
+def build_active_experiment_runner_runtime_v2(
+    *,
+    normal_gate: WriterEligibilityGate,
+    emergency_gate: EmergencyCancelGate,
+    send_operation_request,
+    fetch_orderbook,
+    monotonic_clock_ns,
+    wall_clock,
+    uuid_factory,
+    risk_config: RiskLimitConfigV1 | None,
+    experiment_absolute_end_monotonic_ns: int,
+    authority_binding: AuthorityNamespaceBinding,
+    canonical_repository_root: str,
+    expected_ledger_path: str | None,
+    domain_binding: ExecutionDomainBindingV1,
+    active_contract: ActiveExecutionDomainContractV1,
+    route_qualification: ActiveRouteQualificationV1,
+    accepted_evidence_contract: ActiveDomainAcceptedEvidenceContractV1,
+    strategy_instance_id: str | None = None,
+    minimum_spread_usd: Decimal | None = None,
+    gate_d_capability_reference_id: str | None = None,
+    normal_write_transport=None,
+) -> ExperimentRunnerRuntimeV2:
+    """Build an active runtime whose Gate-B local/trusted reads are bound to
+    the active revision-2 helpers with the exact same ``active_contract``
+    (DSB-WRITER-005: ``read_local_safety_state`` / ``read_trusted_release_
+    evidence`` MUST be the active helpers, not the legacy projection path)."""
+    if type(active_contract) is LegacyIncidentContract:
+        raise RunnerError(
+            RunnerFailureCode.PRE_RELEASE_CAPABILITY_NOT_AUTHORIZED,
+            detail=FailureCode.ACTIVE_PATH_LEGACY_CONTRACT_REJECTED.value,
+        )
+
+    def _read_local_safety_state() -> OpenResult:
+        return read_active_local_safety_state_v1(
+            authority_binding,
+            canonical_repository_root=canonical_repository_root,
+            active_contract=active_contract,
+            expected_ledger_path=expected_ledger_path,
+        )
+
+    def _read_trusted_release_evidence() -> "TrustedReleaseEvidenceReadResultV1":
+        return read_active_trusted_release_evidence_projection_v1(
+            authority_binding,
+            canonical_repository_root=canonical_repository_root,
+            active_contract=active_contract,
+            expected_ledger_path=expected_ledger_path,
+        )
+
+    return ExperimentRunnerRuntimeV2(
+        normal_gate=normal_gate,
+        emergency_gate=emergency_gate,
+        read_local_safety_state=_read_local_safety_state,
+        read_trusted_release_evidence=_read_trusted_release_evidence,
+        send_operation_request=send_operation_request,
+        fetch_orderbook=fetch_orderbook,
+        monotonic_clock_ns=monotonic_clock_ns,
+        wall_clock=wall_clock,
+        uuid_factory=uuid_factory,
+        risk_config=risk_config,
+        experiment_absolute_end_monotonic_ns=experiment_absolute_end_monotonic_ns,
+        authority_binding=authority_binding,
+        canonical_repository_root=canonical_repository_root,
+        expected_ledger_path=expected_ledger_path,
+        domain_binding=domain_binding,
+        active_contract=active_contract,
+        route_qualification=route_qualification,
+        accepted_evidence_contract=accepted_evidence_contract,
+        strategy_instance_id=strategy_instance_id,
+        minimum_spread_usd=minimum_spread_usd,
+        gate_d_capability_reference_id=gate_d_capability_reference_id,
+        normal_write_transport=normal_write_transport,
+    )
+
+
 @dataclass(frozen=True, slots=True)
 class ExperimentRunnerInvocationV1:
     """Exact bound invocation identity (Spec 03 ER-ARCH-001, narrowed to the
@@ -1177,13 +2010,16 @@ class PreReleaseReadCapabilityV1:
     __slots__ = (
         "__process_instance_id", "__ticker", "__runtime", "__consumed",
         "__lock", "__ordinal", "__authoritative_order_ids", "__budget_max", "__exhausted_code",
+        "__domain_subaccount", "__domain_exchange_index",
     )
 
     def __init__(
         self, issuance_key: object, *, process_instance_id: str, ticker: str,
-        runtime: ExperimentRunnerRuntimeV1,
+        runtime: "ExperimentRunnerRuntimeV1 | ExperimentRunnerRuntimeV2",
         budget_max: int = PRE_RELEASE_READ_REQUEST_MAX,
         exhausted_code: "RunnerFailureCode | None" = None,
+        domain_subaccount: int = _SUBACCOUNT,
+        domain_exchange_index: int = _EXCHANGE_INDEX,
     ) -> None:
         if issuance_key is not _CAPABILITY_ISSUANCE_KEY:
             raise RunnerError(RunnerFailureCode.CAPABILITY_ISSUANCE_UNAUTHORIZED)
@@ -1191,13 +2027,19 @@ class PreReleaseReadCapabilityV1:
             raise RunnerError(RunnerFailureCode.PRE_RELEASE_CAPABILITY_NOT_AUTHORIZED, detail="process_instance_id")
         if type(ticker) is not str or _TICKER_PATTERN.fullmatch(ticker) is None:
             raise RunnerError(RunnerFailureCode.MARKET_IDENTITY_INVALID, detail="capability ticker")
-        if type(runtime) is not ExperimentRunnerRuntimeV1:
+        if type(runtime) not in (ExperimentRunnerRuntimeV1, ExperimentRunnerRuntimeV2):
             raise RunnerError(RunnerFailureCode.PRE_RELEASE_CAPABILITY_NOT_AUTHORIZED, detail="runtime type")
         if type(budget_max) is not int or budget_max <= 0:
             raise RunnerError(RunnerFailureCode.PRE_RELEASE_CAPABILITY_NOT_AUTHORIZED, detail="budget_max")
+        if type(domain_subaccount) is not int or type(domain_subaccount) is bool or not 0 <= domain_subaccount <= 63:
+            raise RunnerError(RunnerFailureCode.PRE_RELEASE_CAPABILITY_NOT_AUTHORIZED, detail="domain_subaccount")
+        if type(domain_exchange_index) is not int or type(domain_exchange_index) is bool or domain_exchange_index < 0:
+            raise RunnerError(RunnerFailureCode.PRE_RELEASE_CAPABILITY_NOT_AUTHORIZED, detail="domain_exchange_index")
         self.__process_instance_id = process_instance_id
         self.__ticker = ticker
         self.__runtime = runtime
+        self.__domain_subaccount = domain_subaccount
+        self.__domain_exchange_index = domain_exchange_index
         self.__consumed = 0
         self.__ordinal = 0
         self.__lock = threading.Lock()
@@ -1252,6 +2094,7 @@ class PreReleaseReadCapabilityV1:
         prepared = prepare_runner_operation_request(
             operation, path_parameters=path_parameters, ticker=ticker, order_id=order_id,
             cursor=cursor, request_ordinal=ordinal, uuid_factory=self.__runtime.uuid_factory,
+            subaccount=self.__domain_subaccount, exchange_index=self.__domain_exchange_index,
         )
         check_deadline(deadline, self.__runtime.monotonic_clock_ns(), checkpoint=DeadlineCheckpoint.AFTER_PREPARATION)
         check_deadline(deadline, self.__runtime.monotonic_clock_ns(), checkpoint=DeadlineCheckpoint.AFTER_SIGNING)
@@ -1269,7 +2112,10 @@ class PreReleaseReadCapabilityV1:
         parsed, deadline = self._send_generic(
             RunnerOperation.GET_MARKET, path_parameters={"ticker": self.__ticker}, ticker=self.__ticker,
         )
-        result = _parse_market(parsed, expected_ticker=self.__ticker)
+        result = _parse_market(
+            parsed, expected_ticker=self.__ticker,
+            expected_exchange_index=self.__domain_exchange_index,
+        )
         check_deadline(deadline, self.__runtime.monotonic_clock_ns(), checkpoint=DeadlineCheckpoint.AFTER_SCHEMA_VALIDATION)
         check_deadline(deadline, self.__runtime.monotonic_clock_ns(), checkpoint=DeadlineCheckpoint.AFTER_RESULT_CONSTRUCTION)
         return result
@@ -1308,7 +2154,11 @@ class PreReleaseReadCapabilityV1:
             raise RunnerError(RunnerFailureCode.RESPONSE_SCHEMA_INVALID, detail="cursor type")
         validated: list[WorkingOrderV1] = []
         for row in orders_raw:
-            order = _working_order_from_raw(row, expected_ticker=self.__ticker)
+            order = _working_order_from_raw(
+                row, expected_ticker=self.__ticker,
+                expected_subaccount=self.__domain_subaccount,
+                expected_exchange_index=self.__domain_exchange_index,
+            )
             if order is not None:
                 validated.append(order)
                 self.__admit_order_id(order.order_id)
@@ -1331,7 +2181,11 @@ class PreReleaseReadCapabilityV1:
             _require_field(obj, "order", code=RunnerFailureCode.RESPONSE_SCHEMA_INVALID),
             code=RunnerFailureCode.RESPONSE_SCHEMA_INVALID, detail="order shape",
         )
-        confirmed = _working_order_from_raw(order_row, expected_ticker=self.__ticker)
+        confirmed = _working_order_from_raw(
+            order_row, expected_ticker=self.__ticker,
+            expected_subaccount=self.__domain_subaccount,
+            expected_exchange_index=self.__domain_exchange_index,
+        )
         if confirmed is None or confirmed.order_id != order_id:
             raise RunnerError(RunnerFailureCode.ORDER_IDENTITY_INVALID, detail="order_id mismatch")
         check_deadline(deadline, self.__runtime.monotonic_clock_ns(), checkpoint=DeadlineCheckpoint.AFTER_SCHEMA_VALIDATION)
@@ -1356,7 +2210,11 @@ class PreReleaseReadCapabilityV1:
         if response_cursor is not None and type(response_cursor) is not str:
             raise RunnerError(RunnerFailureCode.RESPONSE_SCHEMA_INVALID, detail="cursor type")
         validated = tuple(
-            _fill_from_raw(row, expected_ticker=self.__ticker, expected_order_id=order_id)
+            _fill_from_raw(
+                row, expected_ticker=self.__ticker, expected_order_id=order_id,
+                expected_subaccount=self.__domain_subaccount,
+                expected_exchange_index=self.__domain_exchange_index,
+            )
             for row in fills_raw
         )
         check_deadline(deadline, self.__runtime.monotonic_clock_ns(), checkpoint=DeadlineCheckpoint.AFTER_SCHEMA_VALIDATION)
@@ -1406,7 +2264,7 @@ class PreReleaseReadCapabilityV1:
                 _require_field(row, "exchange_index", code=RunnerFailureCode.RESPONSE_SCHEMA_INVALID),
                 code=RunnerFailureCode.MARKET_IDENTITY_INVALID, detail="position exchange_index type",
             )
-            if row_ticker != self.__ticker or row_subaccount != _SUBACCOUNT or row_exchange_index != _EXCHANGE_INDEX:
+            if row_ticker != self.__ticker or row_subaccount != self.__domain_subaccount or row_exchange_index != self.__domain_exchange_index:
                 raise RunnerError(RunnerFailureCode.MARKET_IDENTITY_INVALID, detail="position scope mismatch")
             validated.append(row)
         check_deadline(deadline, self.__runtime.monotonic_clock_ns(), checkpoint=DeadlineCheckpoint.AFTER_SCHEMA_VALIDATION)
@@ -1415,16 +2273,28 @@ class PreReleaseReadCapabilityV1:
 
 
 def _issue_pre_release_read_capability(
-    *, process_instance_id: str, ticker: str, runtime: ExperimentRunnerRuntimeV1,
+    *, process_instance_id: str, ticker: str,
+    runtime: "ExperimentRunnerRuntimeV1 | ExperimentRunnerRuntimeV2",
 ) -> PreReleaseReadCapabilityV1:
     """Module-private factory (Marco Blocker 01): the sole route by which a
     usable `PreReleaseReadCapabilityV1` is ever constructed. Called only by
-    `run_pre_release_read_phase`, and only after Stage 3C's local
-    release-impossibility gate has already returned no blocking reasons --
-    i.e. the successful Stage-3C -> Stage-3D transition IS the issuance
-    event. A caller cannot reach this factory by importing the module; it
-    is not exported and is not part of `__all__`."""
+    `run_pre_release_read_phase` / `run_pre_release_read_phase_v2`, and only
+    after Stage 3C's local release-impossibility gate has already returned no
+    blocking reasons -- i.e. the successful Stage-3C -> Stage-3D transition
+    IS the issuance event. A caller cannot reach this factory by importing
+    the module; it is not exported and is not part of `__all__`.
 
+    For a revision-2 active runtime the capability's private reads are scoped
+    to ``runtime.domain_binding`` (DSB-RUN-002): no literal 0/1 in the active
+    request/validation path."""
+
+    if type(runtime) is ExperimentRunnerRuntimeV2:
+        return PreReleaseReadCapabilityV1(
+            _CAPABILITY_ISSUANCE_KEY, process_instance_id=process_instance_id, ticker=ticker,
+            runtime=runtime,
+            domain_subaccount=runtime.domain_binding.subaccount,
+            domain_exchange_index=runtime.domain_binding.exchange_index,
+        )
     return PreReleaseReadCapabilityV1(
         _CAPABILITY_ISSUANCE_KEY, process_instance_id=process_instance_id, ticker=ticker, runtime=runtime,
     )
@@ -1655,7 +2525,15 @@ _BLOCKING_RESTART_CLASSIFICATIONS = frozenset({
 })
 
 
-def _local_impossibility_reasons(opened: OpenResult, *, writer_proof_id: str) -> Tuple[str, ...]:
+_ACTIVE_LOCAL_COMPLETENESS_VALUES = frozenset({
+    "COMPLETE_CONTROLLED_FROM_INCEPTION", "COMPLETE_KNOWN_NONEMPTY_PRESTACK",
+})
+
+
+def _local_impossibility_reasons(
+    opened: OpenResult, *, writer_proof_id: str,
+    allowed_completeness: frozenset = frozenset({"COMPLETE"}),
+) -> Tuple[str, ...]:
     """Evaluate the full local release-impossibility predicate set (Spec 04
     ER04-PRE-004; dispatch Implementation-02 Section 8) against a
     `SafetyProjection` obtained from the read-only local-state open.
@@ -1664,13 +2542,17 @@ def _local_impossibility_reasons(opened: OpenResult, *, writer_proof_id: str) ->
     proceed); any nonempty tuple means Stage 3C must stop before Stage 3D
     -- before capability issuance, credential resolution, signing, or any
     venue transport/budget consumption.
+
+    ``allowed_completeness`` defaults to the legacy single ``{"COMPLETE"}``
+    set (V1 behaviour byte-identical).  The revision-2 active path passes
+    the two accepted bootstrap-completeness values instead.
     """
 
     if opened.projection is None:
         return (f"LOCAL_STATE_UNAVAILABLE:{opened.failure_code.value if opened.failure_code else 'UNKNOWN'}",)
     projection = opened.projection
     reasons: list[str] = []
-    if projection.history_completeness != "COMPLETE":
+    if projection.history_completeness not in allowed_completeness:
         reasons.append(f"HISTORY_COMPLETENESS:{projection.history_completeness}")
     if projection.protected_unresolved_legacy_write_count != 0:
         reasons.append("PROTECTED_UNRESOLVED_LEGACY_WRITE_COUNT_NONZERO")
@@ -1971,6 +2853,24 @@ def assemble_release_evaluation_state(
     01) -- never from raw, untrusted Stage-3E venue output.
     """
 
+    return _assemble_release_state_core(
+        incident_id=invocation.incident_id,
+        writer_proof_id=invocation.writer_proof_id,
+        runtime=runtime, truth=truth, projection=projection,
+    )
+
+
+def _assemble_release_state_core(
+    *, incident_id: str, writer_proof_id: str,
+    runtime: "ExperimentRunnerRuntimeV1 | ExperimentRunnerRuntimeV2",
+    truth: AuthoritativeReadTruthV1, projection: SafetyProjection,
+) -> ReleaseEvaluationStateV1:
+    """Shared Stage-3F assembly body.  ``incident_id`` / ``writer_proof_id``
+    are the only contract-derived inputs; for the legacy path they come from
+    the ``ExperimentRunnerInvocationV1``, for the active path they come only
+    from ``runtime.active_contract`` (DSB-WRITER-003).  Everything else is
+    identical, so a single implementation serves both without ambiguity."""
+
     process_instance_id = runtime.normal_gate.process_instance_id
 
     # Stage 3F step 1: trusted read-only projection (T1). The projection
@@ -2037,8 +2937,8 @@ def assemble_release_evaluation_state(
 
     return ReleaseEvaluationStateV1(
         process_instance_id=process_instance_id,
-        incident_id=invocation.incident_id,
-        writer_proof_id=invocation.writer_proof_id,
+        incident_id=incident_id,
+        writer_proof_id=writer_proof_id,
         risk_config=runtime.risk_config,
         risk_snapshot=risk_snapshot,
         reconciliation_snapshot=reconciliation,
@@ -2619,8 +3519,100 @@ class GateDLoopResultV1:
     cycle_results: Tuple[GateDCycleResultV1, ...]
 
 
+def _runtime_domain_scope(
+    runtime: "ExperimentRunnerRuntimeV1 | ExperimentRunnerRuntimeV2",
+) -> Tuple[int, int]:
+    """Resolve the private-read domain scope: the legacy source-bound
+    SUBACCOUNT=0 route for a V1 runtime, or the immutable
+    ``runtime.domain_binding`` for a V2 runtime (DSB-RUN-002).  Exact static
+    branch on runtime type -- no ambiguous dual-contract acceptance."""
+    if type(runtime) is ExperimentRunnerRuntimeV2:
+        return runtime.domain_binding.subaccount, runtime.domain_binding.exchange_index
+    return _SUBACCOUNT, _EXCHANGE_INDEX
+
+
+def _require_active_gate_d_pre_adapter_equality(
+    *, runtime: "ExperimentRunnerRuntimeV2", locked: "LockedLedger",
+    assessment, permit, prepared_domain_metadata: Mapping[str, object],
+    prepared_request_sha256: str,
+    active_trusted_read_set_id: str | None = None,
+) -> "str | None":
+    """DSB-WRITER-008 final pre-adapter gate for an active ordinary
+    CREATE/CANCEL.  Requires exact equality among runtime.active_contract /
+    domain_binding, the locked revision-2 ledger domain, the assessment, the
+    NormalWriterPermit (including a recomputed permit_domain_commitment
+    digest), the prepared-request logical domain metadata, and -- Correction
+    02 -- the trusted dynamic read-set identity carried by both the
+    assessment and the permit.  Returns the most-specific mismatch
+    classification string, or ``None`` when every identity is exact.  A
+    non-``None`` return MUST short-circuit BEFORE transport."""
+    c = runtime.active_contract
+    b = runtime.domain_binding
+    meta = locked.ledger_meta
+
+    # 1. locked revision-2 ledger domain.
+    if (
+        type(meta) is not ActiveLedgerMeta
+        or meta.execution_domain_binding_id != c.domain_binding_id
+        or meta.execution_domain_binding_sha256 != c.domain_binding_sha256
+        or meta.conflict_domain_ref != c.conflict_domain_ref
+        or meta.environment_classification != c.environment
+        or locked.conflict_domain_ref != c.conflict_domain_ref
+    ):
+        return "ACTIVE_DOMAIN_CONTRACT_MISMATCH"
+
+    expected = {
+        "domain_binding_id": c.domain_binding_id, "domain_binding_sha256": c.domain_binding_sha256,
+        "active_contract_id": c.contract_id, "active_contract_sha256": c.contract_sha256,
+        "bootstrap_contract_sha256": c.bootstrap_contract_sha256,
+        "conflict_domain_ref": c.conflict_domain_ref, "account_scope_ref": c.account_scope_ref,
+        "subaccount": c.subaccount, "exchange_index": c.exchange_index,
+        "environment": c.environment, "incident_id": c.incident_id, "writer_proof_id": c.writer_proof_id,
+    }
+    if (
+        type(active_trusted_read_set_id) is not str
+        or active_trusted_read_set_id[:6] != "ADRS2_"
+        or len(active_trusted_read_set_id) != 70
+    ):
+        return "ACTIVE_DOMAIN_PERMIT_MISMATCH"
+    expected["trusted_dynamic_read_set_id"] = active_trusted_read_set_id
+    if (b.subaccount != c.subaccount or b.exchange_index != c.exchange_index
+            or b.binding_sha256 != c.domain_binding_sha256 or b.conflict_domain_ref != c.conflict_domain_ref):
+        return "ACTIVE_DOMAIN_CONTRACT_MISMATCH"
+
+    # 2. assessment active commitments.
+    for key, value in expected.items():
+        if getattr(assessment, key, None) != value:
+            return "ACTIVE_DOMAIN_PERMIT_MISMATCH"
+
+    # 3. NormalWriterPermit active commitments + recomputed digest.
+    for key, value in expected.items():
+        if getattr(permit, key, None) != value:
+            return "NORMAL_WRITER_PERMIT_DOMAIN_MISMATCH"
+    if (
+        permit.permit_domain_commitment_sha256 is None
+        or permit.permit_domain_commitment_sha256 != compute_permit_domain_commitment_sha256(permit)
+    ):
+        return "NORMAL_WRITER_PERMIT_DOMAIN_MISMATCH"
+
+    # 4. prepared-request logical domain metadata.
+    if (
+        prepared_domain_metadata.get("subaccount") != c.subaccount
+        or prepared_domain_metadata.get("exchange_index") != c.exchange_index
+        or prepared_domain_metadata.get("conflict_domain_ref") != c.conflict_domain_ref
+        or prepared_domain_metadata.get("domain_binding_sha256") != c.domain_binding_sha256
+        or prepared_domain_metadata.get("domain_binding_id") != c.domain_binding_id
+        or prepared_domain_metadata.get("canonical_request_sha256") != prepared_request_sha256
+        or prepared_domain_metadata.get("exchange_index_wire_policy") != runtime.route_qualification.exchange_index_wire_policy
+    ):
+        return "ACTIVE_DOMAIN_PERMIT_MISMATCH"
+
+    return None
+
+
 def _issue_gate_d_read_capability(
-    *, process_instance_id: str, ticker: str, runtime: ExperimentRunnerRuntimeV1,
+    *, process_instance_id: str, ticker: str,
+    runtime: "ExperimentRunnerRuntimeV1 | ExperimentRunnerRuntimeV2",
 ) -> PreReleaseReadCapabilityV1:
     """Module-private factory for Gate D's Stage-4+ read capability: the
     exact same closed six-operation, REST-only, read-only surface as
@@ -2633,9 +3625,11 @@ def _issue_gate_d_read_capability(
     preconditions (a genuine Stage-3K `NORMAL_WRITER` result) have already
     passed."""
 
+    scope_subaccount, scope_exchange_index = _runtime_domain_scope(runtime)
     return PreReleaseReadCapabilityV1(
         _CAPABILITY_ISSUANCE_KEY, process_instance_id=process_instance_id, ticker=ticker, runtime=runtime,
         budget_max=GATE_D_READ_REQUEST_MAX, exhausted_code=RunnerFailureCode.GATE_D_READ_BUDGET_EXHAUSTED,
+        domain_subaccount=scope_subaccount, domain_exchange_index=scope_exchange_index,
     )
 
 
@@ -2822,6 +3816,7 @@ def _gate_d_price_decimal(value: object) -> Decimal | None:
 def _gate_d_validate_terminal_order_identity(
     order_row: Mapping[str, object], *, expected_order_id: str, expected_client_order_id: str,
     expected_ticker: str, expected_outcome_side: str, expected_yes_price: Decimal,
+    expected_subaccount: int = _SUBACCOUNT, expected_exchange_index: int = _EXCHANGE_INDEX,
 ) -> str | None:
     """Correction 04 Defect 03 / Correction 05 (dispatch Sections 14-23) /
     Correction 06 (dispatch Sections 13-16): an authoritative terminal row
@@ -2865,12 +3860,12 @@ def _gate_d_validate_terminal_order_identity(
     subaccount = order_row.get("subaccount")
     if type(subaccount) is not int:
         return "SUBACCOUNT_MISSING_OR_MALFORMED"
-    if subaccount != _SUBACCOUNT:
+    if subaccount != expected_subaccount:
         return "SUBACCOUNT_MISMATCH"
     exchange_index = order_row.get("exchange_index")
     if type(exchange_index) is not int:
         return "EXCHANGE_INDEX_MISSING_OR_MALFORMED"
-    if exchange_index != _EXCHANGE_INDEX:
+    if exchange_index != expected_exchange_index:
         return "EXCHANGE_INDEX_MISMATCH"
     status = order_row.get("status")
     if status not in SUPPORTED_ORDER_STATUSES:
@@ -3083,8 +4078,8 @@ def _gate_d_extract_created_order_id(raw_response: object, *, expected_client_or
 
 def _gate_d_build_quote_plan(
     *,
-    runtime: ExperimentRunnerRuntimeV1,
-    invocation: ExperimentRunnerInvocationV1,
+    runtime: "ExperimentRunnerRuntimeV1 | ExperimentRunnerRuntimeV2",
+    invocation: "ExperimentRunnerInvocationV1 | ExperimentRunnerInvocationV2",
     truth: AuthoritativeReadTruthV1,
     reconstructions: Mapping[str, ReconstructedSlotOwnershipV1],
     projection: "SafetyProjection",
@@ -3169,12 +4164,13 @@ def _gate_d_execute_cancel(
     session_id: str,
     capability: PreReleaseReadCapabilityV1,
     adapter: NormalWriteAdapter,
-    runtime: ExperimentRunnerRuntimeV1,
-    invocation: ExperimentRunnerInvocationV1,
+    runtime: "ExperimentRunnerRuntimeV1 | ExperimentRunnerRuntimeV2",
+    invocation: "ExperimentRunnerInvocationV1 | ExperimentRunnerInvocationV2",
     projection: "SafetyProjection",
     truth: AuthoritativeReadTruthV1,
     reconstruction: ReconstructedSlotOwnershipV1,
     selected: SelectedWriteV1,
+    active_trusted_read_set_id: str | None = None,
 ) -> GateDWriteOutcomeV1:
     """Exact Spec-06/07 ordinary CANCEL send sequence: fresh economic proof
     (with load-bearing transformation-invariant validation, Correction 03
@@ -3213,12 +4209,19 @@ def _gate_d_execute_cancel(
     )
     freshness_deadline_monotonic_ns = now_ns + OPERATION_DEADLINE_MS * 1_000_000
 
+    active_commitment: "dict | None" = None
+    if type(runtime) is ExperimentRunnerRuntimeV2:
+        _require_active_route_qualified(runtime)
+        active_commitment = active_domain_commitment(runtime.active_contract, runtime.domain_binding)
+
     prepared = build_cancel_prepared_payload(
         request_id=request_id, environment="KALSHI_DEMO", venue_order_id=target_venue_order_id,
         client_order_id=working_order.client_order_id, adapter_payload_schema_id=_GATE_D_CANCEL_ADAPTER_PAYLOAD_SCHEMA_ID,
     )
     unresolved_exposure_usd = _gate_d_unresolved_exposure_usd(projection, truth)
     assessment = build_cancel_writer_eligibility_assessment(
+        active_domain_commitment=active_commitment,
+        trusted_dynamic_read_set_id=active_trusted_read_set_id,
         risk_assessment_id=f"ra_{runtime.uuid_factory().hex}", request_id=request_id,
         strategy_instance_id=runtime.strategy_instance_id, market_ticker=invocation.market_ticker,
         quote_slot=selected.quote_slot, quote_generation_id=working_order.quote_generation_id,
@@ -3287,6 +4290,27 @@ def _gate_d_execute_cancel(
     if runtime.monotonic_clock_ns() > permit.freshness_deadline_monotonic_ns:
         return _outcome(budget_charged=budget_charged, transport_invoked=False, classification="FRESHNESS_EXPIRED_BEFORE_ADAPTER")
 
+    # DSB-WRITER-008 final pre-adapter active-domain equality gate for the
+    # ordinary CANCEL path -- fail BEFORE transport on any mismatch.
+    if active_commitment is not None:
+        prepared_domain_metadata = {
+            "conflict_domain_ref": runtime.domain_binding.conflict_domain_ref,
+            "domain_binding_id": runtime.domain_binding.binding_id,
+            "domain_binding_sha256": runtime.domain_binding.binding_sha256,
+            "exchange_index": runtime.domain_binding.exchange_index,
+            "exchange_index_wire_policy": runtime.route_qualification.exchange_index_wire_policy,
+            "canonical_request_sha256": prepared["prepared_request_sha256"],
+            "subaccount": runtime.domain_binding.subaccount,
+        }
+        mismatch = _require_active_gate_d_pre_adapter_equality(
+            runtime=runtime, locked=locked, assessment=assessment, permit=permit,
+            prepared_domain_metadata=prepared_domain_metadata,
+            prepared_request_sha256=prepared["prepared_request_sha256"],
+            active_trusted_read_set_id=active_trusted_read_set_id,
+        )
+        if mismatch is not None:
+            return _outcome(budget_charged=budget_charged, transport_invoked=False, classification=mismatch)
+
     try:
         raw_response = adapter.invoke(permit, prepared)
     except Exception:
@@ -3337,10 +4361,12 @@ def _gate_d_execute_cancel(
         fresh_fills: Tuple[EconomicFillV1, ...] = ()
         # Correction 04 Defect 03: exact terminal-order identity/scope
         # validation before the row may contribute to closure at all.
+        _terminal_subaccount, _terminal_exchange_index = _runtime_domain_scope(runtime)
         identity_violation = _gate_d_validate_terminal_order_identity(
             order_row, expected_order_id=target_venue_order_id, expected_client_order_id=working_order.client_order_id,
             expected_ticker=invocation.market_ticker, expected_outcome_side=working_order.outcome_side,
             expected_yes_price=working_order.yes_price,
+            expected_subaccount=_terminal_subaccount, expected_exchange_index=_terminal_exchange_index,
         )
         if identity_violation is not None:
             classification = "TERMINAL_UNRECONCILED"
@@ -3418,8 +4444,8 @@ def _gate_d_execute_create(
     session_id: str,
     capability: PreReleaseReadCapabilityV1,
     adapter: NormalWriteAdapter,
-    runtime: ExperimentRunnerRuntimeV1,
-    invocation: ExperimentRunnerInvocationV1,
+    runtime: "ExperimentRunnerRuntimeV1 | ExperimentRunnerRuntimeV2",
+    invocation: "ExperimentRunnerInvocationV1 | ExperimentRunnerInvocationV2",
     projection: "SafetyProjection",
     truth: AuthoritativeReadTruthV1,
     reconstruction: ReconstructedSlotOwnershipV1,
@@ -3428,11 +4454,18 @@ def _gate_d_execute_create(
     quote_plan_sha256: str,
     plan_input_sha256: str,
     source_book_snapshot_sha256: str,
+    active_trusted_read_set_id: str | None = None,
 ) -> GateDWriteOutcomeV1:
     """Exact ordinary CREATE send sequence, structurally parallel to
     `_gate_d_execute_cancel`, reusing the unmodified canonical
     `build_writer_eligibility_assessment` candidate-risk projection
-    (MM-RISK-002..006, not reopened by Spec 06/07)."""
+    (MM-RISK-002..006, not reopened by Spec 06/07).
+
+    Correction 02 DSB-WRITER-007 / DSB-QUOTE-003: for an active runtime the
+    assessment/permit lineage also commits to
+    ``active_trusted_read_set_id`` -- the exact ``ADRS2_<64hex>`` identity of
+    the fresh trusted dynamic read-set that supported the current release --
+    so a permit cannot be carried across current-read acquisitions."""
 
     if desired is None or type(desired) is not DesiredQuoteV1:
         raise RunnerError(RunnerFailureCode.GATE_D_STRATEGY_INPUT_CONSTRUCTION_FAILED, detail="missing desired for CREATE_NEW")
@@ -3456,7 +4489,24 @@ def _gate_d_execute_create(
     )
     unresolved_exposure_usd = _gate_d_unresolved_exposure_usd(projection, truth)
 
-    venue_binding = VenueBindingV1(adapter_payload_schema_id=_GATE_D_CREATE_ADAPTER_PAYLOAD_SCHEMA_ID)
+    # Active revision-2 path binds the venue create route to the immutable
+    # domain binding (VenueBindingV2, DSB-QUOTE-001..003).  The
+    # exchange-index wire policy comes ONLY from the explicit, pre-Gate-D
+    # ``runtime.route_qualification`` -- there is no ``subaccount == 1`` (or
+    # any) literal route-selection rule (DSB-QUOTE-004 / DSB-STOP-002); an
+    # unqualified route fails closed before permit issuance.  The legacy
+    # path keeps the source-bound SUBACCOUNT=0 VenueBindingV1 unchanged.
+    active_commitment: "dict | None" = None
+    if type(runtime) is ExperimentRunnerRuntimeV2:
+        _require_active_route_qualified(runtime)
+        active_commitment = active_domain_commitment(runtime.active_contract, runtime.domain_binding)
+        venue_binding: "VenueBindingV1 | VenueBindingV2" = VenueBindingV2(
+            domain_binding=runtime.domain_binding,
+            exchange_index_wire_policy=runtime.route_qualification.exchange_index_wire_policy,
+            adapter_payload_schema_id=_GATE_D_CREATE_ADAPTER_PAYLOAD_SCHEMA_ID,
+        )
+    else:
+        venue_binding = VenueBindingV1(adapter_payload_schema_id=_GATE_D_CREATE_ADAPTER_PAYLOAD_SCHEMA_ID)
     expiration_time = int(runtime.wall_clock().timestamp()) + _GATE_D_CREATE_EXPIRATION_WINDOW_SECONDS
     body = build_mm_create_order_body(
         ticker=invocation.market_ticker, client_order_id=client_order_id, venue_side=desired.venue_side,
@@ -3478,6 +4528,8 @@ def _gate_d_execute_create(
         reconciliation_freshness_identity_sha256=reconciliation_freshness_identity_sha256,
         risk_state_epoch=projection.risk_state_epoch,
         freshness_deadline_monotonic_ns=now_ns + OPERATION_DEADLINE_MS * 1_000_000,
+        active_domain_commitment=active_commitment,
+        trusted_dynamic_read_set_id=active_trusted_read_set_id,
     )
     outer_intent = build_mm_create_intent_payload(
         execution_attempt_id=execution_attempt_id, conflict_domain_ref=conflict_domain_ref,
@@ -3513,6 +4565,24 @@ def _gate_d_execute_create(
 
     if runtime.monotonic_clock_ns() > permit.freshness_deadline_monotonic_ns:
         return _outcome(budget_charged=budget_charged, transport_invoked=False, classification="FRESHNESS_EXPIRED_BEFORE_ADAPTER")
+
+    # DSB-WRITER-008 final pre-adapter active-domain equality gate: exact
+    # equality among runtime.active_contract/domain_binding, the locked
+    # revision-2 ledger domain, the assessment, the NormalWriterPermit, and
+    # the prepared-request logical domain metadata -- fail BEFORE transport
+    # with the most specific active-domain/permit mismatch classification.
+    if active_commitment is not None:
+        prepared_domain_metadata = active_prepared_request_domain_metadata(
+            venue_binding, canonical_request_sha256=prepared["prepared_request_sha256"],
+        )
+        mismatch = _require_active_gate_d_pre_adapter_equality(
+            runtime=runtime, locked=locked, assessment=assessment, permit=permit,
+            prepared_domain_metadata=prepared_domain_metadata,
+            prepared_request_sha256=prepared["prepared_request_sha256"],
+            active_trusted_read_set_id=active_trusted_read_set_id,
+        )
+        if mismatch is not None:
+            return _outcome(budget_charged=budget_charged, transport_invoked=False, classification=mismatch)
 
     try:
         raw_response = adapter.invoke(permit, prepared)
@@ -3551,9 +4621,9 @@ def _gate_d_execute_create(
 
 
 def run_gate_d_ordinary_decision_loop(
-    stage3: "_Stage3ReleaseAndNormalWriterResultV1",
-    runtime: ExperimentRunnerRuntimeV1,
-    invocation: ExperimentRunnerInvocationV1,
+    stage3: "_Stage3ReleaseAndNormalWriterResultV1 | _Stage3ActiveReleaseAndNormalWriterResultV1",
+    runtime: "ExperimentRunnerRuntimeV1 | ExperimentRunnerRuntimeV2",
+    invocation: "ExperimentRunnerInvocationV1 | ExperimentRunnerInvocationV2",
     *,
     decision_cycle_max: int = GATE_D_DECISION_CYCLE_MAX,
 ) -> GateDLoopResultV1:
@@ -3570,8 +4640,9 @@ def run_gate_d_ordinary_decision_loop(
     always the real `evaluate_market_maker_input` pipeline
     (`_gate_d_build_quote_plan`) -- there is no substitutable seam."""
 
-    if type(stage3) is not _Stage3ReleaseAndNormalWriterResultV1:
+    if type(stage3) not in (_Stage3ReleaseAndNormalWriterResultV1, _Stage3ActiveReleaseAndNormalWriterResultV1):
         raise RunnerError(RunnerFailureCode.GATE_D_ENTRY_PRECONDITION_FAILED, detail="stage3 type")
+    active_gate_d = type(stage3) is _Stage3ActiveReleaseAndNormalWriterResultV1
     acquisition = stage3.normal_writer_acquisition
     if (
         type(acquisition) is not NormalWriterAcquisition
@@ -3595,7 +4666,9 @@ def run_gate_d_ordinary_decision_loop(
         # rejects unconditionally.
         raise RunnerError(RunnerFailureCode.GATE_D_ENTRY_PRECONDITION_FAILED, detail="projection")
     if (
-        type(runtime) is not ExperimentRunnerRuntimeV1
+        type(runtime) not in (ExperimentRunnerRuntimeV1, ExperimentRunnerRuntimeV2)
+        or (active_gate_d and type(runtime) is not ExperimentRunnerRuntimeV2)
+        or (not active_gate_d and type(runtime) is not ExperimentRunnerRuntimeV1)
         or type(runtime.strategy_instance_id) is not str or not runtime.strategy_instance_id
         or type(runtime.minimum_spread_usd) is not Decimal
         or type(runtime.gate_d_incident_id) is not str or not runtime.gate_d_incident_id
@@ -3604,8 +4677,24 @@ def run_gate_d_ordinary_decision_loop(
         or type(runtime.risk_config) is not RiskLimitConfigV1
     ):
         raise RunnerError(RunnerFailureCode.GATE_D_ENTRY_PRECONDITION_FAILED, detail="runtime gate-d bindings")
-    if type(invocation) is not ExperimentRunnerInvocationV1:
+    if type(invocation) not in (ExperimentRunnerInvocationV1, ExperimentRunnerInvocationV2):
         raise RunnerError(RunnerFailureCode.GATE_D_ENTRY_PRECONDITION_FAILED, detail="invocation type")
+    # An active Stage-3 result MUST arrive with a V2 runtime whose active
+    # contract matches, and vice-versa (no cross-path entry).
+    if active_gate_d and runtime.active_contract.incident_id != stage3.active_contract.incident_id:
+        raise RunnerError(RunnerFailureCode.GATE_D_ENTRY_PRECONDITION_FAILED, detail="active contract mismatch")
+    # Correction 02 DSB-WRITER-007 / DSB-QUOTE-003 / DSB-RUN-006: the fresh
+    # trusted dynamic read-set identity that supported the active Stage-3K
+    # release flows into every ordinary Gate-D assessment/permit lineage.
+    active_trusted_read_set_id: str | None = None
+    if active_gate_d:
+        active_trusted_read_set_id = stage3.trusted_dynamic_read_set_id
+        if (
+            type(active_trusted_read_set_id) is not str
+            or active_trusted_read_set_id[:6] != "ADRS2_"
+            or len(active_trusted_read_set_id) != 70
+        ):
+            raise RunnerError(RunnerFailureCode.GATE_D_ENTRY_PRECONDITION_FAILED, detail="active stage-3 trusted read-set identity")
     if type(decision_cycle_max) is not int or not (0 < decision_cycle_max <= GATE_D_DECISION_CYCLE_MAX):
         raise RunnerError(RunnerFailureCode.GATE_D_ENTRY_PRECONDITION_FAILED, detail="decision_cycle_max")
 
@@ -3710,6 +4799,7 @@ def run_gate_d_ordinary_decision_loop(
                     locked=locked, session_id=session_id, capability=capability, adapter=adapter, runtime=runtime,
                     invocation=invocation, projection=live_projection, truth=truth,
                     reconstruction=reconstructions[selected.quote_slot], selected=selected,
+                    active_trusted_read_set_id=active_trusted_read_set_id,
                 )
                 if write_outcome.budget_charged:
                     ordinary_writes_sent += 1
@@ -3721,6 +4811,7 @@ def run_gate_d_ordinary_decision_loop(
                     desired=desired_by_slot[selected.quote_slot],
                     quote_plan_sha256=plan.plan_sha256, plan_input_sha256=plan.plan_input_sha256,
                     source_book_snapshot_sha256=plan.source_book_snapshot_sha256,
+                    active_trusted_read_set_id=active_trusted_read_set_id,
                 )
                 if write_outcome.budget_charged:
                     ordinary_writes_sent += 1
@@ -3738,4 +4829,3836 @@ def run_gate_d_ordinary_decision_loop(
         stop_reason=stop_reason, cycles_executed=len(cycle_results), reads_consumed=capability.requests_consumed,
         ordinary_writes_sent=ordinary_writes_sent, cleanup_cancels_sent=cleanup_cancels_sent,
         cycle_results=tuple(cycle_results),
+    )
+
+
+# ===========================================================================
+# Section 15 -- Revision-2 ACTIVE execution-domain Stage 3A-3K path
+# (KALSHI_DEMO_DYNAMIC_SUBACCOUNT_EXECUTION_DOMAIN_BINDING_AND_RISK_CONTROL
+# _SPEC_01_CORRECTION_02, DSB-WRITER-003..010 / DSB-DYN-001..006 /
+# DSB-OPS-001..012 / DSB-BUDGET-001..007 / DSB-DOMAIN/FRESH/PAGE /
+# DSB-READSET-001..005 / DSB-RISK-003..008 / DSB-READ-001..006 /
+# DSB-RUN-001..006).
+#
+# These are EXPLICIT V2 entrypoints/types.  They never accept a
+# LegacyIncidentContract or a V1 completion token; they derive incident/proof
+# only from runtime.active_contract; and they carry that one active_contract
+# object from Stage 3A through Stage 3K.  The legacy V1 path above is
+# untouched and remains the only path a LegacyIncidentContract can enter.
+# Correction 02: current Path-A truth is produced ONLY by the trusted dynamic
+# pre-release acquisition boundary -- ``deterministic self-hash !=
+# authoritative-source proof``.
+# ===========================================================================
+
+
+@dataclass(frozen=True, slots=True)
+class ExperimentRunnerInvocationV2:
+    """Active revision-2 bound invocation.  Unlike ExperimentRunnerInvocationV1
+    it carries NO caller-supplied incident/proof: those come only from
+    runtime.active_contract (DSB-WRITER-003)."""
+
+    invocation_id: str
+    market_ticker: str
+
+    def __post_init__(self) -> None:
+        for name in ("invocation_id", "market_ticker"):
+            value = getattr(self, name)
+            if type(value) is not str or value == "":
+                raise RunnerError(RunnerFailureCode.ACTIVE_GATE_ENTRY_PRECONDITION_FAILED, detail=name)
+        if _TICKER_PATTERN.fullmatch(self.market_ticker) is None:
+            raise RunnerError(RunnerFailureCode.MARKET_IDENTITY_INVALID, detail="active invocation ticker grammar")
+
+
+def _is_hex64(value: object) -> bool:
+    return type(value) is str and len(value) == 64 and all(ch in "0123456789abcdef" for ch in value)
+
+
+@dataclass(frozen=True, slots=True)
+class SubaccountWideCompletenessTheoremV1:
+    """DSB-RISK-004 path B: an accepted exact completeness theorem proving
+    that every non-selected exchange_index for the selected subaccount has
+    zero relevant economic state at the reconciliation cutoff.
+
+    It is accepted ONLY when it is identity-bound to a separately accepted
+    evidence artifact (``accepted_evidence_identity_sha256`` must be in the
+    caller's accepted-evidence set) AND its
+    ``reconciliation_cutoff_identity_sha256`` matches the current
+    reconciliation cutoff.  A caller-created dataclass with arbitrary values
+    is NOT sufficient acceptance evidence (DSB-STOP-001)."""
+
+    conflict_domain_ref: str
+    subaccount: int
+    selected_exchange_index: int
+    proven_zero_foreign_exchange_indices: Tuple[int, ...]
+    reconciliation_cutoff_identity_sha256: str
+    accepted_evidence_identity_sha256: str
+    provenance_class: str  # PROJECT_EVIDENCE_RECORDED | INDEPENDENTLY_VERIFIED
+
+    def __post_init__(self) -> None:
+        if (
+            type(self.conflict_domain_ref) is not str or not self.conflict_domain_ref
+            or type(self.subaccount) is not int or type(self.subaccount) is bool
+            or type(self.selected_exchange_index) is not int
+            or type(self.proven_zero_foreign_exchange_indices) is not tuple
+            or any(type(x) is not int or type(x) is bool or x < 0 for x in self.proven_zero_foreign_exchange_indices)
+            or self.selected_exchange_index in self.proven_zero_foreign_exchange_indices
+            or not _is_hex64(self.reconciliation_cutoff_identity_sha256)
+            or not _is_hex64(self.accepted_evidence_identity_sha256)
+            or self.provenance_class not in ("PROJECT_EVIDENCE_RECORDED", "INDEPENDENTLY_VERIFIED")
+        ):
+            raise RunnerError(RunnerFailureCode.SUBACCOUNT_WIDE_COMPLETENESS_UNPROVEN, detail="theorem malformed")
+
+
+def _canonical_account_wide_row(row: object) -> list:
+    """Deterministic canonical form of one account-wide row -- a sorted list
+    of ``[key, str(value)]`` pairs -- so a content hash over it COMMITS to
+    the full validated row content (Correction 03 F2 / F5), not just its
+    scope coordinates.  A non-mapping row is unpartitionable."""
+    if not isinstance(row, Mapping):
+        raise RunnerError(RunnerFailureCode.DOMAIN_SCOPE_RESPONSE_AMBIGUOUS, detail="account-wide row not a mapping")
+    return [[str(k), str(row[k])] for k in sorted(row.keys(), key=str)]
+
+
+@dataclass(frozen=True, slots=True)
+class ProvenAccountWideReadV1:
+    """DSB-RISK-004 path A carrier: a PROVEN complete authoritative
+    account-wide read (Correction 03 F2).
+
+    It is completeness evidence ONLY when, at use time
+    (``require_subaccount_wide_completeness``), it matches a separately bound
+    ``ActiveDomainAcceptedEvidenceContractV1`` for the exact active domain:
+      * ``request_classification`` is exactly ``"ACCOUNT_WIDE"`` -- an
+        account-wide (not selected-route) request;
+      * ``accepted_source_classification`` equals the contract's accepted
+        account-wide source classification;
+      * ``accepted_evidence_identity_sha256`` is one of the contract's
+        accepted completeness-evidence identities (i.e. a value in the
+        task-controlled accepted-evidence registry -- NOT a caller-labelled
+        64-hex string);
+      * ``pagination_exhausted`` is exactly ``True`` and it is bound to the
+        CURRENT reconciliation cutoff;
+      * ``account_scope_ref`` / ``subaccount`` equal the selected domain's.
+
+    ``account_wide_result_hash`` is COMPUTED here from every field + every
+    canonical row, so it changes when any row, pagination fact, scope fact,
+    or source identity changes; ``require_subaccount_wide_completeness``
+    recomputes and checks it.  A bare/empty caller object carrying only the
+    right current cutoff does not satisfy Path A.  An empty result proves
+    zero ONLY when it is itself the exact accepted, complete authoritative
+    account-wide result (i.e. it also passes the contract-bound checks)."""
+
+    request_classification: str
+    accepted_source_classification: str
+    accepted_evidence_identity_sha256: str
+    account_scope_ref: str
+    subaccount: int
+    pagination_exhausted: bool
+    reconciliation_cutoff_identity_sha256: str
+    position_rows: Tuple[Mapping[str, object], ...] = ()
+    working_order_rows: Tuple[Mapping[str, object], ...] = ()
+    fill_rows: Tuple[Mapping[str, object], ...] = ()
+    account_wide_result_hash: str = field(init=False, default="")
+
+    def __post_init__(self) -> None:
+        if (
+            self.request_classification != _ACCOUNT_WIDE_REQUEST_CLASSIFICATION
+            or type(self.accepted_source_classification) is not str or not self.accepted_source_classification
+            or not _is_hex64(self.accepted_evidence_identity_sha256)
+            or type(self.account_scope_ref) is not str or not self.account_scope_ref
+            or type(self.subaccount) is not int or type(self.subaccount) is bool or not 0 <= self.subaccount <= 63
+            or self.pagination_exhausted is not True
+            or not _is_hex64(self.reconciliation_cutoff_identity_sha256)
+            or type(self.position_rows) is not tuple
+            or type(self.working_order_rows) is not tuple
+            or type(self.fill_rows) is not tuple
+        ):
+            raise RunnerError(RunnerFailureCode.SUBACCOUNT_WIDE_COMPLETENESS_UNPROVEN, detail="proven account-wide read malformed")
+        object.__setattr__(self, "account_wide_result_hash", self._compute_result_hash())
+
+    def _compute_result_hash(self) -> str:
+        return sha256_hex(canonical_json_bytes({
+            "schema": "ARB_ACCOUNT_WIDE_AUTHORITATIVE_READ_RESULT_V1",
+            "request_classification": self.request_classification,
+            "accepted_source_classification": self.accepted_source_classification,
+            "accepted_evidence_identity_sha256": self.accepted_evidence_identity_sha256,
+            "account_scope_ref": self.account_scope_ref,
+            "subaccount": self.subaccount,
+            "pagination_exhausted": self.pagination_exhausted,
+            "reconciliation_cutoff_identity_sha256": self.reconciliation_cutoff_identity_sha256,
+            "position_rows": [_canonical_account_wide_row(r) for r in self.position_rows],
+            "working_order_rows": [_canonical_account_wide_row(r) for r in self.working_order_rows],
+            "fill_rows": [_canonical_account_wide_row(r) for r in self.fill_rows],
+        }))
+
+
+def _active_scope_row_int(row: Mapping[str, object], field: str) -> int | None:
+    value = row.get(field)
+    if type(value) is not int or type(value) is bool:
+        return None
+    return value
+
+
+def active_scope_classify_row(
+    row: Mapping[str, object], *, expected_subaccount: int, expected_exchange_index: int,
+    exact_route: bool = True,
+) -> str:
+    """DSB-READ-001/002/003/004: classify one economic row by proven exact
+    scope.  Returns "SELECTED" or "SAME_SUBACCOUNT_FOREIGN_INDEX"; raises on
+    a missing/malformed scope field (DOMAIN_SCOPE_RESPONSE_AMBIGUOUS), a
+    foreign subaccount (DOMAIN_SCOPE_RESPONSE_MISMATCH), or -- on an
+    exact-route read -- a foreign exchange index
+    (DOMAIN_ROUTE_EXCHANGE_INDEX_MISMATCH).  A missing/malformed field is
+    NEVER treated as selected-domain evidence."""
+    sub = _active_scope_row_int(row, "subaccount")
+    idx = _active_scope_row_int(row, "exchange_index")
+    if sub is None or idx is None:
+        raise RunnerError(RunnerFailureCode.DOMAIN_SCOPE_RESPONSE_AMBIGUOUS, detail="row scope field missing/malformed")
+    if sub != expected_subaccount:
+        raise RunnerError(RunnerFailureCode.DOMAIN_SCOPE_RESPONSE_MISMATCH, detail="subaccount " + str(sub))
+    if idx == expected_exchange_index:
+        return "SELECTED"
+    if exact_route:
+        raise RunnerError(RunnerFailureCode.DOMAIN_ROUTE_EXCHANGE_INDEX_MISMATCH, detail="exchange_index " + str(idx))
+    return "SAME_SUBACCOUNT_FOREIGN_INDEX"
+
+
+@dataclass(frozen=True, slots=True)
+class ActiveAccountWidePartitionV1:
+    # Same-subaccount / selected exchange_index.
+    selected: Tuple[Mapping[str, object], ...]
+    # Same-subaccount / other exchange_index -- retained and FOLDED INTO
+    # subaccount-wide aggregate risk.
+    same_subaccount_foreign_index: Tuple[Mapping[str, object], ...]
+    # Other-subaccount rows -- digested/counted, NEVER folded into
+    # selected-domain risk (DSB-READ-003).
+    foreign_subaccount: Tuple[Mapping[str, object], ...]
+    foreign_subaccount_count: int
+    foreign_partition_digest_sha256: str
+
+
+def partition_active_account_wide_rows(
+    proven_read: "ProvenAccountWideReadV1", *, expected_subaccount: int, expected_exchange_index: int,
+) -> ActiveAccountWidePartitionV1:
+    """DSB-READ-003: partition the rows of a PROVEN account-wide read.
+
+    A proven account-wide response MAY legitimately contain multiple
+    subaccounts (unlike a scoped selected-subaccount response, where a
+    foreign subaccount is ``DOMAIN_SCOPE_RESPONSE_MISMATCH`` --
+    ``active_scope_classify_row``).  Here every row is partitioned exactly:
+    selected subaccount + selected index -> ``selected``; selected subaccount
+    + other index -> ``same_subaccount_foreign_index`` (folded into aggregate
+    risk); another subaccount -> ``foreign_subaccount`` (digested/counted,
+    NOT folded).  A row that cannot be partitioned exactly is
+    ``DOMAIN_SCOPE_RESPONSE_AMBIGUOUS``.
+
+    Correction 03 F5: ``foreign_partition_digest_sha256`` commits to the
+    canonical VALIDATED CONTENT of every foreign-subaccount row (not just its
+    ``(subaccount, exchange_index)`` scope), so changing a foreign row's
+    order/fill/position identity or economics changes the digest.  Foreign
+    rows are ordered canonically before hashing, so the digest/count are
+    deterministic regardless of input row order."""
+    if type(proven_read) is not ProvenAccountWideReadV1:
+        raise RunnerError(RunnerFailureCode.SUBACCOUNT_WIDE_COMPLETENESS_UNPROVEN, detail="proven account-wide read required")
+    all_rows = tuple(proven_read.position_rows) + tuple(proven_read.working_order_rows) + tuple(proven_read.fill_rows)
+    selected: list[Mapping[str, object]] = []
+    foreign_index: list[Mapping[str, object]] = []
+    foreign_subaccount: list[Mapping[str, object]] = []
+    foreign_canonical: list[list] = []
+    for row in all_rows:
+        sub = _active_scope_row_int(row, "subaccount")
+        idx = _active_scope_row_int(row, "exchange_index")
+        if sub is None or idx is None:
+            raise RunnerError(RunnerFailureCode.DOMAIN_SCOPE_RESPONSE_AMBIGUOUS, detail="unpartitionable row")
+        if sub != expected_subaccount:
+            foreign_subaccount.append(row)
+            foreign_canonical.append([sub, idx, _canonical_account_wide_row(row)])
+        elif idx == expected_exchange_index:
+            selected.append(row)
+        else:
+            foreign_index.append(row)
+    foreign_canonical.sort(key=lambda entry: canonical_json_bytes(entry))
+    digest = sha256_hex(canonical_json_bytes(foreign_canonical))
+    return ActiveAccountWidePartitionV1(
+        tuple(selected), tuple(foreign_index), tuple(foreign_subaccount),
+        len(foreign_subaccount), digest,
+    )
+
+
+def require_complete_active_pagination(complete: bool, *, detail: str) -> None:
+    """DSB-READ-005: an incomplete/cyclic traversal is unknown, never zero."""
+    if not complete:
+        raise RunnerError(RunnerFailureCode.SUBACCOUNT_WIDE_COMPLETENESS_UNPROVEN, detail="pagination incomplete: " + detail)
+
+
+def require_subaccount_wide_completeness(
+    *, domain_binding: ExecutionDomainBindingV1,
+    current_reconciliation_cutoff_sha256: str,
+    accepted_evidence_contract: "ActiveDomainAcceptedEvidenceContractV1",
+    completeness_theorem,
+    proven_account_wide_read,
+) -> None:
+    """DSB-RISK-003/004/005 / DSB-STOP-001 -- FAIL CLOSED.
+
+    Correction 02: this is the STATIC positive-completeness path (Path B) and
+    its structural cousin (a caller-supplied ``ProvenAccountWideReadV1``).
+    For the current N1 domain the accepted static positive completeness set
+    is EMPTY, so neither a ``ProvenAccountWideReadV1`` nor a
+    ``SubaccountWideCompletenessTheoremV1`` can be accepted here -- current
+    writer-release completeness comes ONLY from a fresh trusted Path A
+    ``_ReleaseEligibleDynamicIndexDomainReadSetV2`` produced by the trusted
+    dynamic pre-release acquisition boundary.  The Path-B *structure* remains
+    for future domains that are separately accepted into it.
+
+    ``accepted_evidence_contract`` is a trusted immutable
+    ``ActiveDomainAcceptedEvidenceContractV1`` bound to this exact active
+    domain BEFORE the run.  It is NOT a per-call caller-provided acceptance
+    set.
+
+    Until a proven read or accepted theorem passes ->
+    ``STATIC_COMPLETENESS_THEOREM_NOT_ACCEPTED`` /
+    ``SUBACCOUNT_WIDE_COMPLETENESS_UNPROVEN``."""
+    if not _is_hex64(current_reconciliation_cutoff_sha256):
+        raise RunnerError(RunnerFailureCode.SUBACCOUNT_WIDE_COMPLETENESS_UNPROVEN, detail="current cutoff identity invalid")
+    if (
+        type(accepted_evidence_contract) is not ActiveDomainAcceptedEvidenceContractV1
+        or not accepted_evidence_contract.applies_to(domain_binding)
+    ):
+        raise RunnerError(
+            RunnerFailureCode.SUBACCOUNT_WIDE_COMPLETENESS_UNPROVEN,
+            detail="accepted-evidence contract missing or does not apply to this active domain")
+
+    if proven_account_wide_read is not None:
+        p = proven_account_wide_read
+        if type(p) is not ProvenAccountWideReadV1:
+            raise RunnerError(RunnerFailureCode.SUBACCOUNT_WIDE_COMPLETENESS_UNPROVEN, detail="proven read type")
+        if p.request_classification != _ACCOUNT_WIDE_REQUEST_CLASSIFICATION:
+            raise RunnerError(RunnerFailureCode.SUBACCOUNT_WIDE_COMPLETENESS_UNPROVEN, detail="not an account-wide request classification")
+        if p.accepted_source_classification != accepted_evidence_contract.account_wide_source_classification:
+            raise RunnerError(RunnerFailureCode.SUBACCOUNT_WIDE_COMPLETENESS_UNPROVEN, detail="account-wide source classification not accepted")
+        if p.accepted_evidence_identity_sha256 not in accepted_evidence_contract.accepted_completeness_evidence_sha256:
+            raise RunnerError(RunnerFailureCode.STATIC_COMPLETENESS_THEOREM_NOT_ACCEPTED, detail="account-wide evidence identity not in the (currently empty for N1) accepted static positive completeness set")
+        if p.account_scope_ref != domain_binding.account_scope_ref or p.subaccount != domain_binding.subaccount:
+            raise RunnerError(RunnerFailureCode.SUBACCOUNT_WIDE_COMPLETENESS_UNPROVEN, detail="account-wide read scope mismatch")
+        if p.pagination_exhausted is not True:
+            raise RunnerError(RunnerFailureCode.SUBACCOUNT_WIDE_COMPLETENESS_UNPROVEN, detail="account-wide pagination not exhausted")
+        if p.reconciliation_cutoff_identity_sha256 != current_reconciliation_cutoff_sha256:
+            raise RunnerError(RunnerFailureCode.SUBACCOUNT_WIDE_COMPLETENESS_UNPROVEN, detail="account-wide read cutoff stale")
+        if p.account_wide_result_hash != p._compute_result_hash():
+            raise RunnerError(RunnerFailureCode.SUBACCOUNT_WIDE_COMPLETENESS_UNPROVEN, detail="account-wide result hash inconsistent")
+        return
+
+    if completeness_theorem is None:
+        raise RunnerError(
+            RunnerFailureCode.SUBACCOUNT_WIDE_COMPLETENESS_UNPROVEN,
+            detail="no proven account-wide read and no accepted completeness theorem",
+        )
+    if type(completeness_theorem) is not SubaccountWideCompletenessTheoremV1:
+        raise RunnerError(RunnerFailureCode.SUBACCOUNT_WIDE_COMPLETENESS_UNPROVEN, detail="theorem type")
+    if (
+        completeness_theorem.conflict_domain_ref != domain_binding.conflict_domain_ref
+        or completeness_theorem.subaccount != domain_binding.subaccount
+        or completeness_theorem.selected_exchange_index != domain_binding.exchange_index
+    ):
+        raise RunnerError(RunnerFailureCode.SUBACCOUNT_WIDE_COMPLETENESS_UNPROVEN, detail="theorem domain mismatch")
+    if completeness_theorem.reconciliation_cutoff_identity_sha256 != current_reconciliation_cutoff_sha256:
+        raise RunnerError(RunnerFailureCode.SUBACCOUNT_WIDE_COMPLETENESS_UNPROVEN, detail="theorem cutoff stale")
+    if completeness_theorem.accepted_evidence_identity_sha256 not in accepted_evidence_contract.accepted_completeness_evidence_sha256:
+        raise RunnerError(RunnerFailureCode.STATIC_COMPLETENESS_THEOREM_NOT_ACCEPTED, detail="theorem evidence identity not in the (currently empty for N1) accepted static positive completeness set")
+    if completeness_theorem.provenance_class != accepted_evidence_contract.accepted_provenance_class:
+        raise RunnerError(RunnerFailureCode.SUBACCOUNT_WIDE_COMPLETENESS_UNPROVEN, detail="theorem provenance class not accepted")
+
+
+def _active_reconciliation_cutoff_sha256(truth: AuthoritativeReadTruthV1) -> str:
+    """Deterministic current reconciliation-cutoff / freshness identity for
+    the active read truth -- what a path-A read or a path-B theorem MUST be
+    bound to."""
+    return sha256_hex(canonical_json_bytes({
+        "market_data_sha256": sha256_hex(canonical_json_bytes(_market_data_snapshot(truth.market, truth.orderbook))),
+        "position_state": truth.position_state,
+        "orders_complete": truth.orders_complete,
+        "fills_complete": truth.fills_complete,
+        "selected_working_order_ids": sorted(o.order_id for o in truth.working_orders),
+        "selected_fill_ids": sorted(f.fill_id for f in truth.fills),
+    }))
+
+
+def _foreign_index_position_fill(
+    row: Mapping[str, object], *, ticker: str, subaccount: int, exchange_index: int,
+) -> "EconomicFillV1 | None":
+    """Correction 03 F1: fold a same-subaccount foreign-index authoritative
+    POSITION/inventory row into the subaccount-wide aggregate economic state
+    by expressing its exact signed fixed-point inventory as one canonical
+    ``EconomicFillV1`` -- the controlling ``compute_market_economic_state``
+    net-position formula is derived from fills, so this is the faithful
+    representation (not a synthetic working order).  A net-zero position
+    contributes nothing.  A row missing an exact signed count, a mark price,
+    or an authoritative as-of timestamp is malformed."""
+    count = _position_count_from_row(row)  # signed fixed-point str -> Decimal, else RESPONSE_SCHEMA_INVALID
+    price_raw = row.get("yes_price_dollars")
+    as_of = row.get("position_as_of_utc")
+    if type(price_raw) is not str or type(as_of) is not str:
+        raise RunnerError(
+            RunnerFailureCode.DOMAIN_SCOPE_RESPONSE_AMBIGUOUS,
+            detail="foreign-index position row missing mark price / as-of timestamp")
+    price = _decimal_from_price_string(price_raw)
+    validate_canonical_timestamp(as_of)
+    if count == 0:
+        return None
+    magnitude = -count if count < 0 else count
+    fill_id = "posfill_" + sha256_hex(canonical_json_bytes([
+        "ARB_FOREIGN_INDEX_POSITION_FILL_V1", ticker, subaccount, exchange_index,
+        _canonical_account_wide_row(row),
+    ]))[:24]
+    return EconomicFillV1(
+        ticker, fill_id, "YES" if count > 0 else "NO", magnitude, price, as_of,
+    )
+
+
+def _parse_same_subaccount_foreign_index_economics(
+    partition: ActiveAccountWidePartitionV1, *, ticker: str, subaccount: int,
+) -> "tuple[tuple, tuple]":
+    """Parse the same-subaccount / other-exchange_index rows into typed
+    WorkingOrderV1 / EconomicFillV1 objects so they FEED the subaccount-wide
+    aggregate risk (DSB-RISK-003/004/006).  Foreign-index authoritative
+    POSITION rows contribute their exact signed inventory (Correction 03 F1).
+    Malformed rows fail closed; two position rows for the same foreign
+    exchange_index with different content are contradictory."""
+    working: list = []
+    fills: list = []
+    position_rows_by_index: dict[int, list] = {}
+    for row in partition.same_subaccount_foreign_index:
+        if "fill_id" in row:
+            fills.append(_fill_from_raw(
+                row, expected_ticker=ticker, expected_order_id=str(row.get("order_id", "")),
+                expected_subaccount=subaccount, expected_exchange_index=None,
+            ))
+        elif "order_id" in row and "remaining_count_fp" in row:
+            parsed = _working_order_from_raw(
+                row, expected_ticker=ticker, expected_subaccount=subaccount, expected_exchange_index=None,
+            )
+            if parsed is not None:
+                working.append(parsed)
+        elif "position_count_fp" in row:
+            idx = _active_scope_row_int(row, "exchange_index")
+            if idx is None:
+                raise RunnerError(RunnerFailureCode.DOMAIN_SCOPE_RESPONSE_AMBIGUOUS, detail="foreign-index position row scope")
+            canonical = _canonical_account_wide_row(row)
+            if idx in position_rows_by_index:
+                if position_rows_by_index[idx] != canonical:
+                    raise RunnerError(
+                        RunnerFailureCode.DOMAIN_SCOPE_RESPONSE_AMBIGUOUS,
+                        detail="contradictory duplicate foreign-index position rows")
+                continue
+            position_rows_by_index[idx] = canonical
+            synthetic = _foreign_index_position_fill(
+                row, ticker=ticker, subaccount=subaccount, exchange_index=idx,
+            )
+            if synthetic is not None:
+                fills.append(synthetic)
+        else:
+            raise RunnerError(RunnerFailureCode.DOMAIN_SCOPE_RESPONSE_AMBIGUOUS, detail="foreign-index economic row shape")
+    return tuple(working), tuple(fills)
+
+
+# ===========================================================================
+# Dynamic exchange-index-domain enumeration Path A -- offline test fixture
+# value representation.
+#
+# Correction 02 (DSB-DYN-001..006): ``DynamicIndexDomainAccountWideReadV1``
+# and its component observation types remain a DETERMINISTIC OFFLINE TEST
+# FIXTURE representation ONLY.  They are never the authority-bearing
+# production type: production release truth is the private
+# ``_ReleaseEligibleDynamicIndexDomainReadSetV2`` minted only by the trusted
+# dynamic pre-release acquisition boundary further below.  A test fixture is
+# consumed ONLY behind ``_FakeTrustedDynamicReadAcquirerV2``.
+# ===========================================================================
+
+_CANONICAL_UTC_FMT = "%Y-%m-%dT%H:%M:%S.%fZ"
+
+
+def _parse_canonical_utc(value: str) -> datetime:
+    """Parse an already-canonical timestamp string to an aware UTC datetime."""
+    return datetime.strptime(validate_canonical_timestamp(value), _CANONICAL_UTC_FMT).replace(tzinfo=timezone.utc)
+
+
+def _sorted_bounded_index_domain(
+    values: object, *, domain_max: int,
+    count_min: int = _ACTIVE_EXCHANGE_INDEX_ENTRY_MIN,
+    count_max: int = _ACTIVE_EXCHANGE_INDEX_ENTRY_MAX,
+    bound_exceeded_code: "RunnerFailureCode | None" = None,
+) -> "Tuple[int, ...]":
+    """DSB-DOMAIN-001/002 / DSB-BUDGET-001: an exact finite integer
+    exchange-index domain -- strictly increasing (hence sorted +
+    de-duplicated), every member a bounded exact non-negative int
+    (0 <= value <= 2147483647), and between ``count_min`` and ``count_max``
+    UNIQUE entries inclusive.  A duplicate, a malformed / bool / negative /
+    out-of-int32 member, or a count outside the bound fails closed.  When
+    ``bound_exceeded_code`` is given it is used for the >count_max case
+    (DYNAMIC_READ_STATUS_DOMAIN_BOUND_EXCEEDED); otherwise the generic
+    fixture failure is used."""
+    if type(values) not in (tuple, list) or not values:
+        raise RunnerError(RunnerFailureCode.SUBACCOUNT_WIDE_COMPLETENESS_UNPROVEN, detail="exchange-index domain empty/malformed")
+    out: list[int] = list(values)
+    for v in out:
+        if type(v) is not int or type(v) is bool or v < 0 or v > domain_max:
+            raise RunnerError(RunnerFailureCode.SUBACCOUNT_WIDE_COMPLETENESS_UNPROVEN, detail="exchange-index domain member " + repr(v))
+    if any(out[i] >= out[i + 1] for i in range(len(out) - 1)):
+        raise RunnerError(RunnerFailureCode.SUBACCOUNT_WIDE_COMPLETENESS_UNPROVEN, detail="exchange-index domain not strictly increasing / duplicate")
+    if len(out) < count_min or len(out) > count_max:
+        raise RunnerError(
+            bound_exceeded_code or RunnerFailureCode.SUBACCOUNT_WIDE_COMPLETENESS_UNPROVEN,
+            detail="exchange-index domain unique count " + str(len(out)) + " outside [" + str(count_min) + "," + str(count_max) + "]")
+    return tuple(out)
+
+
+@dataclass(frozen=True, slots=True)
+class ExchangeIndexStatusObservationV1:
+    """One ``/exchange/status`` observation (DSB-DOMAIN-001/002).  Carries the
+    exact status RESPONSE identity -- kept SEPARATE from the
+    user_data_timestamp freshness identity -- and the exact finite bounded
+    sorted integer exchange_index domain (1..8 unique entries) it exposed."""
+
+    response_identity_sha256: str
+    exchange_index_domain: "Tuple[int, ...]"
+
+    def __post_init__(self) -> None:
+        if not _is_hex64(self.response_identity_sha256):
+            raise RunnerError(RunnerFailureCode.SUBACCOUNT_WIDE_COMPLETENESS_UNPROVEN, detail="status response identity")
+        object.__setattr__(
+            self, "exchange_index_domain",
+            _sorted_bounded_index_domain(self.exchange_index_domain, domain_max=_ACTIVE_EXCHANGE_INDEX_VALUE_MAX))
+
+
+@dataclass(frozen=True, slots=True)
+class UserDataFreshnessWatermarkV1:
+    """One ``/exchange/user_data_timestamp`` observation (R04).  ``as_of_time``
+    is approximate freshness ORDERING evidence, NOT an atomic snapshot token;
+    its RESPONSE identity is kept SEPARATE from the ``/exchange/status``
+    response identity."""
+
+    response_identity_sha256: str
+    as_of_time_utc: str
+
+    def __post_init__(self) -> None:
+        if not _is_hex64(self.response_identity_sha256):
+            raise RunnerError(RunnerFailureCode.SUBACCOUNT_WIDE_COMPLETENESS_UNPROVEN, detail="freshness watermark response identity")
+        validate_canonical_timestamp(self.as_of_time_utc)
+
+
+@dataclass(frozen=True, slots=True)
+class PerIndexSurfaceTraversalV1:
+    """Explicit per-(exchange_index, surface) private traversal: the request
+    identity, the ordered per-page (response digest + economic digest +
+    cursor-present) and the pagination-completion flag.  Pagination MUST be
+    exhausted (R01)."""
+
+    request_identity_sha256: str
+    page_response_digests: "Tuple[str, ...]"
+    page_economic_digests: "Tuple[str, ...]"
+    final_cursor_absent: bool
+    pagination_complete: bool
+
+    def __post_init__(self) -> None:
+        if (
+            not _is_hex64(self.request_identity_sha256)
+            or type(self.page_response_digests) is not tuple or not self.page_response_digests
+            or type(self.page_economic_digests) is not tuple
+            or len(self.page_economic_digests) != len(self.page_response_digests)
+            or any(not _is_hex64(d) for d in self.page_response_digests)
+            or any(not _is_hex64(d) for d in self.page_economic_digests)
+        ):
+            raise RunnerError(RunnerFailureCode.SUBACCOUNT_WIDE_COMPLETENESS_UNPROVEN, detail="per-index surface traversal malformed")
+        if self.final_cursor_absent is not True or self.pagination_complete is not True:
+            raise RunnerError(RunnerFailureCode.SUBACCOUNT_WIDE_COMPLETENESS_UNPROVEN, detail="per-index surface pagination not exhausted")
+
+
+@dataclass(frozen=True, slots=True)
+class PerIndexTraversalV1:
+    """Explicit orders/fills/positions traversal for ONE enumerated exchange
+    index, with the validated same-subaccount economic rows observed there."""
+
+    exchange_index: int
+    orders: PerIndexSurfaceTraversalV1
+    fills: PerIndexSurfaceTraversalV1
+    positions: PerIndexSurfaceTraversalV1
+    order_rows: "Tuple[Mapping[str, object], ...]" = ()
+    fill_rows: "Tuple[Mapping[str, object], ...]" = ()
+    position_rows: "Tuple[Mapping[str, object], ...]" = ()
+
+    def __post_init__(self) -> None:
+        if (
+            type(self.exchange_index) is not int or type(self.exchange_index) is bool or self.exchange_index < 0
+            or type(self.orders) is not PerIndexSurfaceTraversalV1
+            or type(self.fills) is not PerIndexSurfaceTraversalV1
+            or type(self.positions) is not PerIndexSurfaceTraversalV1
+            or type(self.order_rows) is not tuple or type(self.fill_rows) is not tuple
+            or type(self.position_rows) is not tuple
+        ):
+            raise RunnerError(RunnerFailureCode.SUBACCOUNT_WIDE_COMPLETENESS_UNPROVEN, detail="per-index traversal malformed")
+
+
+@dataclass(frozen=True, slots=True)
+class RetainedPositionSettlementReconciliationV1:
+    """R06: an accepted exact settlement/reconciliation for the domain's
+    retained bootstrap position, cross-checked against a fresh complete
+    per-index positions enumeration that shows NO live controlled position."""
+
+    settlement_evidence_identity_sha256: str
+    ticker: str
+    exchange_index: int
+    conflict_domain_ref: str
+    market_result: str
+    settled_time_utc: str
+    yes_count_fp: str
+    settlement_response_identity_sha256: str
+
+    def __post_init__(self) -> None:
+        try:
+            settled = Decimal(self.yes_count_fp) if type(self.yes_count_fp) is str else None
+        except InvalidOperation:
+            settled = None
+        if (
+            not _is_hex64(self.settlement_evidence_identity_sha256)
+            or not _is_hex64(self.settlement_response_identity_sha256)
+            or type(self.ticker) is not str or _TICKER_PATTERN.fullmatch(self.ticker) is None
+            or type(self.exchange_index) is not int or type(self.exchange_index) is bool or self.exchange_index < 0
+            or type(self.conflict_domain_ref) is not str or not self.conflict_domain_ref
+            or self.market_result not in ("yes", "no")
+            or settled is None or not settled.is_finite() or settled <= 0
+        ):
+            raise RunnerError(RunnerFailureCode.N1_RETAINED_POSITION_NOT_RECONCILED, detail="settlement reconciliation malformed")
+        validate_canonical_timestamp(self.settled_time_utc)
+
+
+def _settlement_reconciliation_canonical(sr: "RetainedPositionSettlementReconciliationV1 | None") -> object:
+    if sr is None:
+        return None
+    return {
+        "settlement_evidence_identity_sha256": sr.settlement_evidence_identity_sha256,
+        "ticker": sr.ticker, "exchange_index": sr.exchange_index,
+        "conflict_domain_ref": sr.conflict_domain_ref, "market_result": sr.market_result,
+        "settled_time_utc": sr.settled_time_utc, "yes_count_fp": sr.yes_count_fp,
+        "settlement_response_identity_sha256": sr.settlement_response_identity_sha256,
+    }
+
+
+@dataclass(frozen=True, slots=True)
+class DynamicIndexDomainAccountWideReadV1:
+    """R1-B03 Correction 04 Path A: a fresh, dynamically enumerated
+    subaccount-wide read set.  It represents the empirically established
+    interface shape (P02): a current ``/exchange/status`` index domain, an
+    explicit orders/fills/positions traversal for EVERY index in that domain
+    with pagination exhausted, before/after status + freshness observations,
+    and (when the domain has a retained bootstrap position) an accepted
+    settlement reconciliation.
+
+    ``read_set_identity_sha256`` is caller-supplied but MUST equal the value
+    recomputed from the full object by
+    ``compute_dynamic_index_domain_read_set_identity`` -- a caller-chosen
+    hash that is not recomputed is rejected (R03)."""
+
+    accepted_source_classification: str
+    index_domain_enumeration_evidence_identity_sha256: str
+    account_scope_ref: str
+    subaccount: int
+    selected_exchange_index: int
+    status_before: ExchangeIndexStatusObservationV1
+    status_after: ExchangeIndexStatusObservationV1
+    freshness_before: UserDataFreshnessWatermarkV1
+    freshness_after: UserDataFreshnessWatermarkV1
+    per_index_traversals: "Tuple[PerIndexTraversalV1, ...]"
+    selected_route_reconciliation_cutoff_sha256: str
+    read_set_identity_sha256: str
+    settlement_reconciliation: "RetainedPositionSettlementReconciliationV1 | None" = None
+
+    def __post_init__(self) -> None:
+        if (
+            type(self.accepted_source_classification) is not str or not self.accepted_source_classification
+            or not _is_hex64(self.index_domain_enumeration_evidence_identity_sha256)
+            or type(self.account_scope_ref) is not str or not self.account_scope_ref
+            or type(self.subaccount) is not int or type(self.subaccount) is bool or not 0 <= self.subaccount <= 63
+            or type(self.selected_exchange_index) is not int or type(self.selected_exchange_index) is bool
+            or self.selected_exchange_index < 0
+            or type(self.status_before) is not ExchangeIndexStatusObservationV1
+            or type(self.status_after) is not ExchangeIndexStatusObservationV1
+            or type(self.freshness_before) is not UserDataFreshnessWatermarkV1
+            or type(self.freshness_after) is not UserDataFreshnessWatermarkV1
+            or type(self.per_index_traversals) is not tuple or not self.per_index_traversals
+            or any(type(t) is not PerIndexTraversalV1 for t in self.per_index_traversals)
+            or not _is_hex64(self.selected_route_reconciliation_cutoff_sha256)
+            or not _is_hex64(self.read_set_identity_sha256)
+            or (self.settlement_reconciliation is not None
+                and type(self.settlement_reconciliation) is not RetainedPositionSettlementReconciliationV1)
+        ):
+            raise RunnerError(RunnerFailureCode.SUBACCOUNT_WIDE_COMPLETENESS_UNPROVEN, detail="dynamic index-domain read malformed")
+        # R02: exact before/after domain stability.
+        if self.status_before.exchange_index_domain != self.status_after.exchange_index_domain:
+            raise RunnerError(RunnerFailureCode.SUBACCOUNT_WIDE_COMPLETENESS_UNPROVEN, detail="exchange-index domain changed before/after")
+        domain = self.status_before.exchange_index_domain
+        if self.selected_exchange_index not in domain:
+            raise RunnerError(RunnerFailureCode.SUBACCOUNT_WIDE_COMPLETENESS_UNPROVEN, detail="selected exchange_index absent from enumerated domain")
+        traversed = tuple(t.exchange_index for t in self.per_index_traversals)
+        if traversed != domain:
+            raise RunnerError(
+                RunnerFailureCode.SUBACCOUNT_WIDE_COMPLETENESS_UNPROVEN,
+                detail="per-index traversals do not exactly enumerate the status domain in canonical order")
+        # R04: freshness ORDERING (monotonic nondecreasing), not T0 == T1.
+        if _parse_canonical_utc(self.freshness_after.as_of_time_utc) < _parse_canonical_utc(self.freshness_before.as_of_time_utc):
+            raise RunnerError(RunnerFailureCode.SUBACCOUNT_WIDE_COMPLETENESS_UNPROVEN, detail="user_data_timestamp clock regression (T1 < T0)")
+
+
+def compute_dynamic_index_domain_read_set_identity(
+    read: DynamicIndexDomainAccountWideReadV1, *,
+    active_domain_binding_id: str,
+    active_domain_binding_sha256: str,
+    active_contract_sha256: str,
+    risk_config_sha256: str,
+) -> str:
+    """R03: the SINGLE composite current-read / reconciliation-cutoff identity
+    bound to ALL pages.  Commits to the active domain binding + active
+    contract + risk config, the account scope + selected sub/index, the
+    ``/exchange/status`` before/after RESPONSE identities + domains (kept
+    SEPARATE from the user_data_timestamp identities), the
+    user_data_timestamp before/after RESPONSE identities + as_of values, and
+    -- for every exchange index in the canonical sorted domain -- the
+    orders/fills/positions request identities + every page response digest +
+    every page economic digest + cursor-completion + pagination-completion +
+    the validated rows.  Changing any of these MUST change the identity."""
+    def _surface(s: PerIndexSurfaceTraversalV1) -> dict:
+        return {
+            "request_identity_sha256": s.request_identity_sha256,
+            "page_response_digests": list(s.page_response_digests),
+            "page_economic_digests": list(s.page_economic_digests),
+            "final_cursor_absent": s.final_cursor_absent,
+            "pagination_complete": s.pagination_complete,
+        }
+
+    per_index = [
+        {
+            "exchange_index": t.exchange_index,
+            "orders": _surface(t.orders), "fills": _surface(t.fills), "positions": _surface(t.positions),
+            "order_rows": [_canonical_account_wide_row(r) for r in t.order_rows],
+            "fill_rows": [_canonical_account_wide_row(r) for r in t.fill_rows],
+            "position_rows": [_canonical_account_wide_row(r) for r in t.position_rows],
+        }
+        for t in sorted(read.per_index_traversals, key=lambda x: x.exchange_index)
+    ]
+    return sha256_hex(canonical_json_bytes({
+        "schema": "ARB_DYNAMIC_INDEX_DOMAIN_ACCOUNT_WIDE_READ_SET_V1",
+        "active_domain_binding_id": active_domain_binding_id,
+        "active_domain_binding_sha256": active_domain_binding_sha256,
+        "active_contract_sha256": active_contract_sha256,
+        "risk_config_sha256": risk_config_sha256,
+        "account_scope_ref": read.account_scope_ref,
+        "subaccount": read.subaccount,
+        "selected_exchange_index": read.selected_exchange_index,
+        "accepted_source_classification": read.accepted_source_classification,
+        "index_domain_enumeration_evidence_identity_sha256": read.index_domain_enumeration_evidence_identity_sha256,
+        "status_before_response_identity_sha256": read.status_before.response_identity_sha256,
+        "status_before_exchange_index_domain": list(read.status_before.exchange_index_domain),
+        "status_after_response_identity_sha256": read.status_after.response_identity_sha256,
+        "status_after_exchange_index_domain": list(read.status_after.exchange_index_domain),
+        "user_data_timestamp_before_response_identity_sha256": read.freshness_before.response_identity_sha256,
+        "user_data_timestamp_before_as_of_time_utc": read.freshness_before.as_of_time_utc,
+        "user_data_timestamp_after_response_identity_sha256": read.freshness_after.response_identity_sha256,
+        "user_data_timestamp_after_as_of_time_utc": read.freshness_after.as_of_time_utc,
+        "per_index": per_index,
+        "selected_route_reconciliation_cutoff_sha256": read.selected_route_reconciliation_cutoff_sha256,
+        "settlement_reconciliation": _settlement_reconciliation_canonical(read.settlement_reconciliation),
+    }))
+
+
+def _dynamic_read_controlled_live_position_contracts(
+    read: DynamicIndexDomainAccountWideReadV1, *, ticker: str, subaccount: int,
+) -> Decimal:
+    """Sum of the signed live position contracts for ``ticker`` across EVERY
+    enumerated exchange index (R06 -- a fresh complete per-index positions
+    enumeration must contain no live controlled position)."""
+    total = Decimal("0")
+    for t in read.per_index_traversals:
+        for row in t.position_rows:
+            row_ticker = row.get("ticker")
+            if row_ticker != ticker:
+                continue
+            sub = _active_scope_row_int(row, "subaccount")
+            if sub is not None and sub != subaccount:
+                raise RunnerError(RunnerFailureCode.DOMAIN_SCOPE_RESPONSE_MISMATCH, detail="other-subaccount controlled position row")
+            total += _position_count_from_row(row)
+    return total
+
+
+def _parse_dynamic_index_domain_foreign_economics(
+    read: DynamicIndexDomainAccountWideReadV1, *, ticker: str, subaccount: int,
+) -> "tuple[tuple, tuple]":
+    """R05: fold EVERY enumerated FOREIGN (non-selected) exchange index's
+    validated same-subaccount orders/fills/positions into typed
+    WorkingOrderV1 / EconomicFillV1 objects for the subaccount-wide aggregate.
+    Selected-index economics already enter via the scoped selected-route
+    read.  An other-subaccount row -> DOMAIN_SCOPE_RESPONSE_MISMATCH; a
+    row whose ``exchange_index`` disagrees with its traversal, or an
+    unpartitionable row -> DOMAIN_SCOPE_RESPONSE_AMBIGUOUS; a contradictory
+    duplicate foreign-index position -> fail closed."""
+    working: list = []
+    fills: list = []
+    seen_position: dict[tuple, list] = {}
+    for t in read.per_index_traversals:
+        if t.exchange_index == read.selected_exchange_index:
+            continue
+        for row in tuple(t.order_rows) + tuple(t.fill_rows) + tuple(t.position_rows):
+            sub = _active_scope_row_int(row, "subaccount")
+            idx = _active_scope_row_int(row, "exchange_index")
+            if sub is None:
+                raise RunnerError(RunnerFailureCode.DOMAIN_SCOPE_RESPONSE_AMBIGUOUS, detail="foreign-index row scope")
+            if sub != subaccount:
+                raise RunnerError(RunnerFailureCode.DOMAIN_SCOPE_RESPONSE_MISMATCH, detail="other-subaccount row on enumerated index")
+            if idx != t.exchange_index:
+                raise RunnerError(RunnerFailureCode.DOMAIN_SCOPE_RESPONSE_AMBIGUOUS, detail="row exchange_index disagrees with traversal")
+            if "fill_id" in row:
+                fills.append(_fill_from_raw(
+                    row, expected_ticker=ticker, expected_order_id=str(row.get("order_id", "")),
+                    expected_subaccount=subaccount, expected_exchange_index=None,
+                ))
+            elif "order_id" in row and "remaining_count_fp" in row:
+                parsed = _working_order_from_raw(
+                    row, expected_ticker=ticker, expected_subaccount=subaccount, expected_exchange_index=None,
+                )
+                if parsed is not None:
+                    working.append(parsed)
+            elif "position_count_fp" in row:
+                canonical = _canonical_account_wide_row(row)
+                if t.exchange_index in seen_position:
+                    if seen_position[t.exchange_index] != canonical:
+                        raise RunnerError(
+                            RunnerFailureCode.DOMAIN_SCOPE_RESPONSE_AMBIGUOUS,
+                            detail="contradictory duplicate foreign-index position row")
+                    continue
+                seen_position[t.exchange_index] = canonical
+                synthetic = _foreign_index_position_fill(
+                    row, ticker=ticker, subaccount=subaccount, exchange_index=t.exchange_index,
+                )
+                if synthetic is not None:
+                    fills.append(synthetic)
+            else:
+                raise RunnerError(RunnerFailureCode.DOMAIN_SCOPE_RESPONSE_AMBIGUOUS, detail="foreign-index economic row shape")
+    return tuple(working), tuple(fills)
+
+
+def require_dynamic_index_domain_completeness(
+    read: "DynamicIndexDomainAccountWideReadV1", *,
+    domain_binding: ExecutionDomainBindingV1,
+    active_contract: "ActiveExecutionDomainContractV1",
+    risk_config: "RiskLimitConfigV1",
+    accepted_evidence_contract: "ActiveDomainAcceptedEvidenceContractV1",
+    current_selected_route_cutoff_sha256: str,
+    now_monotonic_ns: int,
+    now_utc: str,
+    t0_wall_sample_utc: "str | None" = None,
+    t1_wall_sample_utc: "str | None" = None,
+) -> str:
+    """Correction 04 Path A -- FAIL CLOSED (requirements 01-08).  Validates the
+    fresh dynamically enumerated read set against the separately bound
+    domain-scoped ``accepted_evidence_contract``, recomputes and checks the
+    composite read-set identity, applies the EXISTING risk/reconciliation
+    freshness/deadline configuration to the user_data_timestamp ordering, and
+    -- when the domain has a retained bootstrap position -- requires an
+    accepted settlement reconciliation with a fresh complete per-index
+    positions enumeration and no live controlled position.
+
+    Returns the retained-position classification:
+    ``"NO_RETAINED_BOOTSTRAP_POSITION"`` or
+    ``"RETAINED_POSITION_TERMINALLY_SETTLED"``.  Any mismatch raises before
+    any economics are merged (hence before Stage 3F / Gate D / transport)."""
+    if type(read) is not DynamicIndexDomainAccountWideReadV1:
+        raise RunnerError(RunnerFailureCode.SUBACCOUNT_WIDE_COMPLETENESS_UNPROVEN, detail="dynamic index-domain read type")
+    if (
+        type(accepted_evidence_contract) is not ActiveDomainAcceptedEvidenceContractV1
+        or not accepted_evidence_contract.applies_to(domain_binding)
+    ):
+        raise RunnerError(RunnerFailureCode.SUBACCOUNT_WIDE_COMPLETENESS_UNPROVEN, detail="accepted-evidence contract does not apply")
+    if not _is_hex64(current_selected_route_cutoff_sha256):
+        raise RunnerError(RunnerFailureCode.SUBACCOUNT_WIDE_COMPLETENESS_UNPROVEN, detail="current selected-route cutoff invalid")
+
+    # R07: role-specific accepted evidence.  P01 (negative) can never satisfy.
+    evid = read.index_domain_enumeration_evidence_identity_sha256
+    if evid in _NEGATIVE_COMPLETENESS_EVIDENCE_SHA256:
+        raise RunnerError(RunnerFailureCode.SUBACCOUNT_WIDE_COMPLETENESS_UNPROVEN, detail="negative completeness evidence cannot qualify index-domain enumeration")
+    if evid not in accepted_evidence_contract.accepted_index_domain_enumeration_evidence_sha256:
+        raise RunnerError(RunnerFailureCode.SUBACCOUNT_WIDE_COMPLETENESS_UNPROVEN, detail="index-domain enumeration evidence not separately accepted")
+    if read.accepted_source_classification != accepted_evidence_contract.account_wide_source_classification:
+        raise RunnerError(RunnerFailureCode.SUBACCOUNT_WIDE_COMPLETENESS_UNPROVEN, detail="account-wide source classification not accepted")
+    if (
+        read.account_scope_ref != domain_binding.account_scope_ref
+        or read.subaccount != domain_binding.subaccount
+        or read.selected_exchange_index != domain_binding.exchange_index
+    ):
+        raise RunnerError(RunnerFailureCode.SUBACCOUNT_WIDE_COMPLETENESS_UNPROVEN, detail="dynamic read scope mismatch")
+
+    # R02 / Correction 06 (BLOCK-05-02): a COUNT bound only.  Each individual
+    # index value is already validated as ``0 <= value <= 2147483647`` inside
+    # ``ExchangeIndexStatusObservationV1.__post_init__`` (no P02-derived
+    # maximum-index-value); here the number of UNIQUE current indices must not
+    # exceed the contract's ``dynamic_exchange_index_entry_max``.  A ninth
+    # unique index fails BEFORE the first per-index portfolio traversal.
+    domain = read.status_before.exchange_index_domain
+    if len(domain) > accepted_evidence_contract.dynamic_exchange_index_entry_max:
+        raise RunnerError(
+            RunnerFailureCode.DYNAMIC_READ_STATUS_DOMAIN_BOUND_EXCEEDED,
+            detail="unique current exchange-index count " + str(len(domain))
+            + " exceeds dynamic_exchange_index_entry_max=" + str(accepted_evidence_contract.dynamic_exchange_index_entry_max))
+    if domain_binding.exchange_index not in domain:
+        raise RunnerError(
+            RunnerFailureCode.DYNAMIC_READ_SELECTED_INDEX_NOT_IN_DOMAIN,
+            detail="selected execution-binding exchange_index is not a member of the observed status domain")
+
+    if read.selected_route_reconciliation_cutoff_sha256 != current_selected_route_cutoff_sha256:
+        raise RunnerError(RunnerFailureCode.SUBACCOUNT_WIDE_COMPLETENESS_UNPROVEN, detail="dynamic read selected-route cutoff stale")
+
+    # R04 / DSB-FRESH-002/003 / Correction 06 (BLOCK-05-04): freshness
+    # ORDERING + the exact 30s/5s active-V2 caps + the EXISTING authoritative
+    # RiskLimitConfigV1.state_integrity limits, all CONJUNCTIVE.  The 30s/5s
+    # caps never REPLACE a stricter existing threshold; whichever applicable
+    # predicate is stricter wins.  T1 >= T0 is required; T1 == T0 and T1 > T0
+    # are both acceptable; T1 < T0 fails; the two trusted wall-clock samples
+    # used for freshness must be nondecreasing.
+    lim = risk_config.state_integrity
+    t0 = _parse_canonical_utc(read.freshness_before.as_of_time_utc)
+    t1 = _parse_canonical_utc(read.freshness_after.as_of_time_utc)
+    t0_sample = _parse_canonical_utc(t0_wall_sample_utc if t0_wall_sample_utc is not None else now_utc)
+    t1_sample = _parse_canonical_utc(t1_wall_sample_utc if t1_wall_sample_utc is not None else now_utc)
+    if type(now_monotonic_ns) is not int or now_monotonic_ns < 0:
+        raise RunnerError(RunnerFailureCode.DYNAMIC_READ_CLOCK_REGRESSION, detail="freshness monotonic clock invalid")
+    if t1 < t0:
+        raise RunnerError(RunnerFailureCode.DYNAMIC_READ_FRESHNESS_REGRESSION, detail="user_data_timestamp T1 < T0")
+    if t1_sample < t0_sample:
+        raise RunnerError(RunnerFailureCode.DYNAMIC_READ_CLOCK_REGRESSION, detail="trusted wall-clock freshness sample regressed between T0 and T1")
+    for bookend, as_of, sample in (("T0", t0, t0_sample), ("T1", t1, t1_sample)):
+        age_ms = (sample - as_of).total_seconds() * 1000.0
+        future_ms = (as_of - sample).total_seconds() * 1000.0
+        # Active-V2 acquisition caps (DSB-FRESH-003).
+        if age_ms > _PRE_RELEASE_FRESHNESS_MAX_AGE_MS:
+            raise RunnerError(RunnerFailureCode.DYNAMIC_READ_FRESHNESS_STALE, detail=bookend + " age exceeds pre_release_freshness_max_age_ms=30000")
+        if future_ms > _PRE_RELEASE_FRESHNESS_FUTURE_SKEW_MAX_MS:
+            raise RunnerError(RunnerFailureCode.DYNAMIC_READ_FRESHNESS_FUTURE_SKEW, detail=bookend + " future skew exceeds pre_release_freshness_future_skew_max_ms=5000")
+        # Existing authoritative state-integrity limits (stricter wins).
+        if age_ms > lim.max_reconciliation_lag_ms:
+            raise RunnerError(RunnerFailureCode.DYNAMIC_READ_FRESHNESS_STALE, detail=bookend + " age exceeds state_integrity.max_reconciliation_lag_ms")
+        if future_ms > lim.max_future_wall_clock_skew_ms:
+            raise RunnerError(RunnerFailureCode.DYNAMIC_READ_FRESHNESS_FUTURE_SKEW, detail=bookend + " future skew exceeds state_integrity.max_future_wall_clock_skew_ms")
+    window_ms = (t1 - t0).total_seconds() * 1000.0
+    if window_ms > lim.reconciliation_read_deadline_ms:
+        raise RunnerError(RunnerFailureCode.DYNAMIC_READ_FRESHNESS_STALE, detail="T0..T1 window exceeds state_integrity.reconciliation_read_deadline_ms")
+
+    # R03: recompute the composite identity from the full object.
+    expected = compute_dynamic_index_domain_read_set_identity(
+        read,
+        active_domain_binding_id=active_contract.domain_binding_id,
+        active_domain_binding_sha256=active_contract.domain_binding_sha256,
+        active_contract_sha256=active_contract.contract_sha256,
+        risk_config_sha256=risk_config.sha256,
+    )
+    if read.read_set_identity_sha256 != expected:
+        raise RunnerError(RunnerFailureCode.SUBACCOUNT_WIDE_COMPLETENESS_UNPROVEN, detail="dynamic read-set composite identity mismatch")
+
+    # R06: retained bootstrap-position settlement reconciliation.
+    rbp = accepted_evidence_contract.retained_bootstrap_position
+    if rbp is None:
+        return "NO_RETAINED_BOOTSTRAP_POSITION"
+    sr = read.settlement_reconciliation
+    if type(sr) is not RetainedPositionSettlementReconciliationV1:
+        raise RunnerError(RunnerFailureCode.N1_RETAINED_POSITION_NOT_RECONCILED, detail="retained bootstrap position present; read set carries no settlement reconciliation")
+    if sr.settlement_evidence_identity_sha256 in _NEGATIVE_COMPLETENESS_EVIDENCE_SHA256:
+        raise RunnerError(RunnerFailureCode.N1_RETAINED_POSITION_NOT_RECONCILED, detail="negative evidence cannot qualify settlement reconciliation")
+    if sr.settlement_evidence_identity_sha256 not in accepted_evidence_contract.accepted_settlement_reconciliation_evidence_sha256:
+        raise RunnerError(RunnerFailureCode.N1_RETAINED_POSITION_NOT_RECONCILED, detail="settlement reconciliation evidence not separately accepted")
+    if (
+        sr.ticker != rbp["ticker"]
+        or sr.exchange_index != rbp["exchange_index"]
+        or sr.conflict_domain_ref != rbp["conflict_domain_ref"]
+    ):
+        raise RunnerError(RunnerFailureCode.N1_RETAINED_POSITION_NOT_RECONCILED, detail="settlement reconciliation does not match the retained bootstrap position identity")
+    live = _dynamic_read_controlled_live_position_contracts(read, ticker=rbp["ticker"], subaccount=domain_binding.subaccount)
+    if live != 0:
+        raise RunnerError(RunnerFailureCode.N1_RETAINED_POSITION_NOT_RECONCILED, detail="a live controlled position is still present across the enumerated domain")
+    return "RETAINED_POSITION_TERMINALLY_SETTLED"
+
+
+def collect_active_authoritative_read_truth(
+    capability: PreReleaseReadCapabilityV1, *, ticker: str,
+    domain_binding: ExecutionDomainBindingV1,
+    accepted_evidence_contract: "ActiveDomainAcceptedEvidenceContractV1",
+    completeness_theorem=None,
+    proven_account_wide_read=None,
+    dynamic_index_domain_read=None,
+    active_contract: "ActiveExecutionDomainContractV1 | None" = None,
+    risk_config: "RiskLimitConfigV1 | None" = None,
+    now_monotonic_ns: "int | None" = None,
+    now_utc: "str | None" = None,
+) -> AuthoritativeReadTruthV1:
+    """Stage 3E for the active revision-2 path -- FAIL CLOSED scope /
+    partition / completeness contract (DSB-READ-001..006 / DSB-RISK-003..006):
+
+      * every selected-route row proves exact subaccount+exchange_index
+        (handled inside the scoped capability);
+      * pagination completeness is required -- incomplete => unknown;
+      * subaccount-wide completeness is required and default CLOSED: it is
+        proven ONLY by a ``ProvenAccountWideReadV1`` (path A) or a
+        ``SubaccountWideCompletenessTheoremV1`` (path B) that BOTH bind to
+        the CURRENT reconciliation cutoff AND to the separately bound,
+        domain-scoped ``accepted_evidence_contract`` -- checked FIRST, before
+        any economics are merged;
+      * only after that check passes, the proven read's same-subaccount
+        other-index working orders / fills / authoritative POSITION rows are
+        PARSED and MERGED into the truth so they feed the subaccount-wide
+        aggregate risk; other-subaccount rows are digested/counted, never
+        merged;
+      * a read failure never synthesizes empty truth."""
+    truth = collect_authoritative_read_truth(capability, ticker=ticker)
+
+    require_complete_active_pagination(truth.orders_complete, detail="orders")
+    require_complete_active_pagination(truth.fills_complete, detail="fills")
+
+    current_cutoff = _active_reconciliation_cutoff_sha256(truth)
+
+    if dynamic_index_domain_read is not None:
+        # Correction 04 Path A: explicit dynamic exchange-index-domain
+        # enumeration.  Fresh read set required (P02 historical rows can never
+        # mint current writer eligibility).
+        if (
+            type(active_contract) is not ActiveExecutionDomainContractV1
+            or type(risk_config) is not RiskLimitConfigV1
+            or type(now_monotonic_ns) is not int
+            or type(now_utc) is not str
+        ):
+            raise RunnerError(
+                RunnerFailureCode.SUBACCOUNT_WIDE_COMPLETENESS_UNPROVEN,
+                detail="dynamic index-domain Path A requires active_contract / risk_config / now")
+        require_dynamic_index_domain_completeness(
+            dynamic_index_domain_read,
+            domain_binding=domain_binding,
+            active_contract=active_contract,
+            risk_config=risk_config,
+            accepted_evidence_contract=accepted_evidence_contract,
+            current_selected_route_cutoff_sha256=current_cutoff,
+            now_monotonic_ns=now_monotonic_ns,
+            now_utc=now_utc,
+        )
+        extra_working, extra_fills = _parse_dynamic_index_domain_foreign_economics(
+            dynamic_index_domain_read, ticker=ticker, subaccount=domain_binding.subaccount,
+        )
+        if extra_working or extra_fills:
+            truth = _dataclass_replace(
+                truth,
+                working_orders=truth.working_orders + extra_working,
+                fills=truth.fills + extra_fills,
+            )
+        return truth
+
+    require_subaccount_wide_completeness(
+        domain_binding=domain_binding,
+        current_reconciliation_cutoff_sha256=current_cutoff,
+        accepted_evidence_contract=accepted_evidence_contract,
+        completeness_theorem=completeness_theorem,
+        proven_account_wide_read=proven_account_wide_read,
+    )
+
+    if proven_account_wide_read is not None:
+        partition = partition_active_account_wide_rows(
+            proven_account_wide_read,
+            expected_subaccount=domain_binding.subaccount,
+            expected_exchange_index=domain_binding.exchange_index,
+        )
+        extra_working, extra_fills = _parse_same_subaccount_foreign_index_economics(
+            partition, ticker=ticker, subaccount=domain_binding.subaccount,
+        )
+        if extra_working or extra_fills:
+            truth = _dataclass_replace(
+                truth,
+                working_orders=truth.working_orders + extra_working,
+                fills=truth.fills + extra_fills,
+            )
+
+    return truth
+
+
+def assemble_active_release_evaluation_state_v1(
+    runtime: ExperimentRunnerRuntimeV2,
+    truth: AuthoritativeReadTruthV1,
+    projection: SafetyProjection,
+    *,
+    trusted_dynamic_read_set_id: str,
+) -> ActiveReleaseEvaluationStateV1:
+    """Stage 3F (active): build the exact ActiveReleaseEvaluationStateV1
+    whose incident/proof come ONLY from runtime.active_contract
+    (DSB-WRITER-004) and which commits to the exact private trusted dynamic
+    read-set identity (``ADRS2_<64hex>``) that supported the release.  Reuses
+    the shared Stage-3F assembly body so the trusted-evidence / T0-T1
+    coherence / fresh-vs-durable matching logic is identical to the legacy
+    path."""
+    if type(runtime) is not ExperimentRunnerRuntimeV2:
+        raise RunnerError(RunnerFailureCode.ACTIVE_GATE_ENTRY_PRECONDITION_FAILED, detail="runtime type")
+    if (
+        type(trusted_dynamic_read_set_id) is not str
+        or trusted_dynamic_read_set_id[:6] != "ADRS2_"
+        or len(trusted_dynamic_read_set_id) != 70
+    ):
+        raise RunnerError(RunnerFailureCode.DYNAMIC_READ_COMPOSITE_IDENTITY_MISMATCH, detail="trusted_dynamic_read_set_id shape")
+    inner = _assemble_release_state_core(
+        incident_id=runtime.active_contract.incident_id,
+        writer_proof_id=runtime.active_contract.writer_proof_id,
+        runtime=runtime, truth=truth, projection=projection,
+    )
+    snap = inner._snapshot()
+    return ActiveReleaseEvaluationStateV1(
+        process_instance_id=runtime.normal_gate.process_instance_id,
+        active_contract=runtime.active_contract,
+        trusted_dynamic_read_set_id=trusted_dynamic_read_set_id,
+        risk_config=snap[5],
+        risk_snapshot=snap[6],
+        reconciliation_snapshot=snap[7],
+        market_freshness=snap[8],
+        reconciliation_freshness=snap[9],
+        venue_defense_evidence=snap[10],
+        normal_gate=runtime.normal_gate,
+        emergency_gate=runtime.emergency_gate,
+    )
+
+
+# ===========================================================================
+# Correction 02 Sections 9-13 -- the trusted dynamic pre-release acquisition
+# boundary (DSB-DYN-001..006 / DSB-OPS-001..012 / DSB-BUDGET-001..007 /
+# DSB-DOMAIN/FRESH/PAGE / DSB-READSET-001..005).
+#
+# Normative rule: ``deterministic self-hash != authoritative-source proof``.
+# Only this closed, process-local, single-use boundary may create the private
+# release-eligible current-read type.  A caller that knows every status/page/
+# row/cursor/freshness identity and the composite hash still cannot
+# manufacture release-eligible current truth.
+# ===========================================================================
+
+
+class ActivePreReleaseReadOperationV2(enum.StrEnum):
+    """DSB-OPS-001 -- the exact closed active-V2 pre-release read surface.  No
+    write / cancel / transfer / account-management / settlement / WebSocket /
+    production / arbitrary-HTTP operation exists on this capability."""
+
+    GET_EXCHANGE_STATUS = "GET_EXCHANGE_STATUS"
+    GET_USER_DATA_TIMESTAMP = "GET_USER_DATA_TIMESTAMP"
+    GET_MARKET = "GET_MARKET"
+    GET_MARKET_ORDERBOOK = "GET_MARKET_ORDERBOOK"
+    GET_ORDERS = "GET_ORDERS"
+    GET_ORDER = "GET_ORDER"
+    GET_FILLS = "GET_FILLS"
+    GET_POSITIONS = "GET_POSITIONS"
+
+
+class ActivePreReleaseReadAuthClassV2(enum.StrEnum):
+    """DSB-OPS-002 -- the exact closed authentication classification.  There is
+    no production-auth class and no write/signing class.  This SPEC/offline
+    implementation task uses NO credentials."""
+
+    PUBLIC_NO_AUTH = "PUBLIC_NO_AUTH"
+    DEMO_SIGNED_PRIVATE_READ = "DEMO_SIGNED_PRIVATE_READ"
+
+
+# DSB-OPS-003 -- exact method / path / auth binding.  All paths are under the
+# selected Kalshi Demo REST origin and the ``/trade-api/v2`` API root;
+# redirects are never followed.
+_ACTIVE_V2_API_ROOT = "/trade-api/v2"
+_ACTIVE_V2_OP_BINDING: Mapping[ActivePreReleaseReadOperationV2, Tuple[str, str, ActivePreReleaseReadAuthClassV2]] = MappingProxyType({
+    ActivePreReleaseReadOperationV2.GET_EXCHANGE_STATUS: ("GET", _ACTIVE_V2_API_ROOT + "/exchange/status", ActivePreReleaseReadAuthClassV2.PUBLIC_NO_AUTH),
+    ActivePreReleaseReadOperationV2.GET_USER_DATA_TIMESTAMP: ("GET", _ACTIVE_V2_API_ROOT + "/exchange/user_data_timestamp", ActivePreReleaseReadAuthClassV2.PUBLIC_NO_AUTH),
+    ActivePreReleaseReadOperationV2.GET_MARKET: ("GET", _ACTIVE_V2_API_ROOT + "/markets/{ticker}", ActivePreReleaseReadAuthClassV2.PUBLIC_NO_AUTH),
+    ActivePreReleaseReadOperationV2.GET_MARKET_ORDERBOOK: ("GET", _ACTIVE_V2_API_ROOT + "/markets/{ticker}/orderbook", ActivePreReleaseReadAuthClassV2.DEMO_SIGNED_PRIVATE_READ),
+    ActivePreReleaseReadOperationV2.GET_ORDERS: ("GET", _ACTIVE_V2_API_ROOT + "/portfolio/orders", ActivePreReleaseReadAuthClassV2.DEMO_SIGNED_PRIVATE_READ),
+    ActivePreReleaseReadOperationV2.GET_ORDER: ("GET", _ACTIVE_V2_API_ROOT + "/portfolio/orders/{order_id}", ActivePreReleaseReadAuthClassV2.DEMO_SIGNED_PRIVATE_READ),
+    ActivePreReleaseReadOperationV2.GET_FILLS: ("GET", _ACTIVE_V2_API_ROOT + "/portfolio/fills", ActivePreReleaseReadAuthClassV2.DEMO_SIGNED_PRIVATE_READ),
+    ActivePreReleaseReadOperationV2.GET_POSITIONS: ("GET", _ACTIVE_V2_API_ROOT + "/portfolio/positions", ActivePreReleaseReadAuthClassV2.DEMO_SIGNED_PRIVATE_READ),
+})
+
+# DSB-BUDGET-002/003 -- exact per-surface maxima and the independently frozen
+# total.  Derivation: 2 status + 2 freshness + 1 market + 1 orderbook + 2
+# exact-order supplements + 8 indices * (2 orders + 4 fills + 2 positions) = 72.
+_ACTIVE_V2_STATUS_REQUEST_MAX = 2
+_ACTIVE_V2_FRESHNESS_REQUEST_MAX = 2
+_ACTIVE_V2_MARKET_REQUEST_MAX = 1
+_ACTIVE_V2_ORDERBOOK_REQUEST_MAX = 1
+_ACTIVE_V2_ORDER_REQUEST_MAX = 2
+_ACTIVE_V2_ORDERS_PAGE_MAX = 2
+_ACTIVE_V2_FILLS_PAGE_MAX = 4
+_ACTIVE_V2_POSITIONS_PAGE_MAX = 2
+_ACTIVE_V2_PORTFOLIO_PAGE_LIMIT = 1000
+PRE_RELEASE_READ_REQUEST_MAX_V2 = (
+    _ACTIVE_V2_STATUS_REQUEST_MAX + _ACTIVE_V2_FRESHNESS_REQUEST_MAX
+    + _ACTIVE_V2_MARKET_REQUEST_MAX + _ACTIVE_V2_ORDERBOOK_REQUEST_MAX
+    + _ACTIVE_V2_ORDER_REQUEST_MAX
+    + _ACTIVE_EXCHANGE_INDEX_ENTRY_MAX * (
+        _ACTIVE_V2_ORDERS_PAGE_MAX + _ACTIVE_V2_FILLS_PAGE_MAX + _ACTIVE_V2_POSITIONS_PAGE_MAX
+    )
+)
+assert PRE_RELEASE_READ_REQUEST_MAX_V2 == 72, PRE_RELEASE_READ_REQUEST_MAX_V2
+
+# DSB-FRESH-003 -- ADDITIONAL active-V2 acquisition caps.  They are
+# conjunctive with the existing authoritative ``RiskLimitConfigV1.state_
+# integrity`` predicates and never relax them; the stricter applicable
+# predicate wins (Marco approval binding interpretation).
+_PRE_RELEASE_FRESHNESS_MAX_AGE_MS = 30000
+_PRE_RELEASE_FRESHNESS_FUTURE_SKEW_MAX_MS = 5000
+
+# DSB-READSET-005 -- the exact accepted dynamic source identity.
+_ACTIVE_DYNAMIC_SOURCE_IDENTITY: Mapping[str, object] = MappingProxyType({
+    "source_contract_id": "ARB_KALSHI_DEMO_ACTIVE_DYNAMIC_PRE_RELEASE_READ_V2",
+    "inherited_binding_index_sha256": OPERATION_BINDING_INDEX_SHA256,
+    "p02_evidence_sha256": _P02_INDEX_DOMAIN_ENUMERATION_EVIDENCE_SHA256,
+    "p01_negative_evidence_sha256": _P01_NEGATIVE_COMPLETENESS_EVIDENCE_SHA256,
+    "operation_contract_revision": 2,
+})
+_ADRS2_READ_SET_SCHEMA = "ARB_KALSHI_DEMO_ACTIVE_DYNAMIC_PRE_RELEASE_READ_SET_V2"
+_RELEASE_ELIGIBLE_READ_SET_KEY = object()
+_TRUSTED_DYNAMIC_CAPABILITY_KEY = object()
+# Process-local, unexported issuer sentinel (DSB-DYN-003).  It is NOT an
+# authority substitute and is never serialized into the deterministic
+# read-set hash; it is only an in-process anti-injection lineage check.
+_ACTIVE_TRUSTED_ISSUER_SENTINEL = object()
+
+
+def _trusted_local_release_projection_identity(opened: "OpenResult | None") -> str:
+    """Deterministic identity of the trusted local release projection observed
+    at Stage 3B, committed into the composite read-set (DSB-READSET-001)."""
+    projection = getattr(opened, "projection", None)
+    if projection is None:
+        return sha256_hex(canonical_json_bytes({"trusted_local_release_projection": "UNAVAILABLE"}))
+    return sha256_hex(canonical_json_bytes({
+        "trusted_local_release_projection": "OBSERVED",
+        "conflict_domain_ref": getattr(projection, "conflict_domain_ref", None),
+        "risk_control_state": getattr(projection, "risk_control_state", None),
+        "risk_state_epoch": getattr(projection, "risk_state_epoch", None),
+        "active_risk_config_sha256": getattr(projection, "active_risk_config_sha256", None),
+        "history_completeness": getattr(projection, "history_completeness", None),
+        "trusted_sequence": getattr(projection, "trusted_sequence", None),
+        "trusted_event_hash": getattr(projection, "trusted_event_hash", None),
+        "terminal_event_hash": getattr(projection, "terminal_event_hash", None),
+    }))
+
+
+# ===========================================================================
+# Correction 06 (BLOCK-05-01 / BLOCK-05-05) -- the closed active-V2 transport
+# mapping, the private V2 request-preparation machinery, the ONE converged
+# private acquisition-result representation, and the production live
+# acquisition state machine.
+#
+# ``ActivePreReleaseReadOperationV2`` stays the controlling SEMANTIC 8-op
+# surface.  The two active-V2 bookend GETs reach the existing
+# ``send_operation_request`` transport boundary + the existing strict generic
+# JSON decoder through the CLOSED INTERNAL ``RunnerOperation`` transport
+# identifiers below -- never through the legacy V1
+# ``PRE_RELEASE_READ_OPERATIONS`` / ``_GENERIC_REQUEST_OPERATIONS`` /
+# ``prepare_runner_operation_request`` / ``PreReleaseReadCapabilityV1`` path,
+# which is preserved byte/semantically unchanged.
+# ===========================================================================
+
+# Active-V2 -> internal transport identifier.  ``GET_MARKET_ORDERBOOK`` maps
+# for identity/decoder symmetry only; it is dispatched through the inherited
+# accepted ``fetch_orderbook`` path, never re-implemented (DSB-OPS-003/011).
+_ACTIVE_V2_OP_TO_RUNNER_OP: Mapping[ActivePreReleaseReadOperationV2, RunnerOperation] = MappingProxyType({
+    ActivePreReleaseReadOperationV2.GET_EXCHANGE_STATUS: RunnerOperation.GET_EXCHANGE_STATUS,
+    ActivePreReleaseReadOperationV2.GET_USER_DATA_TIMESTAMP: RunnerOperation.GET_USER_DATA_TIMESTAMP,
+    ActivePreReleaseReadOperationV2.GET_MARKET: RunnerOperation.GET_MARKET,
+    ActivePreReleaseReadOperationV2.GET_MARKET_ORDERBOOK: RunnerOperation.GET_MARKET_ORDERBOOK,
+    ActivePreReleaseReadOperationV2.GET_ORDERS: RunnerOperation.GET_ORDERS,
+    ActivePreReleaseReadOperationV2.GET_ORDER: RunnerOperation.GET_ORDER,
+    ActivePreReleaseReadOperationV2.GET_FILLS: RunnerOperation.GET_FILLS,
+    ActivePreReleaseReadOperationV2.GET_POSITIONS: RunnerOperation.GET_POSITIONS,
+})
+# The exact closed set of internal transport identifiers the active-V2
+# acquirer may drive.  Disjoint from ``WRITE_OPERATIONS``.
+_ACTIVE_V2_TRANSPORT_OPERATIONS: "frozenset[RunnerOperation]" = frozenset(_ACTIVE_V2_OP_TO_RUNNER_OP.values())
+assert _ACTIVE_V2_TRANSPORT_OPERATIONS.isdisjoint(WRITE_OPERATIONS)
+assert len(_ACTIVE_V2_OP_TO_RUNNER_OP) == 8
+
+_ACTIVE_V2_PORTFOLIO_OPS = (
+    ActivePreReleaseReadOperationV2.GET_ORDERS,
+    ActivePreReleaseReadOperationV2.GET_FILLS,
+    ActivePreReleaseReadOperationV2.GET_POSITIONS,
+)
+
+
+def _active_v2_canonical_query(
+    operation: ActivePreReleaseReadOperationV2, *,
+    subaccount: int, exchange_index: "int | None", cursor_in: str,
+) -> "Tuple[Tuple[str, str], ...]":
+    """DSB-OPS-004 -- the exact query key/value sequence.  Status / freshness /
+    market / orderbook / exact-order carry NO ARB query.  The three paginated
+    portfolio surfaces carry exactly ``subaccount, exchange_index, limit=1000``
+    on the first page and additionally the exact nonempty ``cursor`` on a
+    continuation page.  No other optional filter is ever added -- no ticker,
+    order id, status, event ticker, or timestamp narrowing."""
+    if operation not in _ACTIVE_V2_PORTFOLIO_OPS:
+        return ()
+    pairs = [
+        ("subaccount", str(subaccount)),
+        ("exchange_index", str(exchange_index)),
+        ("limit", str(_ACTIVE_V2_PORTFOLIO_PAGE_LIMIT)),
+    ]
+    if cursor_in:
+        pairs.append(("cursor", cursor_in))
+    return tuple(pairs)
+
+
+def _active_v2_request_identity_sha256(
+    operation: ActivePreReleaseReadOperationV2, *,
+    active_contract: "ActiveExecutionDomainContractV1",
+    domain_binding: "ExecutionDomainBindingV1",
+    exchange_index: "int | None",
+    page_ordinal: int,
+    cursor_in: str = "",
+    ticker: "str | None" = None,
+    order_id: "str | None" = None,
+) -> str:
+    """DSB-READSET-002 -- deterministic request identity.  Commits operation
+    enum / method / exact path / auth class / canonical query sequence /
+    active_contract_sha256 / domain_binding_sha256 / subaccount /
+    exchange_index (when applicable) / page ordinal / cursor input (when
+    applicable) / selected ticker or order id (when applicable).  NEVER a
+    secret, signature, private key, auth header, or secret environment
+    value."""
+    method, path, auth = _ACTIVE_V2_OP_BINDING[operation]
+    return sha256_hex(canonical_json_bytes({
+        "schema": "ARB_KALSHI_DEMO_ACTIVE_V2_READ_REQUEST_IDENTITY_V1",
+        "operation": operation.value,
+        "method": method,
+        "path": path,
+        "auth_class": auth.value,
+        "canonical_query": [
+            [k, v] for k, v in _active_v2_canonical_query(
+                operation, subaccount=domain_binding.subaccount,
+                exchange_index=exchange_index, cursor_in=cursor_in,
+            )
+        ],
+        "active_contract_sha256": active_contract.contract_sha256,
+        "domain_binding_sha256": active_contract.domain_binding_sha256,
+        "subaccount": domain_binding.subaccount,
+        "exchange_index": exchange_index,
+        "page_ordinal": page_ordinal,
+        "cursor_input": cursor_in,
+        "selected_ticker": ticker,
+        "selected_order_id": order_id,
+    }))
+
+
+def _prepare_active_v2_request(
+    operation: ActivePreReleaseReadOperationV2, *,
+    subaccount: int,
+    exchange_index: "int | None" = None,
+    ticker: "str | None" = None,
+    order_id: "str | None" = None,
+    cursor: "str | None" = None,
+    request_ordinal: int,
+    uuid_factory: "Callable[[], uuid.UUID]",
+) -> PreparedRunnerOperationRequestV1:
+    """Correction 06 (CL-4) -- the CLOSED private V2 request preparation for
+    all eight ``ActivePreReleaseReadOperationV2`` members.  Pure / offline: it
+    derives method / exact path / wire URL / canonical query from the frozen
+    DSB-OPS-003 binding + the exact DSB-OPS-004 query contract ONLY.  Nothing
+    here can construct an arbitrary method / path / host / body, add an
+    unlisted query key, or follow a redirect.  ``GET_MARKET_ORDERBOOK`` is
+    prepared here for request-identity purposes only -- transport goes through
+    the inherited accepted ``fetch_orderbook`` path, never re-implemented."""
+    method, api_path, auth = _ACTIVE_V2_OP_BINDING[operation]
+    rendered = api_path
+    if operation in (ActivePreReleaseReadOperationV2.GET_MARKET, ActivePreReleaseReadOperationV2.GET_MARKET_ORDERBOOK):
+        if type(ticker) is not str or _TICKER_PATTERN.fullmatch(ticker) is None:
+            raise RunnerError(RunnerFailureCode.MARKET_IDENTITY_INVALID, detail="active-V2 ticker grammar")
+        rendered = rendered.replace("{ticker}", ticker)
+    elif operation is ActivePreReleaseReadOperationV2.GET_ORDER:
+        if type(order_id) is not str or _ORDER_ID_PATTERN.fullmatch(order_id) is None:
+            raise RunnerError(RunnerFailureCode.ORDER_IDENTITY_INVALID, detail="active-V2 order_id grammar")
+        rendered = rendered.replace("{order_id}", order_id)
+    if cursor is not None and operation not in _ACTIVE_V2_PORTFOLIO_OPS:
+        raise RunnerError(RunnerFailureCode.OPERATION_REQUEST_POLICY_VIOLATION, detail="cursor not permitted for this V2 operation")
+    if cursor is not None and (type(cursor) is not str or cursor == ""):
+        raise RunnerError(RunnerFailureCode.OPERATION_REQUEST_POLICY_VIOLATION, detail="V2 cursor empty")
+    query_pairs = list(_active_v2_canonical_query(
+        operation, subaccount=subaccount, exchange_index=exchange_index,
+        cursor_in=cursor if type(cursor) is str else "",
+    ))
+    canonical_query = _canonical_query_string(query_pairs)
+    query_suffix = "" if canonical_query == "" else "?" + canonical_query
+    auth_mode = (
+        "PUBLIC_UNSIGNED_FOR_THIS_OPERATION"
+        if auth is ActivePreReleaseReadAuthClassV2.PUBLIC_NO_AUTH else "AUTHENTICATED"
+    )
+    return PreparedRunnerOperationRequestV1(
+        operation=_ACTIVE_V2_OP_TO_RUNNER_OP[operation],
+        method=method,
+        host=DEMO_HOST,
+        full_path=rendered,
+        wire_request_url=DEMO_ORIGIN + rendered + query_suffix,
+        signed_path_without_query=rendered,
+        query=tuple(query_pairs),
+        body=None,
+        auth_mode=auth_mode,
+        request_id=f"req_{uuid_factory().hex}",
+    )
+
+
+# --- the ONE converged private acquisition-result / page-commitment shape ---
+
+
+@dataclass(frozen=True, slots=True)
+class _ActiveV2PageCommitmentV1:
+    """DSB-READSET-001 / BLOCK-05-05 -- one ordered immutable commitment per
+    ACTUAL portfolio request.  ``response_sha256`` is the digest of the exact
+    raw response body bytes; ``canonical_content_digest_sha256`` is a
+    SEPARATELY computed digest over the canonical validated
+    page/economic content -- the two are distinct concepts computed
+    separately."""
+
+    operation: str
+    exchange_index: int
+    page_ordinal: int
+    request_identity_sha256: str
+    response_sha256: str
+    canonical_content_digest_sha256: str
+    cursor_in: str
+    cursor_out: str
+    row_count: int
+    row_content_sha256: "Tuple[str, ...]"
+
+    def __post_init__(self) -> None:
+        if (
+            type(self.operation) is not str or not self.operation
+            or type(self.exchange_index) is not int or type(self.exchange_index) is bool or self.exchange_index < 0
+            or type(self.page_ordinal) is not int or type(self.page_ordinal) is bool or self.page_ordinal < 1
+            or not _is_hex64(self.request_identity_sha256)
+            or not _is_hex64(self.response_sha256)
+            or not _is_hex64(self.canonical_content_digest_sha256)
+            or type(self.cursor_in) is not str or type(self.cursor_out) is not str
+            or type(self.row_count) is not int or type(self.row_count) is bool or self.row_count < 0
+            or type(self.row_content_sha256) is not tuple
+            or len(self.row_content_sha256) != self.row_count
+            or any(not _is_hex64(h) for h in self.row_content_sha256)
+        ):
+            raise RunnerError(RunnerFailureCode.SUBACCOUNT_WIDE_COMPLETENESS_UNPROVEN, detail="active-V2 page commitment malformed")
+
+
+@dataclass(frozen=True, slots=True)
+class _ActiveV2SurfaceCommitmentV1:
+    """One (exchange_index, surface) traversal: the ordered page commitments,
+    the page count, and ``pagination_exhausted`` (always True for a
+    release-eligible read).  Cursor thread: first page ``cursor_in == ""``;
+    each page's ``cursor_in`` equals the previous page's nonempty
+    ``cursor_out``; the final page's ``cursor_out == ""`` (terminal)."""
+
+    operation: str
+    exchange_index: int
+    pages: "Tuple[_ActiveV2PageCommitmentV1, ...]"
+    page_count: int
+    pagination_exhausted: bool
+
+    def __post_init__(self) -> None:
+        if (
+            type(self.pages) is not tuple or not self.pages
+            or any(type(p) is not _ActiveV2PageCommitmentV1 for p in self.pages)
+            or type(self.page_count) is not int or self.page_count != len(self.pages)
+            or self.pagination_exhausted is not True
+            or any(p.page_ordinal != i + 1 for i, p in enumerate(self.pages))
+            or any(p.operation != self.operation for p in self.pages)
+            or any(p.exchange_index != self.exchange_index for p in self.pages)
+            or self.pages[0].cursor_in != ""
+            or self.pages[-1].cursor_out != ""
+        ):
+            raise RunnerError(RunnerFailureCode.SUBACCOUNT_WIDE_COMPLETENESS_UNPROVEN, detail="active-V2 surface commitment malformed")
+        for prev, cur in zip(self.pages, self.pages[1:]):
+            if not prev.cursor_out or cur.cursor_in != prev.cursor_out:
+                raise RunnerError(RunnerFailureCode.DYNAMIC_READ_PAGINATION_INCOMPLETE, detail="active-V2 page cursor thread break")
+
+
+@dataclass(frozen=True, slots=True)
+class _ActiveV2PerIndexCommitmentV1:
+    exchange_index: int
+    orders: _ActiveV2SurfaceCommitmentV1
+    fills: _ActiveV2SurfaceCommitmentV1
+    positions: _ActiveV2SurfaceCommitmentV1
+    order_rows: "Tuple[Mapping[str, object], ...]" = ()
+    fill_rows: "Tuple[Mapping[str, object], ...]" = ()
+    position_rows: "Tuple[Mapping[str, object], ...]" = ()
+
+    def __post_init__(self) -> None:
+        for surf, op in (
+            (self.orders, ActivePreReleaseReadOperationV2.GET_ORDERS),
+            (self.fills, ActivePreReleaseReadOperationV2.GET_FILLS),
+            (self.positions, ActivePreReleaseReadOperationV2.GET_POSITIONS),
+        ):
+            if type(surf) is not _ActiveV2SurfaceCommitmentV1 or surf.exchange_index != self.exchange_index or surf.operation != op.value:
+                raise RunnerError(RunnerFailureCode.SUBACCOUNT_WIDE_COMPLETENESS_UNPROVEN, detail="active-V2 per-index commitment malformed")
+
+
+@dataclass(frozen=True, slots=True)
+class _ActiveV2BookendCommitmentV1:
+    """Status / freshness bookend commitment.  For status: exact request
+    identity + raw response SHA + canonical validated status-content SHA +
+    exact sorted derived domain.  For freshness: exact request identity + raw
+    response SHA + exact parsed ``as_of_time`` + the trusted wall-clock sample
+    taken immediately after successful parse."""
+
+    operation: str
+    bookend: str
+    request_identity_sha256: str
+    response_sha256: str
+    canonical_content_sha256: str
+    exact_sorted_domain: "Tuple[int, ...]" = ()
+    as_of_time_utc: str = ""
+    wall_sample_utc: str = ""
+
+    def __post_init__(self) -> None:
+        if (
+            self.bookend not in ("BEFORE", "AFTER")
+            or not _is_hex64(self.request_identity_sha256)
+            or not _is_hex64(self.response_sha256)
+            or not _is_hex64(self.canonical_content_sha256)
+            or type(self.exact_sorted_domain) is not tuple
+        ):
+            raise RunnerError(RunnerFailureCode.SUBACCOUNT_WIDE_COMPLETENESS_UNPROVEN, detail="active-V2 bookend commitment malformed")
+
+
+@dataclass(frozen=True, slots=True)
+class _ActiveV2ContentCommitmentV1:
+    """Selected market / orderbook commitment: exact request identity, the
+    exact accepted response/snapshot identity, and a SEPARATELY computed
+    canonical consumed economic-content digest (DSB-OPS-011 / CL-3)."""
+
+    operation: str
+    request_identity_sha256: str
+    response_identity_sha256: str
+    canonical_consumed_digest_sha256: str
+
+    def __post_init__(self) -> None:
+        if (
+            not _is_hex64(self.request_identity_sha256)
+            or not _is_hex64(self.response_identity_sha256)
+            or not _is_hex64(self.canonical_consumed_digest_sha256)
+        ):
+            raise RunnerError(RunnerFailureCode.SUBACCOUNT_WIDE_COMPLETENESS_UNPROVEN, detail="active-V2 content commitment malformed")
+
+
+@dataclass(frozen=True, slots=True)
+class _ActiveV2OrderSupplementCommitmentV1:
+    order_id: str
+    request_identity_sha256: str
+    response_sha256: str
+    canonical_content_sha256: str
+
+    def __post_init__(self) -> None:
+        if (
+            type(self.order_id) is not str or _ORDER_ID_PATTERN.fullmatch(self.order_id) is None
+            or not _is_hex64(self.request_identity_sha256)
+            or not _is_hex64(self.response_sha256)
+            or not _is_hex64(self.canonical_content_sha256)
+        ):
+            raise RunnerError(RunnerFailureCode.SUBACCOUNT_WIDE_COMPLETENESS_UNPROVEN, detail="active-V2 exact-order supplement malformed")
+
+
+@dataclass(frozen=True, slots=True)
+class _ActiveV2AcquiredReadV1:
+    """DSB-READSET-001 / BLOCK-05-05 / CL-1 -- the ONE private
+    acquisition-result representation produced by BOTH the production live
+    acquirer and the offline fake seam.  Carries every ordered page/bookend
+    commitment plus the derived ``DynamicIndexDomainAccountWideReadV1``
+    fixture (so the existing completeness / foreign-economics predicates run
+    unchanged) and the scoped selected-route ``AuthoritativeReadTruthV1``.
+    There is no weaker or alternate shape and one ADRS2 minting
+    implementation consumes it."""
+
+    status_before: _ActiveV2BookendCommitmentV1
+    status_after: _ActiveV2BookendCommitmentV1
+    freshness_before: _ActiveV2BookendCommitmentV1
+    freshness_after: _ActiveV2BookendCommitmentV1
+    selected_market: _ActiveV2ContentCommitmentV1
+    selected_orderbook: _ActiveV2ContentCommitmentV1
+    per_index: "Tuple[_ActiveV2PerIndexCommitmentV1, ...]"
+    exact_order_supplements: "Tuple[_ActiveV2OrderSupplementCommitmentV1, ...]"
+    d0: "Tuple[int, ...]"
+    d1: "Tuple[int, ...]"
+    fixture: "DynamicIndexDomainAccountWideReadV1"
+    selected_route_truth: "AuthoritativeReadTruthV1"
+    t0_wall_sample_utc: str
+    t1_wall_sample_utc: str
+
+    def __post_init__(self) -> None:
+        if (
+            type(self.fixture) is not DynamicIndexDomainAccountWideReadV1
+            or type(self.selected_route_truth) is not AuthoritativeReadTruthV1
+            or type(self.d0) is not tuple or type(self.d1) is not tuple
+        ):
+            raise RunnerError(RunnerFailureCode.SUBACCOUNT_WIDE_COMPLETENESS_UNPROVEN, detail="active-V2 acquired read malformed")
+        if self.d0 != self.d1:
+            raise RunnerError(RunnerFailureCode.DYNAMIC_READ_STATUS_DOMAIN_CHANGED, detail="D1 != D0")
+        if tuple(p.exchange_index for p in self.per_index) != self.d0:
+            raise RunnerError(RunnerFailureCode.SUBACCOUNT_WIDE_COMPLETENESS_UNPROVEN, detail="per-index commitments do not enumerate D0 ascending")
+        if self.status_before.exact_sorted_domain != self.d0 or self.status_after.exact_sorted_domain != self.d1:
+            raise RunnerError(RunnerFailureCode.DYNAMIC_READ_STATUS_DOMAIN_CHANGED, detail="status bookend domain != derived domain")
+        if len(self.exact_order_supplements) > _ACTIVE_V2_ORDER_REQUEST_MAX:
+            raise RunnerError(RunnerFailureCode.GET_ORDER_TARGET_LIMIT_EXCEEDED, detail="more than two exact-order supplements")
+        validate_canonical_timestamp(self.t0_wall_sample_utc)
+        validate_canonical_timestamp(self.t1_wall_sample_utc)
+
+
+# --- the closed private V2 transport adapter ------------------------------
+
+
+class _ActiveV2OperationAdapter:
+    """DSB-DYN-001/006 / CL-4 -- the CLOSED module-private bridge from
+    ``ActivePreReleaseReadOperationV2`` to the already-supplied
+    ``ExperimentRunnerRuntimeV2`` transport dependencies
+    (``send_operation_request`` + the accepted ``fetch_orderbook``).  It adds
+    NO caller-supplied transport/acquirer seam, follows NO redirect, performs
+    NO automatic retry, and never widens the operation surface beyond the
+    exact eight-op contract.  Every JSON GET flows through the SAME strict
+    generic response decoder as every other read."""
+
+    __slots__ = ("_runtime", "_absolute_invocation_deadline_ns", "_process_instance_id")
+
+    def __init__(self, runtime: "ExperimentRunnerRuntimeV2", *, absolute_invocation_deadline_ns: int) -> None:
+        if type(runtime) is not ExperimentRunnerRuntimeV2:
+            raise RunnerError(RunnerFailureCode.TRUSTED_DYNAMIC_READ_CAPABILITY_INVALID, detail="adapter runtime type")
+        if type(absolute_invocation_deadline_ns) is not int or absolute_invocation_deadline_ns < 0:
+            raise RunnerError(RunnerFailureCode.TRUSTED_DYNAMIC_READ_CAPABILITY_INVALID, detail="adapter deadline")
+        self._runtime = runtime
+        self._absolute_invocation_deadline_ns = absolute_invocation_deadline_ns
+        self._process_instance_id = runtime.normal_gate.process_instance_id
+
+    def _deadline(self, operation: ActivePreReleaseReadOperationV2, ordinal: int) -> OperationDeadlineV1:
+        # DSB-BUDGET-006: request_deadline = min(absolute_invocation_deadline,
+        # request_start_monotonic + 10000 ms).  ``OperationDeadlineV1.create``
+        # applies exactly that min() against the passed experiment end.
+        return OperationDeadlineV1.create(
+            process_instance_id=self._process_instance_id,
+            operation_name=operation.value,
+            request_ordinal=ordinal,
+            started_monotonic_ns=self._runtime.monotonic_clock_ns(),
+            experiment_absolute_end_monotonic_ns=self._absolute_invocation_deadline_ns,
+            uuid_factory=self._runtime.uuid_factory,
+        )
+
+    def issue_json(
+        self,
+        capability: "_TrustedDynamicPreReleaseReadCapabilityV2",
+        operation: ActivePreReleaseReadOperationV2,
+        *,
+        ordinal: int,
+        subaccount: int,
+        exchange_index: "int | None" = None,
+        ticker: "str | None" = None,
+        order_id: "str | None" = None,
+        cursor: "str | None" = None,
+    ) -> "Tuple[Mapping[str, object], bytes, OperationDeadlineV1]":
+        """Correction 07 C07-E / DSB-BUDGET-005 -- exact charge boundary:
+
+        start monotonic sample + create request deadline -> check
+        BEFORE_PREPARATION -> ``_prepare_active_v2_request`` (local
+        construction) -> complete ALL local request validation -> check
+        AFTER_PREPARATION / inherited local-signing boundary -> ``capability.
+        charge(operation)`` exactly once -> IMMEDIATELY
+        ``send_operation_request(...)``.
+
+        A local request-construction/validation failure (anything before the
+        ``charge`` call) consumes ZERO V2 budget.  Any request that reaches
+        the charge boundary stays consumed on every later HTTP / timeout /
+        parse / scope failure -- there is no refund and no retry.
+
+        The one ``OperationDeadlineV1`` identity is returned to the caller so
+        the SAME deadline covers operation-specific schema / scope / cursor /
+        row-hash / page-digest / accepted-commitment construction, with one
+        final check after the accepted result exists (C07-F)."""
+        deadline = self._deadline(operation, ordinal)
+        check_deadline(deadline, self._runtime.monotonic_clock_ns(), checkpoint=DeadlineCheckpoint.BEFORE_PREPARATION)
+        # Every fallible LOCAL step -- operation->transport identifier mapping,
+        # method/path/query/auth/request-id construction and validation --
+        # completes BEFORE the charge (C07-E / clarification 1).
+        runner_op = _ACTIVE_V2_OP_TO_RUNNER_OP[operation]
+        prepared = _prepare_active_v2_request(
+            operation, subaccount=subaccount, exchange_index=exchange_index,
+            ticker=ticker, order_id=order_id, cursor=cursor,
+            request_ordinal=ordinal, uuid_factory=self._runtime.uuid_factory,
+        )
+        # All local request construction/validation is now complete.
+        check_deadline(deadline, self._runtime.monotonic_clock_ns(), checkpoint=DeadlineCheckpoint.AFTER_PREPARATION)
+        check_deadline(deadline, self._runtime.monotonic_clock_ns(), checkpoint=DeadlineCheckpoint.AFTER_SIGNING)
+        # Charge exactly once; the next fallible action is the transport call.
+        capability.charge(operation)
+        raw = self._runtime.send_operation_request(runner_op, prepared, deadline)
+        check_deadline(deadline, self._runtime.monotonic_clock_ns(), checkpoint=DeadlineCheckpoint.AFTER_TRANSPORT)
+        parsed = _decode_and_validate_runner_json_response(
+            runner_op, raw_response=raw, deadline=deadline,
+            now_monotonic_ns=self._runtime.monotonic_clock_ns,
+        )
+        raw_bytes = raw.body_bytes if type(raw.body_bytes) is bytes else b""
+        return parsed, raw_bytes, deadline
+
+    def issue_orderbook(
+        self, capability: "_TrustedDynamicPreReleaseReadCapabilityV2", *, ordinal: int, ticker: str,
+    ) -> "Tuple[object, OperationDeadlineV1]":
+        """DSB-OPS-003/011 / CL-3 / C07-E -- the inherited accepted
+        ``fetch_orderbook`` path.  Exact local ticker/request preparation and
+        validation happen FIRST; then the capability is charged exactly once;
+        then ``fetch_orderbook`` is invoked immediately.  A local preparation
+        failure consumes ZERO budget.  The parsed snapshot identity is NEVER
+        treated as a raw-body SHA.  The request ``OperationDeadlineV1`` is
+        returned so the caller's snapshot validation / canonical identity /
+        economic digest / selected-orderbook commitment construction all
+        occur before one final check against the SAME deadline (C07-F)."""
+        deadline = self._deadline(ActivePreReleaseReadOperationV2.GET_MARKET_ORDERBOOK, ordinal)
+        check_deadline(deadline, self._runtime.monotonic_clock_ns(), checkpoint=DeadlineCheckpoint.BEFORE_PREPARATION)
+        # Exact local ticker/request preparation + validation BEFORE any charge.
+        _prepare_active_v2_request(
+            ActivePreReleaseReadOperationV2.GET_MARKET_ORDERBOOK,
+            subaccount=capability.runtime.domain_binding.subaccount, ticker=ticker,
+            request_ordinal=ordinal, uuid_factory=self._runtime.uuid_factory,
+        )
+        check_deadline(deadline, self._runtime.monotonic_clock_ns(), checkpoint=DeadlineCheckpoint.AFTER_PREPARATION)
+        capability.charge(ActivePreReleaseReadOperationV2.GET_MARKET_ORDERBOOK)
+        result = self._runtime.fetch_orderbook(ticker, deadline)
+        check_deadline(deadline, self._runtime.monotonic_clock_ns(), checkpoint=DeadlineCheckpoint.AFTER_TRANSPORT)
+        if isinstance(result, OrderBookHalt):
+            raise RunnerError(RunnerFailureCode.RESPONSE_SCHEMA_INVALID, detail="orderbook halt " + result.code.value)
+        if type(result) is not KalshiNativeOrderBookSnapshot:
+            raise RunnerError(RunnerFailureCode.RESPONSE_SCHEMA_INVALID, detail="orderbook return type")
+        if result.market_ticker != ticker:
+            raise RunnerError(RunnerFailureCode.MARKET_IDENTITY_INVALID, detail="orderbook ticker mismatch")
+        return result, deadline
+
+
+# --- exact response parsers for the active-V2 status / freshness / pages ---
+
+_ACTIVE_V2_SURFACE_PAGE_MAX = MappingProxyType({
+    ActivePreReleaseReadOperationV2.GET_ORDERS: _ACTIVE_V2_ORDERS_PAGE_MAX,
+    ActivePreReleaseReadOperationV2.GET_FILLS: _ACTIVE_V2_FILLS_PAGE_MAX,
+    ActivePreReleaseReadOperationV2.GET_POSITIONS: _ACTIVE_V2_POSITIONS_PAGE_MAX,
+})
+_ACTIVE_V2_SURFACE_ROW_KEY = MappingProxyType({
+    ActivePreReleaseReadOperationV2.GET_ORDERS: "orders",
+    ActivePreReleaseReadOperationV2.GET_FILLS: "fills",
+    ActivePreReleaseReadOperationV2.GET_POSITIONS: "market_positions",
+})
+
+
+def _active_v2_status_domain_and_content(parsed: "Mapping[str, object]") -> "Tuple[Tuple[int, ...], str]":
+    """DSB-OPS-006 / DSB-DOMAIN-001/002 -- derive the exact sorted unique
+    integer exchange-index domain from a ``GET_EXCHANGE_STATUS`` body and a
+    canonical status-content digest kept SEPARATE from the raw response SHA.
+    Malformed / duplicate / out-of-range / >8-unique fail closed with the
+    precise ``DYNAMIC_READ_STATUS_DOMAIN_*`` code before any traversal."""
+    if type(parsed.get("exchange_active")) is not bool or type(parsed.get("trading_active")) is not bool:
+        raise RunnerError(RunnerFailureCode.DYNAMIC_READ_STATUS_DOMAIN_MALFORMED, detail="status required booleans")
+    rows = parsed.get("exchange_index_statuses")
+    if type(rows) is not list or not rows:
+        raise RunnerError(RunnerFailureCode.DYNAMIC_READ_STATUS_DOMAIN_MALFORMED, detail="exchange_index_statuses missing/non-array/empty")
+    seen: set[int] = set()
+    values: list[int] = []
+    canonical_rows: list[dict] = []
+    for row in rows:
+        if not isinstance(row, Mapping):
+            raise RunnerError(RunnerFailureCode.DYNAMIC_READ_STATUS_DOMAIN_MALFORMED, detail="status row not an object")
+        idx = row.get("exchange_index")
+        if type(idx) is not int or type(idx) is bool or idx < 0 or idx > _ACTIVE_EXCHANGE_INDEX_VALUE_MAX:
+            raise RunnerError(RunnerFailureCode.DYNAMIC_READ_STATUS_DOMAIN_MALFORMED, detail="status row exchange_index " + repr(idx))
+        if type(row.get("exchange_active")) is not bool or type(row.get("trading_active")) is not bool:
+            raise RunnerError(RunnerFailureCode.DYNAMIC_READ_STATUS_DOMAIN_MALFORMED, detail="status row required booleans")
+        if "intra_exchange_transfers_active" in row and type(row.get("intra_exchange_transfers_active")) is not bool:
+            raise RunnerError(RunnerFailureCode.DYNAMIC_READ_STATUS_DOMAIN_MALFORMED, detail="status row intra_exchange_transfers_active type")
+        if "description" in row and type(row.get("description")) is not str:
+            raise RunnerError(RunnerFailureCode.DYNAMIC_READ_STATUS_DOMAIN_MALFORMED, detail="status row description type")
+        if idx in seen:
+            raise RunnerError(RunnerFailureCode.DYNAMIC_READ_STATUS_DOMAIN_DUPLICATE, detail="duplicate exchange_index " + str(idx))
+        seen.add(idx)
+        values.append(idx)
+        canonical_rows.append({k: str(row[k]) for k in sorted(row.keys(), key=str)})
+    domain = _sorted_bounded_index_domain(
+        tuple(sorted(values)), domain_max=_ACTIVE_EXCHANGE_INDEX_VALUE_MAX,
+        bound_exceeded_code=RunnerFailureCode.DYNAMIC_READ_STATUS_DOMAIN_BOUND_EXCEEDED,
+    )
+    content_sha = sha256_hex(canonical_json_bytes({
+        "schema": "ARB_KALSHI_DEMO_ACTIVE_V2_STATUS_CONTENT_V1",
+        "exchange_active": parsed["exchange_active"],
+        "trading_active": parsed["trading_active"],
+        "exchange_index_statuses": sorted(canonical_rows, key=lambda r: int(r["exchange_index"])),
+    }))
+    return domain, content_sha
+
+
+def _active_v2_as_of_time(parsed: "Mapping[str, object]") -> str:
+    """DSB-OPS-007 -- the single ARB-consumed ``as_of_time`` field: a
+    nonempty timezone-aware RFC3339 string producing a finite UTC instant.
+    Naive/invalid/duplicate-key/non-string fails closed."""
+    raw = parsed.get("as_of_time")
+    if type(raw) is not str or raw == "":
+        raise RunnerError(RunnerFailureCode.DYNAMIC_READ_FRESHNESS_MALFORMED, detail="as_of_time missing/non-string")
+    try:
+        # ARB canonical UTC form (``...%f Z``): a finite timezone-aware instant.
+        # A naive / invalid / malformed-offset value fails closed here.
+        canonical = validate_canonical_timestamp(raw)
+        _parse_canonical_utc(canonical)
+    except Exception as exc:  # noqa: BLE001 - any parse failure is fail-closed
+        raise RunnerError(RunnerFailureCode.DYNAMIC_READ_FRESHNESS_MALFORMED, detail="as_of_time not a finite canonical UTC instant") from exc
+    return canonical
+
+
+_ACTIVE_V2_SUBACCOUNT_FIELD = "subaccount_number"
+
+
+def _active_v2_row_ticker(row: "Mapping[str, object]", *, operation_detail: str) -> str:
+    """The row's OWN exact market ticker (DSB-OPS-008/009/010 / Correction 07
+    C07-C: each accepted economic row keeps its own ticker; it is never
+    forced to the selected market).  Predecessor validation only: an exact
+    non-empty built-in ``str``.  A missing / non-string / empty ticker is
+    malformed current truth."""
+    ticker = row.get("ticker")
+    if type(ticker) is not str or ticker == "":
+        raise RunnerError(RunnerFailureCode.DYNAMIC_READ_RESPONSE_SCOPE_MISMATCH, detail=operation_detail + " row ticker missing/non-string/empty")
+    return ticker
+
+
+def _active_v2_order_fill_scope(
+    row: "Mapping[str, object]", *, subaccount: int, exchange_index: int, operation: "ActivePreReleaseReadOperationV2",
+) -> str:
+    """Correction 07 C07-B / DSB-OPS-008/009 -- exact active-V2 GET_ORDERS /
+    GET_FILLS row scope.  EVERY consumed row REQUIRES:
+
+    ``subaccount_number`` : exact built-in int, bool prohibited, non-null,
+    == ``runtime.domain_binding.subaccount``;
+    ``exchange_index``    : exact built-in int, bool prohibited, non-null,
+    == the exact request index.
+
+    A missing required field is malformed current truth -- the request scope
+    is NEVER used as a default.  A legacy/synthetic ``subaccount`` key, if
+    present, is a CONTRADICTION check only (must equal the runtime subaccount)
+    and is NOT a substitute for the required ``subaccount_number``.  Returns
+    the row's own exact ticker.  This function NEVER touches the legacy V1
+    ``_working_order_from_raw`` / ``_fill_from_raw`` schema."""
+    if _ACTIVE_V2_SUBACCOUNT_FIELD not in row:
+        raise RunnerError(RunnerFailureCode.DYNAMIC_READ_RESPONSE_SCOPE_MISMATCH, detail=operation.value + " row missing required subaccount_number")
+    sn = row.get(_ACTIVE_V2_SUBACCOUNT_FIELD)
+    if type(sn) is not int or type(sn) is bool or sn != subaccount:
+        raise RunnerError(RunnerFailureCode.DYNAMIC_READ_RESPONSE_SCOPE_MISMATCH, detail=operation.value + " subaccount_number not exact int == runtime subaccount")
+    if "exchange_index" not in row:
+        raise RunnerError(RunnerFailureCode.DYNAMIC_READ_RESPONSE_SCOPE_MISMATCH, detail=operation.value + " row missing required exchange_index")
+    ei = row.get("exchange_index")
+    if type(ei) is not int or type(ei) is bool or ei != exchange_index:
+        raise RunnerError(RunnerFailureCode.DYNAMIC_READ_RESPONSE_SCOPE_MISMATCH, detail=operation.value + " exchange_index not exact int == request index")
+    legacy = row.get("subaccount")
+    if legacy is not None and (type(legacy) is not int or type(legacy) is bool or legacy != subaccount):
+        raise RunnerError(RunnerFailureCode.DYNAMIC_READ_RESPONSE_SCOPE_MISMATCH, detail=operation.value + " contradictory legacy subaccount field")
+    return _active_v2_row_ticker(row, operation_detail=operation.value)
+
+
+def _active_v2_position_scope(row: "Mapping[str, object]", *, subaccount: int, exchange_index: int) -> str:
+    """Correction 07 C07-B / DSB-OPS-010 -- exact active-V2 GET_POSITIONS
+    ``market_positions`` row scope.  REQUIRED exact ``exchange_index`` ==
+    request index.  ``subaccount_number``, when exposed, must be an exact int
+    == runtime subaccount.  A legacy/synthetic ``subaccount`` key, if present,
+    is a CONTRADICTION check only (must equal the runtime subaccount) and does
+    not substitute for a missing order/fill ``subaccount_number``.  Returns
+    the row's own exact ticker."""
+    if "exchange_index" not in row:
+        raise RunnerError(RunnerFailureCode.DYNAMIC_READ_RESPONSE_SCOPE_MISMATCH, detail="position row missing required exchange_index")
+    ei = row.get("exchange_index")
+    if type(ei) is not int or type(ei) is bool or ei != exchange_index:
+        raise RunnerError(RunnerFailureCode.DYNAMIC_READ_RESPONSE_SCOPE_MISMATCH, detail="position exchange_index not exact int == request index")
+    sn = row.get(_ACTIVE_V2_SUBACCOUNT_FIELD)
+    if sn is not None and (type(sn) is not int or type(sn) is bool or sn != subaccount):
+        raise RunnerError(RunnerFailureCode.DYNAMIC_READ_RESPONSE_SCOPE_MISMATCH, detail="position subaccount_number not exact int == runtime subaccount")
+    legacy = row.get("subaccount")
+    if legacy is not None and (type(legacy) is not int or type(legacy) is bool or legacy != subaccount):
+        raise RunnerError(RunnerFailureCode.DYNAMIC_READ_RESPONSE_SCOPE_MISMATCH, detail="position contradictory legacy subaccount field")
+    return _active_v2_row_ticker(row, operation_detail="GET_POSITIONS")
+
+
+def _active_v2_working_order_from_row(
+    row: "Mapping[str, object]", *, subaccount: int, exchange_index: int,
+) -> "WorkingOrderV1 | None":
+    """Correction 07 -- active-V2-specific working-order conversion.  Uses the
+    row's OWN ticker and the exact ``subaccount_number`` scope; a non-resting
+    order returns ``None``.  The legacy V1 ``_working_order_from_raw`` schema
+    is left untouched."""
+    ticker = _active_v2_order_fill_scope(
+        row, subaccount=subaccount, exchange_index=exchange_index,
+        operation=ActivePreReleaseReadOperationV2.GET_ORDERS,
+    )
+    order_id = _require_exact_str(
+        _require_field(row, "order_id", code=RunnerFailureCode.RESPONSE_SCHEMA_INVALID),
+        code=RunnerFailureCode.RESPONSE_SCHEMA_INVALID, detail="active-V2 order_id type")
+    if order_id == "":
+        raise RunnerError(RunnerFailureCode.RESPONSE_SCHEMA_INVALID, detail="active-V2 order_id blank")
+    status = _require_exact_str(
+        _require_field(row, "status", code=RunnerFailureCode.RESPONSE_SCHEMA_INVALID),
+        code=RunnerFailureCode.RESPONSE_SCHEMA_INVALID, detail="active-V2 order status type")
+    if status != "resting":
+        return None
+    side = row.get("side")
+    outcome_side = {"yes": "YES", "no": "NO"}.get(side) if type(side) is str else None
+    if outcome_side is None:
+        raise RunnerError(RunnerFailureCode.RESPONSE_SCHEMA_INVALID, detail="active-V2 order side")
+    remaining = _decimal_from_quantity_string(_require_field(row, "remaining_count_fp", code=RunnerFailureCode.RESPONSE_SCHEMA_INVALID))
+    price = _decimal_from_price_string(_require_field(row, "yes_price_dollars", code=RunnerFailureCode.RESPONSE_SCHEMA_INVALID))
+    return WorkingOrderV1(ticker, order_id, outcome_side, remaining, price)
+
+
+@dataclass(frozen=True, slots=True)
+class _ActiveV2ParsedFillV1:
+    """Correction 09 C09-A / DSB-OPS-009 -- the ONE private parsed active-V2
+    fill identity.  It carries the COMPLETE inherited exact fill identity,
+    including the ``order_id`` that the public ``EconomicFillV1`` risk
+    projection does not model, so DSB-READ-005 exactly-once/conflict
+    comparison compares the full identity rather than only the economic
+    projection.  Frozen: equality is exact field-by-field equality, preserving
+    the predecessor's Decimal/temporal comparison semantics."""
+
+    fill_id: str
+    order_id: str
+    subaccount: int
+    exchange_index: int
+    ticker: str
+    outcome_side: str
+    quantity: Decimal
+    yes_price: Decimal
+    created_time_utc: str
+
+    def economic_fill(self) -> "EconomicFillV1":
+        """The existing public risk projection -- the ``EconomicFillV1`` model
+        is UNCHANGED by Correction 09; ``order_id`` stays private identity."""
+        return EconomicFillV1(
+            self.ticker, self.fill_id, self.outcome_side,
+            self.quantity, self.yes_price, self.created_time_utc,
+        )
+
+
+def _active_v2_parsed_fill_from_row(
+    row: "Mapping[str, object]", *, subaccount: int, exchange_index: int,
+) -> "_ActiveV2ParsedFillV1":
+    """Correction 09 C09-A -- the ONE shared active-V2 fill parser.  Every
+    consumer (C08 page-acceptance economic validation, selected-route truth,
+    account-wide aggregate extras, and the C09-C domain-wide fill-identity
+    proof) parses through THIS function; there is no second/weaker fill
+    parser.  Uses the row's OWN ticker and the exact ``subaccount_number``
+    scope, and preserves the inherited exact identity / Decimal / temporal
+    validation of the legacy V1 ``_fill_from_raw`` -- including its REQUIRED
+    exact ``order_id`` (C09-B: omitted by Correction 08).  The legacy V1
+    ``_fill_from_raw`` schema itself is left untouched."""
+    ticker = _active_v2_order_fill_scope(
+        row, subaccount=subaccount, exchange_index=exchange_index,
+        operation=ActivePreReleaseReadOperationV2.GET_FILLS,
+    )
+    fill_id = _require_exact_str(
+        _require_field(row, "fill_id", code=RunnerFailureCode.RESPONSE_SCHEMA_INVALID),
+        code=RunnerFailureCode.RESPONSE_SCHEMA_INVALID, detail="active-V2 fill_id type")
+    if fill_id == "":
+        raise RunnerError(RunnerFailureCode.RESPONSE_SCHEMA_INVALID, detail="active-V2 fill_id blank")
+    # C09-B / DSB-OPS-009: order_id is inherited exact fill IDENTITY (never a
+    # current-working-order liveness claim -- see C09-G).  A missing / non-str
+    # / blank order_id is malformed current truth.  The request scope is NEVER
+    # used as a default.
+    order_id = _require_exact_str(
+        _require_field(row, "order_id", code=RunnerFailureCode.RESPONSE_SCHEMA_INVALID),
+        code=RunnerFailureCode.ORDER_IDENTITY_INVALID, detail="active-V2 fill order_id type")
+    if order_id == "":
+        raise RunnerError(RunnerFailureCode.ORDER_IDENTITY_INVALID, detail="active-V2 fill order_id blank")
+    side = row.get("side")
+    outcome_side = {"yes": "YES", "no": "NO"}.get(side) if type(side) is str else None
+    if outcome_side is None:
+        raise RunnerError(RunnerFailureCode.RESPONSE_SCHEMA_INVALID, detail="active-V2 fill side")
+    price = _decimal_from_price_string(_require_field(row, "yes_price_dollars", code=RunnerFailureCode.RESPONSE_SCHEMA_INVALID))
+    quantity = _decimal_from_quantity_string(_require_field(row, "count_fp", code=RunnerFailureCode.RESPONSE_SCHEMA_INVALID))
+    created = _require_str(
+        _require_field(row, "created_time", code=RunnerFailureCode.RESPONSE_SCHEMA_INVALID),
+        code=RunnerFailureCode.RESPONSE_SCHEMA_INVALID, detail="active-V2 fill created_time")
+    validate_canonical_timestamp(created)
+    return _ActiveV2ParsedFillV1(
+        fill_id=fill_id, order_id=order_id, subaccount=subaccount, exchange_index=exchange_index,
+        ticker=ticker, outcome_side=outcome_side, quantity=quantity, yes_price=price,
+        created_time_utc=created,
+    )
+
+
+def _active_v2_fill_from_row(
+    row: "Mapping[str, object]", *, subaccount: int, exchange_index: int,
+) -> "EconomicFillV1":
+    """Correction 07 / Correction 09 -- active-V2-specific fill conversion.
+    Delegates to the ONE shared ``_active_v2_parsed_fill_from_row`` and returns
+    only its existing ``EconomicFillV1`` projection."""
+    return _active_v2_parsed_fill_from_row(
+        row, subaccount=subaccount, exchange_index=exchange_index,
+    ).economic_fill()
+
+
+def _active_v2_scope_guard(row: "Mapping[str, object]", *, subaccount: int, exchange_index: int) -> None:
+    """DSB-PAGE-003 -- retained ONLY for the exact-order GET_ORDER supplement
+    confirmation (a single trusted selected-route order id).  The paginated
+    portfolio surfaces use the exact Correction-07 operation-specific
+    validators above."""
+    ei = row.get("exchange_index")
+    if type(ei) is not int or type(ei) is bool or ei != exchange_index:
+        raise RunnerError(RunnerFailureCode.DYNAMIC_READ_RESPONSE_SCOPE_MISMATCH, detail="get_order row exchange_index != request index")
+    sn = row.get(_ACTIVE_V2_SUBACCOUNT_FIELD)
+    if sn is not None and (type(sn) is not int or type(sn) is bool or sn != subaccount):
+        raise RunnerError(RunnerFailureCode.DYNAMIC_READ_RESPONSE_SCOPE_MISMATCH, detail="get_order row subaccount_number mismatch")
+    legacy = row.get("subaccount")
+    if legacy is not None and (type(legacy) is not int or type(legacy) is bool or legacy != subaccount):
+        raise RunnerError(RunnerFailureCode.DYNAMIC_READ_RESPONSE_SCOPE_MISMATCH, detail="get_order row contradictory legacy subaccount")
+
+
+def _active_v2_extract_cursor_out(parsed: "Mapping[str, object]") -> str:
+    """DSB-PAGE-001 -- ``cursor`` must be an exact string.  ``""`` is
+    terminal; a nonempty string is the exact next-page cursor; an
+    absent/null/non-string cursor is malformed/incomplete."""
+    if "cursor" not in parsed:
+        raise RunnerError(RunnerFailureCode.DYNAMIC_READ_PAGINATION_INCOMPLETE, detail="cursor field absent")
+    cursor = parsed.get("cursor")
+    if type(cursor) is not str:
+        raise RunnerError(RunnerFailureCode.DYNAMIC_READ_PAGINATION_INCOMPLETE, detail="cursor not a string")
+    return cursor
+
+
+def _active_v2_validate_page_row_economics(
+    row: "Mapping[str, object]",
+    *,
+    operation: ActivePreReleaseReadOperationV2,
+    row_ticker: str,
+    subaccount: int,
+    exchange_index: int,
+    selected_exchange_index: int,
+    selected_ticker: str,
+    retained_ticker: "str | None",
+) -> None:
+    """Correction 08 C08-A/B/C/D -- DSB-BUDGET-006: validate, BEFORE this
+    page's own final same-request deadline check, exactly the economic
+    fields a later ARB risk/reconciliation path will actually consume from
+    this accepted row.  Reuses the SAME semantic parsers later used by
+    selected-route truth / account-wide aggregate extras / position
+    corroboration (``_active_v2_working_order_from_row`` /
+    ``_active_v2_parsed_fill_from_row`` / ``_position_count_from_row`` /
+    ``_foreign_index_position_fill``) -- never a parallel/weaker parser.
+    Validation-only: any returned object is discarded here; the row itself
+    is never mutated or filtered by this function."""
+    if operation is ActivePreReleaseReadOperationV2.GET_ORDERS:
+        _active_v2_working_order_from_row(row, subaccount=subaccount, exchange_index=exchange_index)
+        return
+    if operation is ActivePreReleaseReadOperationV2.GET_FILLS:
+        # C09-B: the SHARED parsed-fill identity parser (which requires the
+        # inherited exact ``order_id``) runs HERE, inside the C08 page
+        # lifecycle -- before cursor/digest/page commitment and before this
+        # page's own final same-request deadline check.  No second deadline
+        # window is created and fill validation is never moved later.
+        _active_v2_parsed_fill_from_row(row, subaccount=subaccount, exchange_index=exchange_index)
+        return
+    # GET_POSITIONS -- ``position_count_fp`` is always consumed (corroboration
+    # / retained-live check / exact-zero classification / aggregate-risk
+    # magnitude all read it), so it is validated for every accepted position
+    # row.  Every other field is validated ONLY when this row's classification
+    # actually consumes it, mirroring
+    # ``_parse_dynamic_index_domain_account_wide_extra_economics`` exactly.
+    count = _position_count_from_row(row)
+    if exchange_index == selected_exchange_index and row_ticker == selected_ticker:
+        return  # SELECTED_ROUTE_ACCOUNTED: selected-route corroboration consumes count only.
+    if retained_ticker is not None and row_ticker == retained_ticker:
+        return  # RETAINED_CURRENT_POSITION_CHECKED: the retained-live check consumes count only.
+    if count == 0:
+        return  # EXACT_ZERO_ACCOUNTED: count only.
+    # AGGREGATE_RISK_ACCOUNTED: a nonzero unrelated position is folded into
+    # aggregate risk as one synthetic EconomicFillV1 -- validate the exact
+    # inherited synthetic-risk inputs (yes_price_dollars / position_as_of_utc
+    # / conversion) before this page becomes accepted.
+    _foreign_index_position_fill(row, ticker=row_ticker, subaccount=subaccount, exchange_index=exchange_index)
+
+
+def _active_v2_paginate_surface(
+    adapter: "_ActiveV2OperationAdapter",
+    capability: "_TrustedDynamicPreReleaseReadCapabilityV2",
+    operation: ActivePreReleaseReadOperationV2,
+    *,
+    ordinal_box: list,
+    subaccount: int,
+    exchange_index: int,
+    selected_ticker: str,
+    retained_ticker: "str | None" = None,
+) -> "Tuple[_ActiveV2SurfaceCommitmentV1, Tuple[Mapping[str, object], ...]]":
+    """DSB-DOMAIN-003 / DSB-PAGE-001..004 / Correction 07 C07-A + C07-E/F /
+    Correction 08 C08-A..E -- one (surface, index) traversal.
+
+    Every page: validate the top-level shape; validate EVERY row's exact
+    active-V2 operation-specific scope (``subaccount_number`` +
+    ``exchange_index`` for orders/fills; required ``exchange_index`` for
+    positions; ``event_positions`` must be exactly empty); validate EVERY
+    row's CONSUMED economic schema via
+    ``_active_v2_validate_page_row_economics`` (DSB-BUDGET-006: the same
+    per-request deadline must cover this, not only scope/cursor/digest);
+    PRESERVE EVERY validated row (NO ticker filter, NO retained-ticker
+    exception); compute the row hashes, the canonical page content digest,
+    and ``row_count`` from EVERY validated row; append EVERY validated row to
+    the surface result; only then handle the cursor.  The exact raw response
+    SHA stays DISTINCT from the canonical page content digest.  The one
+    per-operation ``OperationDeadlineV1`` returned by the adapter covers the
+    scope / economic-schema / cursor / row-hash / page-digest /
+    page-commitment work, with one final check after the accepted page
+    commitment exists (C07-F / C08-E)."""
+    runtime = adapter._runtime
+    contract = runtime.active_contract
+    binding = runtime.domain_binding
+    row_key = _ACTIVE_V2_SURFACE_ROW_KEY[operation]
+    page_max = _ACTIVE_V2_SURFACE_PAGE_MAX[operation]
+    is_positions = operation is ActivePreReleaseReadOperationV2.GET_POSITIONS
+    pages: list[_ActiveV2PageCommitmentV1] = []
+    kept_rows: list[Mapping[str, object]] = []
+    seen_cursors: set[str] = set()
+    cursor_in = ""
+    exhausted = False
+    for page_ordinal in range(1, page_max + 1):
+        ordinal_box[0] += 1
+        parsed, raw_bytes, deadline = adapter.issue_json(
+            capability, operation, ordinal=ordinal_box[0], subaccount=subaccount,
+            exchange_index=exchange_index, cursor=(cursor_in or None),
+        )
+        rows_raw = parsed.get(row_key)
+        if type(rows_raw) is not list:
+            raise RunnerError(RunnerFailureCode.RESPONSE_SCHEMA_INVALID, detail=operation.value + " " + row_key + " non-array")
+        if is_positions:
+            events = parsed.get("event_positions")
+            if type(events) is not list:
+                raise RunnerError(RunnerFailureCode.RESPONSE_SCHEMA_INVALID, detail="event_positions non-array")
+            if events:
+                raise RunnerError(RunnerFailureCode.DYNAMIC_READ_POSITION_EVENT_SCOPE_UNPROVEN, detail="nonempty unscoped event_positions")
+        page_rows: list[Mapping[str, object]] = []
+        for row in rows_raw:
+            if not isinstance(row, Mapping):
+                raise RunnerError(RunnerFailureCode.RESPONSE_SCHEMA_INVALID, detail=operation.value + " row not an object")
+            if is_positions:
+                row_ticker = _active_v2_position_scope(row, subaccount=subaccount, exchange_index=exchange_index)
+            else:
+                row_ticker = _active_v2_order_fill_scope(row, subaccount=subaccount, exchange_index=exchange_index, operation=operation)
+            # C08-A..D: complete CONSUMED economic schema validation, reusing
+            # the exact same parsers later object construction uses, BEFORE
+            # this page's own final same-request deadline check below.
+            _active_v2_validate_page_row_economics(
+                row, operation=operation, row_ticker=row_ticker, subaccount=subaccount,
+                exchange_index=exchange_index, selected_exchange_index=binding.exchange_index,
+                selected_ticker=selected_ticker, retained_ticker=retained_ticker,
+            )
+            page_rows.append(row)  # C07-A: retain EVERY validated row, no ticker filter
+        cursor_out = _active_v2_extract_cursor_out(parsed)
+        row_hashes = tuple(
+            sha256_hex(canonical_json_bytes(_canonical_account_wide_row(r))) for r in page_rows
+        )
+        content_digest = sha256_hex(canonical_json_bytes({
+            "schema": "ARB_KALSHI_DEMO_ACTIVE_V2_PAGE_CONTENT_V1",
+            "operation": operation.value,
+            "exchange_index": exchange_index,
+            "page_ordinal": page_ordinal,
+            "cursor_out": cursor_out,
+            "rows": [_canonical_account_wide_row(r) for r in page_rows],
+        }))
+        commitment = _ActiveV2PageCommitmentV1(
+            operation=operation.value,
+            exchange_index=exchange_index,
+            page_ordinal=page_ordinal,
+            request_identity_sha256=_active_v2_request_identity_sha256(
+                operation, active_contract=contract, domain_binding=binding,
+                exchange_index=exchange_index, page_ordinal=page_ordinal, cursor_in=cursor_in,
+            ),
+            response_sha256=sha256_hex(raw_bytes),
+            canonical_content_digest_sha256=content_digest,
+            cursor_in=cursor_in,
+            cursor_out=cursor_out,
+            row_count=len(page_rows),
+            row_content_sha256=row_hashes,
+        )
+        # C07-F: one final check of the SAME request deadline, after the
+        # accepted page commitment (scope + cursor + hashes + digest) exists.
+        check_deadline(deadline, runtime.monotonic_clock_ns(), checkpoint=DeadlineCheckpoint.AFTER_RESULT_CONSTRUCTION)
+        pages.append(commitment)
+        kept_rows.extend(page_rows)
+        if cursor_out == "":
+            exhausted = True
+            break
+        if cursor_out == cursor_in or cursor_out in seen_cursors:
+            raise RunnerError(RunnerFailureCode.DYNAMIC_READ_CURSOR_CYCLE, detail=operation.value + " repeated/cyclic cursor")
+        seen_cursors.add(cursor_out)
+        cursor_in = cursor_out
+    if not exhausted:
+        # DSB-BUDGET-002 / DSB-PAGE-001: a nonempty cursor after the final
+        # allowed page is incomplete -- NO extra request is attempted.
+        raise RunnerError(RunnerFailureCode.DYNAMIC_READ_PAGINATION_INCOMPLETE, detail=operation.value + " nonempty cursor at page cap")
+    surface = _ActiveV2SurfaceCommitmentV1(
+        operation=operation.value, exchange_index=exchange_index,
+        pages=tuple(pages), page_count=len(pages), pagination_exhausted=True,
+    )
+    return surface, tuple(kept_rows)
+
+
+def _active_v2_selected_route_truth(
+    *,
+    market: "Mapping[str, object]",
+    orderbook: object,
+    order_rows: "Tuple[Mapping[str, object], ...]",
+    fill_rows: "Tuple[Mapping[str, object], ...]",
+    position_rows: "Tuple[Mapping[str, object], ...]",
+    bound_order_ids: "Tuple[str, ...]",
+    orders_complete: bool,
+    subaccount: int,
+    exchange_index: int,
+    ticker: str,
+    requests_consumed: int,
+) -> "AuthoritativeReadTruthV1":
+    """Assemble the scoped selected-route ``AuthoritativeReadTruthV1`` from the
+    selected exchange index's own validated V2 reads, filtered to the selected
+    ticker (Correction 07 C07-C: selected-route truth = selected index +
+    selected ticker only).  DSB-OPS-005: the selected index participates once
+    in the all-index traversal; it is not re-read.  Uses the active-V2
+    operation-specific converters (``subaccount_number`` schema); the legacy
+    V1 ``_working_order_from_raw`` / ``_fill_from_raw`` schema is untouched."""
+    working_orders: list[WorkingOrderV1] = []
+    for row in order_rows:
+        wo = _active_v2_working_order_from_row(row, subaccount=subaccount, exchange_index=exchange_index)
+        if wo is not None:
+            if wo.market != ticker:
+                raise RunnerError(RunnerFailureCode.ORDER_IDENTITY_INVALID, detail="selected-route order ticker mismatch")
+            working_orders.append(wo)
+    # Correction 09 C09-D / DSB-READ-005: ``fill_id`` remains the exactly-once
+    # key, but equality/conflict is decided on the FULL parsed identity (which
+    # includes ``order_id`` and the exact scope), not merely on the
+    # ``EconomicFillV1`` projection.  An exact duplicate contributes exactly
+    # one economic fill; any contradictory field fails closed.
+    fills_by_id: dict[str, _ActiveV2ParsedFillV1] = {}
+    for row in fill_rows:
+        parsed = _active_v2_parsed_fill_from_row(row, subaccount=subaccount, exchange_index=exchange_index)
+        if parsed.ticker != ticker:
+            raise RunnerError(RunnerFailureCode.ORDER_IDENTITY_INVALID, detail="selected-route fill ticker mismatch")
+        existing = fills_by_id.get(parsed.fill_id)
+        if existing is None:
+            fills_by_id[parsed.fill_id] = parsed
+        elif existing != parsed:
+            raise RunnerError(RunnerFailureCode.FILL_DUPLICATE_CONFLICT, detail=parsed.fill_id)
+    fills = tuple(sorted(
+        (parsed.economic_fill() for parsed in fills_by_id.values()),
+        key=lambda item: (item.authoritative_created_time_utc, item.fill_id),
+    ))
+    position_state = "VENUE_POSITION_ROW_OBSERVED" if position_rows else "NO_VENUE_POSITION_ROW"
+    corroboration = _corroborate_position(
+        ticker=ticker, position_state=position_state, market_positions_raw=tuple(position_rows),
+        working_orders=tuple(working_orders), fills=fills,
+    )
+    return AuthoritativeReadTruthV1(
+        market=market, orderbook=orderbook, working_orders=tuple(working_orders),
+        orders_complete=orders_complete, bound_order_ids=tuple(bound_order_ids),
+        fills=fills, fills_complete=True, position_state=position_state,
+        market_positions_raw=tuple(position_rows), position_corroboration=corroboration,
+        requests_consumed=requests_consumed,
+    )
+
+
+_POSITION_CLASS_SELECTED_ROUTE_ACCOUNTED = "SELECTED_ROUTE_ACCOUNTED"
+_POSITION_CLASS_RETAINED_CURRENT_POSITION_CHECKED = "RETAINED_CURRENT_POSITION_CHECKED"
+_POSITION_CLASS_EXACT_ZERO_ACCOUNTED = "EXACT_ZERO_ACCOUNTED"
+_POSITION_CLASS_AGGREGATE_RISK_ACCOUNTED = "AGGREGATE_RISK_ACCOUNTED"
+_POSITION_CLASSES = frozenset({
+    _POSITION_CLASS_SELECTED_ROUTE_ACCOUNTED, _POSITION_CLASS_RETAINED_CURRENT_POSITION_CHECKED,
+    _POSITION_CLASS_EXACT_ZERO_ACCOUNTED, _POSITION_CLASS_AGGREGATE_RISK_ACCOUNTED,
+})
+
+
+def _parse_dynamic_index_domain_account_wide_extra_economics(
+    read: "DynamicIndexDomainAccountWideReadV1", *,
+    selected_ticker: str,
+    selected_exchange_index: int,
+    subaccount: int,
+    retained_ticker: "str | None" = None,
+) -> "tuple[tuple, tuple, bool]":
+    """Correction 07 C07-C / C07-D / DSB-RISK-004 -- consume EVERY accepted
+    economic row across EVERY enumerated index and EVERY ticker that is NOT
+    already represented by the selected-route truth (selected index + selected
+    ticker), converting each to the existing ``WorkingOrderV1`` /
+    ``EconomicFillV1`` using that ROW's OWN exact ticker as the market.
+
+    Covers:
+      * selected-index / other-ticker working orders, fills, positions;
+      * foreign-index / selected-ticker rows;
+      * foreign-index / other-ticker rows.
+
+    Predecessor duplicate / conflict / fixed-point / fail-closed semantics are
+    preserved (duplicate identity is ``(exchange_index, ticker)``, so multiple
+    markets on one exchange index are never conflated).  A row already
+    represented by the selected route is never double counted.
+
+    Returns ``(extra_working_orders, extra_fills, other_positions_all_accounted)``.
+    The boolean is the DERIVED result of EXPLICITLY classifying EVERY accepted
+    current market-position row across every enumerated index into exactly one
+    of:
+
+      SELECTED_ROUTE_ACCOUNTED               -- the selected-index/selected-
+                                                 ticker position, consumed by
+                                                 selected-route corroboration;
+      RETAINED_CURRENT_POSITION_CHECKED       -- a row for the retained
+                                                 bootstrap ticker, verified by
+                                                 the caller's retained-live-
+                                                 contracts check;
+      EXACT_ZERO_ACCOUNTED                    -- an exact zero-count position;
+      AGGREGATE_RISK_ACCOUNTED                -- a nonzero position folded
+                                                 into aggregate risk as one
+                                                 synthetic ``EconomicFillV1``.
+
+    A row that cannot be placed into exactly one of these four classes is
+    UNCLASSIFIED and the boolean becomes ``False`` (fail closed at the
+    caller's retained-floor reconciliation).  A genuinely malformed row (bad
+    ``position_count_fp`` / scope) still fails hard before release."""
+    working: list = []
+    fills: list = []
+    seen_position: dict[tuple, list] = {}
+    # C09-E / DSB-READ-005: extra (non-selected-route) fills are exactly-once
+    # by ``fill_id``, compared on the full parsed identity.
+    seen_extra_fill: dict[str, _ActiveV2ParsedFillV1] = {}
+    every_position_classified = True
+    for t in read.per_index_traversals:
+        for row in tuple(t.order_rows) + tuple(t.fill_rows) + tuple(t.position_rows):
+            is_position = "position_count_fp" in row
+            is_fill = "fill_id" in row
+            is_order = ("order_id" in row and "remaining_count_fp" in row)
+            if is_position:
+                row_ticker = _active_v2_position_scope(row, subaccount=subaccount, exchange_index=t.exchange_index)
+            elif is_fill:
+                row_ticker = _active_v2_order_fill_scope(
+                    row, subaccount=subaccount, exchange_index=t.exchange_index,
+                    operation=ActivePreReleaseReadOperationV2.GET_FILLS)
+            elif is_order:
+                row_ticker = _active_v2_order_fill_scope(
+                    row, subaccount=subaccount, exchange_index=t.exchange_index,
+                    operation=ActivePreReleaseReadOperationV2.GET_ORDERS)
+            else:
+                raise RunnerError(RunnerFailureCode.DOMAIN_SCOPE_RESPONSE_AMBIGUOUS, detail="account-wide economic row shape")
+            is_selected_route_row = t.exchange_index == selected_exchange_index and row_ticker == selected_ticker
+
+            if is_position:
+                key = (t.exchange_index, row_ticker)
+                canonical = _canonical_account_wide_row(row)
+                if key in seen_position:
+                    if seen_position[key] != canonical:
+                        raise RunnerError(
+                            RunnerFailureCode.DOMAIN_SCOPE_RESPONSE_AMBIGUOUS,
+                            detail="contradictory duplicate account-wide position row")
+                    continue
+                seen_position[key] = canonical
+                if is_selected_route_row:
+                    classification = _POSITION_CLASS_SELECTED_ROUTE_ACCOUNTED
+                elif retained_ticker is not None and row_ticker == retained_ticker:
+                    # Verified separately by the caller's fresh complete
+                    # retained-ticker live-contracts check; not re-folded here.
+                    classification = _POSITION_CLASS_RETAINED_CURRENT_POSITION_CHECKED
+                else:
+                    count = _position_count_from_row(row)  # bad Decimal -> RESPONSE_SCHEMA_INVALID (hard fail)
+                    if count == 0:
+                        classification = _POSITION_CLASS_EXACT_ZERO_ACCOUNTED
+                    else:
+                        price_raw = row.get("yes_price_dollars")
+                        as_of = row.get("position_as_of_utc")
+                        if type(price_raw) is str and type(as_of) is str:
+                            synthetic = _foreign_index_position_fill(
+                                row, ticker=row_ticker, subaccount=subaccount, exchange_index=t.exchange_index)
+                            if synthetic is not None:
+                                fills.append(synthetic)
+                            classification = _POSITION_CLASS_AGGREGATE_RISK_ACCOUNTED
+                        else:
+                            # A nonzero, non-selected-route, non-retained
+                            # position we cannot faithfully represent ->
+                            # UNCLASSIFIED (fail closed at ATSE1 time).
+                            classification = None
+                if classification not in _POSITION_CLASSES:
+                    every_position_classified = False
+                continue
+
+            # Orders / fills already represented by the selected route are not
+            # re-consumed here (no double counting); they still enter the
+            # page/ADRS2 commitment upstream regardless.
+            if is_selected_route_row:
+                continue
+            if is_fill:
+                # C09-E: one economic fill per exact fill event; an exact
+                # duplicate (same fill_id AND identical parsed identity) is
+                # NOT double counted into aggregate risk, and a contradictory
+                # duplicate fails closed.  The raw row itself still stays in
+                # the page/ADRS2 commitment upstream (C09-F).
+                parsed_fill = _active_v2_parsed_fill_from_row(
+                    row, subaccount=subaccount, exchange_index=t.exchange_index)
+                existing_fill = seen_extra_fill.get(parsed_fill.fill_id)
+                if existing_fill is None:
+                    seen_extra_fill[parsed_fill.fill_id] = parsed_fill
+                    fills.append(parsed_fill.economic_fill())
+                elif existing_fill != parsed_fill:
+                    raise RunnerError(RunnerFailureCode.FILL_DUPLICATE_CONFLICT, detail=parsed_fill.fill_id)
+            else:
+                parsed = _active_v2_working_order_from_row(row, subaccount=subaccount, exchange_index=t.exchange_index)
+                if parsed is not None:
+                    working.append(parsed)
+    return tuple(working), tuple(fills), every_position_classified
+
+
+def _validate_active_v2_domain_wide_fill_identity(
+    read: "DynamicIndexDomainAccountWideReadV1", *, subaccount: int,
+) -> None:
+    """Correction 09 C09-C / DSB-OPS-009 + DSB-READ-005 -- the ONE domain-wide
+    exactly-once fill-identity proof, run at the converged mint boundary that
+    BOTH the live acquirer and the test-only fake seam reach, before any
+    release-eligible read set or risk acceptance exists.
+
+    Every accepted fill row across EVERY enumerated exchange index and EVERY
+    fill page is parsed with the ONE shared ``_active_v2_parsed_fill_from_row``
+    and keyed by ``fill_id``:
+
+      * first occurrence            -> retain the exact parsed identity;
+      * identical parsed identity   -> exact duplicate, allowed;
+      * ANY differing field         -> ``FILL_DUPLICATE_CONFLICT``, fail closed.
+
+    Because the exact scope (``subaccount`` / ``exchange_index``) and
+    ``order_id`` are part of the compared identity, the same ``fill_id``
+    observed under a different exchange index, ticker, order, side, quantity,
+    price, or canonical time is a CONFLICT -- never a second economic fill.
+
+    This validates ECONOMIC truth only: the raw page rows and their ADRS2
+    commitments still retain every observed occurrence (C09-F).  No new
+    per-request deadline window is created -- the still-running absolute
+    invocation deadline remains controlling over this mint-time work."""
+    seen: dict[str, _ActiveV2ParsedFillV1] = {}
+    for t in read.per_index_traversals:
+        for row in t.fill_rows:
+            parsed = _active_v2_parsed_fill_from_row(
+                row, subaccount=subaccount, exchange_index=t.exchange_index)
+            existing = seen.get(parsed.fill_id)
+            if existing is None:
+                seen[parsed.fill_id] = parsed
+            elif existing != parsed:
+                raise RunnerError(RunnerFailureCode.FILL_DUPLICATE_CONFLICT, detail=parsed.fill_id)
+
+
+def _run_active_v2_acquisition(
+    runtime: "ExperimentRunnerRuntimeV2",
+    capability: "_TrustedDynamicPreReleaseReadCapabilityV2",
+    *,
+    opened: "OpenResult | None",
+    selected_ticker: str,
+) -> "_ActiveV2AcquiredReadV1":
+    """DSB-FRESH-001 / DSB-DOMAIN-001..004 / DSB-PAGE-001..004 -- the exact
+    production live acquisition state machine.  Issues S0 -> T0 -> selected
+    GET_MARKET -> selected GET_MARKET_ORDERBOOK -> per-index (ORDERS<=2,
+    FILLS<=4, POSITIONS<=2) for every i in ascending D0 -> zero-to-two exact
+    GET_ORDER supplements -> T1 -> S1, each request capability-owned and
+    charged once immediately before transport, each inside the exact 10000-ms
+    per-operation deadline, zero automatic retry, zero redirect, and the whole
+    thing inside the already-running absolute invocation deadline.  Returns
+    the ONE converged ``_ActiveV2AcquiredReadV1`` (no weaker shape)."""
+    contract = runtime.active_contract
+    binding = runtime.domain_binding
+    if type(selected_ticker) is not str or _TICKER_PATTERN.fullmatch(selected_ticker) is None:
+        raise RunnerError(RunnerFailureCode.MARKET_IDENTITY_INVALID, detail="active-V2 selected ticker")
+    adapter = _ActiveV2OperationAdapter(
+        runtime, absolute_invocation_deadline_ns=capability.absolute_invocation_deadline_ns,
+    )
+    ordinal_box = [0]
+    # Correction 08 C08-D: the retained-bootstrap ticker (if any) is known
+    # up front and is threaded into EVERY per-index GET_POSITIONS page
+    # acceptance so its consumed-economics validation boundary (DSB-BUDGET-
+    # 006) can classify a retained-current-ticker row -- without filtering
+    # any row -- at the exact same place C07-D later classifies it.
+    rbp = runtime.accepted_evidence_contract.retained_bootstrap_position
+    retained_ticker = rbp["ticker"] if rbp is not None else None
+
+    def _bookend(operation, *, bookend, exchange_index=None, ticker=None):
+        ordinal_box[0] += 1
+        parsed, raw_bytes, deadline = adapter.issue_json(
+            capability, operation, ordinal=ordinal_box[0], subaccount=binding.subaccount,
+            exchange_index=exchange_index, ticker=ticker,
+        )
+        return parsed, raw_bytes, deadline
+
+    def _final_check(deadline):
+        # C07-F: one final check of the SAME per-operation deadline, after the
+        # accepted operation/bookend/market/orderbook/supplement commitment
+        # exists, immediately before it becomes part of acquired truth.
+        check_deadline(deadline, runtime.monotonic_clock_ns(), checkpoint=DeadlineCheckpoint.AFTER_RESULT_CONSTRUCTION)
+
+    def _req_id(operation, *, exchange_index=None, ticker=None, order_id=None):
+        return _active_v2_request_identity_sha256(
+            operation, active_contract=contract, domain_binding=binding,
+            exchange_index=exchange_index, page_ordinal=1, ticker=ticker, order_id=order_id,
+        )
+
+    # 1 -- S0 status-before -> D0
+    s0_parsed, s0_raw, s0_deadline = _bookend(ActivePreReleaseReadOperationV2.GET_EXCHANGE_STATUS, bookend="BEFORE")
+    d0, s0_content = _active_v2_status_domain_and_content(s0_parsed)
+    if binding.exchange_index not in d0:
+        raise RunnerError(RunnerFailureCode.DYNAMIC_READ_SELECTED_INDEX_NOT_IN_DOMAIN, detail="selected exchange_index absent from D0")
+    status_before = _ActiveV2BookendCommitmentV1(
+        operation=ActivePreReleaseReadOperationV2.GET_EXCHANGE_STATUS.value, bookend="BEFORE",
+        request_identity_sha256=_req_id(ActivePreReleaseReadOperationV2.GET_EXCHANGE_STATUS),
+        response_sha256=sha256_hex(s0_raw), canonical_content_sha256=s0_content,
+        exact_sorted_domain=d0,
+    )
+    _final_check(s0_deadline)
+
+    # 2 -- T0 freshness-before (wall sample taken immediately after parse)
+    t0_parsed, t0_raw, t0_deadline = _bookend(ActivePreReleaseReadOperationV2.GET_USER_DATA_TIMESTAMP, bookend="BEFORE")
+    t0_as_of = _active_v2_as_of_time(t0_parsed)
+    t0_wall = canonical_timestamp(runtime.wall_clock())
+    freshness_before = _ActiveV2BookendCommitmentV1(
+        operation=ActivePreReleaseReadOperationV2.GET_USER_DATA_TIMESTAMP.value, bookend="BEFORE",
+        request_identity_sha256=_req_id(ActivePreReleaseReadOperationV2.GET_USER_DATA_TIMESTAMP),
+        response_sha256=sha256_hex(t0_raw),
+        canonical_content_sha256=sha256_hex(canonical_json_bytes({
+            "schema": "ARB_KALSHI_DEMO_ACTIVE_V2_FRESHNESS_CONTENT_V1", "as_of_time": t0_as_of})),
+        as_of_time_utc=t0_as_of, wall_sample_utc=t0_wall,
+    )
+    _final_check(t0_deadline)
+
+    # 3 -- selected GET_MARKET
+    ordinal_box[0] += 1
+    m_parsed, m_raw, m_deadline = adapter.issue_json(
+        capability, ActivePreReleaseReadOperationV2.GET_MARKET, ordinal=ordinal_box[0],
+        subaccount=binding.subaccount, ticker=selected_ticker,
+    )
+    market = _parse_market(m_parsed, expected_ticker=selected_ticker, expected_exchange_index=binding.exchange_index)
+    selected_market = _ActiveV2ContentCommitmentV1(
+        operation=ActivePreReleaseReadOperationV2.GET_MARKET.value,
+        request_identity_sha256=_req_id(ActivePreReleaseReadOperationV2.GET_MARKET, ticker=selected_ticker),
+        response_identity_sha256=sha256_hex(m_raw),
+        canonical_consumed_digest_sha256=sha256_hex(canonical_json_bytes({
+            "schema": "ARB_KALSHI_DEMO_ACTIVE_V2_MARKET_ECON_V1",
+            "market": _canonical_account_wide_row(market),
+        })),
+    )
+    _final_check(m_deadline)
+
+    # 4 -- selected GET_MARKET_ORDERBOOK (inherited accepted fetch_orderbook)
+    ordinal_box[0] += 1
+    orderbook, ob_deadline = adapter.issue_orderbook(capability, ordinal=ordinal_box[0], ticker=selected_ticker)
+    ob_identity = orderbook.with_canonical_identity().canonical_snapshot_sha256
+    if not _is_hex64(ob_identity):
+        raise RunnerError(RunnerFailureCode.RESPONSE_SCHEMA_INVALID, detail="orderbook snapshot identity")
+    selected_orderbook = _ActiveV2ContentCommitmentV1(
+        operation=ActivePreReleaseReadOperationV2.GET_MARKET_ORDERBOOK.value,
+        request_identity_sha256=_req_id(ActivePreReleaseReadOperationV2.GET_MARKET_ORDERBOOK, ticker=selected_ticker),
+        response_identity_sha256=ob_identity,
+        canonical_consumed_digest_sha256=sha256_hex(canonical_json_bytes({
+            "schema": "ARB_KALSHI_DEMO_ACTIVE_V2_ORDERBOOK_ECON_V1",
+            "market_data_snapshot": {k: str(v) for k, v in _market_data_snapshot(market, orderbook).items()},
+            "canonical_snapshot_sha256": ob_identity,
+        })),
+    )
+    _final_check(ob_deadline)
+
+    # 5 -- per-index all-member traversal (ascending D0).  Every accepted row
+    # (every ticker) is retained by ``_active_v2_paginate_surface`` and enters
+    # the page commitments / ADRS2 (C07-A).  Selected-route filtering happens
+    # only AFTER the complete accepted rows exist (C07-C).
+    per_index: list[_ActiveV2PerIndexCommitmentV1] = []
+    sel_order_rows: "Tuple[Mapping[str, object], ...]" = ()
+    sel_fill_rows: "Tuple[Mapping[str, object], ...]" = ()
+    sel_position_rows: "Tuple[Mapping[str, object], ...]" = ()
+    fixture_traversals: list[PerIndexTraversalV1] = []
+    for i in d0:
+        orders_surface, orders_rows = _active_v2_paginate_surface(
+            adapter, capability, ActivePreReleaseReadOperationV2.GET_ORDERS,
+            ordinal_box=ordinal_box, subaccount=binding.subaccount, exchange_index=i,
+            selected_ticker=selected_ticker, retained_ticker=retained_ticker,
+        )
+        fills_surface, fills_rows = _active_v2_paginate_surface(
+            adapter, capability, ActivePreReleaseReadOperationV2.GET_FILLS,
+            ordinal_box=ordinal_box, subaccount=binding.subaccount, exchange_index=i,
+            selected_ticker=selected_ticker, retained_ticker=retained_ticker,
+        )
+        positions_surface, positions_rows = _active_v2_paginate_surface(
+            adapter, capability, ActivePreReleaseReadOperationV2.GET_POSITIONS,
+            ordinal_box=ordinal_box, subaccount=binding.subaccount, exchange_index=i,
+            selected_ticker=selected_ticker, retained_ticker=retained_ticker,
+        )
+        per_index.append(_ActiveV2PerIndexCommitmentV1(
+            exchange_index=i, orders=orders_surface, fills=fills_surface, positions=positions_surface,
+            order_rows=orders_rows, fill_rows=fills_rows, position_rows=positions_rows,
+        ))
+
+        def _surface_fixture(surface: _ActiveV2SurfaceCommitmentV1) -> PerIndexSurfaceTraversalV1:
+            return PerIndexSurfaceTraversalV1(
+                request_identity_sha256=surface.pages[0].request_identity_sha256,
+                page_response_digests=tuple(p.response_sha256 for p in surface.pages),
+                page_economic_digests=tuple(p.canonical_content_digest_sha256 for p in surface.pages),
+                final_cursor_absent=True, pagination_complete=True,
+            )
+
+        fixture_traversals.append(PerIndexTraversalV1(
+            exchange_index=i,
+            orders=_surface_fixture(orders_surface),
+            fills=_surface_fixture(fills_surface),
+            positions=_surface_fixture(positions_surface),
+            order_rows=orders_rows, fill_rows=fills_rows, position_rows=positions_rows,
+        ))
+        if i == binding.exchange_index:
+            # C07-C: selected-route truth = selected index + selected ticker
+            # ONLY, derived AFTER the complete accepted rows exist.  Every
+            # other accepted row (this index's other tickers, every foreign
+            # index) stays in the fixture traversal and is folded into
+            # account-wide aggregate risk by
+            # ``_parse_dynamic_index_domain_account_wide_extra_economics``.
+            sel_order_rows = tuple(r for r in orders_rows if r.get("ticker") == selected_ticker)
+            sel_fill_rows = tuple(r for r in fills_rows if r.get("ticker") == selected_ticker)
+            sel_position_rows = tuple(r for r in positions_rows if r.get("ticker") == selected_ticker)
+
+    # 6 -- zero-to-two exact GET_ORDER supplements from the selected index's
+    # own accepted GET_ORDERS traversal (DSB-OPS-004/005).
+    selected_order_ids = [str(r.get("order_id", "")) for r in sel_order_rows if str(r.get("order_id", "")) != ""]
+    bound_ids = tuple(selected_order_ids[:_ACTIVE_V2_ORDER_REQUEST_MAX])
+    orders_complete = len(selected_order_ids) <= _ACTIVE_V2_ORDER_REQUEST_MAX
+    supplements: list[_ActiveV2OrderSupplementCommitmentV1] = []
+    for oid in bound_ids:
+        ordinal_box[0] += 1
+        o_parsed, o_raw, o_deadline = adapter.issue_json(
+            capability, ActivePreReleaseReadOperationV2.GET_ORDER, ordinal=ordinal_box[0],
+            subaccount=binding.subaccount, exchange_index=binding.exchange_index,
+            ticker=selected_ticker, order_id=oid,
+        )
+        o_obj = _require_dict(o_parsed, code=RunnerFailureCode.RESPONSE_SCHEMA_INVALID, detail="get_order top level")
+        o_row = _require_dict(
+            _require_field(o_obj, "order", code=RunnerFailureCode.RESPONSE_SCHEMA_INVALID),
+            code=RunnerFailureCode.RESPONSE_SCHEMA_INVALID, detail="order shape",
+        )
+        _active_v2_scope_guard(o_row, subaccount=binding.subaccount, exchange_index=binding.exchange_index)
+        if o_row.get("order_id") != oid or o_row.get("ticker") != selected_ticker:
+            raise RunnerError(RunnerFailureCode.ORDER_IDENTITY_INVALID, detail="get_order confirmation mismatch")
+        supplements.append(_ActiveV2OrderSupplementCommitmentV1(
+            order_id=oid,
+            request_identity_sha256=_req_id(
+                ActivePreReleaseReadOperationV2.GET_ORDER, exchange_index=binding.exchange_index,
+                ticker=selected_ticker, order_id=oid,
+            ),
+            response_sha256=sha256_hex(o_raw),
+            canonical_content_sha256=sha256_hex(canonical_json_bytes({
+                "schema": "ARB_KALSHI_DEMO_ACTIVE_V2_ORDER_SUPPLEMENT_V1",
+                "order": _canonical_account_wide_row(o_row),
+            })),
+        ))
+        _final_check(o_deadline)
+
+    # 7 -- T1 freshness-after
+    t1_parsed, t1_raw, t1_deadline = _bookend(ActivePreReleaseReadOperationV2.GET_USER_DATA_TIMESTAMP, bookend="AFTER")
+    t1_as_of = _active_v2_as_of_time(t1_parsed)
+    t1_wall = canonical_timestamp(runtime.wall_clock())
+    if _parse_canonical_utc(t1_as_of) < _parse_canonical_utc(t0_as_of):
+        raise RunnerError(RunnerFailureCode.DYNAMIC_READ_FRESHNESS_REGRESSION, detail="T1 as_of < T0 as_of")
+    if _parse_canonical_utc(t1_wall) < _parse_canonical_utc(t0_wall):
+        raise RunnerError(RunnerFailureCode.DYNAMIC_READ_CLOCK_REGRESSION, detail="trusted wall-clock sample regressed T0->T1")
+    freshness_after = _ActiveV2BookendCommitmentV1(
+        operation=ActivePreReleaseReadOperationV2.GET_USER_DATA_TIMESTAMP.value, bookend="AFTER",
+        request_identity_sha256=_active_v2_request_identity_sha256(
+            ActivePreReleaseReadOperationV2.GET_USER_DATA_TIMESTAMP, active_contract=contract,
+            domain_binding=binding, exchange_index=None, page_ordinal=2,
+        ),
+        response_sha256=sha256_hex(t1_raw),
+        canonical_content_sha256=sha256_hex(canonical_json_bytes({
+            "schema": "ARB_KALSHI_DEMO_ACTIVE_V2_FRESHNESS_CONTENT_V1", "as_of_time": t1_as_of})),
+        as_of_time_utc=t1_as_of, wall_sample_utc=t1_wall,
+    )
+    _final_check(t1_deadline)
+
+    # 8 -- S1 status-after -> D1 == D0
+    s1_parsed, s1_raw, s1_deadline = _bookend(ActivePreReleaseReadOperationV2.GET_EXCHANGE_STATUS, bookend="AFTER")
+    d1, s1_content = _active_v2_status_domain_and_content(s1_parsed)
+    if d1 != d0:
+        raise RunnerError(RunnerFailureCode.DYNAMIC_READ_STATUS_DOMAIN_CHANGED, detail="D1 != D0")
+    status_after = _ActiveV2BookendCommitmentV1(
+        operation=ActivePreReleaseReadOperationV2.GET_EXCHANGE_STATUS.value, bookend="AFTER",
+        request_identity_sha256=_active_v2_request_identity_sha256(
+            ActivePreReleaseReadOperationV2.GET_EXCHANGE_STATUS, active_contract=contract,
+            domain_binding=binding, exchange_index=None, page_ordinal=2,
+        ),
+        response_sha256=sha256_hex(s1_raw), canonical_content_sha256=s1_content, exact_sorted_domain=d1,
+    )
+    _final_check(s1_deadline)
+
+    # 9 -- build the selected-route truth + the completeness fixture, then the
+    # converged acquired-read (final composite validation happens in the mint,
+    # inside the still-running absolute invocation deadline).
+    selected_route_truth = _active_v2_selected_route_truth(
+        market=market, orderbook=orderbook, order_rows=sel_order_rows, fill_rows=sel_fill_rows,
+        position_rows=sel_position_rows, bound_order_ids=bound_ids, orders_complete=orders_complete,
+        subaccount=binding.subaccount, exchange_index=binding.exchange_index, ticker=selected_ticker,
+        requests_consumed=capability.requests_consumed,
+    )
+    cutoff = _active_reconciliation_cutoff_sha256(selected_route_truth)
+    # The completeness fixture's ``settlement_reconciliation`` is derived by
+    # THIS trusted boundary from the module-private
+    # ``n1_accepted_terminal_settlement_evidence()`` -- never caller content.
+    # It only satisfies the existing fixture-path completeness check; the
+    # ACTUAL retained-position release authority is
+    # ``reconcile_retained_bootstrap_floor_v1`` in ``_mint_release_eligible_
+    # read_set`` (BLOCK-05-03).  ``rbp`` was already resolved at the top of
+    # this function (Correction 08 C08-D) and is reused here unchanged.
+    settlement_reconciliation = None
+    if rbp is not None:
+        _atse1 = n1_accepted_terminal_settlement_evidence()
+        settlement_reconciliation = RetainedPositionSettlementReconciliationV1(
+            settlement_evidence_identity_sha256=_atse1.evidence_sha256,
+            ticker=rbp["ticker"],
+            exchange_index=rbp["exchange_index"],
+            conflict_domain_ref=rbp["conflict_domain_ref"],
+            market_result=_atse1.market_result,
+            settled_time_utc=_atse1.settled_time,
+            yes_count_fp=_atse1.yes_count_fp,
+            settlement_response_identity_sha256=_atse1.settlement_response_sha256,
+        )
+    fixture_no_ident = DynamicIndexDomainAccountWideReadV1(
+        accepted_source_classification=_ACCOUNT_WIDE_SOURCE_CLASSIFICATION_V1,
+        index_domain_enumeration_evidence_identity_sha256=_P02_INDEX_DOMAIN_ENUMERATION_EVIDENCE_SHA256,
+        account_scope_ref=binding.account_scope_ref,
+        subaccount=binding.subaccount,
+        selected_exchange_index=binding.exchange_index,
+        status_before=ExchangeIndexStatusObservationV1(response_identity_sha256=sha256_hex(s0_raw), exchange_index_domain=d0),
+        status_after=ExchangeIndexStatusObservationV1(response_identity_sha256=sha256_hex(s1_raw), exchange_index_domain=d1),
+        freshness_before=UserDataFreshnessWatermarkV1(response_identity_sha256=sha256_hex(t0_raw), as_of_time_utc=t0_as_of),
+        freshness_after=UserDataFreshnessWatermarkV1(response_identity_sha256=sha256_hex(t1_raw), as_of_time_utc=t1_as_of),
+        per_index_traversals=tuple(fixture_traversals),
+        selected_route_reconciliation_cutoff_sha256=cutoff,
+        read_set_identity_sha256="0" * 64,
+        settlement_reconciliation=settlement_reconciliation,
+    )
+    fixture_identity = compute_dynamic_index_domain_read_set_identity(
+        fixture_no_ident,
+        active_domain_binding_id=contract.domain_binding_id,
+        active_domain_binding_sha256=contract.domain_binding_sha256,
+        active_contract_sha256=contract.contract_sha256,
+        risk_config_sha256=runtime.risk_config.sha256,
+    )
+    fixture = _dataclass_replace(fixture_no_ident, read_set_identity_sha256=fixture_identity)
+
+    return _ActiveV2AcquiredReadV1(
+        status_before=status_before, status_after=status_after,
+        freshness_before=freshness_before, freshness_after=freshness_after,
+        selected_market=selected_market, selected_orderbook=selected_orderbook,
+        per_index=tuple(per_index), exact_order_supplements=tuple(supplements),
+        d0=d0, d1=d1, fixture=fixture, selected_route_truth=selected_route_truth,
+        t0_wall_sample_utc=t0_wall, t1_wall_sample_utc=t1_wall,
+    )
+
+
+def _active_v2_surface_canonical(surface: "_ActiveV2SurfaceCommitmentV1") -> dict:
+    """DSB-READSET-001 -- per-surface commitment: one entry per ACTUAL page,
+    each with its request identity, its RAW response SHA, its SEPARATELY
+    computed canonical economic/content digest, the exact cursor-in/out, the
+    row count, and the validated canonical row-content hashes; plus the page
+    count and ``pagination_exhausted``."""
+    return {
+        "operation": surface.operation,
+        "exchange_index": surface.exchange_index,
+        "page_count": surface.page_count,
+        "pagination_exhausted": surface.pagination_exhausted,
+        "pages": [
+            {
+                "page_ordinal": p.page_ordinal,
+                "request_identity_sha256": p.request_identity_sha256,
+                "response_sha256": p.response_sha256,
+                "canonical_economic_content_digest_sha256": p.canonical_content_digest_sha256,
+                "cursor_in": p.cursor_in,
+                "cursor_out": p.cursor_out,
+                "row_count": p.row_count,
+                "row_content_sha256": list(p.row_content_sha256),
+            }
+            for p in surface.pages
+        ],
+    }
+
+
+def _compute_release_eligible_read_set_sha256(
+    acquired: "_ActiveV2AcquiredReadV1",
+    *,
+    active_contract: "ActiveExecutionDomainContractV1",
+    domain_binding: "ExecutionDomainBindingV1",
+    risk_config_sha256: str,
+    risk_state_epoch: int,
+    reconciliation_cutoff_identity_sha256: str,
+    trusted_local_release_projection_identity_sha256: str,
+    acquisition_started_at_utc: str,
+    acquisition_completed_at_utc: str,
+    absolute_invocation_deadline_identity: str,
+    pre_release_requests_consumed: int,
+    retained_position_classification: str,
+    accepted_terminal_settlement_id: str,
+) -> Tuple[str, Mapping[str, object]]:
+    """DSB-READSET-001/003/005 -- the exact ``ADRS2_`` composite identity.
+
+    The canonical object commits every DSB-READSET-001 Section-13 field: the
+    active contract/binding, the accepted source identity, the issuer lineage
+    class, the acquisition window, the absolute invocation-deadline identity,
+    the frozen budget max + consumed count, the ``/exchange/status``
+    before/after request/RAW-response/canonical-status-content/domain
+    identities (SEPARATE from the ``user_data_timestamp`` before/after request/
+    RAW-response/as_of identities), the selected market/orderbook request/
+    response/economic-content identities, EVERY per-index per-surface
+    per-ACTUAL-page request/RAW-response/canonical-economic-digest/cursor/
+    row-hash/page-count/pagination-exhausted commitment, the zero-to-two exact
+    trusted GET_ORDER supplements, the current risk-config identity, risk-state
+    epoch, reconciliation cutoff, trusted local release projection identity,
+    and the retained-position settlement classification + accepted ATSE1
+    identity where applicable.  Any mutation of any of these -- including a
+    single page ordinal, request identity, raw response hash (which is a
+    distinct value from the canonical content digest), row hash, cursor, or
+    an exact-order supplement -- changes the composite hash.  A correct
+    self-hash still does NOT establish source authority: the exact private
+    type + the same live issuer lineage remain independently mandatory
+    (DSB-READSET-004)."""
+    fixture = acquired.fixture
+    inner = compute_dynamic_index_domain_read_set_identity(
+        fixture,
+        active_domain_binding_id=active_contract.domain_binding_id,
+        active_domain_binding_sha256=active_contract.domain_binding_sha256,
+        active_contract_sha256=active_contract.contract_sha256,
+        risk_config_sha256=risk_config_sha256,
+    )
+
+    def _bookend(b: "_ActiveV2BookendCommitmentV1", *, status: bool) -> dict:
+        out = {
+            "request_identity_sha256": b.request_identity_sha256,
+            "response_sha256": b.response_sha256,
+        }
+        if status:
+            out["canonical_status_content_sha256"] = b.canonical_content_sha256
+            out["exact_sorted_domain"] = list(b.exact_sorted_domain)
+        else:
+            out["canonical_freshness_content_sha256"] = b.canonical_content_sha256
+            out["as_of_time"] = b.as_of_time_utc
+            out["trusted_wall_clock_sample_utc"] = b.wall_sample_utc
+        return out
+
+    def _content(c: "_ActiveV2ContentCommitmentV1") -> dict:
+        return {
+            "request_identity_sha256": c.request_identity_sha256,
+            "response_identity_sha256": c.response_identity_sha256,
+            "canonical_economic_content_digest_sha256": c.canonical_consumed_digest_sha256,
+        }
+
+    canonical: Mapping[str, object] = MappingProxyType({
+        "schema": _ADRS2_READ_SET_SCHEMA,
+        "schema_revision": 2,
+        "active_contract_id": active_contract.contract_id,
+        "active_contract_sha256": active_contract.contract_sha256,
+        "domain_binding_id": active_contract.domain_binding_id,
+        "domain_binding_sha256": active_contract.domain_binding_sha256,
+        "conflict_domain_ref": active_contract.conflict_domain_ref,
+        "subaccount": domain_binding.subaccount,
+        "selected_exchange_index": domain_binding.exchange_index,
+        "accepted_dynamic_source_identity": dict(_ACTIVE_DYNAMIC_SOURCE_IDENTITY),
+        "issuer_lineage_class": "LIVE_TRUSTED_DYNAMIC_ACQUIRER_V2",
+        "acquisition_started_at_utc": acquisition_started_at_utc,
+        "acquisition_completed_at_utc": acquisition_completed_at_utc,
+        "absolute_invocation_deadline_identity": absolute_invocation_deadline_identity,
+        "pre_release_read_request_max_v2": PRE_RELEASE_READ_REQUEST_MAX_V2,
+        "pre_release_requests_consumed": pre_release_requests_consumed,
+        "derived_domain_d0": list(acquired.d0),
+        "derived_domain_d1": list(acquired.d1),
+        "status_before": _bookend(acquired.status_before, status=True),
+        "status_after": _bookend(acquired.status_after, status=True),
+        "freshness_before": _bookend(acquired.freshness_before, status=False),
+        "freshness_after": _bookend(acquired.freshness_after, status=False),
+        "selected_market": _content(acquired.selected_market),
+        "selected_orderbook": _content(acquired.selected_orderbook),
+        "per_index_traversals": [
+            {
+                "exchange_index": pc.exchange_index,
+                "orders": _active_v2_surface_canonical(pc.orders),
+                "fills": _active_v2_surface_canonical(pc.fills),
+                "positions": _active_v2_surface_canonical(pc.positions),
+                "order_rows": [_canonical_account_wide_row(r) for r in pc.order_rows],
+                "fill_rows": [_canonical_account_wide_row(r) for r in pc.fill_rows],
+                "position_rows": [_canonical_account_wide_row(r) for r in pc.position_rows],
+            }
+            for pc in acquired.per_index
+        ],
+        "exact_order_supplements": [
+            {
+                "order_id": s.order_id,
+                "request_identity_sha256": s.request_identity_sha256,
+                "response_sha256": s.response_sha256,
+                "canonical_content_sha256": s.canonical_content_sha256,
+            }
+            for s in acquired.exact_order_supplements
+        ],
+        "dynamic_index_domain_read_inner_identity_sha256": inner,
+        "selected_route_reconciliation_cutoff_sha256": fixture.selected_route_reconciliation_cutoff_sha256,
+        "retained_position_classification": retained_position_classification,
+        "accepted_terminal_settlement_id": accepted_terminal_settlement_id,
+        "current_risk_config_identity": risk_config_sha256,
+        "current_risk_state_epoch": risk_state_epoch,
+        "reconciliation_cutoff_identity": reconciliation_cutoff_identity_sha256,
+        "trusted_local_release_projection_identity": trusted_local_release_projection_identity_sha256,
+    })
+    return sha256_hex(canonical_json_bytes(dict(canonical))), canonical
+
+
+@dataclass(frozen=True, init=False)
+class _ReleaseEligibleDynamicIndexDomainReadSetV2:
+    """DSB-READSET-001 -- the ONLY type that may represent current Path-A
+    release truth in the production active-V2 path.  Process-local,
+    non-serializable, non-copyable, non-deepcopyable, single-use, bound to
+    exactly one active contract/domain and one Stage-3 invocation, invalid
+    after restart.  Not constructible through a public constructor.  Recomputing
+    ``read_set_id`` correctly does NOT prove source authority (DSB-READSET-004):
+    Stage 3F additionally requires the exact private type + the live issuer
+    lineage that produced it."""
+
+    schema_revision: int
+    read_set_sha256: str
+    read_set_id: str
+    read_set_canonical: Mapping[str, object]
+    selected_route_truth: "AuthoritativeReadTruthV1"
+    extra_working_orders: Tuple[object, ...]
+    extra_fills: Tuple[object, ...]
+    controlled_live_position_contracts: Decimal
+    retained_position_classification: str
+    accepted_terminal_settlement_id: str
+    pre_release_requests_consumed: int
+    absolute_invocation_deadline_ns: int
+
+    def __init__(self, key: object, **values: object) -> None:
+        if key is not _RELEASE_ELIGIBLE_READ_SET_KEY:
+            raise RunnerError(
+                RunnerFailureCode.CALLER_SUPPLIED_DYNAMIC_READ_SET_REJECTED,
+                detail="no public constructor for _ReleaseEligibleDynamicIndexDomainReadSetV2",
+            )
+        object.__setattr__(self, "_issuer_sentinel", values.pop("_issuer_sentinel"))
+        object.__setattr__(self, "_nonce", values.pop("_nonce"))
+        object.__setattr__(self, "_capability_obj_id", values.pop("_capability_obj_id"))
+        for field in fields(type(self)):
+            object.__setattr__(self, field.name, values[field.name])
+
+    def verify_self_hash(self) -> bool:
+        return (
+            self.read_set_id == "ADRS2_" + self.read_set_sha256
+            and self.read_set_sha256 == sha256_hex(canonical_json_bytes(dict(self.read_set_canonical)))
+        )
+
+    def __copy__(self):
+        raise TypeError("_ReleaseEligibleDynamicIndexDomainReadSetV2 cannot be copied")
+
+    __deepcopy__ = __copy__
+
+    def __reduce_ex__(self, protocol):
+        del protocol
+        raise TypeError("_ReleaseEligibleDynamicIndexDomainReadSetV2 cannot be serialized")
+
+
+class _TrustedDynamicPreReleaseReadCapabilityV2:
+    """DSB-DYN-002/003 -- the one closed process-local trusted dynamic
+    pre-release capability.  Single-use for one Stage-3 invocation; after a
+    successful result or any terminal failure it is consumed.  Owns the
+    independent 72-request budget and receives the already-running absolute
+    invocation deadline (Stage 3D does NOT create a new 300-second window)."""
+
+    __slots__ = (
+        "_runtime", "_issuer_sentinel", "_nonce", "_absolute_invocation_deadline_ns",
+        "_consumed", "_requests_consumed", "_lock",
+    )
+
+    def __init__(self, key: object, *, runtime: "ExperimentRunnerRuntimeV2", absolute_invocation_deadline_ns: int) -> None:
+        if key is not _TRUSTED_DYNAMIC_CAPABILITY_KEY:
+            raise RunnerError(
+                RunnerFailureCode.TRUSTED_DYNAMIC_READ_CAPABILITY_INVALID,
+                detail="no public constructor for _TrustedDynamicPreReleaseReadCapabilityV2",
+            )
+        if type(runtime) is not ExperimentRunnerRuntimeV2:
+            raise RunnerError(RunnerFailureCode.TRUSTED_DYNAMIC_READ_CAPABILITY_INVALID, detail="runtime type")
+        if type(absolute_invocation_deadline_ns) is not int or absolute_invocation_deadline_ns < 0:
+            raise RunnerError(RunnerFailureCode.TRUSTED_DYNAMIC_READ_CAPABILITY_INVALID, detail="deadline")
+        self._runtime = runtime
+        self._issuer_sentinel = _ACTIVE_TRUSTED_ISSUER_SENTINEL
+        self._nonce = runtime.uuid_factory().hex
+        self._absolute_invocation_deadline_ns = absolute_invocation_deadline_ns
+        self._consumed = False
+        self._requests_consumed = 0
+        self._lock = threading.Lock()
+
+    @property
+    def runtime(self) -> "ExperimentRunnerRuntimeV2":
+        return self._runtime
+
+    @property
+    def issuer_sentinel(self) -> object:
+        return self._issuer_sentinel
+
+    @property
+    def nonce(self) -> str:
+        return self._nonce
+
+    @property
+    def absolute_invocation_deadline_ns(self) -> int:
+        return self._absolute_invocation_deadline_ns
+
+    @property
+    def requests_consumed(self) -> int:
+        return self._requests_consumed
+
+    @property
+    def is_consumed(self) -> bool:
+        return self._consumed
+
+    def charge(self, operation: ActivePreReleaseReadOperationV2, *, count: int = 1) -> None:
+        """DSB-BUDGET-005/006 -- charge ``count`` units at the pre-transport
+        boundary.  A request that reaches this charged boundary stays consumed
+        regardless of any later outcome; there is no refund and no retry.  The
+        deadline is checked first (DSB-BUDGET-006); a request that would exceed
+        72 fails ``DYNAMIC_READ_BUDGET_EXHAUSTED`` before transport."""
+        with self._lock:
+            if self._consumed:
+                raise RunnerError(RunnerFailureCode.TRUSTED_DYNAMIC_READ_CAPABILITY_INVALID, detail="capability already consumed")
+            if operation not in _ACTIVE_V2_OP_BINDING:
+                raise RunnerError(RunnerFailureCode.TRUSTED_DYNAMIC_READ_CAPABILITY_INVALID, detail="operation not on the closed V2 surface")
+            if self._runtime.monotonic_clock_ns() >= self._absolute_invocation_deadline_ns:
+                raise RunnerError(RunnerFailureCode.DYNAMIC_READ_DEADLINE_EXHAUSTED, detail="absolute invocation deadline reached before request " + str(self._requests_consumed + 1))
+            if self._requests_consumed + count > PRE_RELEASE_READ_REQUEST_MAX_V2:
+                raise RunnerError(RunnerFailureCode.DYNAMIC_READ_BUDGET_EXHAUSTED, detail="request " + str(self._requests_consumed + count) + " exceeds pre_release_read_request_max_v2=72")
+            self._requests_consumed += count
+
+    def mark_consumed(self) -> None:
+        with self._lock:
+            self._consumed = True
+
+    def __copy__(self):
+        raise TypeError("_TrustedDynamicPreReleaseReadCapabilityV2 cannot be copied")
+
+    __deepcopy__ = __copy__
+
+    def __reduce_ex__(self, protocol):
+        del protocol
+        raise TypeError("_TrustedDynamicPreReleaseReadCapabilityV2 cannot be serialized")
+
+
+class _TrustedDynamicReadAcquirerV2:
+    """DSB-DYN-002/004 -- the exact acquisition interface.  The production path
+    always binds ``_LiveTrustedDynamicReadAcquirerV2``; the offline fake seam
+    binds ``_FakeTrustedDynamicReadAcquirerV2`` only through a module-private
+    test factory."""
+
+    def acquire(self, capability: "_TrustedDynamicPreReleaseReadCapabilityV2") -> "_ReleaseEligibleDynamicIndexDomainReadSetV2":  # pragma: no cover - interface
+        raise NotImplementedError
+
+
+def _mint_release_eligible_read_set(
+    capability: "_TrustedDynamicPreReleaseReadCapabilityV2",
+    *,
+    acquired: "_ActiveV2AcquiredReadV1",
+    opened: "OpenResult | None",
+) -> "_ReleaseEligibleDynamicIndexDomainReadSetV2":
+    """The ONE ADRS2 minting implementation (CL-1).  Consumes the ONE
+    converged ``_ActiveV2AcquiredReadV1`` (from either the live acquirer or
+    the fake seam), validates the enumerated read set against the
+    domain-scoped accepted-evidence contract, wires the exact retained
+    bootstrap-floor reconciliation through
+    ``reconcile_retained_bootstrap_floor_v1`` +
+    ``n1_accepted_terminal_settlement_evidence()`` (BLOCK-05-03 -- the caller
+    settlement fields / P02 SHA are NOT release authority), recomputes and
+    binds the full per-page DSB-READSET-001 composite ADRS2 identity inside
+    the still-running absolute invocation deadline, folds same-subaccount
+    foreign-index economics into the selected-route truth, and mints the
+    private release-eligible type with this capability's live issuer lineage.
+    A correct self-hash does NOT by itself establish source authority."""
+    if type(acquired) is not _ActiveV2AcquiredReadV1:
+        raise RunnerError(RunnerFailureCode.CALLER_SUPPLIED_DYNAMIC_READ_SET_REJECTED, detail="acquisition result is not the converged private type")
+    runtime = capability.runtime
+    contract = runtime.active_contract
+    binding = runtime.domain_binding
+    risk_config = runtime.risk_config
+    fixture = acquired.fixture
+    selected_route_truth = acquired.selected_route_truth
+    if type(risk_config) is not RiskLimitConfigV1:
+        raise RunnerError(RunnerFailureCode.SUBACCOUNT_WIDE_COMPLETENESS_UNPROVEN, detail="active runtime risk_config required")
+    if type(selected_route_truth) is not AuthoritativeReadTruthV1:
+        raise RunnerError(RunnerFailureCode.SUBACCOUNT_WIDE_COMPLETENESS_UNPROVEN, detail="selected-route truth type")
+    require_complete_active_pagination(selected_route_truth.orders_complete, detail="orders")
+    require_complete_active_pagination(selected_route_truth.fills_complete, detail="fills")
+    # C09-C: the domain-wide exactly-once fill-identity proof runs at this ONE
+    # converged live/fake boundary, before any release-eligible mint or risk
+    # acceptance consumes the accepted fill rows.
+    _validate_active_v2_domain_wide_fill_identity(fixture, subaccount=binding.subaccount)
+
+    now_monotonic_ns = runtime.monotonic_clock_ns()
+    started_utc = canonical_timestamp(runtime.wall_clock())
+    current_cutoff = _active_reconciliation_cutoff_sha256(selected_route_truth)
+
+    retained_classification = require_dynamic_index_domain_completeness(
+        fixture,
+        domain_binding=binding,
+        active_contract=contract,
+        risk_config=risk_config,
+        accepted_evidence_contract=runtime.accepted_evidence_contract,
+        current_selected_route_cutoff_sha256=current_cutoff,
+        now_monotonic_ns=now_monotonic_ns,
+        now_utc=started_utc,
+        t0_wall_sample_utc=acquired.t0_wall_sample_utc,
+        t1_wall_sample_utc=acquired.t1_wall_sample_utc,
+    )
+
+    selected_ticker_value = (
+        selected_route_truth.market.get("ticker") if isinstance(selected_route_truth.market, Mapping) else ""
+    )
+    rbp = runtime.accepted_evidence_contract.retained_bootstrap_position
+    extra_working, extra_fills, every_position_classified = _parse_dynamic_index_domain_account_wide_extra_economics(
+        fixture, selected_ticker=selected_ticker_value, selected_exchange_index=binding.exchange_index,
+        subaccount=binding.subaccount, retained_ticker=(rbp["ticker"] if rbp is not None else None),
+    )
+    folded_truth = selected_route_truth
+    if extra_working or extra_fills:
+        folded_truth = _dataclass_replace(
+            selected_route_truth,
+            working_orders=selected_route_truth.working_orders + extra_working,
+            fills=selected_route_truth.fills + extra_fills,
+        )
+
+    # BLOCK-05-03 -- the ACTUAL retained-position release authority.
+    controlled_live = Decimal("0")
+    accepted_atse1_id = ""
+    if rbp is not None:
+        controlled_live = _dynamic_read_controlled_live_position_contracts(
+            fixture, ticker=rbp["ticker"], subaccount=binding.subaccount,
+        )
+        # ``fresh_all_index_positions_complete`` is True ONLY after EVERY
+        # enumerated index's GET_POSITIONS traversal exhausts and D1 == D0.
+        fresh_all_index_positions_complete = (
+            bool(acquired.per_index)
+            and acquired.d0 == acquired.d1
+            and tuple(pc.exchange_index for pc in acquired.per_index) == acquired.d0
+            and all(pc.positions.pagination_exhausted is True for pc in acquired.per_index)
+        )
+        # Correction 07 C07-D -- DERIVED, never a literal ``True``: EVERY
+        # accepted current position row must have been explicitly classified
+        # (selected-route accounted / retained-current-position checked /
+        # exact-zero accounted / aggregate-risk accounted -- an unclassified
+        # row fails closed), the domain must be stable and every index's
+        # positions traversal exhausted, and -- when the selected route itself
+        # carries a live position -- selected-route corroboration must
+        # actually agree with the independently derived economic state.
+        selected_route_position_ok = (
+            selected_route_truth.position_state == "NO_VENUE_POSITION_ROW"
+            or selected_route_truth.position_corroboration == "CORROBORATED"
+        )
+        other_positions_all_accounted = (
+            every_position_classified
+            and fresh_all_index_positions_complete
+            and selected_route_position_ok
+        )
+        accepted_settlement = n1_accepted_terminal_settlement_evidence()
+        try:
+            retained_classification = reconcile_retained_bootstrap_floor_v1(
+                accepted_settlement=accepted_settlement,
+                retained_position_ticker=rbp["ticker"],
+                retained_position_floor_contracts=Decimal(str(rbp["floor_contracts_fp"])),
+                retained_route_exchange_index=rbp["exchange_index"],
+                fresh_all_index_positions_complete=fresh_all_index_positions_complete,
+                current_retained_ticker_live_contracts=controlled_live,
+                ambiguous_event_positions_present=False,
+                other_positions_all_accounted=other_positions_all_accounted,
+            )
+        except LedgerError as exc:
+            raise RunnerError(
+                RunnerFailureCode.N1_RETAINED_POSITION_NOT_RECONCILED,
+                detail="retained bootstrap floor not reconciled: " + exc.code.value,
+            ) from exc
+        accepted_atse1_id = ACCEPTED_TERMINAL_SETTLEMENT_ID
+
+    completed_utc = canonical_timestamp(runtime.wall_clock())
+    if runtime.monotonic_clock_ns() >= capability.absolute_invocation_deadline_ns:
+        raise RunnerError(RunnerFailureCode.DYNAMIC_READ_DEADLINE_EXHAUSTED, detail="absolute invocation deadline expired during final read-set construction")
+    deadline_identity = sha256_hex(canonical_json_bytes({
+        "absolute_invocation_deadline_ns": capability.absolute_invocation_deadline_ns,
+        "active_contract_sha256": contract.contract_sha256,
+    }))
+    read_set_sha256, canonical = _compute_release_eligible_read_set_sha256(
+        acquired,
+        active_contract=contract,
+        domain_binding=binding,
+        risk_config_sha256=risk_config.sha256,
+        risk_state_epoch=getattr(getattr(opened, "projection", None), "risk_state_epoch", 0) or 0,
+        reconciliation_cutoff_identity_sha256=current_cutoff,
+        trusted_local_release_projection_identity_sha256=_trusted_local_release_projection_identity(opened),
+        acquisition_started_at_utc=started_utc,
+        acquisition_completed_at_utc=completed_utc,
+        absolute_invocation_deadline_identity=deadline_identity,
+        pre_release_requests_consumed=capability.requests_consumed,
+        retained_position_classification=retained_classification,
+        accepted_terminal_settlement_id=accepted_atse1_id,
+    )
+    read_set = _ReleaseEligibleDynamicIndexDomainReadSetV2(
+        _RELEASE_ELIGIBLE_READ_SET_KEY,
+        _issuer_sentinel=capability.issuer_sentinel,
+        _nonce=capability.nonce,
+        _capability_obj_id=id(capability),
+        schema_revision=2,
+        read_set_sha256=read_set_sha256,
+        read_set_id="ADRS2_" + read_set_sha256,
+        read_set_canonical=canonical,
+        selected_route_truth=folded_truth,
+        extra_working_orders=tuple(extra_working),
+        extra_fills=tuple(extra_fills),
+        controlled_live_position_contracts=controlled_live,
+        retained_position_classification=retained_classification,
+        accepted_terminal_settlement_id=accepted_atse1_id,
+        pre_release_requests_consumed=capability.requests_consumed,
+        absolute_invocation_deadline_ns=capability.absolute_invocation_deadline_ns,
+    )
+    capability.mark_consumed()
+    return read_set
+
+
+class _LiveTrustedDynamicReadAcquirerV2(_TrustedDynamicReadAcquirerV2):
+    """DSB-DYN-002/005/006 -- the production acquirer.  It owns every current
+    venue GET, response byte acquisition, parse, scope validation, pagination,
+    canonical page/row digests, status-domain derivation, freshness validation,
+    and private result construction, all charged to the capability's
+    independent 72-request budget.  No out-of-band read may be admitted as
+    current Stage-3 truth."""
+
+    __slots__ = ("_runtime", "_opened", "_selected_ticker")
+
+    def __init__(
+        self, runtime: "ExperimentRunnerRuntimeV2", *,
+        selected_ticker: str, opened: "OpenResult | None" = None,
+    ) -> None:
+        if type(runtime) is not ExperimentRunnerRuntimeV2:
+            raise RunnerError(RunnerFailureCode.TRUSTED_DYNAMIC_READ_CAPABILITY_INVALID, detail="runtime type")
+        if type(selected_ticker) is not str or _TICKER_PATTERN.fullmatch(selected_ticker) is None:
+            raise RunnerError(RunnerFailureCode.MARKET_IDENTITY_INVALID, detail="live acquirer selected ticker")
+        self._runtime = runtime
+        self._opened = opened
+        self._selected_ticker = selected_ticker
+
+    def acquire(self, capability: "_TrustedDynamicPreReleaseReadCapabilityV2") -> "_ReleaseEligibleDynamicIndexDomainReadSetV2":
+        if type(capability) is not _TrustedDynamicPreReleaseReadCapabilityV2 or capability.runtime is not self._runtime:
+            raise RunnerError(RunnerFailureCode.TRUSTED_DYNAMIC_READ_CAPABILITY_INVALID, detail="capability/runtime mismatch")
+        if capability.is_consumed:
+            raise RunnerError(RunnerFailureCode.TRUSTED_DYNAMIC_READ_CAPABILITY_INVALID, detail="capability already consumed")
+        acquired = _run_active_v2_acquisition(
+            self._runtime, capability, opened=self._opened, selected_ticker=self._selected_ticker,
+        )
+        return _mint_release_eligible_read_set(capability, acquired=acquired, opened=self._opened)
+
+
+def _normalize_legacy_fixture_rows_for_active_v2(
+    fixture: "DynamicIndexDomainAccountWideReadV1", *,
+    active_contract: "ActiveExecutionDomainContractV1",
+    risk_config_sha256: str,
+) -> "DynamicIndexDomainAccountWideReadV1":
+    """Correction 07 clarification -- module-private TEST-ONLY fixture
+    normalizer, reachable ONLY from ``_synthesize_active_v2_acquired`` (the
+    fake seam's synthesis path).  It is NEVER reachable from the production
+    ``_LiveTrustedDynamicReadAcquirerV2``, and it does NOT relax the live
+    active-V2 orders/fills schema -- live rows still require exact
+    ``subaccount_number``.
+
+    It converts a trusted legacy synthetic fixture's ``subaccount``-keyed
+    economic rows into the same canonical active-V2 ``subaccount_number``
+    shape the live acquirer's rows carry, so the fake seam mints through the
+    exact same converged representation / economics helpers as the live
+    acquirer -- never a weaker or alternate one.  A row that already carries
+    ``subaccount_number`` is left exactly as-is; a row that states BOTH
+    fields with disagreeing values is a contradiction and fails closed."""
+
+    changed = False
+
+    def _normalize_row(row: object) -> object:
+        nonlocal changed
+        if not isinstance(row, Mapping):
+            return row
+        legacy = row.get("subaccount")
+        v2 = row.get(_ACTIVE_V2_SUBACCOUNT_FIELD)
+        if v2 is not None and legacy is not None and v2 != legacy:
+            raise RunnerError(
+                RunnerFailureCode.DYNAMIC_READ_RESPONSE_SCOPE_MISMATCH,
+                detail="fixture row subaccount_number/subaccount contradiction")
+        if v2 is not None or legacy is None:
+            return row
+        out = dict(row)
+        out[_ACTIVE_V2_SUBACCOUNT_FIELD] = legacy
+        changed = True
+        return out
+
+    def _normalize_traversal(t: "PerIndexTraversalV1") -> "PerIndexTraversalV1":
+        return PerIndexTraversalV1(
+            exchange_index=t.exchange_index, orders=t.orders, fills=t.fills, positions=t.positions,
+            order_rows=tuple(_normalize_row(r) for r in t.order_rows),
+            fill_rows=tuple(_normalize_row(r) for r in t.fill_rows),
+            position_rows=tuple(_normalize_row(r) for r in t.position_rows),
+        )
+
+    normalized_traversals = tuple(_normalize_traversal(t) for t in fixture.per_index_traversals)
+    if not changed:
+        # Nothing needed normalizing (already V2-shaped, or no rows at all):
+        # return the ORIGINAL fixture object unchanged, including its
+        # existing ``read_set_identity_sha256`` -- a caller-supplied,
+        # deliberately-inconsistent identity (e.g. an injection/mutation
+        # test) must NOT be silently repaired by this test-only helper.
+        return fixture
+    normalized = _dataclass_replace(fixture, per_index_traversals=normalized_traversals)
+    identity = compute_dynamic_index_domain_read_set_identity(
+        normalized,
+        active_domain_binding_id=active_contract.domain_binding_id,
+        active_domain_binding_sha256=active_contract.domain_binding_sha256,
+        active_contract_sha256=active_contract.contract_sha256,
+        risk_config_sha256=risk_config_sha256,
+    )
+    return _dataclass_replace(normalized, read_set_identity_sha256=identity)
+
+
+def _synthesize_active_v2_acquired(
+    fixture: "DynamicIndexDomainAccountWideReadV1",
+    selected_route_truth: "AuthoritativeReadTruthV1",
+    *,
+    runtime: "ExperimentRunnerRuntimeV2",
+) -> "_ActiveV2AcquiredReadV1":
+    """CL-1 -- convert an existing deterministic offline
+    ``DynamicIndexDomainAccountWideReadV1`` fixture into the ONE converged
+    ``_ActiveV2AcquiredReadV1`` shape for injection / lineage / hash tests.
+    The fake seam does NOT execute the transport state machine; it may
+    synthesize the per-page/bookend commitments from fixture material, but it
+    MUST NOT retain a weaker or alternate read-set / ADRS2 shape -- the same
+    ``_mint_release_eligible_read_set`` consumes the result and production
+    authority still additionally requires live-acquirer issuer lineage.  The
+    fixture's legacy ``subaccount``-keyed rows are normalized to the exact
+    active-V2 ``subaccount_number`` shape (test-only; never reachable from the
+    live acquirer) before being carried into the acquired read."""
+    fixture = _normalize_legacy_fixture_rows_for_active_v2(
+        fixture, active_contract=runtime.active_contract, risk_config_sha256=runtime.risk_config.sha256,
+    )
+
+    def _h(*parts: object) -> str:
+        return sha256_hex(canonical_json_bytes(list(parts)))
+
+    def _surface(op: ActivePreReleaseReadOperationV2, idx: int, src: "PerIndexSurfaceTraversalV1", rows: "Tuple[Mapping[str, object], ...]") -> _ActiveV2SurfaceCommitmentV1:
+        n = len(src.page_response_digests)
+        pages: list[_ActiveV2PageCommitmentV1] = []
+        for k in range(1, n + 1):
+            cursor_in = "" if k == 1 else "SYNTH-CUR-" + op.value + "-" + str(idx) + "-" + str(k - 1)
+            cursor_out = "" if k == n else "SYNTH-CUR-" + op.value + "-" + str(idx) + "-" + str(k)
+            page_rows = tuple(rows) if k == 1 else ()
+            pages.append(_ActiveV2PageCommitmentV1(
+                operation=op.value, exchange_index=idx, page_ordinal=k,
+                request_identity_sha256=_h("synthetic_request", src.request_identity_sha256, op.value, idx, k, cursor_in),
+                response_sha256=src.page_response_digests[k - 1],
+                canonical_content_digest_sha256=src.page_economic_digests[k - 1],
+                cursor_in=cursor_in, cursor_out=cursor_out,
+                row_count=len(page_rows),
+                row_content_sha256=tuple(sha256_hex(canonical_json_bytes(_canonical_account_wide_row(r))) for r in page_rows),
+            ))
+        return _ActiveV2SurfaceCommitmentV1(
+            operation=op.value, exchange_index=idx, pages=tuple(pages),
+            page_count=len(pages), pagination_exhausted=True,
+        )
+
+    d0 = fixture.status_before.exchange_index_domain
+    d1 = fixture.status_after.exchange_index_domain
+    per_index = tuple(
+        _ActiveV2PerIndexCommitmentV1(
+            exchange_index=t.exchange_index,
+            orders=_surface(ActivePreReleaseReadOperationV2.GET_ORDERS, t.exchange_index, t.orders, t.order_rows),
+            fills=_surface(ActivePreReleaseReadOperationV2.GET_FILLS, t.exchange_index, t.fills, t.fill_rows),
+            positions=_surface(ActivePreReleaseReadOperationV2.GET_POSITIONS, t.exchange_index, t.positions, t.position_rows),
+            order_rows=t.order_rows, fill_rows=t.fill_rows, position_rows=t.position_rows,
+        )
+        for t in fixture.per_index_traversals
+    )
+    market = selected_route_truth.market if isinstance(selected_route_truth.market, Mapping) else {}
+    ob = selected_route_truth.orderbook
+    ob_identity = ""
+    _with_ident = getattr(ob, "with_canonical_identity", None)
+    if callable(_with_ident):
+        try:
+            ob_identity = _with_ident().canonical_snapshot_sha256
+        except Exception:  # noqa: BLE001 - synthetic fallback
+            ob_identity = ""
+    if not _is_hex64(ob_identity):
+        ob_identity = _h("synthetic_orderbook_identity", str(type(ob)), market.get("ticker"))
+    status_before = _ActiveV2BookendCommitmentV1(
+        operation=ActivePreReleaseReadOperationV2.GET_EXCHANGE_STATUS.value, bookend="BEFORE",
+        request_identity_sha256=_h("synthetic_request", "S0", fixture.status_before.response_identity_sha256),
+        response_sha256=fixture.status_before.response_identity_sha256,
+        canonical_content_sha256=_h("synthetic_status_content", "BEFORE", list(d0)),
+        exact_sorted_domain=d0,
+    )
+    status_after = _ActiveV2BookendCommitmentV1(
+        operation=ActivePreReleaseReadOperationV2.GET_EXCHANGE_STATUS.value, bookend="AFTER",
+        request_identity_sha256=_h("synthetic_request", "S1", fixture.status_after.response_identity_sha256),
+        response_sha256=fixture.status_after.response_identity_sha256,
+        canonical_content_sha256=_h("synthetic_status_content", "AFTER", list(d1)),
+        exact_sorted_domain=d1,
+    )
+    freshness_before = _ActiveV2BookendCommitmentV1(
+        operation=ActivePreReleaseReadOperationV2.GET_USER_DATA_TIMESTAMP.value, bookend="BEFORE",
+        request_identity_sha256=_h("synthetic_request", "T0", fixture.freshness_before.response_identity_sha256),
+        response_sha256=fixture.freshness_before.response_identity_sha256,
+        canonical_content_sha256=_h("synthetic_freshness_content", fixture.freshness_before.as_of_time_utc),
+        as_of_time_utc=fixture.freshness_before.as_of_time_utc,
+        wall_sample_utc=fixture.freshness_before.as_of_time_utc,
+    )
+    freshness_after = _ActiveV2BookendCommitmentV1(
+        operation=ActivePreReleaseReadOperationV2.GET_USER_DATA_TIMESTAMP.value, bookend="AFTER",
+        request_identity_sha256=_h("synthetic_request", "T1", fixture.freshness_after.response_identity_sha256),
+        response_sha256=fixture.freshness_after.response_identity_sha256,
+        canonical_content_sha256=_h("synthetic_freshness_content", fixture.freshness_after.as_of_time_utc),
+        as_of_time_utc=fixture.freshness_after.as_of_time_utc,
+        wall_sample_utc=fixture.freshness_after.as_of_time_utc,
+    )
+    selected_market = _ActiveV2ContentCommitmentV1(
+        operation=ActivePreReleaseReadOperationV2.GET_MARKET.value,
+        request_identity_sha256=_h("synthetic_request", "GET_MARKET", market.get("ticker")),
+        response_identity_sha256=_h("synthetic_market_response", _canonical_account_wide_row(market) if market else []),
+        canonical_consumed_digest_sha256=_h("ARB_KALSHI_DEMO_ACTIVE_V2_MARKET_ECON_V1", _canonical_account_wide_row(market) if market else []),
+    )
+    selected_orderbook = _ActiveV2ContentCommitmentV1(
+        operation=ActivePreReleaseReadOperationV2.GET_MARKET_ORDERBOOK.value,
+        request_identity_sha256=_h("synthetic_request", "GET_MARKET_ORDERBOOK", market.get("ticker")),
+        response_identity_sha256=ob_identity,
+        canonical_consumed_digest_sha256=_h(
+            "ARB_KALSHI_DEMO_ACTIVE_V2_ORDERBOOK_ECON_V1",
+            {k: str(v) for k, v in _market_data_snapshot(market, ob).items()} if market else {},
+        ),
+    )
+    return _ActiveV2AcquiredReadV1(
+        status_before=status_before, status_after=status_after,
+        freshness_before=freshness_before, freshness_after=freshness_after,
+        selected_market=selected_market, selected_orderbook=selected_orderbook,
+        per_index=per_index, exact_order_supplements=(),
+        d0=d0, d1=d1, fixture=fixture, selected_route_truth=selected_route_truth,
+        t0_wall_sample_utc=fixture.freshness_before.as_of_time_utc,
+        t1_wall_sample_utc=fixture.freshness_after.as_of_time_utc,
+    )
+
+
+class _FakeTrustedDynamicReadAcquirerV2(_TrustedDynamicReadAcquirerV2):
+    """DSB-DYN-004 -- the ONLY synthetic-current-read seam.  Module-private and
+    used only by the runner test module.  It consumes synthetic
+    ``DynamicIndexDomainAccountWideReadV1`` fixture material internally,
+    converts it to the ONE converged ``_ActiveV2AcquiredReadV1`` shape, and
+    mints a private ``_ReleaseEligibleDynamicIndexDomainReadSetV2`` ONLY
+    through this same trusted acquisition boundary
+    (``_mint_release_eligible_read_set``).  A cryptographic bearer token, a
+    public dataclass constructor, a plugin source, or a separate source module
+    are NOT permitted alternatives, and it must not retain a weaker
+    read-set / ADRS2 shape."""
+
+    __slots__ = ("_fixture", "_selected_route_truth", "_opened", "_implied_request_count")
+
+    def __init__(
+        self,
+        *,
+        fixture: "DynamicIndexDomainAccountWideReadV1",
+        selected_route_truth: "AuthoritativeReadTruthV1",
+        runtime: "ExperimentRunnerRuntimeV2 | None" = None,  # accepted for symmetry; not identity-pinned
+        opened: "OpenResult | None" = None,
+        implied_request_count: int = 72,
+    ) -> None:
+        del runtime
+        if type(fixture) is not DynamicIndexDomainAccountWideReadV1:
+            raise RunnerError(RunnerFailureCode.CALLER_SUPPLIED_DYNAMIC_READ_SET_REJECTED, detail="fake seam requires a DynamicIndexDomainAccountWideReadV1 fixture")
+        if type(selected_route_truth) is not AuthoritativeReadTruthV1:
+            raise RunnerError(RunnerFailureCode.SUBACCOUNT_WIDE_COMPLETENESS_UNPROVEN, detail="selected-route truth type")
+        if type(implied_request_count) is not int or not 0 <= implied_request_count <= PRE_RELEASE_READ_REQUEST_MAX_V2:
+            raise RunnerError(RunnerFailureCode.DYNAMIC_READ_BUDGET_EXHAUSTED, detail="implied request count out of range")
+        self._fixture = fixture
+        self._selected_route_truth = selected_route_truth
+        self._opened = opened
+        self._implied_request_count = implied_request_count
+
+    def acquire(self, capability: "_TrustedDynamicPreReleaseReadCapabilityV2") -> "_ReleaseEligibleDynamicIndexDomainReadSetV2":
+        if type(capability) is not _TrustedDynamicPreReleaseReadCapabilityV2:
+            raise RunnerError(RunnerFailureCode.TRUSTED_DYNAMIC_READ_CAPABILITY_INVALID, detail="capability type")
+        if capability.is_consumed:
+            raise RunnerError(RunnerFailureCode.TRUSTED_DYNAMIC_READ_CAPABILITY_INVALID, detail="capability already consumed")
+        # Charge the fixture's implied request count one unit at a time through
+        # the same pre-transport charge boundary the live path uses, so budget
+        # / deadline accounting is identical.
+        for i in range(self._implied_request_count):
+            op = (
+                ActivePreReleaseReadOperationV2.GET_EXCHANGE_STATUS if i < 2
+                else ActivePreReleaseReadOperationV2.GET_USER_DATA_TIMESTAMP if i < 4
+                else ActivePreReleaseReadOperationV2.GET_MARKET if i == 4
+                else ActivePreReleaseReadOperationV2.GET_MARKET_ORDERBOOK if i == 5
+                else ActivePreReleaseReadOperationV2.GET_ORDERS
+            )
+            capability.charge(op)
+        acquired = _synthesize_active_v2_acquired(self._fixture, self._selected_route_truth, runtime=capability.runtime)
+        return _mint_release_eligible_read_set(capability, acquired=acquired, opened=self._opened)
+
+
+def _issue_trusted_dynamic_pre_release_read_capability_v2(
+    runtime: "ExperimentRunnerRuntimeV2", existing_invocation_deadline_ns: int,
+) -> "_TrustedDynamicPreReleaseReadCapabilityV2":
+    """DSB-DYN-002 -- the SOLE production route by which a usable
+    ``_TrustedDynamicPreReleaseReadCapabilityV2`` is created.  Called only by
+    ``run_pre_release_read_phase_v2`` AFTER Stage 3C's local
+    release-impossibility gate has returned no blocking reasons.  Stage 3D
+    receives the already-running absolute invocation deadline; issuing the
+    capability does NOT create a new 300-second window."""
+    if type(runtime) is not ExperimentRunnerRuntimeV2:
+        raise RunnerError(RunnerFailureCode.TRUSTED_DYNAMIC_READ_CAPABILITY_REQUIRED, detail="runtime type")
+    if type(existing_invocation_deadline_ns) is not int or existing_invocation_deadline_ns < 0:
+        raise RunnerError(RunnerFailureCode.TRUSTED_DYNAMIC_READ_CAPABILITY_INVALID, detail="existing invocation deadline")
+    return _TrustedDynamicPreReleaseReadCapabilityV2(
+        _TRUSTED_DYNAMIC_CAPABILITY_KEY, runtime=runtime,
+        absolute_invocation_deadline_ns=existing_invocation_deadline_ns,
+    )
+
+
+def _acquire_release_eligible_dynamic_index_domain_read_set_v2(
+    runtime: "ExperimentRunnerRuntimeV2",
+    capability: "_TrustedDynamicPreReleaseReadCapabilityV2",
+    *,
+    selected_ticker: str,
+    opened: "OpenResult | None" = None,
+) -> "_ReleaseEligibleDynamicIndexDomainReadSetV2":
+    """DSB-DYN-002 / DSB-READSET-004 -- Stage 3E.  Runs the trusted acquirer
+    that owns every current venue GET and returns exactly one private
+    ``_ReleaseEligibleDynamicIndexDomainReadSetV2``.  Stage 3F (the caller)
+    accepts the result only if: the exact private type; the live issuer
+    lineage belongs to THIS runtime/process/capability; the capability is
+    consumed exactly once; the active contract/domain match the current
+    runtime exactly; the read-set self-hash verifies; and the absolute
+    invocation deadline has not expired.  A deserialized or caller-reconstructed
+    value-equivalent object is rejected ``CALLER_SUPPLIED_DYNAMIC_READ_SET_
+    REJECTED`` even if every hash is correct."""
+    if type(runtime) is not ExperimentRunnerRuntimeV2:
+        raise RunnerError(RunnerFailureCode.TRUSTED_DYNAMIC_READ_CAPABILITY_REQUIRED, detail="runtime type")
+    if type(capability) is not _TrustedDynamicPreReleaseReadCapabilityV2 or capability.runtime is not runtime:
+        raise RunnerError(RunnerFailureCode.TRUSTED_DYNAMIC_READ_CAPABILITY_INVALID, detail="capability/runtime mismatch")
+    if capability.is_consumed:
+        raise RunnerError(RunnerFailureCode.TRUSTED_DYNAMIC_READ_CAPABILITY_INVALID, detail="capability already consumed before Stage 3E")
+
+    seam = runtime.trusted_dynamic_read_acquirer_test_seam
+    if seam is not None:
+        if not isinstance(seam, _FakeTrustedDynamicReadAcquirerV2):
+            raise RunnerError(RunnerFailureCode.TRUSTED_DYNAMIC_READ_CAPABILITY_INVALID, detail="only a _FakeTrustedDynamicReadAcquirerV2 may occupy the test seam")
+        acquirer: _TrustedDynamicReadAcquirerV2 = seam
+    else:
+        acquirer = _LiveTrustedDynamicReadAcquirerV2(runtime, selected_ticker=selected_ticker, opened=opened)
+
+    result = acquirer.acquire(capability)
+
+    if type(result) is not _ReleaseEligibleDynamicIndexDomainReadSetV2:
+        raise RunnerError(RunnerFailureCode.CALLER_SUPPLIED_DYNAMIC_READ_SET_REJECTED, detail="Stage 3E result is not the private release-eligible type")
+    if (
+        getattr(result, "_issuer_sentinel", None) is not capability.issuer_sentinel
+        or getattr(result, "_nonce", None) != capability.nonce
+        or getattr(result, "_capability_obj_id", None) != id(capability)
+    ):
+        raise RunnerError(RunnerFailureCode.DYNAMIC_READ_SOURCE_MISMATCH, detail="read-set issuer lineage does not match this capability")
+    if not capability.is_consumed:
+        raise RunnerError(RunnerFailureCode.DYNAMIC_READ_SOURCE_MISMATCH, detail="capability was not consumed by the acquirer")
+    if not result.verify_self_hash():
+        raise RunnerError(RunnerFailureCode.DYNAMIC_READ_COMPOSITE_IDENTITY_MISMATCH, detail="read-set self-hash does not verify")
+    canonical = result.read_set_canonical
+    if (
+        canonical.get("active_contract_sha256") != runtime.active_contract.contract_sha256
+        or canonical.get("domain_binding_sha256") != runtime.active_contract.domain_binding_sha256
+        or canonical.get("conflict_domain_ref") != runtime.active_contract.conflict_domain_ref
+        or canonical.get("subaccount") != runtime.domain_binding.subaccount
+        or canonical.get("selected_exchange_index") != runtime.domain_binding.exchange_index
+        or dict(canonical.get("accepted_dynamic_source_identity") or {}) != dict(_ACTIVE_DYNAMIC_SOURCE_IDENTITY)
+    ):
+        raise RunnerError(RunnerFailureCode.DYNAMIC_READ_SOURCE_MISMATCH, detail="read-set does not match the current runtime active contract/domain")
+    if runtime.monotonic_clock_ns() >= capability.absolute_invocation_deadline_ns:
+        raise RunnerError(RunnerFailureCode.DYNAMIC_READ_DEADLINE_EXHAUSTED, detail="absolute invocation deadline expired during Stage 3E result construction")
+    return result
+
+
+def _build_active_experiment_runner_runtime_v2_for_test(
+    *, fake_acquirer_factory: Callable[["ExperimentRunnerRuntimeV2"], "_FakeTrustedDynamicReadAcquirerV2"] | None = None, **kwargs: object,
+) -> "ExperimentRunnerRuntimeV2":
+    """Module-private test-only factory (DSB-DYN-004).  It builds an active
+    runtime via the production factory and then, if requested, attaches a
+    ``_FakeTrustedDynamicReadAcquirerV2`` to the single synthetic-current-read
+    seam.  Production code never calls this."""
+    runtime = build_active_experiment_runner_runtime_v2(**kwargs)  # type: ignore[arg-type]
+    if fake_acquirer_factory is None:
+        return runtime
+    fake = fake_acquirer_factory(runtime)
+    if not isinstance(fake, _FakeTrustedDynamicReadAcquirerV2):
+        raise RunnerError(RunnerFailureCode.TRUSTED_DYNAMIC_READ_CAPABILITY_INVALID, detail="fake_acquirer_factory did not return a _FakeTrustedDynamicReadAcquirerV2")
+    return _dataclass_replace(runtime, trusted_dynamic_read_acquirer_test_seam=fake)
+
+
+@dataclass(frozen=True, slots=True)
+class PreReleaseReadPhaseResultV2:
+    status: str  # "LOCALLY_BLOCKED" | "READ_PHASE_COMPLETE"
+    process_instance_id: str
+    local_block_reasons: Tuple[str, ...]
+    active_release_state: object
+    truth: object
+    requests_consumed: int
+    trusted_dynamic_read_set_id: str = ""
+
+
+def run_pre_release_read_phase_v2(
+    invocation: ExperimentRunnerInvocationV2,
+    runtime: ExperimentRunnerRuntimeV2,
+) -> PreReleaseReadPhaseResultV2:
+    """Active Stages 3A-3F (DSB-RUN-003).
+
+    3A BOOT_HOLD -> 3B exact local authority/ledger replay through the active
+    helper (``runtime.read_local_safety_state`` bound to
+    ``read_active_local_safety_state_v1``) -> 3C local
+    release-impossibility gate (NO venue current-read request occurs before
+    3C succeeds; a 3C denial consumes NO pre-release capability/request
+    budget) -> 3D issue exactly one ``_TrustedDynamicPreReleaseReadCapabilityV2``
+    receiving the already-running absolute invocation deadline -> 3E the live
+    trusted acquirer OWNS every current venue GET and returns exactly one
+    private ``_ReleaseEligibleDynamicIndexDomainReadSetV2`` -> 3F assemble
+    ``ActiveReleaseEvaluationStateV1`` using ONLY that private read-set's
+    identity and folded truth.
+
+    Correction 02: this entrypoint takes NO caller-supplied
+    ``DynamicIndexDomainAccountWideReadV1`` / ``ProvenAccountWideReadV1`` /
+    ``SubaccountWideCompletenessTheoremV1`` / ``dict`` / callback -- current
+    Path-A truth can only come from the trusted acquisition boundary
+    (``deterministic self-hash != authoritative-source proof``).  It never
+    acquires RELEASE_ONLY / issues a completion token / acquires NORMAL_WRITER."""
+    if type(invocation) is not ExperimentRunnerInvocationV2:
+        raise RunnerError(RunnerFailureCode.ACTIVE_GATE_ENTRY_PRECONDITION_FAILED, detail="invocation type")
+    if type(runtime) is not ExperimentRunnerRuntimeV2:
+        raise RunnerError(RunnerFailureCode.ACTIVE_GATE_ENTRY_PRECONDITION_FAILED, detail="runtime type")
+
+    process_instance_id = runtime.normal_gate.process_instance_id
+
+    opened = runtime.read_local_safety_state()
+    if type(opened) is not OpenResult:
+        raise RunnerError(RunnerFailureCode.ACTIVE_GATE_ENTRY_PRECONDITION_FAILED, detail="local state type")
+
+    reasons = _local_impossibility_reasons(
+        opened, writer_proof_id=runtime.active_contract.writer_proof_id,
+        allowed_completeness=_ACTIVE_LOCAL_COMPLETENESS_VALUES,
+    )
+    if reasons:
+        return PreReleaseReadPhaseResultV2(
+            status="LOCALLY_BLOCKED", process_instance_id=process_instance_id,
+            local_block_reasons=reasons, active_release_state=None, truth=None,
+            requests_consumed=0, trusted_dynamic_read_set_id="",
+        )
+
+    # Stage 3D -- one closed process-local trusted capability, receiving the
+    # already-running absolute invocation deadline (no reset).
+    capability = _issue_trusted_dynamic_pre_release_read_capability_v2(
+        runtime, runtime.experiment_absolute_end_monotonic_ns,
+    )
+
+    # Stage 3E -- the live trusted acquirer owns every current venue GET and
+    # returns exactly one private release-eligible read-set.
+    read_set = _acquire_release_eligible_dynamic_index_domain_read_set_v2(
+        runtime, capability, selected_ticker=invocation.market_ticker, opened=opened,
+    )
+
+    truth = read_set.selected_route_truth
+
+    # Stage 3F -- assemble ActiveReleaseEvaluationStateV1 committing to the
+    # exact private read-set identity.
+    active_release_state = assemble_active_release_evaluation_state_v1(
+        runtime, truth, opened.projection,
+        trusted_dynamic_read_set_id=read_set.read_set_id,
+    )
+
+    return PreReleaseReadPhaseResultV2(
+        status="READ_PHASE_COMPLETE", process_instance_id=process_instance_id,
+        local_block_reasons=(), active_release_state=active_release_state, truth=truth,
+        requests_consumed=read_set.pre_release_requests_consumed,
+        trusted_dynamic_read_set_id=read_set.read_set_id,
+    )
+
+
+@dataclass(frozen=True, slots=True)
+class _Stage3ActiveReleaseAndNormalWriterResultV1:
+    """Gate-C active (Stage 3G-3K) success carrier.  Module-private, no
+    export/serialization/secret field.  Carries the one active_contract and
+    the live NormalWriterAcquisition forward for Gate D."""
+
+    process_instance_id: str
+    release_id: str
+    normal_writer_session_id: str
+    normal_writer_acquisition: NormalWriterAcquisition
+    active_contract: ActiveExecutionDomainContractV1
+    trusted_dynamic_read_set_id: str = ""
+
+
+def _complete_stage3_active_release_and_normal_writer_v2(
+    read_phase_result: PreReleaseReadPhaseResultV2,
+    runtime: ExperimentRunnerRuntimeV2,
+) -> _Stage3ActiveReleaseAndNormalWriterResultV1:
+    """Active Stages 3G-3K.  3G acquire_active_release_only_v1 -> 3H durable
+    release (evaluate_release / record_risk_release / release_writer_proof /
+    record_writer_eligible) -> 3I issue_active_current_process_release_
+    completion_v2 -> 3J acquire_active_normal_writer_state_v1 -> 3K
+    active-contract/domain revalidation.  One runtime.active_contract object
+    is carried through every stage; no LegacyIncidentContract and no V1
+    token can enter."""
+
+    if type(runtime) is not ExperimentRunnerRuntimeV2:
+        raise RunnerError(RunnerFailureCode.GATE_C_ENTRY_PRECONDITION_FAILED, detail="runtime type")
+    if (
+        type(read_phase_result) is not PreReleaseReadPhaseResultV2
+        or read_phase_result.status != "READ_PHASE_COMPLETE"
+        or type(read_phase_result.active_release_state) is not ActiveReleaseEvaluationStateV1
+        or read_phase_result.process_instance_id != runtime.normal_gate.process_instance_id
+        or type(runtime.risk_config) is not RiskLimitConfigV1
+        or read_phase_result.active_release_state.active_contract.contract_sha256
+        != runtime.active_contract.contract_sha256
+        or read_phase_result.active_release_state.trusted_dynamic_read_set_id
+        != read_phase_result.trusted_dynamic_read_set_id
+        or read_phase_result.trusted_dynamic_read_set_id[:6] != "ADRS2_"
+        or len(read_phase_result.trusted_dynamic_read_set_id) != 70
+    ):
+        raise RunnerError(RunnerFailureCode.GATE_C_ENTRY_PRECONDITION_FAILED)
+    if runtime.monotonic_clock_ns() >= runtime.experiment_absolute_end_monotonic_ns:
+        raise RunnerError(RunnerFailureCode.DEADLINE_EXCEEDED, detail="before active RELEASE_ONLY")
+
+    active_contract = runtime.active_contract
+
+    acquisition = acquire_active_release_only_v1(
+        runtime.authority_binding,
+        canonical_repository_root=runtime.canonical_repository_root,
+        active_contract=active_contract,
+        expected_ledger_path=runtime.expected_ledger_path,
+        clock=runtime.wall_clock,
+        uuid_factory=runtime.uuid_factory,
+        monotonic_clock_ns=runtime.monotonic_clock_ns,
+        release_wall_clock=runtime.wall_clock,
+    )
+    if (
+        acquisition.failure_code is not None
+        or type(acquisition.handle) is not ReleaseLedgerHandle
+        or acquisition.authority_ledger_relation is not AuthorityLedgerRelation.EQUAL
+    ):
+        if acquisition.handle is not None:
+            acquisition.handle.close()
+        raise RunnerError(RunnerFailureCode.RELEASE_ONLY_ACQUISITION_FAILED)
+    handle = acquisition.handle
+
+    try:
+        assessment = handle.evaluate_release(read_phase_result.active_release_state.inner)
+    except LedgerError as exc:
+        handle.close()
+        raise RunnerError(RunnerFailureCode.DURABLE_RELEASE_SEQUENCE_FAILED, detail="evaluate_release") from exc
+    for step_name, step in (
+        ("record_risk_release", handle.record_risk_release),
+        ("release_writer_proof", handle.release_writer_proof),
+        ("record_writer_eligible", handle.record_writer_eligible),
+    ):
+        try:
+            step(assessment)
+        except LedgerError as exc:
+            handle.close()
+            raise RunnerError(RunnerFailureCode.DURABLE_RELEASE_SEQUENCE_FAILED, detail=step_name) from exc
+
+    if runtime.monotonic_clock_ns() >= runtime.experiment_absolute_end_monotonic_ns:
+        handle.close()
+        raise RunnerError(RunnerFailureCode.DEADLINE_EXCEEDED, detail="before active completion token")
+
+    try:
+        token = issue_active_current_process_release_completion_v2(
+            handle, assessment, active_contract=active_contract,
+            trusted_dynamic_read_set_id=read_phase_result.trusted_dynamic_read_set_id,
+        )
+    except LedgerError as exc:
+        handle.close()
+        raise RunnerError(RunnerFailureCode.CURRENT_PROCESS_RELEASE_COMPLETION_ISSUANCE_FAILED) from exc
+    if type(token) is not CurrentProcessReleaseCompletionV2:
+        raise RunnerError(RunnerFailureCode.CURRENT_PROCESS_RELEASE_COMPLETION_ISSUANCE_FAILED)
+
+    if runtime.monotonic_clock_ns() >= runtime.experiment_absolute_end_monotonic_ns:
+        raise RunnerError(RunnerFailureCode.DEADLINE_EXCEEDED, detail="before active NORMAL_WRITER")
+
+    normal = acquire_active_normal_writer_state_v1(
+        runtime.authority_binding,
+        canonical_repository_root=runtime.canonical_repository_root,
+        risk_config=runtime.risk_config,
+        process_instance_id=runtime.normal_gate.process_instance_id,
+        current_process_release_completion=token,
+        active_contract=active_contract,
+        expected_ledger_path=runtime.expected_ledger_path,
+        clock=runtime.wall_clock,
+        uuid_factory=runtime.uuid_factory,
+    )
+    if normal.handle is None:
+        raise RunnerError(RunnerFailureCode.NORMAL_WRITER_ACQUISITION_FAILED)
+
+    locked = normal.handle
+    session_id = normal.normal_writer_session_id
+    try:
+        if (
+            normal.failure_code is not None
+            or session_id is None
+            or _WRITER_SESSION_ID_PATTERN.fullmatch(session_id) is None
+            or normal.authority_ledger_relation is not AuthorityLedgerRelation.EQUAL
+        ):
+            raise RunnerError(RunnerFailureCode.NORMAL_WRITER_ACQUISITION_FAILED)
+
+        tail = locked.events[-1]
+        authority = locked.authority_row
+        observed_tail = (tail.sequence, tail.event_hash)
+        projection = locked.projection()
+        revalidated = (
+            not locked.closed
+            and type(projection) is SafetyProjection
+            and locked.relation is AuthorityLedgerRelation.EQUAL
+            and projection.active_writer_session_id == session_id
+            and session_id in projection.writer_sessions
+            and projection.active_restricted_session_id is None
+            and projection.risk_control_state == "WRITER_ELIGIBLE"
+            and projection.active_risk_config_sha256 == runtime.risk_config.sha256
+            and projection.writer_proof_state_by_proof_id.get(active_contract.writer_proof_id) == "RELEASED"
+            and projection.writer_proof_release_eligible_by_proof_id.get(active_contract.writer_proof_id) is True
+            and projection.protected_unresolved_legacy_write_count == 0
+            and not projection.unresolved_write_request_ids
+            and (authority.trusted_sequence, authority.trusted_event_hash) == observed_tail
+            and (projection.trusted_sequence, projection.trusted_event_hash) == observed_tail
+            and (projection.last_sequence, projection.terminal_event_hash) == observed_tail
+            and token.incident_id == active_contract.incident_id
+            and token.writer_proof_id == active_contract.writer_proof_id
+            and token.active_contract_sha256 == active_contract.contract_sha256
+            and token.v1.process_instance_id == runtime.normal_gate.process_instance_id
+        )
+        if not revalidated:
+            raise RunnerError(RunnerFailureCode.STAGE_3K_REVALIDATION_FAILED)
+        if runtime.monotonic_clock_ns() >= runtime.experiment_absolute_end_monotonic_ns:
+            raise RunnerError(RunnerFailureCode.DEADLINE_EXCEEDED, detail="active Stage-3K success boundary")
+    except Exception:
+        _fail_closed_end_writer_session(locked, session_id)
+        raise
+
+    return _Stage3ActiveReleaseAndNormalWriterResultV1(
+        process_instance_id=runtime.normal_gate.process_instance_id,
+        release_id=token.v1.release_id,
+        normal_writer_session_id=session_id,
+        normal_writer_acquisition=normal,
+        active_contract=active_contract,
+        trusted_dynamic_read_set_id=read_phase_result.trusted_dynamic_read_set_id,
+    )
+
+
+def run_active_experiment_stage3_and_gate_d(
+    invocation: ExperimentRunnerInvocationV2,
+    runtime: ExperimentRunnerRuntimeV2,
+    *,
+    decision_cycle_max: int = GATE_D_DECISION_CYCLE_MAX,
+) -> "GateDLoopResultV1":
+    """One explicit active entrypoint: Stage 3A-3F -> Stage 3G-3K -> enter
+    the ordinary Gate-D decision loop, and ONLY from that active Stage-3K
+    result (DSB-RUN-003).  A LOCALLY_BLOCKED Stage-3C outcome raises rather
+    than silently returning an empty loop result.
+
+    Correction 02: current Path-A truth comes ONLY from the trusted dynamic
+    pre-release acquisition boundary -- there is no caller-supplied
+    completeness/read-set parameter."""
+    read_phase = run_pre_release_read_phase_v2(invocation, runtime)
+    if read_phase.status != "READ_PHASE_COMPLETE":
+        raise RunnerError(
+            RunnerFailureCode.ACTIVE_GATE_ENTRY_PRECONDITION_FAILED,
+            detail="locally blocked: " + ",".join(read_phase.local_block_reasons),
+        )
+    stage3 = _complete_stage3_active_release_and_normal_writer_v2(read_phase, runtime)
+    return run_gate_d_ordinary_decision_loop(
+        stage3, runtime, invocation, decision_cycle_max=decision_cycle_max,
     )

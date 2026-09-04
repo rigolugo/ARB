@@ -446,3 +446,63 @@ def test_historical_incident_remains_non_releasable_unknown_and_has_no_cancel_ta
     assert HISTORICAL_INCIDENT_CANCEL_TARGET is None
     assert HISTORICAL_INCIDENT_WRITER_RELEASE_ELIGIBLE is False
     assert HISTORICAL_UNRESOLVED_EXPOSURE == UNKNOWN_UNBOUNDED
+
+
+# --- R1-B03 T26-T28, DSB-WRITER-007: active-domain permit commitments ------
+from dataclasses import fields as _rc_fields
+from arb.venues.kalshi.risk_control import (
+    NormalWriterPermit as _NWP,
+    WriterEligibilityAssessment as _WEA,
+    compute_permit_domain_commitment_sha256 as _permit_digest,
+)
+from arb.execution_ledger import canonical_json_bytes as _cjb, sha256_hex as _sha
+
+
+def test_dsb_writer_007_assessment_gains_active_fields() -> None:
+    names = {f.name for f in _rc_fields(_WEA)}
+    assert {"domain_binding_id", "domain_binding_sha256", "active_contract_id",
+            "active_contract_sha256", "bootstrap_contract_sha256", "conflict_domain_ref",
+            "account_scope_ref", "subaccount", "exchange_index", "environment",
+            "incident_id", "writer_proof_id"} <= names
+    # legacy construction (no active fields) still works
+    a = _WEA(risk_assessment_id="ra_" + "0" * 32, operation_kind="CREATE_ORDER_V2",
+             request_id="req_" + "0" * 32, candidate_request_sha256="a" * 64,
+             candidate_economic_sha256="b" * 64, risk_config_sha256="c" * 64,
+             market_data_snapshot_sha256="d" * 64, market_data_freshness_identity_sha256="e" * 64,
+             reconciliation_snapshot_sha256="f" * 64, reconciliation_freshness_identity_sha256="1" * 64,
+             risk_state_epoch=1, freshness_deadline_monotonic_ns=1, eligible=True)
+    assert a.domain_binding_sha256 is None
+
+
+def test_dsb_writer_007_permit_gains_active_fields_and_digest_helper() -> None:
+    names = {f.name for f in _rc_fields(_NWP)}
+    assert {"domain_binding_id", "domain_binding_sha256", "active_contract_id",
+            "active_contract_sha256", "environment", "account_scope_ref", "subaccount",
+            "exchange_index", "incident_id", "writer_proof_id", "bootstrap_contract_sha256",
+            "permit_domain_commitment_sha256"} <= names
+
+
+def test_dsb_writer_007_permit_domain_commitment_formula() -> None:
+    # Correction 02 DSB-WRITER-007 / DSB-QUOTE-003: the digest additionally
+    # folds in the exact trusted dynamic read-set identity so a permit cannot
+    # be carried across current-read acquisitions.
+    p = SimpleNamespace(
+        account_scope_ref="ARB_KALSHI_DEMO_PRIMARY_ACCOUNT",
+        active_contract_id="AEDC1_" + "0" * 64, active_contract_sha256="0" * 64,
+        bootstrap_contract_sha256="1" * 64, conflict_domain_ref="KALSHI|KALSHI_DEMO|X|SUBACCOUNT=1",
+        domain_binding_id="KEDB1_" + "2" * 64, domain_binding_sha256="2" * 64,
+        environment="KALSHI_DEMO", exchange_index=0, incident_id="adi_" + "0" * 32,
+        subaccount=1, writer_proof_id="adwp_" + "0" * 32,
+        trusted_dynamic_read_set_id="ADRS2_" + "3" * 64)
+    expected = _sha(_cjb({
+        "account_scope_ref": p.account_scope_ref, "active_contract_id": p.active_contract_id,
+        "active_contract_sha256": p.active_contract_sha256,
+        "bootstrap_contract_sha256": p.bootstrap_contract_sha256,
+        "conflict_domain_ref": p.conflict_domain_ref, "domain_binding_id": p.domain_binding_id,
+        "domain_binding_sha256": p.domain_binding_sha256, "environment": p.environment,
+        "exchange_index": p.exchange_index, "incident_id": p.incident_id,
+        "subaccount": p.subaccount,
+        "trusted_dynamic_read_set_id": p.trusted_dynamic_read_set_id,
+        "writer_proof_id": p.writer_proof_id,
+    }))
+    assert _permit_digest(p) == expected

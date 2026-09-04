@@ -2090,3 +2090,55 @@ def test_mm07_econ_single_removal_never_expands_worst_case_abs_net_position() ->
                 f"removing {target.order_id} expanded worst-case abs net position: "
                 f"{pre_worst} -> {post_worst}"
             )
+
+
+# --- R1-B03 T41-T45: VenueBindingV2 active-path binding ---------------------
+import arb.venues.kalshi.quote_lifecycle as _ql2
+from arb.venues.kalshi.ledger_binding import ExecutionDomainBindingV1 as _EDB
+
+
+def _edb(subaccount=1, exchange_index=0):
+    return _EDB(venue="KALSHI", environment="KALSHI_DEMO",
+               account_scope_ref="ARB_KALSHI_DEMO_PRIMARY_ACCOUNT",
+               subaccount=subaccount, exchange_index=exchange_index)
+
+
+def test_t41_venue_binding_v2_requires_active_binding() -> None:
+    with pytest.raises(_ql2.QuoteLifecycleError):
+        _ql2.VenueBindingV2(domain_binding=object(), exchange_index_wire_policy="EXPLICIT_EXCHANGE_INDEX",
+                            adapter_payload_schema_id="S")
+    with pytest.raises(_ql2.QuoteLifecycleError):
+        _ql2.VenueBindingV2(domain_binding=_ql2.VenueBindingV1(adapter_payload_schema_id="S"),
+                            exchange_index_wire_policy="EXPLICIT_EXCHANGE_INDEX",
+                            adapter_payload_schema_id="S")
+
+
+def test_t43_create_domain_derives_only_from_active_binding() -> None:
+    v2 = _ql2.VenueBindingV2(domain_binding=_edb(subaccount=5, exchange_index=2),
+                             exchange_index_wire_policy="EXPLICIT_EXCHANGE_INDEX",
+                             adapter_payload_schema_id="KALSHI_MM_CREATE_V1")
+    assert v2.subaccount == 5 and v2.exchange_index == 2
+    assert v2.conflict_domain_ref == "KALSHI|KALSHI_DEMO|ARB_KALSHI_DEMO_PRIMARY_ACCOUNT|SUBACCOUNT=5"
+    body = _ql2.build_mm_create_order_body(
+        ticker="KXTEST-1", client_order_id="c" * 8, venue_side="bid",
+        yes_price=Decimal("0.50"), quantity=_ql2.QUOTE_QUANTITY, expiration_time=0, venue_binding=v2)
+    assert body["subaccount"] == 5 and body["exchange_index"] == 2
+
+
+def test_t44_and_t45_exchange_index_wire_policy() -> None:
+    for policy in ("EXPLICIT_EXCHANGE_INDEX", "EMPIRICALLY_BOUND_AUTOROUTE"):
+        v2 = _ql2.VenueBindingV2(domain_binding=_edb(), exchange_index_wire_policy=policy,
+                                 adapter_payload_schema_id="S")
+        assert v2.exchange_index_wire_policy == policy
+    with pytest.raises(_ql2.QuoteLifecycleError):
+        _ql2.VenueBindingV2(domain_binding=_edb(), exchange_index_wire_policy="GUESS",
+                            adapter_payload_schema_id="S")
+
+
+def test_t_no_hardcoded_subaccount_one_gate() -> None:
+    v2 = _ql2.VenueBindingV2(domain_binding=_edb(subaccount=31),
+                             exchange_index_wire_policy="EXPLICIT_EXCHANGE_INDEX",
+                             adapter_payload_schema_id="S")
+    meta = _ql2.active_prepared_request_domain_metadata(v2, canonical_request_sha256="0" * 64)
+    assert meta["subaccount"] == 31
+    assert meta["conflict_domain_ref"].endswith("SUBACCOUNT=31")

@@ -555,6 +555,28 @@ class WriterEligibilityAssessment:
     risk_state_epoch: int
     freshness_deadline_monotonic_ns: int
     eligible: bool
+    # DSB-WRITER-007 active execution-domain commitments.  ``None`` on the
+    # legacy SUBACCOUNT=0 path (which never issues a normal-writer permit);
+    # populated by the revision-2 active runtime.  The reconciliation-snapshot
+    # and risk-assessment hashes computed by the active runtime include
+    # ``active_contract_sha256`` and ``domain_binding_sha256``.
+    domain_binding_id: str | None = None
+    domain_binding_sha256: str | None = None
+    active_contract_id: str | None = None
+    active_contract_sha256: str | None = None
+    bootstrap_contract_sha256: str | None = None
+    conflict_domain_ref: str | None = None
+    account_scope_ref: str | None = None
+    subaccount: int | None = None
+    exchange_index: int | None = None
+    environment: str | None = None
+    incident_id: str | None = None
+    writer_proof_id: str | None = None
+    # Correction 02 DSB-WRITER-007 / DSB-QUOTE-003: the exact private trusted
+    # dynamic read-set identity (``ADRS2_<64hex>``) supporting current risk,
+    # so a permit/assessment cannot be carried across current-read
+    # acquisitions.  ``None`` on the legacy path.
+    trusted_dynamic_read_set_id: str | None = None
 
 
 _PERMIT_CONSTRUCTION_KEY = object()
@@ -588,6 +610,23 @@ class NormalWriterPermit:
     issued_monotonic_ns: int
     freshness_deadline_monotonic_ns: int
     private_gate_instance_identity: object
+    # DSB-WRITER-007 active execution-domain commitments (``None`` on the
+    # legacy path).  ``permit_domain_commitment_sha256`` is the exact
+    # canonical digest of the active commitment tuple.
+    domain_binding_id: str | None = None
+    domain_binding_sha256: str | None = None
+    active_contract_id: str | None = None
+    active_contract_sha256: str | None = None
+    environment: str | None = None
+    account_scope_ref: str | None = None
+    subaccount: int | None = None
+    exchange_index: int | None = None
+    incident_id: str | None = None
+    writer_proof_id: str | None = None
+    bootstrap_contract_sha256: str | None = None
+    # Correction 02 DSB-WRITER-007 / DSB-QUOTE-003.
+    trusted_dynamic_read_set_id: str | None = None
+    permit_domain_commitment_sha256: str | None = None
 
     def __init__(self, key: object, **values: object) -> None:
         if key is not _PERMIT_CONSTRUCTION_KEY:
@@ -605,6 +644,88 @@ class NormalWriterPermit:
     def __reduce_ex__(self, protocol):
         del protocol
         raise TypeError("NormalWriterPermit cannot be serialized")
+
+
+_ACTIVE_ASSESSMENT_FIELDS = (
+    "domain_binding_id", "domain_binding_sha256", "active_contract_id",
+    "active_contract_sha256", "bootstrap_contract_sha256", "account_scope_ref",
+    "subaccount", "exchange_index", "environment", "incident_id", "writer_proof_id",
+    "trusted_dynamic_read_set_id",
+)
+
+
+def compute_permit_domain_commitment_sha256(permit: "NormalWriterPermit") -> str:
+    """Exact DSB-WRITER-007 canonical digest of a permit's active commitment
+    tuple.  Correction 02 folds the trusted dynamic read-set identity into
+    the digest so the permit is bound to one current-read acquisition."""
+    return sha256_hex(canonical_json_bytes({
+        "account_scope_ref": permit.account_scope_ref,
+        "active_contract_id": permit.active_contract_id,
+        "active_contract_sha256": permit.active_contract_sha256,
+        "bootstrap_contract_sha256": permit.bootstrap_contract_sha256,
+        "conflict_domain_ref": permit.conflict_domain_ref,
+        "domain_binding_id": permit.domain_binding_id,
+        "domain_binding_sha256": permit.domain_binding_sha256,
+        "environment": permit.environment,
+        "exchange_index": permit.exchange_index,
+        "incident_id": permit.incident_id,
+        "subaccount": permit.subaccount,
+        "trusted_dynamic_read_set_id": permit.trusted_dynamic_read_set_id,
+        "writer_proof_id": permit.writer_proof_id,
+    }))
+
+
+def _active_permit_commitment_from_assessment(
+    assessment: "WriterEligibilityAssessment", *, conflict_domain_ref: str,
+) -> dict[str, object]:
+    """Derive the active-domain permit commitment fields from the assessment.
+
+    Legacy (SUBACCOUNT=0) assessments carry no active commitments -> every
+    field is ``None`` and no commitment digest is computed.  For an active
+    assessment every commitment field must be present and the assessment's
+    conflict domain must equal the locked revision-2 ledger's conflict domain
+    (DSB-WRITER-007 / NORMAL_WRITER_PERMIT_DOMAIN_MISMATCH).
+    """
+    present = [getattr(assessment, name) is not None for name in _ACTIVE_ASSESSMENT_FIELDS]
+    if not any(present):
+        return {name: None for name in (
+            "domain_binding_id", "domain_binding_sha256", "active_contract_id",
+            "active_contract_sha256", "environment", "account_scope_ref", "subaccount",
+            "exchange_index", "incident_id", "writer_proof_id", "bootstrap_contract_sha256",
+            "trusted_dynamic_read_set_id", "permit_domain_commitment_sha256",
+        )}
+    read_set_id = assessment.trusted_dynamic_read_set_id
+    if (
+        not all(present)
+        or assessment.conflict_domain_ref != conflict_domain_ref
+        or type(read_set_id) is not str
+        or read_set_id[:6] != "ADRS2_"
+        or len(read_set_id) != 70
+    ):
+        raise RiskControlError(RiskControlCode.NORMAL_WRITER_PERMIT_INVALID)
+    fields_out = {name: getattr(assessment, name) for name in (
+        "domain_binding_id", "domain_binding_sha256", "active_contract_id",
+        "active_contract_sha256", "environment", "account_scope_ref", "subaccount",
+        "exchange_index", "incident_id", "writer_proof_id", "bootstrap_contract_sha256",
+        "trusted_dynamic_read_set_id",
+    )}
+    digest = sha256_hex(canonical_json_bytes({
+        "account_scope_ref": fields_out["account_scope_ref"],
+        "active_contract_id": fields_out["active_contract_id"],
+        "active_contract_sha256": fields_out["active_contract_sha256"],
+        "bootstrap_contract_sha256": fields_out["bootstrap_contract_sha256"],
+        "conflict_domain_ref": conflict_domain_ref,
+        "domain_binding_id": fields_out["domain_binding_id"],
+        "domain_binding_sha256": fields_out["domain_binding_sha256"],
+        "environment": fields_out["environment"],
+        "exchange_index": fields_out["exchange_index"],
+        "incident_id": fields_out["incident_id"],
+        "subaccount": fields_out["subaccount"],
+        "trusted_dynamic_read_set_id": fields_out["trusted_dynamic_read_set_id"],
+        "writer_proof_id": fields_out["writer_proof_id"],
+    }))
+    fields_out["permit_domain_commitment_sha256"] = digest
+    return fields_out
 
 
 class PermitStage(enum.StrEnum):
@@ -721,6 +842,9 @@ class WriterEligibilityGate:
                 raise RiskControlError(RiskControlCode.NORMAL_WRITER_PERMIT_EXPIRED)
             permit_id = f"nwp_{self.__uuid().hex}"
             stage_ids = tuple(f"evt_{self.__uuid().hex}" for _ in range(3))
+            active_commitment = _active_permit_commitment_from_assessment(
+                assessment, conflict_domain_ref=locked.conflict_domain_ref,
+            )
             values = dict(
                 permit_id=permit_id, risk_assessment_id=assessment.risk_assessment_id,
                 process_instance_id=self.__process_instance_id,
@@ -740,6 +864,7 @@ class WriterEligibilityGate:
                 issued_at_utc=canonical_timestamp(self.__wall()), issued_monotonic_ns=now,
                 freshness_deadline_monotonic_ns=assessment.freshness_deadline_monotonic_ns,
                 private_gate_instance_identity=self.__identity,
+                **active_commitment,
             )
             permit = NormalWriterPermit(_PERMIT_CONSTRUCTION_KEY, **values)
             progress = NormalWriterPermitProgress(permit_id, PermitStage.INTENT, tail.sequence, tail.event_hash, tail.sequence, tail.event_hash, now, 0)
@@ -939,4 +1064,5 @@ __all__ = [
     "WriterEligibilityGate", "build_orderbook_reference", "compute_market_economic_state",
     "enforce_projected_limits", "freshness_age_ms", "price_reasonable",
     "project_candidate_risk", "validate_price_ranges",
+    "compute_permit_domain_commitment_sha256",
 ]

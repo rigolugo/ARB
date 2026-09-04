@@ -21,7 +21,10 @@ from types import MappingProxyType
 from typing import Callable, Mapping, Sequence
 
 from arb.execution_ledger import (
+    ACTIVE_LEDGER_SCHEMA_REVISION,
+    BOOTSTRAP_CLASS_TO_COMPLETENESS,
     AcquisitionMode,
+    ActiveLedgerMeta,
     AppendStatus,
     AuthorityLedgerRelation,
     AuthorityNamespaceBinding,
@@ -38,8 +41,10 @@ from arb.execution_ledger import (
     _acquire_restricted_state,
     acquire_local_state,
     canonical_json_bytes,
+    canonical_json_text,
     canonical_timestamp,
     end_restricted_session,
+    initialize_execution_domain_ledger_v2,
     parse_canonical_json,
     sha256_hex,
     start_writer_session,
@@ -2876,6 +2881,1329 @@ def canonical_kalshi_fill_payload(
     return payload
 
 
+# ===========================================================================
+# Active execution-domain (dynamic numbered-subaccount) binding, bootstrap
+# contract, active safety/release contract, and the revision-2 active Gate
+# B/C/D read/acquisition boundary.  Nothing below repoints, subclasses, or
+# widens ``LegacyIncidentContract``; the legacy SUBACCOUNT=0 path above is
+# untouched.  (KALSHI_DEMO_DYNAMIC_SUBACCOUNT_EXECUTION_DOMAIN_BINDING_AND
+# _RISK_CONTROL_SPEC_01_CORRECTION_02, sections 5-8 and 14 -- Correction 02
+# is a complete standalone same-scope successor to Correction 01 and
+# preserves all its non-conflicting active-domain architecture.)
+# ===========================================================================
+
+_ACTIVE_ENVIRONMENT = "KALSHI_DEMO"
+_ACTIVE_HISTORY_ANCHOR_DOMAIN = b"ARB_ACTIVE_EXECUTION_DOMAIN_INCIDENT_V1\x00"
+_ACTIVE_WRITER_PROOF_DOMAIN = b"ARB_ACTIVE_DOMAIN_WRITER_PROOF_V1\x00"
+_BOOTSTRAP_TRUTH_VALUES = frozenset({"COMPLETE_ZERO", "COMPLETE_KNOWN_NONZERO"})
+_EVIDENCE_PROVENANCE_VALUES = frozenset({"PROJECT_EVIDENCE_RECORDED", "INDEPENDENTLY_VERIFIED"})
+
+# Correction 02 composite trusted dynamic pre-release read-set identity
+# (DSB-READSET-003): ``ADRS2_`` + the full 64-hex read-set SHA-256.  No
+# truncated read-set hash is normative.
+def _is_adrs2_read_set_id(value: object) -> bool:
+    return (
+        type(value) is str
+        and value[:6] == "ADRS2_"
+        and _is_exact_sha256_hex(value[6:])
+    )
+
+
+def _first_32_lower_hex(data: bytes) -> str:
+    return hashlib.sha256(data).hexdigest()[:32]
+
+
+def _require_nfc_nonempty(value: object) -> str:
+    import unicodedata
+    if type(value) is not str or not value or unicodedata.normalize("NFC", value) != value:
+        raise LedgerError(FailureCode.EXECUTION_DOMAIN_BINDING_MALFORMED)
+    return value
+
+
+@dataclass(frozen=True, slots=True, init=False)
+class ExecutionDomainBindingV1:
+    """Immutable dynamically selected numbered-subaccount execution domain
+    (DSB-BIND-001..004).  ``exchange_index`` is excluded from
+    ``conflict_domain_ref`` (subaccount-wide writer conflict scope) but
+    included in the binding hash."""
+
+    schema_revision: int
+    venue: str
+    environment: str
+    account_scope_ref: str
+    subaccount: int
+    exchange_index: int
+    conflict_domain_ref: str
+    binding_id: str
+    binding_sha256: str
+
+    def __init__(
+        self,
+        *,
+        venue: str,
+        environment: str,
+        account_scope_ref: str,
+        subaccount: int,
+        exchange_index: int,
+    ) -> None:
+        if venue != "KALSHI" or environment != "KALSHI_DEMO":
+            raise LedgerError(FailureCode.EXECUTION_DOMAIN_BINDING_MALFORMED)
+        scope = _require_nfc_nonempty(account_scope_ref)
+        if any(ch in scope for ch in ("|", "\x00", "\r", "\n")) or scope.strip() != scope:
+            raise LedgerError(FailureCode.EXECUTION_DOMAIN_BINDING_MALFORMED)
+        if any(ord(ch) < 0x20 for ch in scope):
+            raise LedgerError(FailureCode.EXECUTION_DOMAIN_BINDING_MALFORMED)
+        if type(subaccount) is not int or type(subaccount) is bool or not 0 <= subaccount <= 63:
+            raise LedgerError(FailureCode.EXECUTION_DOMAIN_BINDING_MALFORMED)
+        if type(exchange_index) is not int or type(exchange_index) is bool or exchange_index < 0:
+            raise LedgerError(FailureCode.EXECUTION_DOMAIN_BINDING_MALFORMED)
+        conflict = f"KALSHI|KALSHI_DEMO|{scope}|SUBACCOUNT={subaccount}"
+        canonical = {
+            "account_scope_ref": scope,
+            "conflict_domain_ref": conflict,
+            "environment": "KALSHI_DEMO",
+            "exchange_index": exchange_index,
+            "schema_revision": 1,
+            "subaccount": subaccount,
+            "venue": "KALSHI",
+        }
+        binding_sha256 = sha256_hex(canonical_json_bytes(canonical))
+        object.__setattr__(self, "schema_revision", 1)
+        object.__setattr__(self, "venue", "KALSHI")
+        object.__setattr__(self, "environment", "KALSHI_DEMO")
+        object.__setattr__(self, "account_scope_ref", scope)
+        object.__setattr__(self, "subaccount", subaccount)
+        object.__setattr__(self, "exchange_index", exchange_index)
+        object.__setattr__(self, "conflict_domain_ref", conflict)
+        object.__setattr__(self, "binding_sha256", binding_sha256)
+        object.__setattr__(self, "binding_id", "KEDB1_" + binding_sha256)
+
+    def canonical_object(self) -> dict[str, object]:
+        return {
+            "account_scope_ref": self.account_scope_ref,
+            "conflict_domain_ref": self.conflict_domain_ref,
+            "environment": self.environment,
+            "exchange_index": self.exchange_index,
+            "schema_revision": 1,
+            "subaccount": self.subaccount,
+            "venue": self.venue,
+        }
+
+    def canonical_json(self) -> str:
+        return canonical_json_text(self.canonical_object())
+
+    def __copy__(self):
+        raise TypeError("ExecutionDomainBindingV1 cannot be copied")
+
+    __deepcopy__ = __copy__
+
+    def __reduce_ex__(self, protocol):
+        del protocol
+        raise TypeError("ExecutionDomainBindingV1 cannot be serialized")
+
+
+@dataclass(frozen=True, slots=True)
+class EvidenceReferenceV1:
+    name: str
+    raw_bytes: int
+    sha256: str
+    provenance_class: str
+
+    def __post_init__(self) -> None:
+        _require_nfc_nonempty(self.name)
+        if (
+            type(self.raw_bytes) is not int or type(self.raw_bytes) is bool or self.raw_bytes < 0
+            or type(self.sha256) is not str or not _is_exact_sha256_hex(self.sha256)
+            or self.provenance_class not in _EVIDENCE_PROVENANCE_VALUES
+        ):
+            raise LedgerError(FailureCode.DOMAIN_BOOTSTRAP_EVIDENCE_MISMATCH)
+
+    def canonical_object(self) -> dict[str, object]:
+        return {
+            "name": self.name,
+            "provenance_class": self.provenance_class,
+            "raw_bytes": self.raw_bytes,
+            "sha256": self.sha256,
+        }
+
+
+@dataclass(frozen=True, slots=True, init=False)
+class DomainBootstrapContractV1:
+    """Immutable, canonical-hashed domain onboarding contract (DSB-BOOT-003).
+
+    The persisted completeness enum string is hash-significant: the two
+    accepted classes never collapse to one generic ``COMPLETE`` value.
+    """
+
+    schema_revision: int
+    domain_binding_id: str
+    domain_binding_sha256: str
+    conflict_domain_ref: str
+    bootstrap_class: str
+    bootstrap_cutoff_at_utc: str
+    inception_evidence: tuple
+    prestack_evidence: tuple
+    prestack_activity_completeness: str
+    unresolved_write_count: int
+    unresolved_cancel_count: int
+    working_order_truth: str
+    fill_truth: str
+    position_truth: str
+    retained_position_ticker: str | None
+    retained_position_floor_contracts: Decimal
+    automatic_flatten_authorized: bool
+    bootstrap_contract_sha256: str
+
+    def __init__(
+        self,
+        *,
+        binding: ExecutionDomainBindingV1,
+        bootstrap_class: str,
+        bootstrap_cutoff_at_utc: str,
+        inception_evidence: Sequence[EvidenceReferenceV1] = (),
+        prestack_evidence: Sequence[EvidenceReferenceV1] = (),
+        prestack_activity_completeness: str,
+        unresolved_write_count: int,
+        unresolved_cancel_count: int,
+        working_order_truth: str,
+        fill_truth: str,
+        position_truth: str,
+        retained_position_ticker: str | None,
+        retained_position_floor_contracts: Decimal,
+        automatic_flatten_authorized: bool = False,
+    ) -> None:
+        if type(binding) is not ExecutionDomainBindingV1:
+            raise LedgerError(FailureCode.ACTIVE_DOMAIN_CONTRACT_MALFORMED)
+        if (
+            bootstrap_class not in BOOTSTRAP_CLASS_TO_COMPLETENESS
+            or BOOTSTRAP_CLASS_TO_COMPLETENESS[bootstrap_class] != prestack_activity_completeness
+        ):
+            raise LedgerError(FailureCode.DOMAIN_BOOTSTRAP_COMPLETENESS_MISMATCH)
+        for value in (working_order_truth, fill_truth, position_truth):
+            if value not in _BOOTSTRAP_TRUTH_VALUES:
+                raise LedgerError(FailureCode.DOMAIN_BOOTSTRAP_EVIDENCE_MISMATCH)
+        if (
+            type(unresolved_write_count) is not int or type(unresolved_write_count) is bool or unresolved_write_count < 0
+            or type(unresolved_cancel_count) is not int or type(unresolved_cancel_count) is bool or unresolved_cancel_count < 0
+            or automatic_flatten_authorized is not False
+            or (retained_position_ticker is not None and type(retained_position_ticker) is not str)
+            or type(retained_position_floor_contracts) is not Decimal
+            or not retained_position_floor_contracts.is_finite()
+            or retained_position_floor_contracts < 0
+        ):
+            raise LedgerError(FailureCode.DOMAIN_BOOTSTRAP_EVIDENCE_MISMATCH)
+        canonical_timestamp_check = str(bootstrap_cutoff_at_utc)
+        inception = tuple(inception_evidence)
+        prestack = tuple(prestack_evidence)
+        if any(type(e) is not EvidenceReferenceV1 for e in inception + prestack):
+            raise LedgerError(FailureCode.DOMAIN_BOOTSTRAP_EVIDENCE_MISMATCH)
+        object.__setattr__(self, "schema_revision", 1)
+        object.__setattr__(self, "domain_binding_id", binding.binding_id)
+        object.__setattr__(self, "domain_binding_sha256", binding.binding_sha256)
+        object.__setattr__(self, "conflict_domain_ref", binding.conflict_domain_ref)
+        object.__setattr__(self, "bootstrap_class", bootstrap_class)
+        object.__setattr__(self, "bootstrap_cutoff_at_utc", canonical_timestamp_check)
+        object.__setattr__(self, "inception_evidence", inception)
+        object.__setattr__(self, "prestack_evidence", prestack)
+        object.__setattr__(self, "prestack_activity_completeness", prestack_activity_completeness)
+        object.__setattr__(self, "unresolved_write_count", unresolved_write_count)
+        object.__setattr__(self, "unresolved_cancel_count", unresolved_cancel_count)
+        object.__setattr__(self, "working_order_truth", working_order_truth)
+        object.__setattr__(self, "fill_truth", fill_truth)
+        object.__setattr__(self, "position_truth", position_truth)
+        object.__setattr__(self, "retained_position_ticker", retained_position_ticker)
+        object.__setattr__(self, "retained_position_floor_contracts", retained_position_floor_contracts)
+        object.__setattr__(self, "automatic_flatten_authorized", False)
+        object.__setattr__(
+            self, "bootstrap_contract_sha256",
+            sha256_hex(canonical_json_bytes(self._canonical_object())),
+        )
+
+    def _canonical_object(self) -> dict[str, object]:
+        return {
+            "automatic_flatten_authorized": False,
+            "bootstrap_class": self.bootstrap_class,
+            "bootstrap_cutoff_at_utc": self.bootstrap_cutoff_at_utc,
+            "conflict_domain_ref": self.conflict_domain_ref,
+            "domain_binding_id": self.domain_binding_id,
+            "domain_binding_sha256": self.domain_binding_sha256,
+            "fill_truth": self.fill_truth,
+            "inception_evidence": [e.canonical_object() for e in self.inception_evidence],
+            "position_truth": self.position_truth,
+            "prestack_activity_completeness": self.prestack_activity_completeness,
+            "prestack_evidence": [e.canonical_object() for e in self.prestack_evidence],
+            "retained_position_floor_contracts": self.retained_position_floor_contracts,
+            "retained_position_ticker": self.retained_position_ticker,
+            "schema_revision": 1,
+            "unresolved_cancel_count": self.unresolved_cancel_count,
+            "unresolved_write_count": self.unresolved_write_count,
+            "working_order_truth": self.working_order_truth,
+        }
+
+    def event_payload(self) -> dict[str, object]:
+        """The exact ``EXECUTION_DOMAIN_BOOTSTRAP_RECORDED`` payload (DSB-BOOT-007)."""
+        obj = self._canonical_object()
+        del obj["schema_revision"]
+        obj["bootstrap_schema_revision"] = 1
+        obj["bootstrap_contract_sha256"] = self.bootstrap_contract_sha256
+        return obj
+
+
+@dataclass(frozen=True, slots=True, init=False)
+class ActiveExecutionDomainContractV1:
+    """Immutable active-domain safety/release contract (DSB-WRITER-001).
+
+    Separate from ``LegacyIncidentContract`` -- never a subclass, wrapper, or
+    repointed instance.  Its incident identity is domain-persistent and
+    bootstrap-scoped, never session/request/invocation scoped.
+    """
+
+    schema_revision: int
+    domain_binding_id: str
+    domain_binding_sha256: str
+    venue: str
+    environment: str
+    account_scope_ref: str
+    subaccount: int
+    exchange_index: int
+    conflict_domain_ref: str
+    bootstrap_contract_sha256: str
+    incident_id: str
+    writer_proof_id: str
+    contract_id: str
+    contract_sha256: str
+
+    def __init__(
+        self,
+        *,
+        binding: ExecutionDomainBindingV1,
+        bootstrap_contract_sha256: str,
+    ) -> None:
+        if type(binding) is not ExecutionDomainBindingV1:
+            raise LedgerError(FailureCode.ACTIVE_DOMAIN_CONTRACT_MALFORMED)
+        if type(bootstrap_contract_sha256) is not str or not _is_exact_sha256_hex(bootstrap_contract_sha256):
+            raise LedgerError(FailureCode.ACTIVE_DOMAIN_CONTRACT_MALFORMED)
+        writer_proof_id = "adwp_" + _first_32_lower_hex(
+            _ACTIVE_WRITER_PROOF_DOMAIN + binding.binding_sha256.encode("ascii")
+        )
+        incident_id = "adi_" + _first_32_lower_hex(
+            _ACTIVE_HISTORY_ANCHOR_DOMAIN
+            + binding.binding_sha256.encode("ascii")
+            + b"\x00"
+            + bootstrap_contract_sha256.encode("ascii")
+        )
+        canonical = {
+            "account_scope_ref": binding.account_scope_ref,
+            "bootstrap_contract_sha256": bootstrap_contract_sha256,
+            "conflict_domain_ref": binding.conflict_domain_ref,
+            "domain_binding_id": binding.binding_id,
+            "domain_binding_sha256": binding.binding_sha256,
+            "environment": binding.environment,
+            "exchange_index": binding.exchange_index,
+            "incident_id": incident_id,
+            "schema_revision": 1,
+            "subaccount": binding.subaccount,
+            "venue": binding.venue,
+            "writer_proof_id": writer_proof_id,
+        }
+        contract_sha256 = sha256_hex(canonical_json_bytes(canonical))
+        for name, value in (
+            ("schema_revision", 1),
+            ("domain_binding_id", binding.binding_id),
+            ("domain_binding_sha256", binding.binding_sha256),
+            ("venue", binding.venue),
+            ("environment", binding.environment),
+            ("account_scope_ref", binding.account_scope_ref),
+            ("subaccount", binding.subaccount),
+            ("exchange_index", binding.exchange_index),
+            ("conflict_domain_ref", binding.conflict_domain_ref),
+            ("bootstrap_contract_sha256", bootstrap_contract_sha256),
+            ("incident_id", incident_id),
+            ("writer_proof_id", writer_proof_id),
+            ("contract_sha256", contract_sha256),
+            ("contract_id", "AEDC1_" + contract_sha256),
+        ):
+            object.__setattr__(self, name, value)
+
+    def __copy__(self):
+        raise TypeError("ActiveExecutionDomainContractV1 cannot be copied")
+
+    __deepcopy__ = __copy__
+
+    def __reduce_ex__(self, protocol):
+        del protocol
+        raise TypeError("ActiveExecutionDomainContractV1 cannot be serialized")
+
+
+def _reject_legacy_contract(value: object) -> None:
+    if type(value) is LegacyIncidentContract:
+        raise LedgerError(FailureCode.ACTIVE_PATH_LEGACY_CONTRACT_REJECTED)
+
+
+def _require_active_contract(active_contract: object) -> ActiveExecutionDomainContractV1:
+    _reject_legacy_contract(active_contract)
+    if active_contract is None:
+        raise LedgerError(FailureCode.ACTIVE_DOMAIN_CONTRACT_REQUIRED)
+    if type(active_contract) is not ActiveExecutionDomainContractV1:
+        raise LedgerError(FailureCode.ACTIVE_DOMAIN_CONTRACT_MALFORMED)
+    # Recompute the contract identity; a mutated/forged instance fails closed.
+    rebuilt = ActiveExecutionDomainContractV1(
+        binding=ExecutionDomainBindingV1(
+            venue=active_contract.venue,
+            environment=active_contract.environment,
+            account_scope_ref=active_contract.account_scope_ref,
+            subaccount=active_contract.subaccount,
+            exchange_index=active_contract.exchange_index,
+        ),
+        bootstrap_contract_sha256=active_contract.bootstrap_contract_sha256,
+    )
+    if (
+        rebuilt.contract_sha256 != active_contract.contract_sha256
+        or rebuilt.contract_id != active_contract.contract_id
+        or rebuilt.incident_id != active_contract.incident_id
+        or rebuilt.writer_proof_id != active_contract.writer_proof_id
+        or rebuilt.domain_binding_id != active_contract.domain_binding_id
+        or rebuilt.domain_binding_sha256 != active_contract.domain_binding_sha256
+        or rebuilt.conflict_domain_ref != active_contract.conflict_domain_ref
+    ):
+        raise LedgerError(FailureCode.ACTIVE_DOMAIN_CONTRACT_MALFORMED)
+    return active_contract
+
+
+_ACTIVE_DOMAIN_COMMITMENT_KEYS = (
+    "domain_binding_id", "domain_binding_sha256", "active_contract_id",
+    "active_contract_sha256", "bootstrap_contract_sha256", "conflict_domain_ref",
+    "account_scope_ref", "subaccount", "exchange_index", "environment",
+    "incident_id", "writer_proof_id",
+)
+
+
+def active_domain_commitment(
+    active_contract: ActiveExecutionDomainContractV1,
+    domain_binding: ExecutionDomainBindingV1,
+) -> dict:
+    """The exact 12-field active execution-domain commitment carried by every
+    active ordinary CREATE/CANCEL assessment/permit/prepared-request
+    (DSB-WRITER-007/008).  For an active runtime NO field may be ``None``.
+    Fails closed on a contract/binding mismatch."""
+    contract = _require_active_contract(active_contract)
+    if type(domain_binding) is not ExecutionDomainBindingV1:
+        raise LedgerError(FailureCode.EXECUTION_DOMAIN_BINDING_MALFORMED)
+    if (
+        contract.domain_binding_id != domain_binding.binding_id
+        or contract.domain_binding_sha256 != domain_binding.binding_sha256
+        or contract.conflict_domain_ref != domain_binding.conflict_domain_ref
+        or contract.account_scope_ref != domain_binding.account_scope_ref
+        or contract.subaccount != domain_binding.subaccount
+        or contract.exchange_index != domain_binding.exchange_index
+        or contract.environment != domain_binding.environment
+    ):
+        raise LedgerError(FailureCode.ACTIVE_DOMAIN_CONTRACT_MISMATCH)
+    return {
+        "domain_binding_id": contract.domain_binding_id,
+        "domain_binding_sha256": contract.domain_binding_sha256,
+        "active_contract_id": contract.contract_id,
+        "active_contract_sha256": contract.contract_sha256,
+        "bootstrap_contract_sha256": contract.bootstrap_contract_sha256,
+        "conflict_domain_ref": contract.conflict_domain_ref,
+        "account_scope_ref": contract.account_scope_ref,
+        "subaccount": contract.subaccount,
+        "exchange_index": contract.exchange_index,
+        "environment": contract.environment,
+        "incident_id": contract.incident_id,
+        "writer_proof_id": contract.writer_proof_id,
+    }
+
+
+def validate_active_domain_commitment(value: object) -> dict:
+    """Reject a partial/None-bearing active commitment (DSB-WRITER-007:
+    for an active runtime no active field may be ``None``)."""
+    if not isinstance(value, Mapping) or set(value) != set(_ACTIVE_DOMAIN_COMMITMENT_KEYS):
+        raise LedgerError(FailureCode.ACTIVE_DOMAIN_CONTRACT_MALFORMED)
+    for key in _ACTIVE_DOMAIN_COMMITMENT_KEYS:
+        if value[key] is None:
+            raise LedgerError(FailureCode.ACTIVE_DOMAIN_CONTRACT_MALFORMED)
+    if not _is_exact_sha256_hex(value["domain_binding_sha256"]) or not _is_exact_sha256_hex(value["active_contract_sha256"]) or not _is_exact_sha256_hex(value["bootstrap_contract_sha256"]):
+        raise LedgerError(FailureCode.ACTIVE_DOMAIN_CONTRACT_MALFORMED)
+    if type(value["subaccount"]) is not int or type(value["subaccount"]) is bool or type(value["exchange_index"]) is not int or type(value["exchange_index"]) is bool:
+        raise LedgerError(FailureCode.ACTIVE_DOMAIN_CONTRACT_MALFORMED)
+    return dict(value)
+
+
+def _validate_active_contract_against_events(
+    events: tuple, active_contract: ActiveExecutionDomainContractV1
+) -> None:
+    """History validator run inside the locked open (DSB-WRITER-008: active
+    contract vs revision-2 ledger metadata/bootstrap and vs writer proof)."""
+    if len(events) < 3:
+        raise LedgerError(FailureCode.ACTIVE_DOMAIN_BOOTSTRAP_COMMITMENT_MISMATCH)
+    initial, bootstrap, hold = events[0], events[1], events[2]
+    if (
+        initial.event_type is not EventType.LEDGER_INITIALIZED
+        or bootstrap.event_type is not EventType.EXECUTION_DOMAIN_BOOTSTRAP_RECORDED
+        or hold.event_type is not EventType.WRITER_PROOF_HELD
+    ):
+        raise LedgerError(FailureCode.ACTIVE_DOMAIN_BOOTSTRAP_COMMITMENT_MISMATCH)
+    ip = initial.payload
+    bp = bootstrap.payload
+    hp = hold.payload
+    if (
+        ip.get("ledger_schema_revision") != ACTIVE_LEDGER_SCHEMA_REVISION
+        or ip.get("execution_domain_binding_id") != active_contract.domain_binding_id
+        or ip.get("execution_domain_binding_sha256") != active_contract.domain_binding_sha256
+        or ip.get("conflict_domain_ref") != active_contract.conflict_domain_ref
+        or ip.get("environment_classification") != active_contract.environment
+    ):
+        raise LedgerError(FailureCode.ACTIVE_DOMAIN_CONTRACT_MISMATCH)
+    if (
+        bp.get("domain_binding_id") != active_contract.domain_binding_id
+        or bp.get("domain_binding_sha256") != active_contract.domain_binding_sha256
+        or bp.get("bootstrap_contract_sha256") != active_contract.bootstrap_contract_sha256
+        or bp.get("conflict_domain_ref") != active_contract.conflict_domain_ref
+    ):
+        raise LedgerError(FailureCode.ACTIVE_DOMAIN_BOOTSTRAP_COMMITMENT_MISMATCH)
+    if (
+        hp.get("writer_proof_id") != active_contract.writer_proof_id
+        or hp.get("conflict_domain_ref") != active_contract.conflict_domain_ref
+        or hold.incident_id != active_contract.incident_id
+    ):
+        raise LedgerError(FailureCode.ACTIVE_DOMAIN_WRITER_PROOF_MISMATCH)
+
+
+def _validate_active_locked(locked: LockedLedger, active_contract: ActiveExecutionDomainContractV1) -> None:
+    """DSB-WRITER-008: active contract vs revision-2 ledger_meta and authority row."""
+    meta = locked.ledger_meta
+    if type(meta) is not ActiveLedgerMeta:
+        raise LedgerError(FailureCode.ACTIVE_DOMAIN_LEDGER_SCHEMA_REQUIRED)
+    row = locked.authority_row
+    if (
+        meta.ledger_schema_revision != ACTIVE_LEDGER_SCHEMA_REVISION
+        or meta.environment_classification != active_contract.environment
+        or meta.conflict_domain_ref != active_contract.conflict_domain_ref
+        or meta.execution_domain_binding_id != active_contract.domain_binding_id
+        or meta.execution_domain_binding_sha256 != active_contract.domain_binding_sha256
+    ):
+        raise LedgerError(FailureCode.ACTIVE_DOMAIN_CONTRACT_MISMATCH)
+    parsed = parse_canonical_json(meta.execution_domain_binding_json)
+    rebuilt_binding = ExecutionDomainBindingV1(
+        venue=active_contract.venue,
+        environment=active_contract.environment,
+        account_scope_ref=active_contract.account_scope_ref,
+        subaccount=active_contract.subaccount,
+        exchange_index=active_contract.exchange_index,
+    )
+    if parsed != rebuilt_binding.canonical_object():
+        raise LedgerError(FailureCode.ACTIVE_DOMAIN_CONTRACT_MISMATCH)
+    if (
+        row.conflict_domain_ref != active_contract.conflict_domain_ref
+        or row.environment_classification != active_contract.environment
+        or row.ledger_instance_id != meta.ledger_instance_id
+    ):
+        raise LedgerError(FailureCode.ACTIVE_DOMAIN_CONTRACT_MISMATCH)
+
+
+def initialize_active_execution_domain_ledger(
+    binding: AuthorityNamespaceBinding,
+    *,
+    canonical_repository_root: str,
+    domain_binding: ExecutionDomainBindingV1,
+    bootstrap_contract: DomainBootstrapContractV1,
+    ledger_path: str,
+    clock=None,
+    uuid_factory=None,
+    fault_hook=None,
+):
+    """Venue wrapper for the revision-2 active-domain ledger initializer
+    (DSB-PERSIST-005).  Deterministically reconstructs the active contract
+    and never touches the historical revision-1 ledger."""
+    if type(domain_binding) is not ExecutionDomainBindingV1 or type(bootstrap_contract) is not DomainBootstrapContractV1:
+        raise LedgerError(FailureCode.EXECUTION_DOMAIN_BINDING_MALFORMED)
+    if (
+        bootstrap_contract.domain_binding_id != domain_binding.binding_id
+        or bootstrap_contract.domain_binding_sha256 != domain_binding.binding_sha256
+    ):
+        raise LedgerError(FailureCode.DOMAIN_LEDGER_BINDING_MISMATCH)
+    if (
+        domain_binding.account_scope_ref == CURRENT_ACCOUNT_SCOPE_REF
+        and domain_binding.subaccount == 0
+    ):
+        raise LedgerError(FailureCode.LEGACY_PRIMARY_DOMAIN_SELECTED)
+    active_contract = ActiveExecutionDomainContractV1(
+        binding=domain_binding,
+        bootstrap_contract_sha256=bootstrap_contract.bootstrap_contract_sha256,
+    )
+    kwargs: dict[str, object] = {}
+    if clock is not None:
+        kwargs["clock"] = clock
+    if uuid_factory is not None:
+        kwargs["uuid_factory"] = uuid_factory
+    if fault_hook is not None:
+        kwargs["fault_hook"] = fault_hook
+    row = initialize_execution_domain_ledger_v2(
+        binding,
+        conflict_domain_ref=domain_binding.conflict_domain_ref,
+        ledger_path=ledger_path,
+        canonical_repository_root=canonical_repository_root,
+        preledger_history_mode=bootstrap_contract.bootstrap_class,
+        execution_domain_binding_id=domain_binding.binding_id,
+        execution_domain_binding_sha256=domain_binding.binding_sha256,
+        execution_domain_binding_json=domain_binding.canonical_json(),
+        bootstrap_event_payload=bootstrap_contract.event_payload(),
+        active_incident_id=active_contract.incident_id,
+        active_writer_proof_id=active_contract.writer_proof_id,
+        **kwargs,
+    )
+    return row, active_contract
+
+
+def _active_open_kwargs(clock, uuid_factory, fault_hook) -> dict[str, object]:
+    kwargs: dict[str, object] = {"ledger_revision": ACTIVE_LEDGER_SCHEMA_REVISION}
+    if clock is not None:
+        kwargs["clock"] = clock
+    if uuid_factory is not None:
+        kwargs["uuid_factory"] = uuid_factory
+    if fault_hook is not None:
+        kwargs["fault_hook"] = fault_hook
+    return kwargs
+
+
+def read_active_local_safety_state_v1(
+    binding: AuthorityNamespaceBinding,
+    *,
+    canonical_repository_root: str,
+    active_contract: ActiveExecutionDomainContractV1,
+    expected_ledger_path: str | None = None,
+    clock=None,
+    uuid_factory=None,
+    fault_hook=None,
+) -> OpenResult:
+    """Gate-B local active-domain safety-state read (DSB-WRITER-005).  Opens,
+    replays, and validates the active contract against the revision-2 ledger;
+    exposes no LockedLedger and never appends."""
+    contract = _require_active_contract(active_contract)
+    opened = _acquire_normal_writer_candidate(
+        binding,
+        conflict_domain_ref=contract.conflict_domain_ref,
+        expected_environment=contract.environment,
+        canonical_repository_root=canonical_repository_root,
+        expected_ledger_path=expected_ledger_path,
+        history_validator=lambda events: _validate_active_contract_against_events(events, contract),
+        **_active_open_kwargs(clock, uuid_factory, fault_hook),
+    )
+    locked = opened.handle
+    if locked is None:
+        return OpenResult(
+            opened.projection, opened.restart_classification, None,
+            opened.failure_code, opened.authority_ledger_relation,
+        )
+    try:
+        _validate_active_locked(locked, contract)
+        projection = locked.projection()
+        return OpenResult(projection, projection.restart_classification, None, None, locked.relation)
+    except LedgerError as exc:
+        return OpenResult(None, RestartClassification.LEDGER_INTEGRITY_FAILURE, None, exc.code, locked.relation)
+    finally:
+        locked.close()
+
+
+def read_active_trusted_release_evidence_projection_v1(
+    binding: AuthorityNamespaceBinding,
+    *,
+    canonical_repository_root: str,
+    active_contract: ActiveExecutionDomainContractV1,
+    expected_ledger_path: str | None = None,
+    clock=None,
+    uuid_factory=None,
+    fault_hook=None,
+) -> TrustedReleaseEvidenceReadResultV1:
+    """Gate-B active trusted release-evidence projection (DSB-WRITER-005)."""
+    contract = _require_active_contract(active_contract)
+    opened = _acquire_normal_writer_candidate(
+        binding,
+        conflict_domain_ref=contract.conflict_domain_ref,
+        expected_environment=contract.environment,
+        canonical_repository_root=canonical_repository_root,
+        expected_ledger_path=expected_ledger_path,
+        history_validator=lambda events: _validate_active_contract_against_events(events, contract),
+        **_active_open_kwargs(clock, uuid_factory, fault_hook),
+    )
+    locked = opened.handle
+    if locked is None:
+        return TrustedReleaseEvidenceReadResultV1(
+            None, opened.restart_classification, opened.failure_code, opened.authority_ledger_relation,
+        )
+    try:
+        _validate_active_locked(locked, contract)
+        universe = _derive_authoritative_release_universe(locked)
+        tail = locked.events[-1]
+        authority = locked.authority_row
+        observed_tail = (tail.sequence, tail.event_hash)
+        if (
+            (authority.trusted_sequence, authority.trusted_event_hash) != observed_tail
+            or (opened.projection.trusted_sequence, opened.projection.trusted_event_hash) != observed_tail
+        ):
+            return TrustedReleaseEvidenceReadResultV1(
+                None, opened.projection.restart_classification,
+                FailureCode.AUTHORITY_LEDGER_ANCHOR_HASH_MISMATCH, locked.relation,
+            )
+        projection = TrustedReleaseEvidenceProjectionV1(
+            _TRUSTED_RELEASE_EVIDENCE_PROJECTION_KEY,
+            schema_revision=1,
+            environment_classification=locked.ledger_meta.environment_classification,
+            conflict_domain_ref=locked.conflict_domain_ref,
+            authority_instance_id=locked.authority_meta.authority_instance_id,
+            authority_namespace_id=locked.authority_meta.authority_namespace_id,
+            authority_store_path_identity_sha256=locked.authority_meta.authority_store_path_identity_sha256,
+            ledger_instance_id=locked.ledger_meta.ledger_instance_id,
+            ledger_path_identity_sha256=locked.ledger_meta.ledger_path_identity_sha256,
+            authority_trusted_sequence=authority.trusted_sequence,
+            authority_trusted_event_hash=authority.trusted_event_hash,
+            ledger_terminal_sequence=tail.sequence,
+            ledger_terminal_event_hash=tail.event_hash,
+            working_orders=universe.working_orders,
+            fills=universe.fills,
+            cancel_order_on_pause_order_ids=universe.cancel_order_on_pause_order_ids,
+            latest_order_event_ids=MappingProxyType(dict(universe.latest_order_event_ids)),
+            fill_matching_event_ids=MappingProxyType(dict(universe.fill_event_ids)),
+            conflict_ids=universe.conflict_ids,
+        )
+        return TrustedReleaseEvidenceReadResultV1(
+            projection, opened.projection.restart_classification, None, locked.relation,
+        )
+    except LedgerError as exc:
+        return TrustedReleaseEvidenceReadResultV1(
+            None, RestartClassification.LEDGER_INTEGRITY_FAILURE, exc.code, locked.relation,
+        )
+    finally:
+        locked.close()
+
+
+def _acquire_active_narrow_restricted(
+    binding: AuthorityNamespaceBinding,
+    *,
+    canonical_repository_root: str,
+    acquisition_mode: AcquisitionMode,
+    active_contract: ActiveExecutionDomainContractV1,
+    expected_ledger_path: str | None,
+    clock,
+    uuid_factory,
+    fault_hook,
+    monotonic_clock_ns=None,
+    release_wall_clock=None,
+) -> RestrictedAcquisition:
+    contract = _require_active_contract(active_contract)
+    opened = _acquire_restricted_state(
+        binding,
+        conflict_domain_ref=contract.conflict_domain_ref,
+        expected_environment=contract.environment,
+        canonical_repository_root=canonical_repository_root,
+        acquisition_mode=acquisition_mode,
+        expected_ledger_path=expected_ledger_path,
+        history_validator=lambda events: _validate_active_contract_against_events(events, contract),
+        **_active_open_kwargs(clock, uuid_factory, fault_hook),
+    )
+    if opened.locked is None:
+        return RestrictedAcquisition(
+            opened.restart_classification, opened.projection, None,
+            opened.failure_code, opened.authority_ledger_relation,
+        )
+    try:
+        _validate_active_locked(opened.locked, contract)
+    except LedgerError as exc:
+        opened.locked.close()
+        return RestrictedAcquisition(
+            RestartClassification.LEDGER_INTEGRITY_FAILURE, None, None, exc.code,
+            opened.authority_ledger_relation,
+        )
+    session_id = opened.restricted_session_id
+    if session_id is None:
+        opened.locked.close()
+        raise LedgerError(FailureCode.RESTRICTED_SESSION_STATE_CONFLICT)
+    handle: EmergencyControlLedgerHandle | ReleaseLedgerHandle
+    if acquisition_mode is AcquisitionMode.EMERGENCY_CONTROL_ONLY:
+        handle = EmergencyControlLedgerHandle(opened.locked, session_id)
+    else:
+        handle = ReleaseLedgerHandle(
+            opened.locked,
+            session_id,
+            monotonic_clock_ns=monotonic_clock_ns or time.monotonic_ns,
+            wall_clock=release_wall_clock or clock or (lambda: datetime.now(timezone.utc)),
+            uuid_factory=uuid_factory or uuid.uuid4,
+        )
+    return RestrictedAcquisition(
+        opened.restart_classification, opened.locked.projection(), handle,
+        None, opened.authority_ledger_relation,
+    )
+
+
+def acquire_active_emergency_control_only_v1(
+    binding: AuthorityNamespaceBinding,
+    *,
+    canonical_repository_root: str,
+    active_contract: ActiveExecutionDomainContractV1,
+    expected_ledger_path: str | None = None,
+    clock=None,
+    uuid_factory=None,
+    fault_hook=None,
+) -> RestrictedAcquisition:
+    return _acquire_active_narrow_restricted(
+        binding, canonical_repository_root=canonical_repository_root,
+        acquisition_mode=AcquisitionMode.EMERGENCY_CONTROL_ONLY, active_contract=active_contract,
+        expected_ledger_path=expected_ledger_path, clock=clock, uuid_factory=uuid_factory,
+        fault_hook=fault_hook,
+    )
+
+
+def acquire_active_release_only_v1(
+    binding: AuthorityNamespaceBinding,
+    *,
+    canonical_repository_root: str,
+    active_contract: ActiveExecutionDomainContractV1,
+    expected_ledger_path: str | None = None,
+    clock=None,
+    uuid_factory=None,
+    fault_hook=None,
+    monotonic_clock_ns=None,
+    release_wall_clock=None,
+) -> RestrictedAcquisition:
+    return _acquire_active_narrow_restricted(
+        binding, canonical_repository_root=canonical_repository_root,
+        acquisition_mode=AcquisitionMode.RELEASE_ONLY, active_contract=active_contract,
+        expected_ledger_path=expected_ledger_path, clock=clock, uuid_factory=uuid_factory,
+        fault_hook=fault_hook, monotonic_clock_ns=monotonic_clock_ns,
+        release_wall_clock=release_wall_clock,
+    )
+
+
+class ActiveReleaseEvaluationStateV1:
+    """DSB-WRITER-004.  Same current-release inputs as
+    ``ReleaseEvaluationStateV1`` except it carries the active contract and
+    forbids separately caller-supplied active incident/proof IDs; those are
+    derived only from ``active_contract``.
+
+    Correction 02 adds one mandatory input commitment: the exact private
+    trusted dynamic read-set identity (``ADRS2_<64hex>``) that supported
+    this release.  No public constructor accepts a caller-created
+    ``DynamicIndexDomainAccountWideReadV1`` as equivalent release truth --
+    only the composite identity string flows here, and Stage 3F is what
+    verifies the private read-set type + live issuer lineage that produced
+    it."""
+
+    __slots__ = ("__active_contract", "__inner", "__trusted_dynamic_read_set_id")
+
+    def __init__(
+        self,
+        *,
+        process_instance_id: str,
+        active_contract: ActiveExecutionDomainContractV1,
+        trusted_dynamic_read_set_id: str,
+        risk_config,
+        risk_snapshot,
+        reconciliation_snapshot,
+        market_freshness,
+        reconciliation_freshness,
+        venue_defense_evidence,
+        normal_gate,
+        emergency_gate,
+    ) -> None:
+        contract = _require_active_contract(active_contract)
+        if not _is_adrs2_read_set_id(trusted_dynamic_read_set_id):
+            raise LedgerError(FailureCode.ACTIVE_DOMAIN_CONTRACT_MALFORMED)
+        self.__active_contract = contract
+        self.__trusted_dynamic_read_set_id = trusted_dynamic_read_set_id
+        self.__inner = ReleaseEvaluationStateV1(
+            process_instance_id=process_instance_id,
+            incident_id=contract.incident_id,
+            writer_proof_id=contract.writer_proof_id,
+            risk_config=risk_config,
+            risk_snapshot=risk_snapshot,
+            reconciliation_snapshot=reconciliation_snapshot,
+            market_freshness=market_freshness,
+            reconciliation_freshness=reconciliation_freshness,
+            venue_defense_evidence=venue_defense_evidence,
+            normal_gate=normal_gate,
+            emergency_gate=emergency_gate,
+        )
+
+    @property
+    def active_contract(self) -> ActiveExecutionDomainContractV1:
+        return self.__active_contract
+
+    @property
+    def trusted_dynamic_read_set_id(self) -> str:
+        return self.__trusted_dynamic_read_set_id
+
+    @property
+    def inner(self) -> ReleaseEvaluationStateV1:
+        return self.__inner
+
+    def replace(self, **kwargs) -> None:
+        self.__inner.replace(**kwargs)
+
+    def __copy__(self):
+        raise TypeError("ActiveReleaseEvaluationStateV1 cannot be copied")
+
+    __deepcopy__ = __copy__
+
+    def __reduce_ex__(self, protocol):
+        del protocol
+        raise TypeError("ActiveReleaseEvaluationStateV1 cannot be serialized")
+
+
+_ACTIVE_COMPLETION_KEY = object()
+_active_completion_registry_lock = threading.Lock()
+_active_completion_registry: dict[int, "CurrentProcessReleaseCompletionV2"] = {}
+
+
+def _register_active_completion(token: "CurrentProcessReleaseCompletionV2") -> None:
+    with _active_completion_registry_lock:
+        _active_completion_registry[id(token)] = token
+
+
+def _is_registered_active_completion(token: object) -> bool:
+    with _active_completion_registry_lock:
+        return _active_completion_registry.get(id(token)) is token
+
+
+def _consume_active_completion(token: "CurrentProcessReleaseCompletionV2") -> None:
+    with _active_completion_registry_lock:
+        if _active_completion_registry.get(id(token)) is token:
+            del _active_completion_registry[id(token)]
+
+
+@dataclass(frozen=True, slots=True, init=False)
+class CurrentProcessReleaseCompletionV2:
+    """DSB-WRITER-006.  Preserves every V1 one-shot / process-local /
+    non-copyable / non-serializable property and adds exact active-domain
+    commitments.  A V1 token cannot acquire an active revision-2 normal
+    writer; a V2 token cannot acquire the legacy N=0 writer path.
+
+    Correction 02 additionally requires the completion lineage to commit to
+    the exact accepted private dynamic read-set identity
+    (``trusted_dynamic_read_set_id`` = ``ADRS2_<64hex>``) that supported the
+    release."""
+
+    v1: CurrentProcessReleaseCompletionV1
+    active_contract_id: str
+    active_contract_sha256: str
+    domain_binding_id: str
+    domain_binding_sha256: str
+    bootstrap_contract_sha256: str
+    incident_id: str
+    writer_proof_id: str
+    trusted_dynamic_read_set_id: str
+
+    def __init__(self, key: object, **values: object) -> None:
+        if key is not _ACTIVE_COMPLETION_KEY:
+            raise LedgerError(FailureCode.CURRENT_PROCESS_RELEASE_COMPLETION_INVALID)
+        for field in fields(type(self)):
+            object.__setattr__(self, field.name, values[field.name])
+
+    def __copy__(self):
+        raise TypeError("CurrentProcessReleaseCompletionV2 cannot be copied")
+
+    __deepcopy__ = __copy__
+
+    def __reduce_ex__(self, protocol):
+        del protocol
+        raise TypeError("CurrentProcessReleaseCompletionV2 cannot be serialized")
+
+
+def issue_active_current_process_release_completion_v2(
+    release_handle: ReleaseLedgerHandle,
+    assessment: "ReleaseAssessmentV1",
+    *,
+    active_contract: ActiveExecutionDomainContractV1,
+    trusted_dynamic_read_set_id: str,
+) -> CurrentProcessReleaseCompletionV2:
+    """Issue the V2 completion token from an active RELEASE_ONLY handle after
+    the durable release sequence and restricted-session-end readback
+    (DSB-WRITER-006).  Consumes the intermediate V1 token so only the V2
+    admission remains valid.
+
+    Correction 02 requires ``trusted_dynamic_read_set_id`` -- the exact
+    ``ADRS2_<64hex>`` identity of the private
+    ``_ReleaseEligibleDynamicIndexDomainReadSetV2`` that fed Stage 3F -- to
+    be committed into the completion lineage."""
+    contract = _require_active_contract(active_contract)
+    if type(release_handle) is not ReleaseLedgerHandle:
+        raise LedgerError(FailureCode.CURRENT_PROCESS_RELEASE_COMPLETION_NOT_ISSUED)
+    if not _is_adrs2_read_set_id(trusted_dynamic_read_set_id):
+        raise LedgerError(FailureCode.CURRENT_PROCESS_RELEASE_COMPLETION_NOT_ISSUED)
+    if (
+        assessment.writer_proof_id != contract.writer_proof_id
+        or assessment.private_source_identity is None
+    ):
+        raise LedgerError(FailureCode.ACTIVE_DOMAIN_WRITER_PROOF_MISMATCH)
+    v1 = release_handle.complete_release_and_issue_current_process_completion(assessment)
+    if (
+        type(v1) is not CurrentProcessReleaseCompletionV1
+        or not _is_registered_current_process_release_completion(v1)
+        or v1.writer_proof_id != contract.writer_proof_id
+    ):
+        raise LedgerError(FailureCode.CURRENT_PROCESS_RELEASE_COMPLETION_NOT_ISSUED)
+    _consume_current_process_release_completion(v1)
+    token = CurrentProcessReleaseCompletionV2(
+        _ACTIVE_COMPLETION_KEY,
+        v1=v1,
+        active_contract_id=contract.contract_id,
+        active_contract_sha256=contract.contract_sha256,
+        domain_binding_id=contract.domain_binding_id,
+        domain_binding_sha256=contract.domain_binding_sha256,
+        bootstrap_contract_sha256=contract.bootstrap_contract_sha256,
+        incident_id=contract.incident_id,
+        writer_proof_id=contract.writer_proof_id,
+        trusted_dynamic_read_set_id=trusted_dynamic_read_set_id,
+    )
+    _register_active_completion(token)
+    return token
+
+
+def acquire_active_normal_writer_state_v1(
+    binding: AuthorityNamespaceBinding,
+    *,
+    canonical_repository_root: str,
+    risk_config,
+    process_instance_id: str,
+    current_process_release_completion: CurrentProcessReleaseCompletionV2,
+    active_contract: ActiveExecutionDomainContractV1,
+    expected_ledger_path: str | None = None,
+    clock=None,
+    uuid_factory=None,
+    fault_hook=None,
+) -> NormalWriterAcquisition:
+    """Sole supported revision-2 active-domain normal-writer acquisition
+    (DSB-WRITER-005/006, DSB-WRITER-008 Stage 3J/3K).  Rejects a legacy
+    contract, a V1 completion token, and any active-contract/domain/
+    bootstrap/incident/proof mismatch before returning a handle."""
+    contract = _require_active_contract(active_contract)
+    opened = _acquire_normal_writer_candidate(
+        binding,
+        conflict_domain_ref=contract.conflict_domain_ref,
+        expected_environment=contract.environment,
+        canonical_repository_root=canonical_repository_root,
+        expected_ledger_path=expected_ledger_path,
+        history_validator=lambda events: _validate_active_contract_against_events(events, contract),
+        **_active_open_kwargs(clock, uuid_factory, fault_hook),
+    )
+    locked = opened.handle
+    if locked is None:
+        return NormalWriterAcquisition(
+            opened.projection, opened.restart_classification, None, None,
+            opened.failure_code, opened.authority_ledger_relation,
+        )
+    try:
+        _validate_active_locked(locked, contract)
+    except LedgerError as exc:
+        locked.close()
+        return NormalWriterAcquisition(
+            None, RestartClassification.LEDGER_INTEGRITY_FAILURE, None, None, exc.code, locked.relation,
+        )
+    projection = locked.projection()
+    tail = locked.events[-1]
+    authority = locked.authority_row
+    observed_tail = (tail.sequence, tail.event_hash)
+    proof_state = projection.writer_proof_state_by_proof_id.get(contract.writer_proof_id)
+    proof_eligible = projection.writer_proof_release_eligible_by_proof_id.get(contract.writer_proof_id)
+    from arb.venues.kalshi.risk_control import RiskLimitConfigV1 as _RiskLimitConfigV1
+    durable_eligible = (
+        projection.history_completeness in BOOTSTRAP_CLASS_TO_COMPLETENESS.values()
+        and projection.protected_unresolved_legacy_write_count == 0
+        and not projection.unresolved_write_request_ids
+        and proof_state == "RELEASED"
+        and proof_eligible is True
+        and projection.risk_control_state == "WRITER_ELIGIBLE"
+        and projection.active_risk_config_sha256 is not None
+        and type(risk_config) is _RiskLimitConfigV1
+        and risk_config.conflict_domain == contract.conflict_domain_ref
+        and risk_config.sha256 == projection.active_risk_config_sha256
+        and projection.active_restricted_session_id is None
+        and not any(projection.cancel_send_may_have_been_sent_by_attempt.values())
+        and (authority.trusted_sequence, authority.trusted_event_hash) == observed_tail
+        and (projection.trusted_sequence, projection.trusted_event_hash) == observed_tail
+        and (projection.last_sequence, projection.terminal_event_hash) == observed_tail
+    )
+    if not durable_eligible:
+        locked.close()
+        return NormalWriterAcquisition(
+            projection, projection.restart_classification, None, None,
+            FailureCode.NORMAL_WRITER_ACQUISITION_REJECTED, locked.relation,
+        )
+    token = current_process_release_completion
+    if token is None:
+        locked.close()
+        return NormalWriterAcquisition(
+            projection, projection.restart_classification, None, None,
+            FailureCode.CURRENT_PROCESS_RELEASE_COMPLETION_REQUIRED, locked.relation,
+        )
+    if type(token) is CurrentProcessReleaseCompletionV1:
+        locked.close()
+        return NormalWriterAcquisition(
+            projection, projection.restart_classification, None, None,
+            FailureCode.CURRENT_PROCESS_RELEASE_COMPLETION_INVALID, locked.relation,
+        )
+    if type(token) is not CurrentProcessReleaseCompletionV2 or not _is_registered_active_completion(token):
+        locked.close()
+        return NormalWriterAcquisition(
+            projection, projection.restart_classification, None, None,
+            FailureCode.CURRENT_PROCESS_RELEASE_COMPLETION_INVALID, locked.relation,
+        )
+    # The embedded V1 token has been deliberately consumed from the V1
+    # registry by ``issue_active_current_process_release_completion_v2`` (only
+    # the V2 admission remains valid), so its structural contract is verified
+    # directly here rather than via the V1 live-registry helper.
+    _v1 = token.v1
+    if (
+        type(_v1) is not CurrentProcessReleaseCompletionV1
+        or type(_v1.schema_revision) is not int or _v1.schema_revision != 1
+        or type(_v1.process_instance_id) is not str or not _v1.process_instance_id
+        or type(_v1.release_id) is not str or not _v1.release_id.startswith("rel_")
+        or type(_v1.writer_proof_id) is not str or not _v1.writer_proof_id
+        or not _is_exact_sha256_hex(_v1.risk_config_sha256)
+        or type(_v1.resulting_risk_state_epoch) is not int or _v1.resulting_risk_state_epoch < 0
+        or not _is_exact_event_id(_v1.writer_eligible_state_event_id)
+        or not _is_exact_sha256_hex(_v1.writer_eligible_state_event_hash)
+        or type(_v1.authority_trusted_sequence) is not int or _v1.authority_trusted_sequence <= 0
+        or not _is_exact_sha256_hex(_v1.authority_trusted_event_hash)
+        or type(_v1.ledger_terminal_sequence) is not int or _v1.ledger_terminal_sequence <= 0
+        or not _is_exact_sha256_hex(_v1.ledger_terminal_event_hash)
+        or not _is_exact_event_id(_v1.release_session_ended_event_id)
+        or not _is_exact_sha256_hex(_v1.release_session_ended_event_hash)
+    ):
+        locked.close()
+        return NormalWriterAcquisition(
+            projection, projection.restart_classification, None, None,
+            FailureCode.CURRENT_PROCESS_RELEASE_COMPLETION_INVALID, locked.relation,
+        )
+    if (
+        token.active_contract_id != contract.contract_id
+        or token.active_contract_sha256 != contract.contract_sha256
+        or token.domain_binding_id != contract.domain_binding_id
+        or token.domain_binding_sha256 != contract.domain_binding_sha256
+        or token.bootstrap_contract_sha256 != contract.bootstrap_contract_sha256
+        or token.incident_id != contract.incident_id
+        or token.writer_proof_id != contract.writer_proof_id
+    ):
+        locked.close()
+        return NormalWriterAcquisition(
+            projection, projection.restart_classification, None, None,
+            FailureCode.ACTIVE_DOMAIN_CONTRACT_MISMATCH, locked.relation,
+        )
+    # DSB-WRITER-006: the completion lineage must carry the exact accepted
+    # private dynamic read-set identity that supported the release.
+    if not _is_adrs2_read_set_id(token.trusted_dynamic_read_set_id):
+        locked.close()
+        return NormalWriterAcquisition(
+            projection, projection.restart_classification, None, None,
+            FailureCode.CURRENT_PROCESS_RELEASE_COMPLETION_INVALID, locked.relation,
+        )
+    if token.v1.process_instance_id != process_instance_id:
+        locked.close()
+        return NormalWriterAcquisition(
+            projection, projection.restart_classification, None, None,
+            FailureCode.CURRENT_PROCESS_RELEASE_COMPLETION_PROCESS_MISMATCH, locked.relation,
+        )
+    events_by_id = {event.event_id: event for event in locked.events}
+    v1 = token.v1
+    writer_eligible_event = events_by_id.get(v1.writer_eligible_state_event_id)
+    session_ended_event = events_by_id.get(v1.release_session_ended_event_id)
+    stale = (
+        v1.writer_proof_id != contract.writer_proof_id
+        or v1.risk_config_sha256 != risk_config.sha256
+        or projection.risk_state_epoch != v1.resulting_risk_state_epoch
+        or writer_eligible_event is None
+        or writer_eligible_event.event_type is not EventType.RISK_CONTROL_STATE_CHANGED
+        or writer_eligible_event.event_hash != v1.writer_eligible_state_event_hash
+        or writer_eligible_event.payload.get("previous_state") != "SAFE_HELD"
+        or writer_eligible_event.payload.get("new_state") != "WRITER_ELIGIBLE"
+        or writer_eligible_event.payload.get("cause") != "DURABLE_RELEASE_COMPLETED"
+        or writer_eligible_event.payload.get("related_release_id") != v1.release_id
+        or session_ended_event is None
+        or session_ended_event.event_type is not EventType.RESTRICTED_SESSION_ENDED
+        or session_ended_event.event_hash != v1.release_session_ended_event_hash
+        or (v1.authority_trusted_sequence, v1.authority_trusted_event_hash) != observed_tail
+        or (v1.ledger_terminal_sequence, v1.ledger_terminal_event_hash) != observed_tail
+    )
+    if stale:
+        locked.close()
+        return NormalWriterAcquisition(
+            projection, projection.restart_classification, None, None,
+            FailureCode.CURRENT_PROCESS_RELEASE_COMPLETION_STALE, locked.relation,
+        )
+    _consume_active_completion(token)
+    relation = locked.relation
+    try:
+        session_id = start_writer_session(locked, prior_session_state="NONE")
+    except LedgerError as exc:
+        locked.close()
+        return NormalWriterAcquisition(
+            projection, projection.restart_classification, None, None, exc.code, relation,
+        )
+    final_projection = locked.projection()
+    if final_projection.active_writer_session_id != session_id:
+        locked.close()
+        return NormalWriterAcquisition(
+            final_projection, final_projection.restart_classification, None, None,
+            FailureCode.NORMAL_WRITER_ACQUISITION_REJECTED, relation,
+        )
+    return NormalWriterAcquisition(
+        final_projection, final_projection.restart_classification, locked, session_id, None, relation,
+    )
+
+
+# ===========================================================================
+# Correction 02 Section 14 -- exact retained-position terminal-settlement
+# binding (DSB-SETTLE-001..005).  The current N1 terminal settlement is a
+# historical accepted-evidence fact; runtime issues NO fresh settlements GET
+# and adds no settlement operation to the trusted pre-release capability.
+# ===========================================================================
+
+# The exact frozen canonical object (DSB-SETTLE-001).  Its canonical JSON is
+# 580 bytes and hashes to the frozen identity below; there is no
+# caller-supplied settlement time / result / count / response-identity
+# override.
+_ATSE1_CANONICAL_OBJECT: Mapping[str, object] = MappingProxyType({
+    "evidence_bytes": 26321,
+    "evidence_name": "KALSHI_DEMO_SUBACCOUNT1_EXCHANGE_INDEX_DOMAIN_COMPLETENESS_DIAGNOSTIC_02_RESULT.json",
+    "evidence_sha256": "2fc189b2a807a6c22ab3e71e41a6cfa66415e3bda87e6c8e66c3eb6e8029c69b",
+    "exchange_index": 0,
+    "market_result": "yes",
+    "schema_revision": 1,
+    "settled_time": "2026-09-02T14:41:43.665741Z",
+    "settlement_economic_rows_digest_sha256": "3b73590a086e12538e8da7f0dc21c9b3717c85676e84fd5effb3a63f654e3965",
+    "settlement_response_sha256": "562f47b835201d3445805102a25b3550582263367570847f4cf48b92a0dab119",
+    "ticker": "KXAAAGASD-26SEP02-4.1200",
+    "yes_count_fp": "1.00",
+})
+_ATSE1_CANONICAL_JSON = canonical_json_text(dict(_ATSE1_CANONICAL_OBJECT))
+_ATSE1_CANONICAL_BYTES = len(canonical_json_bytes(dict(_ATSE1_CANONICAL_OBJECT)))
+ACCEPTED_TERMINAL_SETTLEMENT_SHA256 = sha256_hex(canonical_json_bytes(dict(_ATSE1_CANONICAL_OBJECT)))
+ACCEPTED_TERMINAL_SETTLEMENT_ID = "ATSE1_" + ACCEPTED_TERMINAL_SETTLEMENT_SHA256
+_ATSE1_CONSTRUCTION_KEY = object()
+_RETAINED_FLOOR_RECONCILED = "RETAINED_POSITION_TERMINALLY_SETTLED"
+
+
+@dataclass(frozen=True, slots=True, init=False)
+class AcceptedTerminalSettlementEvidenceV1:
+    """DSB-SETTLE-001.  One immutable logical onboarding record for the
+    current N1 retained-ticker terminal settlement.  Construction requires
+    EXACT equality with the fixed canonical object -- any changed field
+    (settled time, result, count, ticker, exchange index, evidence SHA,
+    settlement-response SHA, economic-row digest) fails
+    ``P02_TERMINAL_SETTLEMENT_EVIDENCE_MISMATCH``.  An exact P02 filename/SHA
+    label on arbitrary settlement content is not sufficient (DSB-SETTLE-004)."""
+
+    schema_revision: int
+    evidence_bytes: int
+    evidence_name: str
+    evidence_sha256: str
+    exchange_index: int
+    market_result: str
+    settled_time: str
+    settlement_economic_rows_digest_sha256: str
+    settlement_response_sha256: str
+    ticker: str
+    yes_count_fp: str
+    canonical_bytes: int
+    canonical_sha256: str
+    id: str
+
+    def __init__(self, key: object, *, candidate_object: Mapping[str, object]) -> None:
+        if key is not _ATSE1_CONSTRUCTION_KEY:
+            raise LedgerError(FailureCode.P02_TERMINAL_SETTLEMENT_EVIDENCE_MISMATCH)
+        if not isinstance(candidate_object, Mapping):
+            raise LedgerError(FailureCode.P02_TERMINAL_SETTLEMENT_EVIDENCE_MISMATCH)
+        candidate = dict(candidate_object)
+        try:
+            candidate_json = canonical_json_text(candidate)
+            candidate_sha = sha256_hex(canonical_json_bytes(candidate))
+        except (TypeError, ValueError) as exc:
+            raise LedgerError(FailureCode.P02_TERMINAL_SETTLEMENT_EVIDENCE_MISMATCH) from exc
+        if (
+            candidate_json != _ATSE1_CANONICAL_JSON
+            or candidate_sha != ACCEPTED_TERMINAL_SETTLEMENT_SHA256
+        ):
+            raise LedgerError(FailureCode.P02_TERMINAL_SETTLEMENT_EVIDENCE_MISMATCH)
+        frozen = dict(_ATSE1_CANONICAL_OBJECT)
+        for name, value in frozen.items():
+            object.__setattr__(self, name, value)
+        object.__setattr__(self, "canonical_bytes", _ATSE1_CANONICAL_BYTES)
+        object.__setattr__(self, "canonical_sha256", ACCEPTED_TERMINAL_SETTLEMENT_SHA256)
+        object.__setattr__(self, "id", ACCEPTED_TERMINAL_SETTLEMENT_ID)
+
+    def __copy__(self):
+        raise TypeError("AcceptedTerminalSettlementEvidenceV1 cannot be copied")
+
+    __deepcopy__ = __copy__
+
+    def __reduce_ex__(self, protocol):
+        del protocol
+        raise TypeError("AcceptedTerminalSettlementEvidenceV1 cannot be serialized")
+
+
+def n1_accepted_terminal_settlement_evidence(
+    candidate_object: Mapping[str, object] | None = None,
+) -> AcceptedTerminalSettlementEvidenceV1:
+    """Explicit N1 onboarding constructor for the exact accepted terminal
+    settlement (DSB-SETTLE-001).  With no argument it builds the frozen
+    record; a supplied object must equal the frozen canonical object exactly
+    or ``P02_TERMINAL_SETTLEMENT_EVIDENCE_MISMATCH`` is raised."""
+    obj = dict(_ATSE1_CANONICAL_OBJECT) if candidate_object is None else candidate_object
+    return AcceptedTerminalSettlementEvidenceV1(_ATSE1_CONSTRUCTION_KEY, candidate_object=obj)
+
+
+def reconcile_retained_bootstrap_floor_v1(
+    *,
+    accepted_settlement: AcceptedTerminalSettlementEvidenceV1,
+    retained_position_ticker: str,
+    retained_position_floor_contracts: Decimal,
+    retained_route_exchange_index: int,
+    fresh_all_index_positions_complete: bool,
+    current_retained_ticker_live_contracts: Decimal,
+    ambiguous_event_positions_present: bool,
+    other_positions_all_accounted: bool,
+) -> str:
+    """DSB-SETTLE-003/004.  Returns ``"RETAINED_POSITION_TERMINALLY_SETTLED"``
+    only when ALL hold: exact accepted ``AcceptedTerminalSettlementEvidenceV1``
+    identity; accepted ticker == bootstrap retained ticker; accepted
+    exchange_index == bootstrap selected retained route/index; yes_count_fp
+    Decimal == Decimal("1.00") and covers the retained floor exactly;
+    market_result == "yes"; a fresh complete trusted all-index positions
+    traversal; no current nonzero retained-ticker live position; no ambiguous
+    nonempty ``event_positions``; and every other current position row
+    accounted by the existing risk economics.  Empty current positions alone
+    are insufficient.  Otherwise ``N1_RETAINED_POSITION_NOT_RECONCILED``."""
+    if (
+        type(accepted_settlement) is not AcceptedTerminalSettlementEvidenceV1
+        or accepted_settlement.id != ACCEPTED_TERMINAL_SETTLEMENT_ID
+        or accepted_settlement.canonical_sha256 != ACCEPTED_TERMINAL_SETTLEMENT_SHA256
+    ):
+        raise LedgerError(FailureCode.N1_RETAINED_POSITION_NOT_RECONCILED)
+    try:
+        settled = Decimal(accepted_settlement.yes_count_fp)
+        floor = retained_position_floor_contracts if type(retained_position_floor_contracts) is Decimal else None
+        live = current_retained_ticker_live_contracts if type(current_retained_ticker_live_contracts) is Decimal else None
+    except Exception as exc:  # noqa: BLE001 - fail closed on any Decimal error
+        raise LedgerError(FailureCode.N1_RETAINED_POSITION_NOT_RECONCILED) from exc
+    if (
+        accepted_settlement.ticker != retained_position_ticker
+        or type(retained_route_exchange_index) is not int
+        or type(retained_route_exchange_index) is bool
+        or accepted_settlement.exchange_index != retained_route_exchange_index
+        or accepted_settlement.market_result != "yes"
+        or floor is None or not floor.is_finite() or floor < 0
+        or not settled.is_finite()
+        or settled != Decimal("1.00")
+        or settled < floor
+        or fresh_all_index_positions_complete is not True
+        or live is None or not live.is_finite() or live != 0
+        or ambiguous_event_positions_present is not False
+        or other_positions_all_accounted is not True
+    ):
+        raise LedgerError(FailureCode.N1_RETAINED_POSITION_NOT_RECONCILED)
+    return _RETAINED_FLOOR_RECONCILED
+
+
 __all__ = [
     "AuthorityAnchoredSendGate", "CURRENT_ACCOUNT_SCOPE_REF", "CURRENT_CLIENT_ORDER_ID",
     "CURRENT_CONFLICT_DOMAIN_REF", "CURRENT_DISPOSITION", "CURRENT_ENVIRONMENT",
@@ -2893,4 +4221,15 @@ __all__ = [
     "validate_venue_defense_evidence",
     "TrustedReleaseEvidenceProjectionV1", "TrustedReleaseEvidenceReadResultV1",
     "read_trusted_release_evidence_projection",
+    "ExecutionDomainBindingV1", "EvidenceReferenceV1", "DomainBootstrapContractV1",
+    "ActiveExecutionDomainContractV1", "ActiveReleaseEvaluationStateV1",
+    "CurrentProcessReleaseCompletionV2", "initialize_active_execution_domain_ledger",
+    "read_active_local_safety_state_v1", "read_active_trusted_release_evidence_projection_v1",
+    "acquire_active_emergency_control_only_v1", "acquire_active_release_only_v1",
+    "acquire_active_normal_writer_state_v1",
+    "issue_active_current_process_release_completion_v2",
+    "active_domain_commitment", "validate_active_domain_commitment",
+    "AcceptedTerminalSettlementEvidenceV1", "ACCEPTED_TERMINAL_SETTLEMENT_ID",
+    "ACCEPTED_TERMINAL_SETTLEMENT_SHA256", "n1_accepted_terminal_settlement_evidence",
+    "reconcile_retained_bootstrap_floor_v1",
 ]

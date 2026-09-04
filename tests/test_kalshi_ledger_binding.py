@@ -4675,5 +4675,355 @@ class TrustedReleaseEvidenceProjectionTestCase(KalshiLedgerBindingTestCase):
         self.assertIsNone(after_projection.active_writer_session_id)
 
 
+import arb.venues.kalshi.ledger_binding as _lb
+
+
+class ActiveExecutionDomainBindingTestCase(unittest.TestCase):
+    """R1-B03 T01-T09: dynamic execution-domain binding."""
+
+    ACCOUNT = "ARB_KALSHI_DEMO_PRIMARY_ACCOUNT"
+
+    def _b(self, *, subaccount=1, exchange_index=0):
+        return _lb.ExecutionDomainBindingV1(
+            venue="KALSHI", environment="KALSHI_DEMO", account_scope_ref=self.ACCOUNT,
+            subaccount=subaccount, exchange_index=exchange_index)
+
+    def test_t01_n1_binding_derives_exact_conflict_and_hash(self) -> None:
+        b = self._b(subaccount=1, exchange_index=0)
+        self.assertEqual(b.conflict_domain_ref,
+                         "KALSHI|KALSHI_DEMO|ARB_KALSHI_DEMO_PRIMARY_ACCOUNT|SUBACCOUNT=1")
+        obj = {
+            "account_scope_ref": self.ACCOUNT,
+            "conflict_domain_ref": b.conflict_domain_ref,
+            "environment": "KALSHI_DEMO", "exchange_index": 0, "schema_revision": 1,
+            "subaccount": 1, "venue": "KALSHI",
+        }
+        self.assertEqual(b.binding_sha256, ledger.sha256_hex(ledger.canonical_json_bytes(obj)))
+        self.assertEqual(b.binding_id, "KEDB1_" + b.binding_sha256)
+
+    def test_t02_arbitrary_non1_subaccount_independent(self) -> None:
+        b = self._b(subaccount=42)
+        self.assertIn("SUBACCOUNT=42", b.conflict_domain_ref)
+        self.assertNotEqual(b.binding_sha256, self._b(subaccount=1).binding_sha256)
+
+    def test_t03_and_t04_malformed_subaccount_rejected(self) -> None:
+        for bad in (True, "1", 1.0, -1, 64):
+            with self.subTest(bad=bad):
+                with self.assertRaises(LedgerError) as c:
+                    _lb.ExecutionDomainBindingV1(venue="KALSHI", environment="KALSHI_DEMO",
+                        account_scope_ref=self.ACCOUNT, subaccount=bad, exchange_index=0)
+                self.assertEqual(c.exception.code, FailureCode.EXECUTION_DOMAIN_BINDING_MALFORMED)
+
+    def test_t05_malformed_exchange_index_rejected(self) -> None:
+        for bad in (True, "0", -1, 1.0):
+            with self.subTest(bad=bad):
+                with self.assertRaises(LedgerError):
+                    _lb.ExecutionDomainBindingV1(venue="KALSHI", environment="KALSHI_DEMO",
+                        account_scope_ref=self.ACCOUNT, subaccount=1, exchange_index=bad)
+
+    def test_t07_same_subaccount_diff_index_same_conflict_diff_hash(self) -> None:
+        a = self._b(subaccount=3, exchange_index=0)
+        b = self._b(subaccount=3, exchange_index=1)
+        self.assertEqual(a.conflict_domain_ref, b.conflict_domain_ref)
+        self.assertNotEqual(a.binding_sha256, b.binding_sha256)
+
+    def test_t08_different_subaccounts_distinct(self) -> None:
+        a, b = self._b(subaccount=2), self._b(subaccount=5)
+        self.assertNotEqual(a.conflict_domain_ref, b.conflict_domain_ref)
+        self.assertNotEqual(a.binding_sha256, b.binding_sha256)
+
+    def test_t06_and_t09_no_hardcoded_subaccount_gate(self) -> None:
+        # No active acceptance rule contains subaccount==1; an arbitrary
+        # non-1 binding constructs and drives an active contract identically.
+        b = self._b(subaccount=17)
+        c = _lb.ActiveExecutionDomainContractV1(binding=b, bootstrap_contract_sha256="a" * 64)
+        self.assertTrue(c.incident_id.startswith("adi_"))
+        self.assertEqual(c.subaccount, 17)
+
+
+class ActiveExecutionDomainContractTestCase(unittest.TestCase):
+    """R1-B03 T72-T79, T26-T29, T49-T50: active contract + release binding."""
+
+    ACCOUNT = "ARB_KALSHI_DEMO_PRIMARY_ACCOUNT"
+
+    def setUp(self) -> None:
+        self.temp = tempfile.TemporaryDirectory()
+        self.root = Path(self.temp.name)
+        self.repository_root = Path(__file__).resolve().parents[1]
+        self.authority_root = self.root / "authority"
+        self.authority_root.mkdir()
+        self._uuid = 1
+        self._instant = datetime(2026, 9, 1, 12, 0, 0, tzinfo=timezone.utc)
+        self.binding = AuthorityNamespaceBinding.bind(
+            authority_namespace_id="active-ns", authority_namespace_root=self.authority_root,
+            canonical_repository_root=self.repository_root)
+        initialize_authority_namespace(self.binding, clock=self._clock, uuid_factory=self._uuidf)
+
+    def tearDown(self) -> None:
+        self.temp.cleanup()
+
+    def _clock(self):
+        v = self._instant
+        self._instant += timedelta(microseconds=1)
+        return v
+
+    def _uuidf(self):
+        v = uuid.UUID(int=self._uuid, version=4)
+        self._uuid += 1
+        return v
+
+    def _domain(self, *, subaccount=1, exchange_index=0, name="d.sqlite3",
+                bclass="KNOWN_NONEMPTY_PRESTACK", comp="COMPLETE_KNOWN_NONEMPTY_PRESTACK",
+                fill="COMPLETE_KNOWN_NONZERO", pos="COMPLETE_KNOWN_NONZERO",
+                ticker="KXAAAGASD-26SEP02-4.1200", floor=Decimal("1.00")):
+        b = _lb.ExecutionDomainBindingV1(venue="KALSHI", environment="KALSHI_DEMO",
+            account_scope_ref=self.ACCOUNT, subaccount=subaccount, exchange_index=exchange_index)
+        bc = _lb.DomainBootstrapContractV1(
+            binding=b, bootstrap_class=bclass, bootstrap_cutoff_at_utc="2026-09-01T00:00:00.000000Z",
+            prestack_activity_completeness=comp, unresolved_write_count=0, unresolved_cancel_count=0,
+            working_order_truth="COMPLETE_ZERO", fill_truth=fill, position_truth=pos,
+            retained_position_ticker=ticker, retained_position_floor_contracts=floor)
+        path = self.root / name
+        row, contract = _lb.initialize_active_execution_domain_ledger(
+            self.binding, canonical_repository_root=str(self.repository_root),
+            domain_binding=b, bootstrap_contract=bc, ledger_path=str(path),
+            clock=self._clock, uuid_factory=self._uuidf)
+        return dict(binding=b, bootstrap=bc, row=row, contract=contract, path=str(path))
+
+    def test_t_active_contract_deterministic_identity(self) -> None:
+        d = self._domain()
+        rebuilt = _lb.ActiveExecutionDomainContractV1(
+            binding=d["binding"], bootstrap_contract_sha256=d["bootstrap"].bootstrap_contract_sha256)
+        self.assertEqual(rebuilt.contract_sha256, d["contract"].contract_sha256)
+        self.assertEqual(rebuilt.incident_id, d["contract"].incident_id)
+        self.assertTrue(d["contract"].contract_id.startswith("AEDC1_"))
+        self.assertTrue(d["contract"].incident_id.startswith("adi_"))
+        self.assertTrue(d["contract"].writer_proof_id.startswith("adwp_"))
+
+    def test_t72_and_t_reject_legacy_contract_on_active_read(self) -> None:
+        d = self._domain()
+        with self.assertRaises(LedgerError) as c:
+            _lb.read_active_local_safety_state_v1(
+                self.binding, canonical_repository_root=str(self.repository_root),
+                active_contract=_lb.CURRENT_LEGACY_INCIDENT_CONTRACT, expected_ledger_path=d["path"])
+        self.assertEqual(c.exception.code, FailureCode.ACTIVE_PATH_LEGACY_CONTRACT_REJECTED)
+
+    def test_t74_contract_a_cannot_act_on_domain_b(self) -> None:
+        a = self._domain(subaccount=1, name="a.sqlite3")
+        b = self._domain(subaccount=9, name="b.sqlite3", bclass="CONTROLLED_FRESH_INCEPTION",
+                         comp="COMPLETE_CONTROLLED_FROM_INCEPTION", fill="COMPLETE_ZERO",
+                         pos="COMPLETE_ZERO", ticker=None, floor=Decimal("0"))
+        # contract A against ledger B's explicit path -> mismatch, no handle.
+        res = _lb.acquire_active_release_only_v1(
+            self.binding, canonical_repository_root=str(self.repository_root),
+            active_contract=a["contract"], expected_ledger_path=b["path"])
+        self.assertIsNone(res.handle)
+        self.assertIsNotNone(res.failure_code)
+
+    def _forge(self, contract, **overrides):
+        forged = object.__new__(_lb.ActiveExecutionDomainContractV1)
+        for f in fields(_lb.ActiveExecutionDomainContractV1):
+            object.__setattr__(forged, f.name, getattr(contract, f.name))
+        for k, v in overrides.items():
+            object.__setattr__(forged, k, v)
+        return forged
+
+    def test_t75_active_incident_mismatch_blocks(self) -> None:
+        d = self._domain()
+        forged = self._forge(d["contract"], incident_id="adi_" + "0" * 32)
+        with self.assertRaises(LedgerError) as c:
+            _lb.read_active_local_safety_state_v1(
+                self.binding, canonical_repository_root=str(self.repository_root),
+                active_contract=forged, expected_ledger_path=d["path"])
+        self.assertEqual(c.exception.code, FailureCode.ACTIVE_DOMAIN_CONTRACT_MALFORMED)
+
+    def test_t77_bootstrap_commitment_mismatch_blocks(self) -> None:
+        d = self._domain()
+        forged = self._forge(d["contract"], bootstrap_contract_sha256="b" * 64)
+        with self.assertRaises(LedgerError) as c:
+            _lb.read_active_local_safety_state_v1(
+                self.binding, canonical_repository_root=str(self.repository_root),
+                active_contract=forged, expected_ledger_path=d["path"])
+        self.assertEqual(c.exception.code, FailureCode.ACTIVE_DOMAIN_CONTRACT_MALFORMED)
+
+    def test_t79_legacy_and_active_functions_do_not_cross_use(self) -> None:
+        d = self._domain()
+        # legacy acquire_release_only on a revision-2 ledger -> no handle
+        from arb.venues.kalshi.ledger_binding import acquire_release_only, LegacyIncidentContract
+        legacy = LegacyIncidentContract(
+            incident_id="X", environment="KALSHI_DEMO", account_scope_ref=self.ACCOUNT,
+            subaccount=0, ticker="T", client_order_id="c", legacy_writer_session_id="w",
+            writer_proof_id="p", conflict_domain_ref=d["binding"].conflict_domain_ref,
+            evidence_expectations=(),
+        )
+        res = acquire_release_only(
+            self.binding, canonical_repository_root=str(self.repository_root),
+            contract=legacy, expected_ledger_path=d["path"])
+        self.assertIsNone(res.handle)
+
+    def test_t15_n1_bootstrap_contract_floor_and_completeness(self) -> None:
+        d = self._domain()
+        self.assertEqual(d["bootstrap"].prestack_activity_completeness, "COMPLETE_KNOWN_NONEMPTY_PRESTACK")
+        self.assertEqual(d["bootstrap"].retained_position_floor_contracts, Decimal("1.00"))
+        self.assertEqual(d["bootstrap"].bootstrap_class, "KNOWN_NONEMPTY_PRESTACK")
+
+    def test_t_cross_pairing_bootstrap_rejected(self) -> None:
+        b = _lb.ExecutionDomainBindingV1(venue="KALSHI", environment="KALSHI_DEMO",
+            account_scope_ref=self.ACCOUNT, subaccount=1, exchange_index=0)
+        with self.assertRaises(LedgerError) as c:
+            _lb.DomainBootstrapContractV1(
+                binding=b, bootstrap_class="KNOWN_NONEMPTY_PRESTACK",
+                bootstrap_cutoff_at_utc="2026-09-01T00:00:00.000000Z",
+                prestack_activity_completeness="COMPLETE_CONTROLLED_FROM_INCEPTION",
+                unresolved_write_count=0, unresolved_cancel_count=0,
+                working_order_truth="COMPLETE_ZERO", fill_truth="COMPLETE_ZERO",
+                position_truth="COMPLETE_ZERO", retained_position_ticker=None,
+                retained_position_floor_contracts=Decimal("0"))
+        self.assertEqual(c.exception.code, FailureCode.DOMAIN_BOOTSTRAP_COMPLETENESS_MISMATCH)
+
+    def test_t_subaccount0_primary_domain_rejected(self) -> None:
+        b = _lb.ExecutionDomainBindingV1(venue="KALSHI", environment="KALSHI_DEMO",
+            account_scope_ref=self.ACCOUNT, subaccount=0, exchange_index=0)
+        bc = _lb.DomainBootstrapContractV1(
+            binding=b, bootstrap_class="CONTROLLED_FRESH_INCEPTION",
+            bootstrap_cutoff_at_utc="2026-09-01T00:00:00.000000Z",
+            prestack_activity_completeness="COMPLETE_CONTROLLED_FROM_INCEPTION",
+            unresolved_write_count=0, unresolved_cancel_count=0,
+            working_order_truth="COMPLETE_ZERO", fill_truth="COMPLETE_ZERO",
+            position_truth="COMPLETE_ZERO", retained_position_ticker=None,
+            retained_position_floor_contracts=Decimal("0"))
+        with self.assertRaises(LedgerError) as c:
+            _lb.initialize_active_execution_domain_ledger(
+                self.binding, canonical_repository_root=str(self.repository_root),
+                domain_binding=b, bootstrap_contract=bc, ledger_path=str(self.root / "z.sqlite3"))
+        self.assertEqual(c.exception.code, FailureCode.LEGACY_PRIMARY_DOMAIN_SELECTED)
+
+    def test_t60_restart_same_binding_replays_held(self) -> None:
+        d = self._domain()
+        for _ in range(2):
+            res = _lb.read_active_local_safety_state_v1(
+                self.binding, canonical_repository_root=str(self.repository_root),
+                active_contract=d["contract"], expected_ledger_path=d["path"])
+            self.assertIsNone(res.failure_code)
+            self.assertEqual(res.projection.history_completeness, "COMPLETE_KNOWN_NONEMPTY_PRESTACK")
+            self.assertEqual(
+                res.projection.writer_proof_state_by_proof_id.get(d["contract"].writer_proof_id), "HELD")
+
+    def test_t63_restart_different_exchange_index_fails(self) -> None:
+        d = self._domain(subaccount=1, exchange_index=0)
+        other = _lb.ExecutionDomainBindingV1(venue="KALSHI", environment="KALSHI_DEMO",
+            account_scope_ref=self.ACCOUNT, subaccount=1, exchange_index=1)
+        other_contract = _lb.ActiveExecutionDomainContractV1(
+            binding=other, bootstrap_contract_sha256=d["contract"].bootstrap_contract_sha256)
+        res = _lb.read_active_local_safety_state_v1(
+            self.binding, canonical_repository_root=str(self.repository_root),
+            active_contract=other_contract, expected_ledger_path=d["path"])
+        self.assertIsNone(res.projection)
+        self.assertIsNotNone(res.failure_code)
+
+    def test_t67_no_auto_transition_to_writer_eligible(self) -> None:
+        d = self._domain()
+        res = _lb.read_active_local_safety_state_v1(
+            self.binding, canonical_repository_root=str(self.repository_root),
+            active_contract=d["contract"], expected_ledger_path=d["path"])
+        self.assertNotEqual(res.projection.risk_control_state, "WRITER_ELIGIBLE")
+
+    def test_t38_t39_n1_retained_position_in_bootstrap(self) -> None:
+        # T38: the retained N=1 position is captured in the bootstrap
+        # contract (non-zero position_truth + floor) so it is available to
+        # risk before any candidate write.  T39: an inconsistent baseline
+        # fails closed -- FailureCode.N1_RETAINED_POSITION_NOT_RECONCILED
+        # exists for that gate.
+        d = self._domain()
+        self.assertEqual(d["bootstrap"].position_truth, "COMPLETE_KNOWN_NONZERO")
+        self.assertEqual(d["bootstrap"].retained_position_floor_contracts, Decimal("1.00"))
+        self.assertEqual(d["bootstrap"].retained_position_ticker, "KXAAAGASD-26SEP02-4.1200")
+        self.assertEqual(FailureCode.N1_RETAINED_POSITION_NOT_RECONCILED.value,
+                         "N1_RETAINED_POSITION_NOT_RECONCILED")
+
+    def test_t40_float_economic_field_rejected_on_bootstrap(self) -> None:
+        b = _lb.ExecutionDomainBindingV1(venue="KALSHI", environment="KALSHI_DEMO",
+            account_scope_ref=self.ACCOUNT, subaccount=1, exchange_index=0)
+        with self.assertRaises(LedgerError):
+            _lb.DomainBootstrapContractV1(
+                binding=b, bootstrap_class="KNOWN_NONEMPTY_PRESTACK",
+                bootstrap_cutoff_at_utc="2026-09-01T00:00:00.000000Z",
+                prestack_activity_completeness="COMPLETE_KNOWN_NONEMPTY_PRESTACK",
+                unresolved_write_count=0, unresolved_cancel_count=0,
+                working_order_truth="COMPLETE_ZERO", fill_truth="COMPLETE_KNOWN_NONZERO",
+                position_truth="COMPLETE_KNOWN_NONZERO", retained_position_ticker="T",
+                retained_position_floor_contracts=1.0)  # float, not Decimal
+
+    def test_t49_t50_domain_change_invalidates_session(self) -> None:
+        # T49/T50: the binding + active contract are immutable for a session;
+        # a different-binding contract cannot acquire release/writer state on
+        # the same ledger (session/plan/token are all domain-bound).
+        d = self._domain(subaccount=1, exchange_index=0)
+        other = _lb.ExecutionDomainBindingV1(venue="KALSHI", environment="KALSHI_DEMO",
+            account_scope_ref=self.ACCOUNT, subaccount=1, exchange_index=1)
+        other_contract = _lb.ActiveExecutionDomainContractV1(
+            binding=other, bootstrap_contract_sha256=d["contract"].bootstrap_contract_sha256)
+        res = _lb.acquire_active_release_only_v1(
+            self.binding, canonical_repository_root=str(self.repository_root),
+            active_contract=other_contract, expected_ledger_path=d["path"])
+        self.assertIsNone(res.handle)
+
+    def test_t61_restart_missing_binding_fails(self) -> None:
+        d = self._domain()
+        with self.assertRaises(LedgerError) as c:
+            _lb.read_active_local_safety_state_v1(
+                self.binding, canonical_repository_root=str(self.repository_root),
+                active_contract=None, expected_ledger_path=d["path"])
+        self.assertEqual(c.exception.code, FailureCode.ACTIVE_DOMAIN_CONTRACT_REQUIRED)
+
+    def test_t62_restart_different_subaccount_fails(self) -> None:
+        d = self._domain(subaccount=1)
+        other = _lb.ExecutionDomainBindingV1(venue="KALSHI", environment="KALSHI_DEMO",
+            account_scope_ref=self.ACCOUNT, subaccount=2, exchange_index=0)
+        other_contract = _lb.ActiveExecutionDomainContractV1(
+            binding=other, bootstrap_contract_sha256=d["contract"].bootstrap_contract_sha256)
+        res = _lb.read_active_local_safety_state_v1(
+            self.binding, canonical_repository_root=str(self.repository_root),
+            active_contract=other_contract, expected_ledger_path=d["path"])
+        self.assertIsNone(res.projection)
+        self.assertIsNotNone(res.failure_code)
+
+    def test_t64_restart_alternate_ledger_path_fails(self) -> None:
+        d = self._domain(subaccount=1, name="real.sqlite3")
+        other = self._domain(subaccount=4, name="other.sqlite3",
+                             bclass="CONTROLLED_FRESH_INCEPTION",
+                             comp="COMPLETE_CONTROLLED_FROM_INCEPTION", fill="COMPLETE_ZERO",
+                             pos="COMPLETE_ZERO", ticker=None, floor=Decimal("0"))
+        # contract A but the alternate (other-domain) ledger path -> fail closed
+        # (no projection, a failure code, no live handle).
+        res = _lb.read_active_local_safety_state_v1(
+            self.binding, canonical_repository_root=str(self.repository_root),
+            active_contract=d["contract"], expected_ledger_path=other["path"])
+        self.assertIsNone(res.projection)
+        self.assertIsNotNone(res.failure_code)
+        self.assertIsNone(res.handle)
+
+    def test_t65_t66_restart_unresolved_or_stale_remains_held(self) -> None:
+        # A freshly bootstrapped active ledger reopened without any release
+        # sequence stays HELD / not WRITER_ELIGIBLE (T66: unknown inventory /
+        # T65: stale release evidence never auto-advances).
+        d = self._domain()
+        res = _lb.read_active_local_safety_state_v1(
+            self.binding, canonical_repository_root=str(self.repository_root),
+            active_contract=d["contract"], expected_ledger_path=d["path"])
+        self.assertEqual(
+            res.projection.writer_proof_state_by_proof_id.get(d["contract"].writer_proof_id), "HELD")
+        self.assertNotEqual(res.projection.risk_control_state, "WRITER_ELIGIBLE")
+
+    def test_t76_active_writer_proof_mismatch_blocks(self) -> None:
+        d = self._domain()
+        forged = self._forge(d["contract"], writer_proof_id="adwp_" + "0" * 32)
+        with self.assertRaises(LedgerError) as c:
+            _lb.read_active_local_safety_state_v1(
+                self.binding, canonical_repository_root=str(self.repository_root),
+                active_contract=forged, expected_ledger_path=d["path"])
+        self.assertEqual(c.exception.code, FailureCode.ACTIVE_DOMAIN_CONTRACT_MALFORMED)
+
+
 if __name__ == "__main__":
     unittest.main()

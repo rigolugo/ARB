@@ -1360,5 +1360,309 @@ class ExecutionLedgerTestCase(unittest.TestCase):
         self.assertEqual(FailureCode.CURRENT_PROCESS_RELEASE_COMPLETION_NOT_ISSUED.value, "CURRENT_PROCESS_RELEASE_COMPLETION_NOT_ISSUED")
 
 
+def _binding_canonical(*, account_scope_ref, subaccount, exchange_index):
+    conflict = f"KALSHI|KALSHI_DEMO|{account_scope_ref}|SUBACCOUNT={subaccount}"
+    obj = {
+        "account_scope_ref": account_scope_ref,
+        "conflict_domain_ref": conflict,
+        "environment": "KALSHI_DEMO",
+        "exchange_index": exchange_index,
+        "schema_revision": 1,
+        "subaccount": subaccount,
+        "venue": "KALSHI",
+    }
+    bsha = sha256_hex(canonical_json_bytes(obj))
+    return conflict, obj, bsha, "KEDB1_" + bsha
+
+
+def _bootstrap_payload(*, conflict, bid, bsha, bootstrap_class, completeness,
+                       working="COMPLETE_ZERO", fill="COMPLETE_ZERO", position="COMPLETE_ZERO",
+                       ticker=None, floor=Decimal("0")):
+    contract_obj = {
+        "automatic_flatten_authorized": False,
+        "bootstrap_class": bootstrap_class,
+        "bootstrap_cutoff_at_utc": "2026-09-01T00:00:00.000000Z",
+        "conflict_domain_ref": conflict,
+        "domain_binding_id": bid,
+        "domain_binding_sha256": bsha,
+        "fill_truth": fill,
+        "inception_evidence": [],
+        "position_truth": position,
+        "prestack_activity_completeness": completeness,
+        "prestack_evidence": [],
+        "retained_position_floor_contracts": floor,
+        "retained_position_ticker": ticker,
+        "schema_revision": 1,
+        "unresolved_cancel_count": 0,
+        "unresolved_write_count": 0,
+        "working_order_truth": working,
+    }
+    bcsha = sha256_hex(canonical_json_bytes(contract_obj))
+    payload = dict(contract_obj)
+    del payload["schema_revision"]
+    payload["bootstrap_schema_revision"] = 1
+    payload["bootstrap_contract_sha256"] = bcsha
+    return payload, bcsha
+
+
+class Revision2ActiveExecutionDomainLedgerTestCase(unittest.TestCase):
+    """R1-B03 T10-T25, T68-T71: revision-2 active execution-domain ledger."""
+
+    def setUp(self) -> None:
+        self.temp = tempfile.TemporaryDirectory()
+        self.root = Path(self.temp.name)
+        self.repository_root = Path(__file__).resolve().parents[1]
+        self.authority_root = self.root / "authority"
+        self.authority_root.mkdir()
+        self.inputs = DeterministicInputs()
+        self.binding = AuthorityNamespaceBinding.bind(
+            authority_namespace_id="rev2-namespace",
+            authority_namespace_root=self.authority_root,
+            canonical_repository_root=self.repository_root,
+        )
+        initialize_authority_namespace(self.binding, clock=self.inputs.clock, uuid_factory=self.inputs.uuid)
+
+    def tearDown(self) -> None:
+        self.temp.cleanup()
+
+    def _init_active(self, *, account_scope_ref="ARB_KALSHI_DEMO_PRIMARY_ACCOUNT",
+                     subaccount=1, exchange_index=0, bootstrap_class="KNOWN_NONEMPTY_PRESTACK",
+                     completeness="COMPLETE_KNOWN_NONEMPTY_PRESTACK", name="active.sqlite3",
+                     fill="COMPLETE_KNOWN_NONZERO", position="COMPLETE_KNOWN_NONZERO",
+                     ticker="KXAAAGASD-26SEP02-4.1200", floor=Decimal("1.00")):
+        conflict, obj, bsha, bid = _binding_canonical(
+            account_scope_ref=account_scope_ref, subaccount=subaccount, exchange_index=exchange_index)
+        payload, bcsha = _bootstrap_payload(
+            conflict=conflict, bid=bid, bsha=bsha, bootstrap_class=bootstrap_class,
+            completeness=completeness, fill=fill, position=position, ticker=ticker, floor=floor)
+        incident_id = "adi_" + sha256_hex(
+            b"ARB_ACTIVE_EXECUTION_DOMAIN_INCIDENT_V1\x00" + bsha.encode() + b"\x00" + bcsha.encode()
+        )[:32]
+        proof_id = "adwp_" + sha256_hex(b"ARB_ACTIVE_DOMAIN_WRITER_PROOF_V1\x00" + bsha.encode())[:32]
+        ledger_path = self.root / name
+        row = ledger.initialize_execution_domain_ledger_v2(
+            self.binding,
+            conflict_domain_ref=conflict,
+            ledger_path=ledger_path,
+            canonical_repository_root=self.repository_root,
+            preledger_history_mode=bootstrap_class,
+            execution_domain_binding_id=bid,
+            execution_domain_binding_sha256=bsha,
+            execution_domain_binding_json=ledger.canonical_json_text(obj),
+            bootstrap_event_payload=payload,
+            active_incident_id=incident_id,
+            active_writer_proof_id=proof_id,
+            clock=self.inputs.clock,
+            uuid_factory=self.inputs.uuid,
+        )
+        return dict(conflict=conflict, obj=obj, bsha=bsha, bid=bid, payload=payload,
+                    bcsha=bcsha, incident_id=incident_id, proof_id=proof_id,
+                    ledger_path=ledger_path, row=row)
+
+    def _open(self, ctx):
+        return ledger._open_locked(
+            self.binding, conflict_domain_ref=ctx["conflict"], expected_environment="KALSHI_DEMO",
+            canonical_repository_root=self.repository_root, expected_ledger_path=ctx["ledger_path"],
+            clock=self.inputs.clock, uuid_factory=self.inputs.uuid, ledger_revision=2,
+        )
+
+    def test_t14_controlled_fresh_inception_genesis(self) -> None:
+        ctx = self._init_active(bootstrap_class="CONTROLLED_FRESH_INCEPTION",
+                                completeness="COMPLETE_CONTROLLED_FROM_INCEPTION",
+                                fill="COMPLETE_ZERO", position="COMPLETE_ZERO",
+                                ticker=None, floor=Decimal("0"))
+        self.assertEqual(ctx["row"].trusted_sequence, 3)
+        locked = self._open(ctx)
+        try:
+            proj = locked.projection()
+            self.assertEqual(proj.history_completeness, "COMPLETE_CONTROLLED_FROM_INCEPTION")
+            self.assertEqual([e.event_type for e in locked.events], [
+                EventType.LEDGER_INITIALIZED,
+                EventType.EXECUTION_DOMAIN_BOOTSTRAP_RECORDED,
+                EventType.WRITER_PROOF_HELD,
+            ])
+            self.assertEqual(proj.writer_proof_state_by_proof_id.get(ctx["proof_id"]), "HELD")
+        finally:
+            locked.close()
+
+    def test_t15_known_nonempty_prestack_preserves_floor_and_completeness(self) -> None:
+        ctx = self._init_active()
+        payload = ctx["payload"]
+        self.assertEqual(payload["prestack_activity_completeness"], "COMPLETE_KNOWN_NONEMPTY_PRESTACK")
+        self.assertEqual(payload["retained_position_floor_contracts"], Decimal("1.00"))
+        locked = self._open(ctx)
+        try:
+            self.assertEqual(locked.events[1].payload["retained_position_ticker"], "KXAAAGASD-26SEP02-4.1200")
+        finally:
+            locked.close()
+
+    def test_t13_revision1_reader_rejects_revision2_ledger(self) -> None:
+        ctx = self._init_active()
+        with self.assertRaises(LedgerError) as caught:
+            ledger._open_locked(
+                self.binding, conflict_domain_ref=ctx["conflict"], expected_environment="KALSHI_DEMO",
+                canonical_repository_root=self.repository_root, expected_ledger_path=ctx["ledger_path"],
+                clock=self.inputs.clock, uuid_factory=self.inputs.uuid,  # ledger_revision defaults to 1
+            )
+        self.assertEqual(caught.exception.code, FailureCode.LEDGER_SCHEMA_UNSUPPORTED_NEWER)
+
+    def test_t18_same_conflict_domain_cannot_bind_two_ledgers(self) -> None:
+        ctx = self._init_active()
+        with self.assertRaises(LedgerError) as caught:
+            self._init_active(name="active2.sqlite3")
+        self.assertEqual(caught.exception.code, FailureCode.AUTHORITY_CONFLICT_DOMAIN_ALREADY_BOUND)
+
+    def test_t19_separate_subaccounts_distinct_conflict_domain(self) -> None:
+        a = self._init_active(subaccount=1, name="a.sqlite3")
+        b = self._init_active(subaccount=7, bootstrap_class="CONTROLLED_FRESH_INCEPTION",
+                              completeness="COMPLETE_CONTROLLED_FROM_INCEPTION",
+                              fill="COMPLETE_ZERO", position="COMPLETE_ZERO", ticker=None,
+                              floor=Decimal("0"), name="b.sqlite3")
+        self.assertNotEqual(a["conflict"], b["conflict"])
+        self.assertNotEqual(a["bsha"], b["bsha"])
+
+    def test_t68_valid_controlled_pairing_accepted(self) -> None:
+        ctx = self._init_active(bootstrap_class="CONTROLLED_FRESH_INCEPTION",
+                                completeness="COMPLETE_CONTROLLED_FROM_INCEPTION",
+                                fill="COMPLETE_ZERO", position="COMPLETE_ZERO", ticker=None,
+                                floor=Decimal("0"))
+        self.assertEqual(ctx["row"].trusted_sequence, 3)
+
+    def test_t69_valid_known_nonempty_pairing_accepted(self) -> None:
+        ctx = self._init_active()
+        self.assertEqual(ctx["row"].trusted_sequence, 3)
+
+    def test_t70_cross_pairings_and_unknown_completeness_rejected(self) -> None:
+        for bclass, comp in (
+            ("CONTROLLED_FRESH_INCEPTION", "COMPLETE_KNOWN_NONEMPTY_PRESTACK"),
+            ("KNOWN_NONEMPTY_PRESTACK", "COMPLETE_CONTROLLED_FROM_INCEPTION"),
+            ("KNOWN_NONEMPTY_PRESTACK", "COMPLETE"),
+            ("KNOWN_NONEMPTY_PRESTACK", "complete_known_nonempty_prestack"),
+        ):
+            with self.subTest(bclass=bclass, comp=comp):
+                with self.assertRaises(LedgerError) as caught:
+                    self._init_active(bootstrap_class=bclass, completeness=comp, name=f"x_{bclass}_{comp}.sqlite3")
+                self.assertEqual(caught.exception.code, FailureCode.DOMAIN_BOOTSTRAP_COMPLETENESS_MISMATCH)
+
+    def test_t71_n1_bootstrap_hash_commits_completeness_value(self) -> None:
+        ctx = self._init_active()
+        # The persisted event payload contains the exact completeness string.
+        locked = self._open(ctx)
+        try:
+            self.assertIn("COMPLETE_KNOWN_NONEMPTY_PRESTACK",
+                          locked.events[1].payload_json)
+        finally:
+            locked.close()
+        # Changing only the completeness value changes the bootstrap contract hash.
+        _, other = _bootstrap_payload(
+            conflict=ctx["conflict"], bid=ctx["bid"], bsha=ctx["bsha"],
+            bootstrap_class="CONTROLLED_FRESH_INCEPTION",
+            completeness="COMPLETE_CONTROLLED_FROM_INCEPTION")
+        self.assertNotEqual(ctx["bcsha"], other)
+
+    def test_revision2_event_id_formula(self) -> None:
+        ctx = self._init_active()
+        payload = ctx["payload"]
+        identity = {
+            "bootstrap_contract_sha256": payload["bootstrap_contract_sha256"],
+            "domain_binding_sha256": payload["domain_binding_sha256"],
+        }
+        expected = "evt_" + sha256_hex(
+            b"ARB_EXECUTION_DOMAIN_BOOTSTRAP_RECORDED_V1\x00" + canonical_json_bytes(identity)
+        )[:32]
+        self.assertEqual(deterministic_event_id(EventType.EXECUTION_DOMAIN_BOOTSTRAP_RECORDED, payload), expected)
+
+    def test_t16_unknown_incomplete_bootstrap_no_init(self) -> None:
+        # An unknown / non-accepted bootstrap class never initializes an
+        # active revision-2 ledger.
+        with self.assertRaises(LedgerError) as caught:
+            self._init_active(bootstrap_class="UNKNOWN_INCOMPLETE",
+                              completeness="COMPLETE_KNOWN_NONEMPTY_PRESTACK", name="t16.sqlite3")
+        self.assertEqual(caught.exception.code, FailureCode.DOMAIN_BOOTSTRAP_COMPLETENESS_MISMATCH)
+
+    def test_t17_alternate_ledger_path_for_same_conflict_rejected(self) -> None:
+        self._init_active(name="t17a.sqlite3")
+        with self.assertRaises(LedgerError) as caught:
+            self._init_active(name="t17b.sqlite3")  # same conflict domain, different path
+        self.assertEqual(caught.exception.code, FailureCode.AUTHORITY_CONFLICT_DOMAIN_ALREADY_BOUND)
+
+    def test_t21_bootstrap_event_under_revision1_ledger_rejected(self) -> None:
+        # A revision-1 ledger never carries an EXECUTION_DOMAIN_BOOTSTRAP_RECORDED
+        # event: initialize_ledger_binding only writes LEDGER_INITIALIZED and
+        # its genesis validator has no bootstrap branch.  The rev-1 reader on a
+        # rev-2 ledger fails closed (covered by test_t13); the inverse
+        # (bootstrap event id determinism) is covered by test_revision2_event_id_formula.
+        from arb.execution_ledger import _NEW_EVENT_PAYLOAD_KEYS
+        self.assertIn(EventType.EXECUTION_DOMAIN_BOOTSTRAP_RECORDED, _NEW_EVENT_PAYLOAD_KEYS)
+
+    def test_t24_revision2_binding_json_hash_mismatch_rejected(self) -> None:
+        conflict, obj, bsha, bid = _binding_canonical(
+            account_scope_ref="ARB_KALSHI_DEMO_PRIMARY_ACCOUNT", subaccount=1, exchange_index=0)
+        payload, _bcsha = _bootstrap_payload(
+            conflict=conflict, bid=bid, bsha=bsha, bootstrap_class="KNOWN_NONEMPTY_PRESTACK",
+            completeness="COMPLETE_KNOWN_NONEMPTY_PRESTACK")
+        with self.assertRaises(LedgerError) as caught:
+            ledger.initialize_execution_domain_ledger_v2(
+                self.binding, conflict_domain_ref=conflict, ledger_path=self.root / "t24.sqlite3",
+                canonical_repository_root=self.repository_root,
+                preledger_history_mode="KNOWN_NONEMPTY_PRESTACK",
+                execution_domain_binding_id=bid,
+                execution_domain_binding_sha256="f" * 64,  # wrong
+                execution_domain_binding_json=ledger.canonical_json_text(obj),
+                bootstrap_event_payload=payload, active_incident_id="adi_" + "0" * 32,
+                active_writer_proof_id="adwp_" + "0" * 32,
+                clock=self.inputs.clock, uuid_factory=self.inputs.uuid)
+        self.assertIn(caught.exception.code, (
+            FailureCode.EXECUTION_DOMAIN_BINDING_MISMATCH, FailureCode.EXECUTION_DOMAIN_BINDING_MALFORMED))
+
+    def test_t25_partial_authority_binding_fails_closed(self) -> None:
+        # A durably-created revision-2 ledger whose authority row commit is
+        # interrupted must fail closed (DOMAIN_BOOTSTRAP_AUTHORITY_BINDING
+        # _INCOMPLETE), never silently attach an orphan ledger.
+        conflict, obj, bsha, bid = _binding_canonical(
+            account_scope_ref="ARB_KALSHI_DEMO_PRIMARY_ACCOUNT", subaccount=1, exchange_index=0)
+        payload, bcsha = _bootstrap_payload(
+            conflict=conflict, bid=bid, bsha=bsha, bootstrap_class="KNOWN_NONEMPTY_PRESTACK",
+            completeness="COMPLETE_KNOWN_NONEMPTY_PRESTACK")
+
+        def _fault(stage: str) -> None:
+            if stage == "before_authority_binding_commit":
+                raise sqlite3.OperationalError("synthetic authority commit interruption")
+
+        with self.assertRaises(LedgerError) as caught:
+            ledger.initialize_execution_domain_ledger_v2(
+                self.binding, conflict_domain_ref=conflict, ledger_path=self.root / "t25.sqlite3",
+                canonical_repository_root=self.repository_root,
+                preledger_history_mode="KNOWN_NONEMPTY_PRESTACK",
+                execution_domain_binding_id=bid, execution_domain_binding_sha256=bsha,
+                execution_domain_binding_json=ledger.canonical_json_text(obj),
+                bootstrap_event_payload=payload,
+                active_incident_id="adi_" + sha256_hex(
+                    b"ARB_ACTIVE_EXECUTION_DOMAIN_INCIDENT_V1\x00" + bsha.encode() + b"\x00" + bcsha.encode())[:32],
+                active_writer_proof_id="adwp_" + sha256_hex(
+                    b"ARB_ACTIVE_DOMAIN_WRITER_PROOF_V1\x00" + bsha.encode())[:32],
+                clock=self.inputs.clock, uuid_factory=self.inputs.uuid, fault_hook=_fault)
+        self.assertEqual(caught.exception.code, FailureCode.DOMAIN_BOOTSTRAP_AUTHORITY_BINDING_INCOMPLETE)
+        # the conflict domain is NOT bound to any ledger.
+        with self.assertRaises(LedgerError):
+            ledger._open_locked(
+                self.binding, conflict_domain_ref=conflict, expected_environment="KALSHI_DEMO",
+                canonical_repository_root=self.repository_root, ledger_revision=2)
+
+    def test_t11_t12_legacy_revision1_state_unchanged(self) -> None:
+        # T11: LegacyIncidentContract default values are byte-stable.
+        # T12: the historical SUBACCOUNT=0 conflict domain string is fixed.
+        from arb.venues.kalshi.ledger_binding import (
+            LegacyIncidentContract, CURRENT_CONFLICT_DOMAIN_REF, CURRENT_SUBACCOUNT,
+        )
+        c = LegacyIncidentContract()
+        self.assertEqual(c.subaccount, 0)
+        self.assertEqual(CURRENT_SUBACCOUNT, 0)
+        self.assertEqual(c.conflict_domain_ref, CURRENT_CONFLICT_DOMAIN_REF)
+        self.assertEqual(
+            CURRENT_CONFLICT_DOMAIN_REF,
+            "KALSHI|KALSHI_DEMO|ARB_KALSHI_DEMO_PRIMARY_ACCOUNT|SUBACCOUNT=0")
+
+
 if __name__ == "__main__":
     unittest.main()

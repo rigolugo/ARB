@@ -18,7 +18,10 @@ from types import MappingProxyType
 from typing import Callable, Mapping, Protocol, Sequence
 
 from arb.execution_ledger import canonical_json_bytes, canonical_timestamp, sha256_hex
-from arb.venues.kalshi.ledger_binding import EmergencyControlLedgerHandle
+from arb.venues.kalshi.ledger_binding import (
+    ActiveExecutionDomainContractV1,
+    EmergencyControlLedgerHandle,
+)
 
 
 CANCEL_SOURCE_BINDING_ID = "KSR-02_CANCEL_ORDER_V2_2026-08-13T20:18:41Z"
@@ -42,6 +45,7 @@ class EmergencyCancelCode(enum.StrEnum):
     CANCEL_RESULT_EVIDENCE_CONFLICT = "CANCEL_RESULT_EVIDENCE_CONFLICT"
     CANCEL_UNRESOLVED = "CANCEL_UNRESOLVED"
     DEADLINE_EXCEEDED = "DEADLINE_EXCEEDED"
+    EMERGENCY_CANCEL_DOMAIN_MISMATCH = "EMERGENCY_CANCEL_DOMAIN_MISMATCH"
 
 
 class EmergencyCancelError(RuntimeError):
@@ -228,6 +232,15 @@ class EmergencyCancelPermit:
     deadline_id: str
     deadline_absolute_monotonic_ns: int
     private_gate_identity: object
+    # DSB-EMERG-002 active execution-domain commitments.  ``conflict_domain_ref``
+    # / ``subaccount`` / ``exchange_index`` are always bound from the
+    # authoritative target; ``active_contract_sha256`` / ``domain_binding_sha256``
+    # are bound only when the gate carries an active-domain contract.
+    conflict_domain_ref: str | None = None
+    subaccount: int | None = None
+    exchange_index: int | None = None
+    active_contract_sha256: str | None = None
+    domain_binding_sha256: str | None = None
 
     def __init__(self, key: object, **values: object) -> None:
         if key is not _PERMIT_KEY:
@@ -257,12 +270,16 @@ class EmergencyCancelGate:
         monotonic_clock_ns: Callable[[], int],
         wall_clock: Callable[[], object],
         uuid_factory: Callable[[], uuid.UUID] = uuid.uuid4,
+        active_contract: ActiveExecutionDomainContractV1 | None = None,
     ) -> None:
         if type(handle) is not EmergencyControlLedgerHandle or type(rate_lane) is not EmergencyRateLane or type(process_instance_id) is not str or _ID_PATTERNS["process"].fullmatch(process_instance_id) is None:
             raise EmergencyCancelError(EmergencyCancelCode.EMERGENCY_CANCEL_PERMIT_INVALID)
+        if active_contract is not None and type(active_contract) is not ActiveExecutionDomainContractV1:
+            raise EmergencyCancelError(EmergencyCancelCode.EMERGENCY_CANCEL_DOMAIN_MISMATCH)
         self.__handle = handle
         self.__lane = rate_lane
         self.__process = process_instance_id
+        self.__active_contract = active_contract
         self.__monotonic = monotonic_clock_ns
         self.__wall = wall_clock
         self.__uuid = uuid_factory
@@ -298,6 +315,15 @@ class EmergencyCancelGate:
         action = projection.emergency_actions_by_id.get(action_id.value)
         if action is None or target.order_id not in action["target_order_ids"]:
             raise EmergencyCancelError(EmergencyCancelCode.EMERGENCY_TARGET_NOT_AUTHORITATIVE)
+        # DSB-EMERG-001/003: an active emergency controller may target only its
+        # own exact domain.  An N=1 controller can never authoritatively bind an
+        # N=0 (or any other-domain) order.
+        if self.__active_contract is not None and (
+            target.conflict_domain_ref != self.__active_contract.conflict_domain_ref
+            or target.subaccount != self.__active_contract.subaccount
+            or target.exchange_index != self.__active_contract.exchange_index
+        ):
+            raise EmergencyCancelError(EmergencyCancelCode.EMERGENCY_CANCEL_DOMAIN_MISMATCH)
         start_ns = self.__monotonic()
         if type(start_ns) is not int or start_ns < 0:
             raise EmergencyCancelError(EmergencyCancelCode.DEADLINE_EXCEEDED)
@@ -368,6 +394,17 @@ class EmergencyCancelGate:
             authority_trusted_hash=after_boundary.trusted_event_hash,
             deadline_id=deadline_id, deadline_absolute_monotonic_ns=deadline_ns,
             private_gate_identity=self.__identity,
+            conflict_domain_ref=target.conflict_domain_ref,
+            subaccount=target.subaccount,
+            exchange_index=target.exchange_index,
+            active_contract_sha256=(
+                self.__active_contract.contract_sha256
+                if self.__active_contract is not None else None
+            ),
+            domain_binding_sha256=(
+                self.__active_contract.domain_binding_sha256
+                if self.__active_contract is not None else None
+            ),
         )
         with self.__mutex:
             self.__states[attempt_id.value] = 0
