@@ -20,14 +20,15 @@ Canonical governance and restart router. This file does not grant capability and
 12. `project_context/PROJECT_STATE_CHECKPOINT_2026_08_29_ROUTE_B_B1_SOURCE_BINDING_CORRECTION_02_INSTALLATION.md`
 13. `project_context/PROJECT_STATE_CHECKPOINT_2026_09_01_KALSHI_DEMO_SUBACCOUNT1_EMPIRICAL_QUALIFICATION.md`
 14. `project_context/PROJECT_STATE_CHECKPOINT_2026_09_04_R1_B03_DYNAMIC_SUBACCOUNT_DOMAIN_BINDING_IMPLEMENTATION.md`
-15. `project_archive/route_a_2026_08_26/README.md` and its manifest when exact accepted Route-A specification/handoff bytes are needed
-16. `project_context/AGENT_ROLES.md`
-17. `project_context/LOCAL_EXECUTION_ENVIRONMENT.md`
-18. `project_context/AUTHORIZATION_LOG.md`
-19. `project_context/DECISION_LOG.md`
-20. `BROWSER_BRANCH_REPOSITORY_TRANSFER_WORKFLOW.md`
-21. `project_context/MARCO_IMPLEMENTATION_REVIEW_PACKAGE_WORKFLOW.md`
-22. task-specific accepted specifications, handoffs, reviews, artifacts, or evidence only when relevant to the active task
+15. `project_context/PROJECT_STATE_CHECKPOINT_2026_09_05_R1_B04_VALIDATION_AND_C05_REVIEW.md`
+16. `project_archive/route_a_2026_08_26/README.md` and its manifest when exact accepted Route-A specification/handoff bytes are needed
+17. `project_context/AGENT_ROLES.md`
+18. `project_context/LOCAL_EXECUTION_ENVIRONMENT.md`
+19. `project_context/AUTHORIZATION_LOG.md`
+20. `project_context/DECISION_LOG.md`
+21. `BROWSER_BRANCH_REPOSITORY_TRANSFER_WORKFLOW.md`
+22. `project_context/MARCO_IMPLEMENTATION_REVIEW_PACKAGE_WORKFLOW.md`
+23. task-specific accepted specifications, handoffs, reviews, artifacts, or evidence only when relevant to the active task
 
 `project_context/ARTIFACT_INDEX.md` remains the canonical artifact-reference ledger for entries already indexed there. The routed current-state checkpoints record accepted state facts that post-date portions of `PROJECT_STATE.md` and `ARTIFACT_INDEX.md` until a later bounded consolidation folds those facts into the long-form state/index. `project_archive/route_a_2026_08_26/` is the lossless repository-resident archive for the accepted public Route-A specification/handoff bytes listed by its manifest.
 
@@ -79,7 +80,9 @@ Use existing checkpoints, the artifact index, and existing owner artifacts befor
 
 `PROJECT_STATE_CHECKPOINT_2026_09_01_KALSHI_DEMO_SUBACCOUNT1_EMPIRICAL_QUALIFICATION.md` is the Route-1 execution-domain empirical-qualification overlay, installed on canonical `main`. It preserves the direct empirical creation and controlled inception of Demo `SUBACCOUNT=1`, its funded exchange-index-0 state, ticker-auto-routed CreateOrder binding to `SUBACCOUNT=1`, observed top-level HTTP-201 CreateOrder response shape, exact-order read-after-write visibility, live queue-position behavior, explicit exact DELETE cancellation, and the separately accepted executable N=1 fill/readback/position-isolation result. It preserves the historical primary `SUBACCOUNT=0` hold unchanged, records the intentionally retained controlled N=1 position with no automatic flatten authorization, and routes future work through explicit stack/risk-control binding. This exact Demo evidence does not authorize additional writes or imply production behavior.
 
-`PROJECT_STATE_CHECKPOINT_2026_09_04_R1_B03_DYNAMIC_SUBACCOUNT_DOMAIN_BINDING_IMPLEMENTATION.md` is the latest R1-B03 overlay and supersedes the immediately preceding checkpoint's next-action text where it says the subaccount-1 stack binding/risk-control implementation is still pending. It records the Marco-approved and canonically installed dynamic subaccount execution-domain binding and risk-control implementation (Corrections 06-09), including the exact active-V2 fill-identity closure (Correction 09), at implementation commit `9fb33f153f06c0a42a05850d049f896705a7b315`. It preserves the historical primary `SUBACCOUNT=0` hold unchanged and grants no production capability, additional venue write, or profitability/arbitrage claim.
+`PROJECT_STATE_CHECKPOINT_2026_09_04_R1_B03_DYNAMIC_SUBACCOUNT_DOMAIN_BINDING_IMPLEMENTATION.md` is the R1-B03 overlay recording the Marco-approved and canonically installed dynamic subaccount execution-domain binding and risk-control implementation (Corrections 06-09), including the exact active-V2 fill-identity closure (Correction 09), at implementation commit `9fb33f153f06c0a42a05850d049f896705a7b315`. It preserves the historical primary `SUBACCOUNT=0` hold unchanged and grants no production capability, additional venue write, or profitability/arbitrage claim.
+
+`PROJECT_STATE_CHECKPOINT_2026_09_05_R1_B04_VALIDATION_AND_C05_REVIEW.md` is the latest overlay and supersedes the immediately preceding checkpoint's next-action text where it says R1-B04 remains not started or R1-C05 remains pending. It records the completed R1-B04/11 offline static and regression validation of the R1-B03 installed implementation (focused 1818 passed + 80 subtests; full 3408 passed + 568 subtests; T01-T158 mapping COMPLETE; static conformance PASS) and the completed Marco R1-C05/11 formal review (disposition APPROVE, no material findings). It preserves the historical primary `SUBACCOUNT=0` hold unchanged, grants no production capability, additional venue write, or profitability/arbitrage claim, and does not authorize R1-D07.
 
 Each checkpoint controls over older state text on its exact listed facts until consolidated. Audit logs and `ARTIFACT_INDEX.md` are historical/reference records and may lag a later accepted technical state until a bounded governance update records it. Absence of a later event from an audit log or index is not evidence that the event did not occur; agents must use the authority hierarchy above, exact active Gustavo authorization, current canonical `main`, and task-specific accepted identities.
 
@@ -102,7 +105,8 @@ Before obtaining fresh evidence, the continuity workflow requires inspection of 
 - Route-B B1 current-source resolution and provenance correction: `PROJECT_STATE_CHECKPOINT_2026_08_28_ROUTE_B_B1_CURRENT_OPENAPI_SOURCE_RESOLUTION.md`
 - Latest Route-B B1 approved source-binding correction installation and next-action overlay: `PROJECT_STATE_CHECKPOINT_2026_08_29_ROUTE_B_B1_SOURCE_BINDING_CORRECTION_02_INSTALLATION.md`
 - Route-1 N=1 empirical qualification overlay: `PROJECT_STATE_CHECKPOINT_2026_09_01_KALSHI_DEMO_SUBACCOUNT1_EMPIRICAL_QUALIFICATION.md`
-- Latest R1-B03 dynamic subaccount domain binding implementation-installation and next-action overlay: `PROJECT_STATE_CHECKPOINT_2026_09_04_R1_B03_DYNAMIC_SUBACCOUNT_DOMAIN_BINDING_IMPLEMENTATION.md`
+- R1-B03 dynamic subaccount domain binding implementation-installation overlay: `PROJECT_STATE_CHECKPOINT_2026_09_04_R1_B03_DYNAMIC_SUBACCOUNT_DOMAIN_BINDING_IMPLEMENTATION.md`
+- Latest R1-B04 validation and R1-C05 review canonicalization and next-action overlay: `PROJECT_STATE_CHECKPOINT_2026_09_05_R1_B04_VALIDATION_AND_C05_REVIEW.md`
 - Canonical sanitized B1 current-source report: `../project_archive/kalshi_sources/KALSHI_CURRENT_OPENAPI_SOURCE_RESOLUTION_01_REPORT.json`
 - Exact raw B1 current OpenAPI source: LOCAL_ONLY external evidence identified by the latest B1 source-resolution checkpoint
 - Lossless accepted public Route-A specification/handoff archive: `../project_archive/route_a_2026_08_26/README.md`
