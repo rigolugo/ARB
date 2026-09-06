@@ -21,14 +21,15 @@ Canonical governance and restart router. This file does not grant capability and
 13. `project_context/PROJECT_STATE_CHECKPOINT_2026_09_01_KALSHI_DEMO_SUBACCOUNT1_EMPIRICAL_QUALIFICATION.md`
 14. `project_context/PROJECT_STATE_CHECKPOINT_2026_09_04_R1_B03_DYNAMIC_SUBACCOUNT_DOMAIN_BINDING_IMPLEMENTATION.md`
 15. `project_context/PROJECT_STATE_CHECKPOINT_2026_09_05_R1_B04_VALIDATION_AND_C05_REVIEW.md`
-16. `project_archive/route_a_2026_08_26/README.md` and its manifest when exact accepted Route-A specification/handoff bytes are needed
-17. `project_context/AGENT_ROLES.md`
-18. `project_context/LOCAL_EXECUTION_ENVIRONMENT.md`
-19. `project_context/AUTHORIZATION_LOG.md`
-20. `project_context/DECISION_LOG.md`
-21. `BROWSER_BRANCH_REPOSITORY_TRANSFER_WORKFLOW.md`
-22. `project_context/MARCO_IMPLEMENTATION_REVIEW_PACKAGE_WORKFLOW.md`
-23. task-specific accepted specifications, handoffs, reviews, artifacts, or evidence only when relevant to the active task
+16. `project_context/PROJECT_STATE_CHECKPOINT_2026_09_05_R1_D07_MARKET_SELECTION_AND_READ_ONLY_PREFLIGHT_PREPARATION.md`
+17. `project_archive/route_a_2026_08_26/README.md` and its manifest when exact accepted Route-A specification/handoff bytes are needed
+18. `project_context/AGENT_ROLES.md`
+19. `project_context/LOCAL_EXECUTION_ENVIRONMENT.md`
+20. `project_context/AUTHORIZATION_LOG.md`
+21. `project_context/DECISION_LOG.md`
+22. `BROWSER_BRANCH_REPOSITORY_TRANSFER_WORKFLOW.md`
+23. `project_context/MARCO_IMPLEMENTATION_REVIEW_PACKAGE_WORKFLOW.md`
+24. task-specific accepted specifications, handoffs, reviews, artifacts, or evidence only when relevant to the active task
 
 `project_context/ARTIFACT_INDEX.md` remains the canonical artifact-reference ledger for entries already indexed there. The routed current-state checkpoints record accepted state facts that post-date portions of `PROJECT_STATE.md` and `ARTIFACT_INDEX.md` until a later bounded consolidation folds those facts into the long-form state/index. `project_archive/route_a_2026_08_26/` is the lossless repository-resident archive for the accepted public Route-A specification/handoff bytes listed by its manifest.
 
@@ -82,7 +83,9 @@ Use existing checkpoints, the artifact index, and existing owner artifacts befor
 
 `PROJECT_STATE_CHECKPOINT_2026_09_04_R1_B03_DYNAMIC_SUBACCOUNT_DOMAIN_BINDING_IMPLEMENTATION.md` is the R1-B03 overlay recording the Marco-approved and canonically installed dynamic subaccount execution-domain binding and risk-control implementation (Corrections 06-09), including the exact active-V2 fill-identity closure (Correction 09), at implementation commit `9fb33f153f06c0a42a05850d049f896705a7b315`. It preserves the historical primary `SUBACCOUNT=0` hold unchanged and grants no production capability, additional venue write, or profitability/arbitrage claim.
 
-`PROJECT_STATE_CHECKPOINT_2026_09_05_R1_B04_VALIDATION_AND_C05_REVIEW.md` is the latest overlay and supersedes the immediately preceding checkpoint's next-action text where it says R1-B04 remains not started or R1-C05 remains pending. It records the completed R1-B04/11 offline static and regression validation of the R1-B03 installed implementation (focused 1818 passed + 80 subtests; full 3408 passed + 568 subtests; T01-T158 mapping COMPLETE; static conformance PASS) and the completed Marco R1-C05/11 formal review (disposition APPROVE, no material findings). It preserves the historical primary `SUBACCOUNT=0` hold unchanged, grants no production capability, additional venue write, or profitability/arbitrage claim, and does not authorize R1-D07.
+`PROJECT_STATE_CHECKPOINT_2026_09_05_R1_B04_VALIDATION_AND_C05_REVIEW.md` is the R1-B04 validation and R1-C05 review overlay and supersedes the immediately preceding checkpoint's next-action text where it says R1-B04 remains not started or R1-C05 remains pending. It records the completed R1-B04/11 offline static and regression validation of the R1-B03 installed implementation (focused 1818 passed + 80 subtests; full 3408 passed + 568 subtests; T01-T158 mapping COMPLETE; static conformance PASS) and the completed Marco R1-C05/11 formal review (disposition APPROVE, no material findings). It preserves the historical primary `SUBACCOUNT=0` hold unchanged, grants no production capability, additional venue write, or profitability/arbitrage claim, and does not authorize R1-D07.
+
+`PROJECT_STATE_CHECKPOINT_2026_09_05_R1_D07_MARKET_SELECTION_AND_READ_ONLY_PREFLIGHT_PREPARATION.md` is the latest overlay and the routed current-state carrier for the accepted R1-D07 Kalshi Demo market-selection empirical process and the subsequent network-free live-entrypoint availability finding. It supersedes older next-action text only where that text says R1-D07 market selection has not been performed or that no task-current D07 read-only input ticker has been qualified. It preserves the exact external/local result identities for the bounded-partial `PREFLIGHT_03` precursor, the A2/A3/A4/C1/B1/C2 diagnostics, and the successful live-entrypoint availability diagnostic; the accepted selector sequence (complete bounded Get Markets discovery -> top-100 full orderbooks -> event-diverse 20 -> exact complete 6h trade windows -> five finalists -> immediate exact-market/orderbook refresh -> one read-only D07 input ticker); the `is_provisional` exact-Demo state as `NOT_EXPOSED`/unknown, never synthesized `false`; MVE exclusion provenance from the explicit `mve_filter=exclude` request parameter; market-level returned `exchange_index` as the authoritative market-selection field; the incomplete-pagination fail-closed / no-quality-inference rule; and the historical selected ticker `KXNCAAFGAME-26SEP05CLEMLSU-CLEM` scoped only to D07 read-only preflight input. The live-entrypoint disposition is `PREFLIGHT_LIVE_ENTRYPOINT_UNAVAILABLE` and the next bounded source-code task is `R1-D07_READ_ONLY_STAGE3_LIVE_ENTRYPOINT_IMPLEMENTATION_01`. Raw result JSON and diagnostic scripts remain external/local direct empirical evidence identified by exact bytes/SHA-256 and are not repository-resident. This overlay grants no production capability, no venue write, no R1-D08, and no profitability or arbitrage claim, and does not turn the diagnostic ranking heuristic into a universal profitability theorem.
 
 Each checkpoint controls over older state text on its exact listed facts until consolidated. Audit logs and `ARTIFACT_INDEX.md` are historical/reference records and may lag a later accepted technical state until a bounded governance update records it. Absence of a later event from an audit log or index is not evidence that the event did not occur; agents must use the authority hierarchy above, exact active Gustavo authorization, current canonical `main`, and task-specific accepted identities.
 
@@ -106,7 +109,8 @@ Before obtaining fresh evidence, the continuity workflow requires inspection of 
 - Latest Route-B B1 approved source-binding correction installation and next-action overlay: `PROJECT_STATE_CHECKPOINT_2026_08_29_ROUTE_B_B1_SOURCE_BINDING_CORRECTION_02_INSTALLATION.md`
 - Route-1 N=1 empirical qualification overlay: `PROJECT_STATE_CHECKPOINT_2026_09_01_KALSHI_DEMO_SUBACCOUNT1_EMPIRICAL_QUALIFICATION.md`
 - R1-B03 dynamic subaccount domain binding implementation-installation overlay: `PROJECT_STATE_CHECKPOINT_2026_09_04_R1_B03_DYNAMIC_SUBACCOUNT_DOMAIN_BINDING_IMPLEMENTATION.md`
-- Latest R1-B04 validation and R1-C05 review canonicalization and next-action overlay: `PROJECT_STATE_CHECKPOINT_2026_09_05_R1_B04_VALIDATION_AND_C05_REVIEW.md`
+- R1-B04 validation and R1-C05 review canonicalization and next-action overlay: `PROJECT_STATE_CHECKPOINT_2026_09_05_R1_B04_VALIDATION_AND_C05_REVIEW.md`
+- Latest R1-D07 market-selection and read-only live-entrypoint preflight preparation overlay: `PROJECT_STATE_CHECKPOINT_2026_09_05_R1_D07_MARKET_SELECTION_AND_READ_ONLY_PREFLIGHT_PREPARATION.md`
 - Canonical sanitized B1 current-source report: `../project_archive/kalshi_sources/KALSHI_CURRENT_OPENAPI_SOURCE_RESOLUTION_01_REPORT.json`
 - Exact raw B1 current OpenAPI source: LOCAL_ONLY external evidence identified by the latest B1 source-resolution checkpoint
 - Lossless accepted public Route-A specification/handoff archive: `../project_archive/route_a_2026_08_26/README.md`
