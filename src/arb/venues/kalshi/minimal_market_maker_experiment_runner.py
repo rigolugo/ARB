@@ -52,16 +52,25 @@ canonically defined; none is re-implemented here.
 
 from __future__ import annotations
 
+import argparse
+import base64
 import enum
+import hashlib
+import io
+import json
 import os
 import re
+import sys
 import threading
+import time
 import uuid
+from contextlib import contextmanager
 from dataclasses import dataclass, field, fields, replace as _dataclass_replace
 from datetime import datetime, timezone
 from decimal import Decimal, InvalidOperation
+from pathlib import Path
 from types import MappingProxyType
-from typing import Callable, Mapping, Sequence, Tuple
+from typing import Callable, Iterator, Mapping, Sequence, Tuple
 
 from arb.execution_ledger import (
     ActiveLedgerMeta,
@@ -101,6 +110,7 @@ from arb.venues.kalshi.ledger_binding import (
     ReleaseLedgerHandle,
     TrustedReleaseEvidenceProjectionV1,
     TrustedReleaseEvidenceReadResultV1,
+    acquire_active_emergency_control_only_v1,
     acquire_active_normal_writer_state_v1,
     acquire_active_release_only_v1,
     acquire_normal_writer_state,
@@ -112,13 +122,19 @@ from arb.venues.kalshi.ledger_binding import (
     reconcile_retained_bootstrap_floor_v1,
 )
 from arb.venues.kalshi.risk_control import (
+    AccountRiskLimits,
     EconomicFillV1,
+    FlowRiskLimits,
     FreshnessStampV1,
     NormalWriteAdapter,
+    PerMarketRiskLimits,
+    PerOrderRiskLimits,
     PriceRangeV1,
     RiskControlError,
     RiskLimitConfigV1,
+    StateIntegrityLimits,
     UNKNOWN_UNBOUNDED,
+    VenueDefensePolicy,
     WorkingOrderV1,
     WriterEligibilityGate,
     build_orderbook_reference,
@@ -126,14 +142,42 @@ from arb.venues.kalshi.risk_control import (
     compute_permit_domain_commitment_sha256,
     validate_price_ranges,
 )
-from arb.venues.kalshi.emergency_cancel import EmergencyCancelGate
+from arb.venues.kalshi.emergency_cancel import (
+    EmergencyCancelGate,
+    EmergencyRateConfigV1,
+    EmergencyRateLane,
+)
+from arb.venues.kalshi import orderbook as _kalshi_orderbook
 from arb.venues.kalshi.orderbook import (
     DEMO_BASE_PATH,
     DEMO_HOST,
     DEMO_ORIGIN,
     DEMO_PORT,
+    DEMO_WEBSOCKET_HOST,
+    DEMO_WEBSOCKET_PATH,
+    AuthenticatedOrderBookInput,
     KalshiNativeOrderBookSnapshot,
+    OrderBookExecutionDispatchExpectation,
     OrderBookHalt,
+    OrderBookHaltCode,
+    OrderBookRestCapability,
+    OrderBookStage,
+    execute_demo_authenticated_orderbook_within_deadline,
+    plan_demo_authenticated_orderbook,
+)
+from arb.venues.kalshi.models import (
+    AuthorizationValue as _AuthorizationValue,
+    CredentialReferenceKind as _CredentialReferenceKind,
+    CredentialReferenceState as _CredentialReferenceState,
+    EndpointComponents as _EndpointComponents,
+    Environment as _Environment,
+    RequestedCapability as _RequestedCapability,
+    TaskAuthorizationCapabilityEnvelope as _TaskAuthorizationCapabilityEnvelope,
+    ValidatedDemoProfile as _ValidatedDemoProfile,
+    require_usable_capability_envelope as _require_usable_capability_envelope,
+)
+from arb.venues.kalshi.serialization import (
+    parse_capability_envelope_json as _parse_capability_envelope_json,
 )
 from arb.venues.kalshi.order_lifecycle import (
     SUPPORTED_ORDER_STATUSES,
@@ -241,6 +285,11 @@ __all__ = [
     "create_one_shot_marker",
     "run_pre_release_read_phase",
     "assemble_release_evaluation_state",
+    # R1-D07 read-only Stage-3 live entrypoint (Correction 03 / Correction 04).
+    "LiveReadOnlyStage3InvocationConfigV1",
+    "build_live_entrypoint_arg_parser",
+    "run_read_only_stage3_live_entrypoint",
+    "main",
 ]
 
 
@@ -423,6 +472,46 @@ class RunnerFailureCode(enum.StrEnum):
     DYNAMIC_READ_COMPOSITE_IDENTITY_MISMATCH = "DYNAMIC_READ_COMPOSITE_IDENTITY_MISMATCH"
     STATIC_COMPLETENESS_THEOREM_NOT_ACCEPTED = "STATIC_COMPLETENESS_THEOREM_NOT_ACCEPTED"
     P02_TERMINAL_SETTLEMENT_EVIDENCE_MISMATCH = "P02_TERMINAL_SETTLEMENT_EVIDENCE_MISMATCH"
+
+    # R1-D07 read-only Stage-3 live entrypoint -- launcher local preconditions
+    # and the Correction-02 PATH -> temporary PEM credential compatibility
+    # bridge (dispatch R1-D07_READ_ONLY_STAGE3_LIVE_ENTRYPOINT_IMPLEMENTATION_01
+    # + Correction 03 / Correction 04).  None of the bridge / transport code is
+    # exercised against a real credential, a real venue, or the real N1
+    # deployed authority/ledger by the offline implementation task or its tests.
+    CREDENTIAL_SOURCE_AMBIGUOUS = "CREDENTIAL_SOURCE_AMBIGUOUS"
+    CREDENTIAL_SOURCE_UNRESOLVED = "CREDENTIAL_SOURCE_UNRESOLVED"
+    LIVE_ENTRYPOINT_PRECONDITION_FAILED = "LIVE_ENTRYPOINT_PRECONDITION_FAILED"
+    LIVE_READ_TRANSPORT_POLICY_VIOLATION = "LIVE_READ_TRANSPORT_POLICY_VIOLATION"
+
+    # Correction 03 DSB-FAIL-004 -- deadline-aware active-V2 orderbook seam
+    # classifications (DSB-OB-008).  Distinct from a plain DEADLINE_EXCEEDED
+    # raised by the runner's own check_deadline.
+    ORDERBOOK_ACTIVE_DEADLINE_EXCEEDED = "ORDERBOOK_ACTIVE_DEADLINE_EXCEEDED"
+    ORDERBOOK_ACTIVE_EXECUTION_HALTED = "ORDERBOOK_ACTIVE_EXECUTION_HALTED"
+
+    # Correction 03 DSB-FAIL-004 -- external SHA-bound execution-authorization
+    # classifications (DSB-LIVE-AUTH).  Correction 04 adds NO new member: an
+    # envelope whose exact thirteen-field capability set is not the frozen D07
+    # pattern (including demo_public_reads not PERMITTED, or artifact_generation
+    # PERMITTED) is classified under LIVE_EXECUTION_AUTHORIZATION_TOO_BROAD.
+    LIVE_EXECUTION_AUTHORIZATION_UNVERIFIED = "LIVE_EXECUTION_AUTHORIZATION_UNVERIFIED"
+    LIVE_EXECUTION_AUTHORIZATION_TOO_BROAD = "LIVE_EXECUTION_AUTHORIZATION_TOO_BROAD"
+    LIVE_EXECUTION_AUTHORIZATION_ID_MISMATCH = "LIVE_EXECUTION_AUTHORIZATION_ID_MISMATCH"
+
+    # Correction 03 DSB-FAIL-004 -- secret-safe deterministic generic signed-GET
+    # transport classifications (DSB-LIVE-TRANSPORT).  Each maps one-to-one to a
+    # bounded transport-boundary failure meaning; the detail is
+    # classification-only and never carries a secret, header value, URL, or raw
+    # exception text.
+    LIVE_READ_TRANSPORT_TLS_FAILED = "LIVE_READ_TRANSPORT_TLS_FAILED"
+    LIVE_READ_TRANSPORT_CONNECT_TIMEOUT = "LIVE_READ_TRANSPORT_CONNECT_TIMEOUT"
+    LIVE_READ_TRANSPORT_DNS_FAILED = "LIVE_READ_TRANSPORT_DNS_FAILED"
+    LIVE_READ_TRANSPORT_IO_FAILED = "LIVE_READ_TRANSPORT_IO_FAILED"
+    LIVE_READ_TRANSPORT_PROTOCOL_FAILED = "LIVE_READ_TRANSPORT_PROTOCOL_FAILED"
+    LIVE_READ_TRANSPORT_HEADER_INVALID = "LIVE_READ_TRANSPORT_HEADER_INVALID"
+    LIVE_READ_TRANSPORT_NON_2XX = "LIVE_READ_TRANSPORT_NON_2XX"
+    LIVE_READ_TRANSPORT_REDIRECT_NOT_FOLLOWED = "LIVE_READ_TRANSPORT_REDIRECT_NOT_FOLLOWED"
 
 
 class RunnerError(RuntimeError):
@@ -702,6 +791,156 @@ def check_deadline(
 ) -> None:
     if deadline.expired(now_monotonic_ns):
         raise RunnerError(RunnerFailureCode.DEADLINE_EXCEEDED, detail=checkpoint.value)
+
+
+# ---------------------------------------------------------------------------
+# Correction 03 DSB-OB-007 -- the closed two-phase active-V2 orderbook seam.
+#
+# The active revision-2 runtime orderbook dependency is one closed
+# module-private object exposing exactly two frozen-name methods:
+#
+#     prepare(ticker)          -> AuthenticatedOrderBookPlan | OrderBookHalt
+#                                 pure and offline: builds the exact accepted
+#                                 AuthenticatedOrderBookInput and returns
+#                                 plan_demo_authenticated_orderbook(input).
+#                                 NO network, NO charge, NO secret read beyond
+#                                 the inherited plan contract.  An OrderBookHalt
+#                                 is returned unchanged.
+#     execute(plan, deadline)  -> KalshiNativeOrderBookSnapshot | OrderBookHalt
+#                                 the FIRST transport-side action: calls
+#                                 orderbook.execute_demo_authenticated_orderbook_
+#                                 within_deadline(plan, caller_deadline_
+#                                 monotonic_ns=deadline.absolute_deadline_
+#                                 monotonic_ns, caller_monotonic_clock_ns=<the
+#                                 runtime monotonic clock>).  Adds NO signing /
+#                                 TLS / parse / body-cap / identity logic.
+#
+# _ActiveV2OperationAdapter.issue_orderbook calls prepare() at the DSB-OB-004
+# pre-charge boundary and execute() immediately after the single charge.
+#
+# The production ExperimentRunnerRuntimeV2 construction path binds a live
+# _LiveDemoOrderbookSeam (Section 40); build_active_experiment_runner_runtime_v2
+# never accepts an arbitrary orderbook transport/callback.  The offline test
+# suite may bind a module-private deterministic _TestOnlyActiveV2OrderbookSeam
+# (mirroring DSB-DYN-004's single fake-acquirer seam discipline); a bare legacy
+# ``Callable[[str, OperationDeadlineV1], object]`` supplied to
+# ExperimentRunnerRuntimeV2 for the pre-existing V2 fixture suite is normalized
+# into that deterministic test-only seam and is unreachable as a production
+# arbitrary callback.  The legacy ExperimentRunnerRuntimeV1 orderbook callable
+# and PreReleaseReadCapabilityV1.get_market_orderbook path are untouched.
+# ---------------------------------------------------------------------------
+
+
+class _ActiveV2OrderbookSeam:
+    """Correction 03 DSB-OB-007 / Correction 02 BLOCK-01 -- the closed base for
+    the active revision-2 orderbook dependency.  It exposes EXACTLY two methods
+    with frozen names -- ``prepare`` and ``execute`` -- and is deliberately
+    **not callable**: there is no one-phase ``__call__`` compatibility path.
+
+    Subclasses: ``_LiveDemoOrderbookSeam`` (production) and
+    ``_TestOnlyActiveV2OrderbookSeam`` (module-private, offline tests only).
+
+    * ``_ActiveV2OperationAdapter.issue_orderbook`` drives the DSB-OB-004
+      pre-charge / post-charge boundary through ``prepare`` then ``execute``.
+    * ``PreReleaseReadCapabilityV1.get_market_orderbook`` (the legacy
+      pre-release read path, also reachable against a V2 runtime from the Gate-D
+      ordinary decision loop) adapts a V2 runtime's seam through the same
+      ``prepare`` -> ``execute`` two-phase interface; against a ``V1`` runtime
+      it keeps calling the unchanged ``Callable[[str, OperationDeadlineV1],
+      object]`` legacy V1 orderbook callable directly.
+
+    The legacy ``ExperimentRunnerRuntimeV1.fetch_orderbook`` callable is
+    entirely untouched."""
+
+    __slots__ = ()
+
+    def prepare(self, ticker: str) -> "AuthenticatedOrderBookPlan | OrderBookHalt":
+        raise NotImplementedError
+
+    def execute(
+        self, plan: "AuthenticatedOrderBookPlan", deadline: "OperationDeadlineV1",
+    ) -> "KalshiNativeOrderBookSnapshot | OrderBookHalt":
+        raise NotImplementedError
+
+
+def _run_active_v2_orderbook_seam_one_phase(
+    seam: "_ActiveV2OrderbookSeam", ticker: str, deadline: "OperationDeadlineV1",
+) -> "object":
+    """The ONLY place the closed two-phase seam is driven end-to-end for a
+    caller that historically expected a one-phase ``fetch_orderbook(ticker,
+    deadline)`` callable (the legacy pre-release read capability against a V2
+    runtime).  It is a free function, not a seam method: the seam itself stays
+    non-callable and two-phase.  A prepare-phase ``OrderBookHalt`` is returned
+    unchanged so the caller's existing fail-closed handling is preserved."""
+    prepared = seam.prepare(ticker)
+    if isinstance(prepared, OrderBookHalt):
+        return prepared
+    return seam.execute(prepared, deadline)
+
+
+@dataclass(frozen=True, slots=True)
+class _LegacyCallableOrderbookPreparedV1:
+    """Opaque prepared-phase marker for a legacy orderbook callable wrapped by
+    the module-private test-only factory.  Not an ``AuthenticatedOrderBookPlan``;
+    carries only the validated ticker so
+    ``_TestOnlyActiveV2OrderbookSeam.execute`` can invoke the wrapped callable."""
+
+    ticker: str
+
+
+class _TestOnlyActiveV2OrderbookSeam(_ActiveV2OrderbookSeam):
+    """Module-private deterministic offline seam.  Either wraps a single legacy
+    ``fetch_orderbook(ticker, deadline)`` callable (the pre-existing V2 fixture
+    shape) or accepts explicit ``prepare`` / ``execute`` callables for the
+    Correction-03 charge-ordering tests.  Like the base seam it is **not
+    callable** -- it exposes only ``prepare`` / ``execute``.  It is bound to a
+    production runtime only through ``_build_active_experiment_runner_runtime_
+    v2_for_test`` (the private test factory) or an explicit test-side
+    construction; ``build_active_experiment_runner_runtime_v2`` never accepts a
+    bare callable and never produces this object itself."""
+
+    __slots__ = ("_legacy_callable", "_prepare_fn", "_execute_fn")
+
+    def __init__(
+        self,
+        legacy_callable: "Callable[[str, OperationDeadlineV1], object] | None" = None,
+        *,
+        prepare: "Callable[[str], object] | None" = None,
+        execute: "Callable[[object, OperationDeadlineV1], object] | None" = None,
+    ) -> None:
+        if legacy_callable is not None and (prepare is not None or execute is not None):
+            raise RunnerError(
+                RunnerFailureCode.TRUSTED_DYNAMIC_READ_CAPABILITY_INVALID,
+                detail="test-only orderbook seam takes a legacy callable OR explicit prepare/execute, not both",
+            )
+        if legacy_callable is None and (prepare is None or execute is None):
+            raise RunnerError(
+                RunnerFailureCode.TRUSTED_DYNAMIC_READ_CAPABILITY_INVALID,
+                detail="test-only orderbook seam requires a legacy callable or both prepare and execute",
+            )
+        if legacy_callable is not None and not callable(legacy_callable):
+            raise RunnerError(
+                RunnerFailureCode.TRUSTED_DYNAMIC_READ_CAPABILITY_INVALID,
+                detail="test-only orderbook seam legacy_callable is not callable",
+            )
+        self._legacy_callable = legacy_callable
+        self._prepare_fn = prepare
+        self._execute_fn = execute
+
+    def prepare(self, ticker: str) -> object:
+        if self._prepare_fn is not None:
+            return self._prepare_fn(ticker)
+        if type(ticker) is not str or _TICKER_PATTERN.fullmatch(ticker) is None:
+            return OrderBookHalt(
+                code=OrderBookHaltCode.MARKET_TICKER_INVALID, stage=OrderBookStage.PLAN_INPUT,
+            )
+        return _LegacyCallableOrderbookPreparedV1(ticker=ticker)
+
+    def execute(self, plan: object, deadline: "OperationDeadlineV1") -> object:
+        if self._execute_fn is not None:
+            return self._execute_fn(plan, deadline)
+        ticker = plan.ticker if type(plan) is _LegacyCallableOrderbookPreparedV1 else plan
+        return self._legacy_callable(ticker, deadline)
 
 
 # ---------------------------------------------------------------------------
@@ -1738,7 +1977,13 @@ class ExperimentRunnerRuntimeV2:
     send_operation_request: Callable[
         [RunnerOperation, PreparedRunnerOperationRequestV1, OperationDeadlineV1], RawOperationResponseV1
     ]
-    fetch_orderbook: Callable[[str, OperationDeadlineV1], object]
+    # Correction 03 DSB-OB-007: for the active revision-2 runtime the orderbook
+    # dependency is one closed two-phase ``_ActiveV2OrderbookSeam`` (prepare /
+    # execute), not an arbitrary callback.  A bare legacy
+    # ``Callable[[str, OperationDeadlineV1], object]`` supplied by the
+    # pre-existing offline V2 fixture suite is normalized in ``__post_init__``
+    # into the module-private deterministic ``_TestOnlyActiveV2OrderbookSeam``.
+    fetch_orderbook: "_ActiveV2OrderbookSeam"
     monotonic_clock_ns: Callable[[], int]
     wall_clock: Callable[[], datetime]
     uuid_factory: Callable[[], "uuid.UUID"]
@@ -1774,9 +2019,22 @@ class ExperimentRunnerRuntimeV2:
             raise RunnerError(RunnerFailureCode.PROCESS_INSTANCE_ID_INCONSISTENT, detail="gate mismatch")
         if (
             not callable(self.read_local_safety_state) or not callable(self.send_operation_request)
-            or not callable(self.fetch_orderbook) or not callable(self.read_trusted_release_evidence)
+            or not callable(self.read_trusted_release_evidence)
         ):
             raise RunnerError(RunnerFailureCode.PRE_RELEASE_CAPABILITY_NOT_AUTHORIZED, detail="runtime callables")
+        # Correction 03 DSB-OB-007 / Correction 02 BLOCK-01: this is a VALIDATOR,
+        # not a compatibility normalizer.  The active-V2 orderbook dependency
+        # MUST already be a closed two-phase ``_ActiveV2OrderbookSeam``.  A bare
+        # callable fails closed here and in ``build_active_experiment_runner_
+        # runtime_v2``; a legacy test callable is wrapped into the module-private
+        # ``_TestOnlyActiveV2OrderbookSeam`` only by
+        # ``_build_active_experiment_runner_runtime_v2_for_test`` BEFORE the
+        # production factory ever sees it.
+        if not isinstance(self.fetch_orderbook, _ActiveV2OrderbookSeam):
+            raise RunnerError(
+                RunnerFailureCode.PRE_RELEASE_CAPABILITY_NOT_AUTHORIZED,
+                detail="active-V2 fetch_orderbook must be a closed _ActiveV2OrderbookSeam (prepare/execute); a bare callable is rejected",
+            )
         if type(self.authority_binding) is not AuthorityNamespaceBinding:
             raise RunnerError(RunnerFailureCode.PRE_RELEASE_CAPABILITY_NOT_AUTHORIZED, detail="authority_binding type")
         if type(self.canonical_repository_root) is not str or not self.canonical_repository_root:
@@ -1898,7 +2156,19 @@ def build_active_experiment_runner_runtime_v2(
     """Build an active runtime whose Gate-B local/trusted reads are bound to
     the active revision-2 helpers with the exact same ``active_contract``
     (DSB-WRITER-005: ``read_local_safety_state`` / ``read_trusted_release_
-    evidence`` MUST be the active helpers, not the legacy projection path)."""
+    evidence`` MUST be the active helpers, not the legacy projection path).
+
+    Correction 03 DSB-OB-007 / Correction 02 BLOCK-01: the production factory
+    accepts ONLY a closed ``_ActiveV2OrderbookSeam`` for ``fetch_orderbook`` --
+    a bare callable is rejected before any runtime is produced.  A legacy
+    offline test callable is wrapped into ``_TestOnlyActiveV2OrderbookSeam`` by
+    ``_build_active_experiment_runner_runtime_v2_for_test`` BEFORE it calls this
+    factory; this factory never performs that normalization itself."""
+    if not isinstance(fetch_orderbook, _ActiveV2OrderbookSeam):
+        raise RunnerError(
+            RunnerFailureCode.PRE_RELEASE_CAPABILITY_NOT_AUTHORIZED,
+            detail="active-V2 fetch_orderbook must be a closed _ActiveV2OrderbookSeam (prepare/execute); a bare callable is rejected",
+        )
     if type(active_contract) is LegacyIncidentContract:
         raise RunnerError(
             RunnerFailureCode.PRE_RELEASE_CAPABILITY_NOT_AUTHORIZED,
@@ -2126,7 +2396,17 @@ class PreReleaseReadCapabilityV1:
         ordinal = self._reserve()
         deadline = self._deadline(RunnerOperation.GET_MARKET_ORDERBOOK, ordinal)
         check_deadline(deadline, self.__runtime.monotonic_clock_ns(), checkpoint=DeadlineCheckpoint.BEFORE_PREPARATION)
-        result = self.__runtime.fetch_orderbook(self.__ticker, deadline)
+        _ob = self.__runtime.fetch_orderbook
+        if isinstance(_ob, _ActiveV2OrderbookSeam):
+            # Correction 03 DSB-OB-007 / Correction 02 BLOCK-01: an active-V2
+            # runtime carries a closed two-phase seam (not a callable).  Drive
+            # it through the same prepare -> execute interface; a prepare-phase
+            # OrderBookHalt is returned unchanged so the fail-closed handling
+            # below is identical.  The legacy ``V1`` runtime path is unchanged:
+            # its ``fetch_orderbook`` is still the plain callable.
+            result = _run_active_v2_orderbook_seam_one_phase(_ob, self.__ticker, deadline)
+        else:
+            result = _ob(self.__ticker, deadline)
         if isinstance(result, OrderBookHalt):
             raise RunnerError(RunnerFailureCode.RESPONSE_SCHEMA_INVALID, detail=f"orderbook halt {result.code.value}")
         if type(result) is not KalshiNativeOrderBookSnapshot:
@@ -6498,15 +6778,41 @@ class _ActiveV2OperationAdapter:
     def issue_orderbook(
         self, capability: "_TrustedDynamicPreReleaseReadCapabilityV2", *, ordinal: int, ticker: str,
     ) -> "Tuple[object, OperationDeadlineV1]":
-        """DSB-OPS-003/011 / CL-3 / C07-E -- the inherited accepted
-        ``fetch_orderbook`` path.  Exact local ticker/request preparation and
-        validation happen FIRST; then the capability is charged exactly once;
-        then ``fetch_orderbook`` is invoked immediately.  A local preparation
-        failure consumes ZERO budget.  The parsed snapshot identity is NEVER
-        treated as a raw-body SHA.  The request ``OperationDeadlineV1`` is
-        returned so the caller's snapshot validation / canonical identity /
-        economic digest / selected-orderbook commitment construction all
-        occur before one final check against the SAME deadline (C07-F)."""
+        """DSB-OPS-003/011 / CL-3 / C07-E and Correction 03 DSB-OB-004/007/008 --
+        the deadline-aware inherited orderbook path through the closed two-phase
+        ``_ActiveV2OrderbookSeam``:
+
+            1  create the request ``OperationDeadlineV1``
+               (min(absolute invocation, request start + 10 s));
+            2  check_deadline(BEFORE_PREPARATION);
+            3  ALL local orderbook request preparation/validation completes with
+               ZERO budget consumed and ZERO network activity:
+                 - runner-local ``_prepare_active_v2_request`` (request-identity /
+                   ticker grammar);
+                 - ``seam.prepare(ticker)`` builds the exact accepted
+                   ``AuthenticatedOrderBookInput`` and returns
+                   ``plan_demo_authenticated_orderbook(input)`` -- pure and
+                   offline.  A prepare-phase ``OrderBookHalt`` fails BEFORE the
+                   charge and consumes ZERO pre-release budget, classified with
+                   the precise inherited orderbook/capability halt code (NOT
+                   ``ORDERBOOK_ACTIVE_EXECUTION_HALTED``);
+            4  check_deadline(AFTER_PREPARATION);
+            5  ``capability.charge(GET_MARKET_ORDERBOOK)`` exactly once;
+            6  IMMEDIATELY ``seam.execute(plan, deadline)`` -- the FIRST
+               transport-side action; it calls
+               ``execute_demo_authenticated_orderbook_within_deadline`` with the
+               exact ``deadline.absolute_deadline_monotonic_ns`` and the runtime
+               monotonic clock;
+            7  check_deadline(AFTER_TRANSPORT);
+            8  a post-charge ``OrderBookHalt`` keeps the charged unit consumed --
+               no refund, no retry: a caller-deadline timeout is
+               ``ORDERBOOK_ACTIVE_DEADLINE_EXCEEDED``; any other halt is
+               ``ORDERBOOK_ACTIVE_EXECUTION_HALTED``.
+
+        The request ``OperationDeadlineV1`` is returned so the caller's snapshot
+        validation / canonical identity / economic digest / selected-orderbook
+        commitment construction all occur before one final check against the
+        SAME deadline (C07-F / DSB-OB-004 step 9)."""
         deadline = self._deadline(ActivePreReleaseReadOperationV2.GET_MARKET_ORDERBOOK, ordinal)
         check_deadline(deadline, self._runtime.monotonic_clock_ns(), checkpoint=DeadlineCheckpoint.BEFORE_PREPARATION)
         # Exact local ticker/request preparation + validation BEFORE any charge.
@@ -6515,12 +6821,29 @@ class _ActiveV2OperationAdapter:
             subaccount=capability.runtime.domain_binding.subaccount, ticker=ticker,
             request_ordinal=ordinal, uuid_factory=self._runtime.uuid_factory,
         )
+        seam = self._runtime.fetch_orderbook
+        prepared = seam.prepare(ticker)  # pure / offline: plan or OrderBookHalt, NO charge, NO network
+        if isinstance(prepared, OrderBookHalt):
+            # DSB-OB-004 step 3 / DSB-OB-008: a prepare-phase halt fails BEFORE
+            # the charge and consumes ZERO pre-release budget, classified with
+            # the precise inherited orderbook/capability code.
+            raise RunnerError(
+                RunnerFailureCode.RESPONSE_SCHEMA_INVALID,
+                detail="orderbook prepare halt " + prepared.code.value,
+            )
         check_deadline(deadline, self._runtime.monotonic_clock_ns(), checkpoint=DeadlineCheckpoint.AFTER_PREPARATION)
         capability.charge(ActivePreReleaseReadOperationV2.GET_MARKET_ORDERBOOK)
-        result = self._runtime.fetch_orderbook(ticker, deadline)
+        result = seam.execute(prepared, deadline)  # FIRST transport-side action
         check_deadline(deadline, self._runtime.monotonic_clock_ns(), checkpoint=DeadlineCheckpoint.AFTER_TRANSPORT)
         if isinstance(result, OrderBookHalt):
-            raise RunnerError(RunnerFailureCode.RESPONSE_SCHEMA_INVALID, detail="orderbook halt " + result.code.value)
+            # DSB-OB-008: the charged unit stays consumed -- no refund, no retry.
+            if result.code is OrderBookHaltCode.CONNECTIVITY_TIMEOUT:
+                raise RunnerError(
+                    RunnerFailureCode.ORDERBOOK_ACTIVE_DEADLINE_EXCEEDED, detail=result.code.value,
+                )
+            raise RunnerError(
+                RunnerFailureCode.ORDERBOOK_ACTIVE_EXECUTION_HALTED, detail=result.code.value,
+            )
         if type(result) is not KalshiNativeOrderBookSnapshot:
             raise RunnerError(RunnerFailureCode.RESPONSE_SCHEMA_INVALID, detail="orderbook return type")
         if result.market_ticker != ticker:
@@ -8370,10 +8693,19 @@ def _acquire_release_eligible_dynamic_index_domain_read_set_v2(
 def _build_active_experiment_runner_runtime_v2_for_test(
     *, fake_acquirer_factory: Callable[["ExperimentRunnerRuntimeV2"], "_FakeTrustedDynamicReadAcquirerV2"] | None = None, **kwargs: object,
 ) -> "ExperimentRunnerRuntimeV2":
-    """Module-private test-only factory (DSB-DYN-004).  It builds an active
-    runtime via the production factory and then, if requested, attaches a
-    ``_FakeTrustedDynamicReadAcquirerV2`` to the single synthetic-current-read
-    seam.  Production code never calls this."""
+    """Module-private test-only factory (DSB-DYN-004 / Correction 02 BLOCK-01).
+    It builds an active runtime via the production factory and then, if
+    requested, attaches a ``_FakeTrustedDynamicReadAcquirerV2`` to the single
+    synthetic-current-read seam.  Production code never calls this.
+
+    This is the ONLY callable-normalization route for the active-V2 orderbook
+    dependency: a legacy ``fetch_orderbook(ticker, deadline)`` callable supplied
+    by the pre-existing offline V2 fixture suite is wrapped into a closed
+    ``_TestOnlyActiveV2OrderbookSeam`` HERE, before the production factory --
+    which only ever accepts a closed seam -- is invoked."""
+    ob = kwargs.get("fetch_orderbook")
+    if ob is not None and not isinstance(ob, _ActiveV2OrderbookSeam) and callable(ob):
+        kwargs["fetch_orderbook"] = _TestOnlyActiveV2OrderbookSeam(ob)
     runtime = build_active_experiment_runner_runtime_v2(**kwargs)  # type: ignore[arg-type]
     if fake_acquirer_factory is None:
         return runtime
@@ -8662,3 +8994,1801 @@ def run_active_experiment_stage3_and_gate_d(
     return run_gate_d_ordinary_decision_loop(
         stage3, runtime, invocation, decision_cycle_max=decision_cycle_max,
     )
+
+
+# ===========================================================================
+# Section 40 -- R1-D07 read-only Stage-3 live entrypoint.
+#
+# Dispatch: R1-D07_READ_ONLY_STAGE3_LIVE_ENTRYPOINT_IMPLEMENTATION_01,
+#           Correction 03 (DSB-OB / DSB-LIVE-AUTH / DSB-LIVE-DEADLINE /
+#           DSB-LIVE-TRANSPORT / DSB-LIVE-LIFECYCLE) + Correction 04
+#           (DSB-LIVE-AUTH-003 exact thirteen-field D07 capability set).
+#
+# Adds the missing executable read-only Stage-3 composition:
+#
+#     python -m arb.venues.kalshi.minimal_market_maker_experiment_runner ...
+#
+#   * a Correction-02 PATH -> temporary process-local
+#     KALSHI_DEMO_PRIVATE_KEY_PEM compatibility bridge (ambiguity rejection +
+#     finally cleanup) whose ONLY purpose is to let the existing canonical
+#     PEM-based code consume the operator's PATH-based local key.  No key
+#     generation, no key-material change, no API-key mutation, no fallback, no
+#     serialization/logging of a secret, and no child process is spawned while
+#     the temporary value exists.
+#   * DSB-LIVE-TRANSPORT: a minimal runner-local signed GET-only transport for
+#     the seven non-orderbook active-V2 reads.  Every credential-derived HTTP
+#     header value is validated by a closed secret-safe rule BEFORE request
+#     construction; the bounded TLS / socket / http.client / header / Unicode /
+#     Value exception family at the transport boundary is caught and mapped to
+#     fixed deterministic RunnerError classifications -- no raw exception text,
+#     no secret, no header value, no URL in any output; 3xx is a fixed
+#     non-followed classification; other non-2xx is a fixed terminal
+#     classification; zero automatic retries; zero followed redirects; the
+#     request's own OperationDeadlineV1 is the socket deadline;
+#     MAX_RESPONSE_BODY_BYTES body cap; redacted repr.
+#   * DSB-OB: GET_MARKET_ORDERBOOK reuse of the canonical
+#     arb.venues.kalshi.orderbook boundary through the closed two-phase
+#     _LiveDemoOrderbookSeam -- NOT a second orderbook transport / parser /
+#     signing / body-cap / snapshot-identity stack.  seam.execute() calls the
+#     canonical execute_demo_authenticated_orderbook_within_deadline with the
+#     exact active OperationDeadlineV1.absolute_deadline_monotonic_ns and the
+#     runtime monotonic clock.
+#   * DSB-LIVE-AUTH (Correction 03 + Correction 04): NO implementation-minted
+#     PERMITTED capability, authorization id, authorizing authority, task id,
+#     issue date, or dispatch-expectation id.  The later live permission is an
+#     externally supplied SHA-bound capability-envelope JSON file
+#     (--execution-authorization-json / --execution-authorization-sha256),
+#     parsed ONLY via the canonical
+#     serialization.parse_capability_envelope_json + verified against the
+#     canonical models.require_usable_capability_envelope invariant + the EXACT
+#     Correction-04 thirteen-field D07 capability set (four PERMITTED:
+#     network_access, demo_public_reads, demo_authenticated_reads,
+#     credential_use; nine PROHIBITED: demo_writes, production_public_reads,
+#     production_authenticated_reads, production_writes, account_funding,
+#     code_changes, tests, artifact_generation, repository_commits).  The
+#     installed-implementation commit is an explicit external operator input
+#     (--installed-implementation-commit); there is no blocked-candidate / base
+#     / task-id default.  The orderbook dispatch expectation's
+#     gustavo_execution_authorization_id is bound to the parsed envelope's
+#     authorization_id.  --confirm-live-read is a technical interlock only:
+#     BOTH a verified envelope AND the flag are required, neither substitutes.
+#   * DSB-LIVE-DEADLINE: the ONE 300-second absolute invocation deadline is
+#     sampled EXACTLY ONCE at the very top of the live execution boundary,
+#     BEFORE the external authorization file read / SHA verification / parse,
+#     BEFORE risk-config file I/O, authority binding, restricted-session
+#     lifecycle, and runtime construction.  The one derived absolute end is
+#     threaded unchanged through _build_read_only_stage3_live_runtime into
+#     build_active_experiment_runner_runtime_v2; no later component re-samples,
+#     resets, extends, or refreshes it.
+#   * MARCO_CLARIFICATION_01 / DSB-LIVE-LIFECYCLE-001: constructing the
+#     mandated runtime requires a real EmergencyCancelGate, and the accepted
+#     active emergency-control acquisition appends RESTRICTED_SESSION_STARTED /
+#     RESTRICTED_SESSION_ENDED local control-plane lifecycle events to the
+#     active safety ledger.  Those are NOT venue requests, cancel sends,
+#     release events, writer sessions, writer-proof release, or Stage-3G+
+#     continuation.  A later real local run of this entrypoint is expected to
+#     append exactly those two lifecycle events when it constructs/closes the
+#     shared runtime gate; that later run requires its own explicit
+#     authorization, which this offline implementation task does not grant.
+#   * strict SHA-bound external RiskLimitConfigV1 ingestion -- expected hash
+#     verified before use; strict complete schema; Decimal text only for
+#     monetary/quantity fields; no omitted-field defaults; no permissive /
+#     unlimited fallback; absent/unaccepted risk config fails closed BEFORE any
+#     current venue read.
+#   * read-only reconstruction of the exact N1 ExecutionDomainBindingV1 +
+#     ActiveExecutionDomainContractV1 (from the exact binding plus an explicit
+#     operator-supplied bootstrap_contract_sha256 -- no default; no ledger
+#     initialization, repair, or silent replacement derivation).
+#   * construction ONLY through build_active_experiment_runner_runtime_v2 and
+#     execution ONLY of run_pre_release_read_phase_v2 (Stage 3A-3F).  Stage 3G+
+#     (RELEASE_ONLY / NORMAL_WRITER / Gate D / CREATE / CANCEL / TRANSFER /
+#     production / WebSocket) is never referenced by this section.
+#
+# OFFLINE IMPLEMENTATION ONLY: nothing in this section is executed by the
+# offline implementation task or its tests against real credentials, the real
+# N1 deployed authority/ledger, or Kalshi.  The bridge / transport /
+# orderbook-seam objects are structurally exercised with synthetic env and
+# synthetic inputs and are never invoked live here.
+# ===========================================================================
+
+
+_D07_TASK_ID = "R1-D07_READ_ONLY_STAGE3_LIVE_ENTRYPOINT_IMPLEMENTATION_01"
+
+# The exact accepted N1 execution domain ("Exact N1 binding").  The launcher
+# validates operator input against these exact values and never silently
+# substitutes a different domain.
+_D07_N1_VENUE = "KALSHI"
+_D07_N1_ENVIRONMENT = "KALSHI_DEMO"
+_D07_N1_ACCOUNT_SCOPE_REF = CURRENT_ACCOUNT_SCOPE_REF  # "ARB_KALSHI_DEMO_PRIMARY_ACCOUNT"
+_D07_N1_SUBACCOUNT = 1
+_D07_N1_SELECTED_EXCHANGE_INDEX = 0
+
+# absolute_experiment_deadline_seconds = 300 (controlling spec DSB-RUN-004 /
+# DSB-LIVE-DEADLINE-002).  Sampled once at the top of the live entrypoint and
+# passed, already running, through runtime construction into Stage 3.
+_D07_ABSOLUTE_EXPERIMENT_DEADLINE_SECONDS = 300
+
+_D07_LEGACY_PEM_ENV_NAME = "KALSHI_DEMO_PRIVATE_KEY_PEM"
+_D07_API_KEY_ID_ENV_NAME = "KALSHI_DEMO_API_KEY_ID"
+_D07_PRIVATE_KEY_PATH_ENV_NAME = "KALSHI_DEMO_PRIVATE_KEY_PATH"
+
+# Kalshi Demo authenticated-GET signing profile: RSA-PSS, SHA-256,
+# MGF1(SHA-256), salt length 32 -- identical to the canonical
+# orderbook._sign_orderbook_message contract.  Reused, not re-specified.
+_D07_SIGNING_SALT_LENGTH = 32
+
+# DSB-LIVE-AUTH-006: the installed-implementation commit is an explicit
+# external operator input, matched against the inherited git-commit grammar
+# (7..64 lowercase hex).  There is NO blocked-candidate / required-base /
+# task-id default.
+_D07_GIT_COMMIT_PATTERN = re.compile(r"[0-9a-f]{7,64}")
+
+
+def _d07_is_sha256_hex(value: object) -> bool:
+    return type(value) is str and len(value) == 64 and all(c in "0123456789abcdef" for c in value)
+
+
+# ---------------------------------------------------------------------------
+# 40.1 -- Correction-02 PATH -> temporary PEM credential compatibility bridge.
+# ---------------------------------------------------------------------------
+
+
+class _DemoCredentialBridgeError(RunnerError):
+    """A Correction-02 PATH -> PEM compatibility-bridge failure.  Secret-safe:
+    never carries a key path, key value, or API-key value."""
+
+
+def _d07_default_read_pem_text(path_value: str) -> str:
+    """Strict UTF-8 filesystem read of the operator's PEM key file.  A binary
+    or non-UTF-8 file raises UnicodeDecodeError, which the bridge maps to
+    CREDENTIAL_SOURCE_UNRESOLVED."""
+    with open(path_value, "r", encoding="utf-8", errors="strict") as handle:
+        return handle.read()
+
+
+@contextmanager
+def _demo_path_to_pem_credential_bridge(
+    *,
+    env: "dict[str, str] | None" = None,
+    read_pem_text: "Callable[[str], str] | None" = None,
+) -> "Iterator[None]":
+    """Correction-02 / DSB-LIVE-TRANSPORT-006 -- exact semantics:
+
+        if KALSHI_DEMO_PRIVATE_KEY_PEM already in env -> CREDENTIAL_SOURCE_AMBIGUOUS
+        path = require env KALSHI_DEMO_PRIVATE_KEY_PATH        (missing -> fail closed)
+        pem_text = strict-utf8 read of that file               (unreadable -> fail closed)
+        env[KALSHI_DEMO_PRIVATE_KEY_PEM] = pem_text             (process-local only)
+        yield
+        finally: env.pop(KALSHI_DEMO_PRIVATE_KEY_PEM, None)     (success OR exception)
+
+    No API-key mutation, no fallback to another path/name, no key generation
+    or conversion, no PEM / API-key / path serialization or logging, and this
+    module spawns no child process while the temporary value exists.  ``env`` /
+    ``read_pem_text`` are injectable ONLY so the offline tests can exercise
+    the contract with a synthetic mapping and synthetic PEM file -- production
+    uses ``os.environ`` and a strict-UTF-8 filesystem read.
+    """
+    target_env = os.environ if env is None else env
+    if _D07_LEGACY_PEM_ENV_NAME in target_env:
+        raise _DemoCredentialBridgeError(
+            RunnerFailureCode.CREDENTIAL_SOURCE_AMBIGUOUS,
+            detail="KALSHI_DEMO_PRIVATE_KEY_PEM already present before bridge",
+        )
+    path_value = target_env.get(_D07_PRIVATE_KEY_PATH_ENV_NAME)
+    if type(path_value) is not str or path_value == "":
+        raise _DemoCredentialBridgeError(
+            RunnerFailureCode.CREDENTIAL_SOURCE_UNRESOLVED,
+            detail="KALSHI_DEMO_PRIVATE_KEY_PATH not set",
+        )
+    reader = _d07_default_read_pem_text if read_pem_text is None else read_pem_text
+    try:
+        pem_text = reader(path_value)
+    except (OSError, UnicodeDecodeError, ValueError):
+        raise _DemoCredentialBridgeError(
+            RunnerFailureCode.CREDENTIAL_SOURCE_UNRESOLVED,
+            detail="private key path unreadable or not strict-UTF-8 text",
+        ) from None
+    if (
+        type(pem_text) is not str
+        or "-----BEGIN" not in pem_text
+        or "PRIVATE KEY-----" not in pem_text
+    ):
+        raise _DemoCredentialBridgeError(
+            RunnerFailureCode.CREDENTIAL_SOURCE_UNRESOLVED,
+            detail="referenced file is not a PEM private key",
+        )
+    target_env[_D07_LEGACY_PEM_ENV_NAME] = pem_text
+    try:
+        yield
+    finally:
+        target_env.pop(_D07_LEGACY_PEM_ENV_NAME, None)
+
+
+# ---------------------------------------------------------------------------
+# 40.2 -- DSB-LIVE-TRANSPORT: secret-safe deterministic generic signed GET-only
+# transport (the seven non-orderbook active-V2 reads).  NEVER invoked by the
+# offline implementation task/tests.
+# ---------------------------------------------------------------------------
+
+
+def _d07_credential_header_value_is_safe(value: object) -> bool:
+    """DSB-LIVE-TRANSPORT-001 -- closed, secret-safe credential-header value
+    rule, equivalent to the canonical
+    ``arb.venues.kalshi.orderbook._api_key_id_is_header_safe``: non-empty,
+    printable ASCII, no CR/LF/HTTP control characters, no DEL, and provably
+    round-trips through the exact ASCII request serialization used.  This
+    function only CHECKS; it never strips, cases, parses, transforms, or
+    renders the value."""
+    return _kalshi_orderbook._api_key_id_is_header_safe(value)
+
+
+# ---------------------------------------------------------------------------
+# 40.2a -- Correction 03 / BLOCK-C02-01 (DSB-BUDGET-006 + DSB-LIVE-TRANSPORT-004):
+# the SAME absolute ``OperationDeadlineV1.absolute_deadline_monotonic_ns`` and the
+# SAME bound runtime monotonic clock must remain load-bearing before EVERY
+# independently blocking network phase of the generic signed GET transport --
+# DNS resolution, TCP connect, TLS handshake, each request-send, and EVERY
+# underlying response header / body read.  A high-level ``HTTPSConnection.request``
+# / ``HTTPResponse.read`` topology is not sufficient because connect/TLS/send and
+# repeated body reads would each inherit one stale relative timeout and could
+# cumulatively outlive the one absolute deadline.  These helpers keep standard
+# ``http.client`` HTTP-response parsing (status / headers / Content-Length /
+# chunked / EOF framing) while routing every underlying blocking read through a
+# reader that re-derives the remaining budget from the same absolute deadline and
+# re-arms the real TLS socket before each ``recv_into``.  No new generic client,
+# no retry, no followed redirect, no body-cap change.
+# ---------------------------------------------------------------------------
+
+
+def _d07_absolute_deadline_remaining_seconds(deadline, now_ns, *, stage):
+    """The ONE canonical remaining-budget rule for the generic signed-GET
+    transport (DSB-BUDGET-006 / DSB-LIVE-TRANSPORT-004).  ``now_ns`` MUST be a
+    fresh reading of the SAME bound runtime monotonic clock and ``deadline`` the
+    SAME request ``OperationDeadlineV1``; the remainder is strictly positive
+    only -- there is NO upward floor, and a non-positive remainder is a
+    deterministic ``DEADLINE_EXCEEDED`` BEFORE the named stage's blocking
+    operation.  ``stage`` is a fixed classification-only label -- never a
+    secret / URL / header value."""
+    if type(now_ns) is not int or type(now_ns) is bool:
+        raise RunnerError(
+            RunnerFailureCode.LIVE_ENTRYPOINT_PRECONDITION_FAILED,
+            detail="runtime monotonic clock did not return an exact int",
+        )
+    remaining_ns = deadline.absolute_deadline_monotonic_ns - now_ns
+    if remaining_ns <= 0:
+        raise RunnerError(RunnerFailureCode.DEADLINE_EXCEEDED, detail=stage)
+    return remaining_ns / 1_000_000_000
+
+
+def _d07_live_signed_get_resolve_addresses(host, port, *, deadline, monotonic_clock_ns):
+    """Bounded DNS under the SAME absolute deadline -- mirrors the accepted
+    least-privilege single-use resolver pattern in
+    ``arb.venues.kalshi.orderbook`` / ``arb.venues.kalshi.connectivity``: a fresh
+    ``daemon`` worker whose only output is one value on a private
+    ``queue.Queue(maxsize=1)``.
+
+    Correction 04 / BLOCK-C03-01: the helper consumes the EXACT request
+    ``OperationDeadlineV1`` and the EXACT bound runtime monotonic clock -- never
+    a caller-computed relative float.  The blocking ``queue.get`` window only
+    BEGINS after queue construction and ``Thread.start()``, and thread
+    construction / start / scheduling latency is not itself bounded by any
+    pre-start sample, so the wait's timeout is RECOMPUTED from that same
+    absolute deadline and that same clock immediately BEFORE ``queue.get``.  If
+    startup has already exhausted the deadline the wait is NOT entered at all
+    and this is a deterministic ``DEADLINE_EXCEEDED``.  There is no positive
+    floor.
+
+    The accepted architecture is otherwise unchanged: one ``getaddrinfo``
+    worker, ``Queue(maxsize=1)``, the worker is abandoned (``daemon=True``, never
+    joined) if the caller stops waiting, no automatic retry, and no socket is
+    created here.  Returns the raw ``getaddrinfo`` ``(family, sockaddr)``
+    candidate tuple; a resolver ``OSError`` is re-raised for the caller's fixed
+    secret-safe mapping."""
+    import queue as _queue
+    import socket as _socket
+
+    if not callable(monotonic_clock_ns):
+        raise RunnerError(
+            RunnerFailureCode.LIVE_ENTRYPOINT_PRECONDITION_FAILED,
+            detail="dns resolution requires the exact runtime monotonic clock",
+        )
+    if type(deadline) is not OperationDeadlineV1:
+        raise RunnerError(
+            RunnerFailureCode.LIVE_READ_TRANSPORT_POLICY_VIOLATION, detail="deadline type",
+        )
+    # fail closed before spending anything on local resolver startup
+    _d07_absolute_deadline_remaining_seconds(
+        deadline, monotonic_clock_ns(), stage="pre-dns-start",
+    )
+
+    channel: "_queue.Queue" = _queue.Queue(maxsize=1)
+
+    def _worker() -> None:
+        try:
+            answer = _socket.getaddrinfo(host, port, _socket.AF_UNSPEC, _socket.SOCK_STREAM)
+            channel.put(("ok", tuple((fam, sockaddr) for fam, _t, _p, _c, sockaddr in answer)))
+        except OSError as exc:  # pragma: no cover - real resolver failure path
+            channel.put(("error", exc))
+
+    threading.Thread(
+        target=_worker, name="kalshi-d07-live-dns-resolver", daemon=True,
+    ).start()
+    # BLOCK-C03-01: the queue wait starts HERE, so its timeout is derived HERE
+    # from the same absolute deadline + same runtime clock -- never from the
+    # pre-thread-start remainder.  A non-positive remainder raises before
+    # ``channel.get`` is ever called (the daemon worker is simply abandoned).
+    remaining_seconds = _d07_absolute_deadline_remaining_seconds(
+        deadline, monotonic_clock_ns(), stage="dns-wait",
+    )
+    try:
+        kind, payload = channel.get(timeout=remaining_seconds)
+    except _queue.Empty:
+        raise RunnerError(RunnerFailureCode.DEADLINE_EXCEEDED, detail="dns-wait") from None
+    if kind == "error":
+        raise payload
+    return payload
+
+
+def _d07_live_signed_get_select_stream_address(candidates):
+    """Deterministically select exactly ONE ``AF_INET`` / ``AF_INET6`` stream
+    address from a raw ``getaddrinfo`` answer.  There is NO automatic second
+    connection attempt across addresses; malformed answers fail closed with the
+    fixed DNS classification (no raw text)."""
+    import socket as _socket
+
+    parsed = []
+    for entry in candidates:
+        if type(entry) is not tuple or len(entry) != 2:
+            raise RunnerError(RunnerFailureCode.LIVE_READ_TRANSPORT_DNS_FAILED, detail="dns answer malformed")
+        family, sockaddr = entry
+        if family not in (_socket.AF_INET, _socket.AF_INET6):
+            continue
+        if type(sockaddr) is not tuple or len(sockaddr) < 2 or type(sockaddr[0]) is not str:
+            raise RunnerError(RunnerFailureCode.LIVE_READ_TRANSPORT_DNS_FAILED, detail="dns answer malformed")
+        version = 4 if family == _socket.AF_INET else 6
+        parsed.append((version, sockaddr[0], family, sockaddr))
+    if not parsed:
+        raise RunnerError(RunnerFailureCode.LIVE_READ_TRANSPORT_DNS_FAILED, detail="no usable stream address")
+    parsed.sort(key=lambda item: (item[0], item[1]))
+    _version, _address, family, sockaddr = parsed[0]
+    return family, sockaddr
+
+
+class _AbsoluteDeadlineTLSReader(io.RawIOBase):
+    """Every underlying blocking read re-derives the remaining budget from the
+    SAME absolute ``OperationDeadlineV1`` and the SAME bound runtime monotonic
+    clock (via the injected ``remaining_seconds`` callback, which raises a
+    deterministic ``DEADLINE_EXCEEDED`` when the remainder is non-positive) and
+    re-arms the real TLS socket immediately before ``recv_into``.  No read ever
+    inherits a stale relative timeout window."""
+
+    def __init__(self, tls_sock, remaining_seconds) -> None:
+        io.RawIOBase.__init__(self)
+        self._sock = tls_sock
+        self._remaining_seconds = remaining_seconds
+
+    def readable(self) -> bool:
+        return True
+
+    def readinto(self, buffer) -> int:
+        remaining = self._remaining_seconds("response-read")
+        self._sock.settimeout(remaining)
+        return self._sock.recv_into(buffer)
+
+
+class _AbsoluteDeadlineResponseShim:
+    """Minimal read-only socket-shaped object for ``http.client.HTTPResponse``:
+    ``makefile('rb')`` hands back a buffered reader over
+    ``_AbsoluteDeadlineTLSReader`` so standard header/status/Content-Length/
+    chunked/EOF parsing is preserved while every underlying read stays bounded by
+    the one absolute deadline."""
+
+    __slots__ = ("_sock", "_remaining_seconds")
+
+    def __init__(self, tls_sock, remaining_seconds) -> None:
+        self._sock = tls_sock
+        self._remaining_seconds = remaining_seconds
+
+    def makefile(self, mode="rb", *args, **kwargs):
+        if "b" not in mode:
+            raise ValueError("binary response read mode required")
+        return io.BufferedReader(_AbsoluteDeadlineTLSReader(self._sock, self._remaining_seconds))
+
+    def close(self) -> None:  # the real TLS socket is closed by _perform_get's finally
+        return None
+
+
+class _LiveDemoSignedReadTransport:
+    """DSB-LIVE-TRANSPORT-001..006 (Correction 03) + Correction 02 BLOCK-03 /
+    BLOCK-04 + Correction 03 BLOCK-C02-01 + Correction 04 BLOCK-C03-01.
+    Consumes ONLY a canonical
+    ``PreparedRunnerOperationRequestV1`` built by the runner's own closed
+    request builders; exposes no caller-controlled URL / method / host /
+    header / query / body surface.  Permitted method is exactly GET.  An
+    ``AUTHENTICATED`` prepared request is signed with the exact Kalshi Demo
+    RSA-PSS / SHA-256 / salt-32 profile over
+    ``timestamp_ms + "GET" + signed_path_without_query`` (query excluded).
+
+    BLOCK-03 + BLOCK-C02-01 (DSB-BUDGET-006 / DSB-LIVE-TRANSPORT-004): the
+    transport is bound at construction to the EXACT runtime monotonic clock --
+    it stores no independent ``time.monotonic_ns`` deadline source.  The
+    request's ``OperationDeadlineV1.absolute_deadline_monotonic_ns`` is the
+    ONLY request-end authority.  ``_perform_get`` uses explicit low-level
+    phases -- bounded DNS resolution, ONE selected stream address, TCP
+    ``connect``, explicit ``wrap_socket(do_handshake_on_connect=False)`` +
+    ``do_handshake``, an explicit request-``send`` loop, and standard
+    ``http.client`` response parsing fed by a deadline-aware reader -- and the
+    remaining budget is recomputed from that same absolute deadline and the
+    same runtime clock immediately BEFORE signing, immediately AFTER signing,
+    and immediately before EVERY independently blocking phase (DNS, connect,
+    TLS wrap, handshake, each send, and every underlying response header / body
+    read).  A high-level ``HTTPSConnection.request`` / ``HTTPResponse.read``
+    window is NOT used, so connect/TLS/send/body-read cannot cumulatively
+    outlive the one absolute deadline.  There is NO positive floor -- a
+    sub-millisecond positive remainder is used as-is and a non-positive
+    remainder fails closed ``DEADLINE_EXCEEDED`` before that I/O phase.  The
+    post-transport adapter ``check_deadline`` is retained as a
+    belt-and-suspenders check but is not the load-bearing transport deadline.
+
+    BLOCK-C03-01 (Correction 04): the DNS phase is no longer authorized by a
+    caller-computed relative snapshot.  ``_perform_get`` hands
+    ``_d07_live_signed_get_resolve_addresses`` the EXACT request
+    ``OperationDeadlineV1`` and the EXACT bound runtime monotonic clock, and
+    that helper recomputes the blocking ``queue.get`` timeout from them
+    immediately AFTER queue construction and ``Thread.start()`` -- because the
+    wait window only begins then, and thread construction / start / scheduling
+    latency is not bounded by any pre-start sample.  If startup has already
+    exhausted the deadline, ``queue.get`` is never called and the result is a
+    deterministic ``DEADLINE_EXCEEDED``.  Every phase budget (this one
+    included) flows through the single canonical
+    ``_d07_absolute_deadline_remaining_seconds`` rule, so no phase can acquire
+    a different or floored budget.
+
+    BLOCK-04 (DSB-LIVE-TRANSPORT-002/003): the resolver, ``socket.socket`` +
+    ``connect``, ``ssl.create_default_context``, ``wrap_socket`` +
+    ``do_handshake``, each ``send``, response parsing / each underlying read,
+    AND terminal cleanup are ALL inside one deterministic secret-safe bounded
+    exception mapping.  Each bounded ``ssl.SSLError`` / ``socket.gaierror`` /
+    ``socket.timeout`` / ``TimeoutError`` / ``http.client.HTTPException`` /
+    ``UnicodeError`` / ``ValueError`` / ``OSError`` maps to a fixed
+    ``RunnerError`` classification with NO ``str(exc)`` / ``repr(exc)`` /
+    ``exc.args`` / URL / header name or value / API-key / signature / PEM text
+    in the detail / serialized result / stdout / stderr.  Every socket
+    ``close`` is guarded: a bounded close-time failure is suppressed and never
+    escapes raw and never overrides an already-determined success/failure
+    classification (cleanup suppression is not a retry).  3xx is a fixed
+    non-followed-redirect classification, other non-2xx is a fixed terminal
+    classification, retries = 0, redirects = 0, only one connection attempt,
+    body cap = ``MAX_RESPONSE_BODY_BYTES``, ``__repr__`` / ``__str__``
+    redacted.
+    """
+
+    __slots__ = ("_wall_clock", "_monotonic_clock_ns", "_env")
+
+    _ALLOWED_OPERATIONS = frozenset({
+        RunnerOperation.GET_MARKET,
+        RunnerOperation.GET_ORDERS,
+        RunnerOperation.GET_ORDER,
+        RunnerOperation.GET_FILLS,
+        RunnerOperation.GET_POSITIONS,
+        RunnerOperation.GET_EXCHANGE_STATUS,
+        RunnerOperation.GET_USER_DATA_TIMESTAMP,
+    })
+
+    def __init__(
+        self,
+        *,
+        wall_clock: "Callable[[], datetime]",
+        monotonic_clock_ns: "Callable[[], int]",
+        env: "Mapping[str, str] | None" = None,
+    ) -> None:
+        if not callable(monotonic_clock_ns):
+            raise RunnerError(
+                RunnerFailureCode.LIVE_ENTRYPOINT_PRECONDITION_FAILED,
+                detail="live signed transport requires the exact runtime monotonic clock",
+            )
+        self._wall_clock = wall_clock
+        self._monotonic_clock_ns = monotonic_clock_ns
+        self._env = os.environ if env is None else env
+
+    def __repr__(self) -> str:  # never render a secret or a credential
+        return "_LiveDemoSignedReadTransport(demo_authenticated_read_only)"
+
+    __str__ = __repr__
+
+    def __call__(
+        self,
+        operation: "RunnerOperation",
+        prepared: "PreparedRunnerOperationRequestV1",
+        deadline: "OperationDeadlineV1",
+    ) -> "RawOperationResponseV1":
+        self._require_policy(operation, prepared)
+        if type(deadline) is not OperationDeadlineV1:
+            raise RunnerError(RunnerFailureCode.LIVE_READ_TRANSPORT_POLICY_VIOLATION, detail="deadline type")
+        # BLOCK-03: positive remaining budget BEFORE any signing compute or I/O.
+        self._remaining_seconds(deadline, stage="pre-sign")
+        request_target = self._request_target(prepared)
+        headers = {"Accept": "application/json"}
+        if prepared.auth_mode == "AUTHENTICATED":
+            headers.update(self._auth_headers(prepared))
+        # BLOCK-03: recheck the SAME absolute deadline immediately AFTER signing;
+        # signing time has reduced the budget and must not be re-widened.
+        self._remaining_seconds(deadline, stage="post-sign")
+        # BLOCK-03: pass the ABSOLUTE deadline into transport, not a stale
+        # pre-sign relative snapshot.
+        return self._perform_get(prepared.host, request_target, headers, deadline)
+
+    def _require_policy(self, operation: object, prepared: object) -> None:
+        if type(prepared) is not PreparedRunnerOperationRequestV1:
+            raise RunnerError(RunnerFailureCode.LIVE_READ_TRANSPORT_POLICY_VIOLATION, detail="prepared type")
+        if operation not in self._ALLOWED_OPERATIONS or operation in WRITE_OPERATIONS:
+            raise RunnerError(RunnerFailureCode.LIVE_READ_TRANSPORT_POLICY_VIOLATION, detail="operation")
+        if prepared.operation is not operation:
+            raise RunnerError(RunnerFailureCode.LIVE_READ_TRANSPORT_POLICY_VIOLATION, detail="operation mismatch")
+        if prepared.method != "GET":
+            raise RunnerError(RunnerFailureCode.LIVE_READ_TRANSPORT_POLICY_VIOLATION, detail="method")
+        if prepared.body is not None:
+            raise RunnerError(RunnerFailureCode.LIVE_READ_TRANSPORT_POLICY_VIOLATION, detail="body")
+        if prepared.host != DEMO_HOST:
+            raise RunnerError(RunnerFailureCode.LIVE_READ_TRANSPORT_POLICY_VIOLATION, detail="host")
+        if not prepared.full_path.startswith(DEMO_BASE_PATH + "/"):
+            raise RunnerError(RunnerFailureCode.LIVE_READ_TRANSPORT_POLICY_VIOLATION, detail="path")
+        if prepared.signed_path_without_query != prepared.full_path:
+            raise RunnerError(RunnerFailureCode.LIVE_READ_TRANSPORT_POLICY_VIOLATION, detail="signed path")
+        if not prepared.wire_request_url.startswith(DEMO_ORIGIN + DEMO_BASE_PATH + "/"):
+            raise RunnerError(RunnerFailureCode.LIVE_READ_TRANSPORT_POLICY_VIOLATION, detail="origin")
+        if prepared.auth_mode not in ("AUTHENTICATED", "PUBLIC_UNSIGNED_FOR_THIS_OPERATION"):
+            raise RunnerError(RunnerFailureCode.LIVE_READ_TRANSPORT_POLICY_VIOLATION, detail="auth mode")
+
+    @staticmethod
+    def _request_target(prepared: "PreparedRunnerOperationRequestV1") -> str:
+        canonical_query = _canonical_query_string(list(prepared.query))
+        return prepared.full_path + ("" if canonical_query == "" else "?" + canonical_query)
+
+    def _remaining_seconds(self, deadline: "OperationDeadlineV1", *, stage: str) -> float:
+        """BLOCK-03 + BLOCK-C02-01 / DSB-BUDGET-006 / DSB-LIVE-TRANSPORT-004:
+        remaining time from the SAME absolute ``OperationDeadlineV1`` and the
+        SAME bound runtime monotonic clock, recomputed before EVERY
+        independently blocking transport phase.  Strictly positive only -- NO
+        upward floor; a non-positive remainder is a deterministic
+        ``DEADLINE_EXCEEDED`` before the named stage's I/O.  ``stage`` is a
+        fixed classification-only label (``pre-sign`` / ``post-sign`` /
+        ``pre-dns-start`` / ``dns-wait`` / ``pre-connect`` / ``pre-tls-wrap`` /
+        ``pre-handshake`` / ``pre-send`` / ``response-read``) -- never a
+        secret / URL / header value.  Correction 04: this delegates to the ONE
+        canonical module-level rule that the DNS helper's post-``Thread.start``
+        recomputation also uses, so no phase can acquire a different (or
+        floored) budget rule."""
+        return _d07_absolute_deadline_remaining_seconds(
+            deadline, self._monotonic_clock_ns(), stage=stage,
+        )
+
+    def _auth_headers(self, prepared: "PreparedRunnerOperationRequestV1") -> "dict[str, str]":
+        from cryptography.hazmat.primitives import hashes, serialization
+        from cryptography.hazmat.primitives.asymmetric import padding
+
+        api_key_id = self._env.get(_D07_API_KEY_ID_ENV_NAME)
+        if type(api_key_id) is not str or api_key_id == "":
+            raise RunnerError(
+                RunnerFailureCode.CREDENTIAL_SOURCE_UNRESOLVED, detail="KALSHI_DEMO_API_KEY_ID not set",
+            )
+        # DSB-LIVE-TRANSPORT-001: closed secret-safe credential-header value
+        # validation BEFORE request construction.  The value is never included
+        # in any error detail.
+        if not _d07_credential_header_value_is_safe(api_key_id):
+            raise RunnerError(
+                RunnerFailureCode.LIVE_READ_TRANSPORT_HEADER_INVALID,
+                detail="credential header value failed the closed ASCII/header-safety rule",
+            )
+        pem_text = self._env.get(_D07_LEGACY_PEM_ENV_NAME)
+        if type(pem_text) is not str or "PRIVATE KEY-----" not in pem_text:
+            raise RunnerError(
+                RunnerFailureCode.CREDENTIAL_SOURCE_UNRESOLVED, detail="bridge PEM value absent",
+            )
+        timestamp_ms = str(int(self._wall_clock().timestamp() * 1000))
+        message = (timestamp_ms + "GET" + prepared.signed_path_without_query).encode("ascii")
+        try:
+            private_key = serialization.load_pem_private_key(pem_text.encode("utf-8"), password=None)
+            signature = private_key.sign(
+                message,
+                padding.PSS(mgf=padding.MGF1(hashes.SHA256()), salt_length=_D07_SIGNING_SALT_LENGTH),
+                hashes.SHA256(),
+            )
+        except Exception:
+            raise RunnerError(
+                RunnerFailureCode.CREDENTIAL_SOURCE_UNRESOLVED, detail="request signing failed",
+            ) from None
+        return {
+            "KALSHI-ACCESS-KEY": api_key_id,
+            "KALSHI-ACCESS-SIGNATURE": base64.b64encode(signature).decode("ascii"),
+            "KALSHI-ACCESS-TIMESTAMP": timestamp_ms,
+        }
+
+    def _perform_get(
+        self,
+        host: str,
+        request_target: str,
+        headers: "Mapping[str, str]",
+        deadline: "OperationDeadlineV1",
+    ) -> "RawOperationResponseV1":
+        import http.client
+        import socket as _socket
+        import ssl
+
+        _bounded = (
+            ssl.SSLError, _socket.gaierror, _socket.timeout, TimeoutError,
+            http.client.HTTPException, UnicodeError, ValueError, OSError,
+        )
+
+        def _remaining(stage: str) -> float:
+            # BLOCK-C02-01: recompute remaining from the SAME absolute
+            # OperationDeadlineV1 + the SAME bound runtime monotonic clock
+            # immediately before the next independently blocking network phase.
+            # No positive floor; a non-positive remainder is a deterministic
+            # DEADLINE_EXCEEDED before that phase's I/O.
+            return self._remaining_seconds(deadline, stage=stage)
+
+        raw_sock = None
+        tls_sock = None
+        response = None
+        try:
+            # ---- DNS resolution (bounded by the SAME absolute deadline) -------
+            # BLOCK-C03-01: hand the resolver the EXACT request deadline object
+            # and the EXACT bound runtime monotonic clock -- never a precomputed
+            # relative float -- so its queue wait is recomputed after
+            # Thread.start() rather than inheriting a pre-startup snapshot.
+            candidates = _d07_live_signed_get_resolve_addresses(
+                host, DEMO_PORT,
+                deadline=deadline, monotonic_clock_ns=self._monotonic_clock_ns,
+            )
+            family, sockaddr = _d07_live_signed_get_select_stream_address(candidates)
+
+            # ---- TCP connect ------------------------------------------------
+            raw_sock = _socket.socket(family, _socket.SOCK_STREAM)
+            raw_sock.settimeout(_remaining("pre-connect"))
+            raw_sock.connect(sockaddr)
+
+            # ---- TLS handshake (explicit; recheck immediately before it) ----
+            context = ssl.create_default_context()
+            raw_sock.settimeout(_remaining("pre-tls-wrap"))
+            tls_sock = context.wrap_socket(
+                raw_sock, server_hostname=host, do_handshake_on_connect=False,
+            )
+            raw_sock = None  # ownership transferred to the TLS socket
+            tls_sock.settimeout(_remaining("pre-handshake"))
+            tls_sock.do_handshake()
+
+            # ---- request send (explicit loop; recheck before EVERY send) ----
+            request_bytes = self._build_request_bytes(host, request_target, headers)
+            view = memoryview(request_bytes)
+            sent_total = 0
+            while sent_total < len(request_bytes):
+                tls_sock.settimeout(_remaining("pre-send"))
+                sent = tls_sock.send(view[sent_total:])
+                if sent <= 0:
+                    raise RunnerError(
+                        RunnerFailureCode.LIVE_READ_TRANSPORT_IO_FAILED,
+                        detail="connection closed during request send",
+                    )
+                sent_total += sent
+
+            # ---- response header + body via the deadline-aware reader -------
+            # Standard http.client parsing (status / headers / Content-Length /
+            # chunked / EOF framing) is preserved, but EVERY underlying blocking
+            # read re-derives its budget from the same absolute deadline and
+            # re-arms the real TLS socket -- no stale multi-read window.
+            shim = _AbsoluteDeadlineResponseShim(tls_sock, _remaining)
+            response = http.client.HTTPResponse(shim, method="GET")
+            response.begin()
+            status = int(response.status)
+            # DSB-LIVE-TRANSPORT-002: 3xx is terminal and non-followed; other
+            # non-2xx is a fixed terminal classification.  Zero redirects
+            # followed, zero automatic retries.
+            if 300 <= status < 400:
+                raise RunnerError(
+                    RunnerFailureCode.LIVE_READ_TRANSPORT_REDIRECT_NOT_FOLLOWED,
+                    detail="3xx redirect not followed",
+                )
+            if not (200 <= status < 300):
+                raise RunnerError(
+                    RunnerFailureCode.LIVE_READ_TRANSPORT_NON_2XX,
+                    detail="non-2xx terminal status",
+                )
+            body = response.read(MAX_RESPONSE_BODY_BYTES + 1)
+            content_type = response.getheader("Content-Type", "") or ""
+            if type(body) is not bytes:
+                body = bytes(body)
+            if len(body) > MAX_RESPONSE_BODY_BYTES:
+                raise RunnerError(
+                    RunnerFailureCode.RESPONSE_BODY_TOO_LARGE, detail="live read body cap",
+                )
+            return RawOperationResponseV1(
+                http_status=status, content_type=content_type, body_bytes=body,
+            )
+        except RunnerError:
+            # deterministic classification already decided (3xx / non-2xx /
+            # DEADLINE_EXCEEDED / body cap / dns-wait) -- propagate unchanged.
+            raise
+        except ssl.SSLError:
+            raise RunnerError(
+                RunnerFailureCode.LIVE_READ_TRANSPORT_TLS_FAILED, detail="tls failed",
+            ) from None
+        except _socket.gaierror:
+            raise RunnerError(
+                RunnerFailureCode.LIVE_READ_TRANSPORT_DNS_FAILED, detail="dns resolution failed",
+            ) from None
+        except (_socket.timeout, TimeoutError):
+            raise RunnerError(
+                RunnerFailureCode.LIVE_READ_TRANSPORT_CONNECT_TIMEOUT, detail="transport timed out",
+            ) from None
+        except http.client.HTTPException:
+            raise RunnerError(
+                RunnerFailureCode.LIVE_READ_TRANSPORT_PROTOCOL_FAILED, detail="http protocol failure",
+            ) from None
+        except UnicodeError:
+            raise RunnerError(
+                RunnerFailureCode.LIVE_READ_TRANSPORT_HEADER_INVALID,
+                detail="request serialization rejected a header value",
+            ) from None
+        except ValueError:
+            raise RunnerError(
+                RunnerFailureCode.LIVE_READ_TRANSPORT_HEADER_INVALID,
+                detail="request construction rejected",
+            ) from None
+        except OSError:
+            raise RunnerError(
+                RunnerFailureCode.LIVE_READ_TRANSPORT_IO_FAILED, detail="socket i/o failure",
+            ) from None
+        finally:
+            # BLOCK-04: guarded terminal cleanup -- a bounded close-time failure
+            # is suppressed, never escapes raw, and never converts a completed
+            # request into a second request or overrides the prior result.  No
+            # second connection and no retry is created here.
+            for _closeable in (response, tls_sock, raw_sock):
+                if _closeable is not None:
+                    try:
+                        _closeable.close()
+                    except _bounded:
+                        pass
+
+    @staticmethod
+    def _build_request_bytes(
+        host: str, request_target: str, headers: "Mapping[str, str]",
+    ) -> bytes:
+        """Fixed ASCII GET request line + headers.  A non-ASCII header value
+        raises ``UnicodeEncodeError`` (a ``UnicodeError``) and is mapped to the
+        fixed ``LIVE_READ_TRANSPORT_HEADER_INVALID`` classification; the
+        credential-derived header values were already validated by the closed
+        secret-safe rule in ``_auth_headers`` before this point."""
+        lines = ["GET " + request_target + " HTTP/1.1", "Host: " + host]
+        for name, value in headers.items():
+            lines.append(str(name) + ": " + str(value))
+        lines.append("Accept-Encoding: identity")
+        lines.append("Connection: close")
+        return ("\r\n".join(lines) + "\r\n\r\n").encode("ascii")
+
+
+# ---------------------------------------------------------------------------
+# 40.3 -- DSB-OB: GET_MARKET_ORDERBOOK reuse of the canonical orderbook
+# boundary through the closed two-phase _LiveDemoOrderbookSeam.
+# ---------------------------------------------------------------------------
+
+
+# The exact accepted Section 9.2 orderbook source-binding record (1556 bytes),
+# reproduced verbatim from the controlling
+# KALSHI_DEMO_ONE_MARKET_AUTHENTICATED_REST_ORDER_BOOK_RECONSTRUCTION_SPEC_01
+# so the launcher can hand the canonical arb.venues.kalshi.orderbook planner
+# the exact accepted record it already validates.  A byte error here is
+# rejected at import against the orderbook module's own accepted identity.
+_D07_ACCEPTED_ORDERBOOK_SOURCE_BINDING_RECORD_BYTES = (
+    b'{"binding_schema_revision":1,"effective_auth_classification":'
+    b'"AUTHENTICATED_READ_ONLY","effective_security":[{"kalshiAccessKey":[],'
+    b'"kalshiAccessSignature":[],"kalshiAccessTimestamp":[]}],'
+    b'"effective_security_source":"OPERATION_OVERRIDE","http_status":200,'
+    b'"normalized_source_media_type":"text/yaml","openapi_version":"3.0.0",'
+    b'"operation_method":"GET","operation_path_template":'
+    b'"/markets/{ticker}/orderbook","operation_security_key_present":true,'
+    b'"planned_query_policy":"OMIT_DEPTH_AND_QUERY_STRING","query_parameters":'
+    b'{"depth":{"default":0,"maximum":100,"minimum":0,"required":false,'
+    b'"type":"integer"}},"raw_openapi_byte_length":323631,"raw_openapi_sha256":'
+    b'"6e6402bf667da7596b5074ba1c687cdcb6e67f73903f49fd6b94f4b83a6a22de",'
+    b'"required_auth_header_names":["KALSHI-ACCESS-KEY","KALSHI-ACCESS-SIGNATURE",'
+    b'"KALSHI-ACCESS-TIMESTAMP"],"response_200":{"level_shape":'
+    b'["price_dollars_string","count_fp_string"],"media_type":"application/json",'
+    b'"orderbook_fp_required_fields":["no_dollars","yes_dollars"],'
+    b'"required_top_level_fields":["orderbook_fp"]},"retrieved_at_utc":'
+    b'"2026-08-08T12:41:45Z","reviewed_demo_rest_origin":'
+    b'"https://external-api.demo.kalshi.co","reviewed_full_request_path_template":'
+    b'"/trade-api/v2/markets/{ticker}/orderbook","schema_version":1,'
+    b'"security_scheme_names":["kalshiAccessKey","kalshiAccessSignature",'
+    b'"kalshiAccessTimestamp"],"source_info_version":"3.27.0","source_url":'
+    b'"https://docs.kalshi.com/openapi.yaml","ticker_parameter":{"in":"path",'
+    b'"maximum_length":null,"minimum_length":null,"name":"ticker","pattern":null,'
+    b'"required":true,"type":"string"}}'
+)
+if hashlib.sha256(_D07_ACCEPTED_ORDERBOOK_SOURCE_BINDING_RECORD_BYTES).hexdigest() != (
+    _kalshi_orderbook._ACCEPTED_SOURCE_BINDING_RECORD_SHA256
+):  # pragma: no cover - import-time byte-integrity guard
+    raise RuntimeError(
+        "R1-D07 accepted orderbook source-binding record bytes drifted from the "
+        "canonical arb.venues.kalshi.orderbook accepted identity"
+    )
+
+
+def _d07_demo_authenticated_profile() -> "_ValidatedDemoProfile":
+    return _ValidatedDemoProfile(
+        environment=_Environment.KALSHI_DEMO,
+        rest=_EndpointComponents(
+            scheme="https", host=DEMO_HOST, port=DEMO_PORT, path=DEMO_BASE_PATH,
+            has_user_info=False, has_query=False, has_fragment=False,
+        ),
+        websocket=_EndpointComponents(
+            scheme="wss", host=DEMO_WEBSOCKET_HOST, port=DEMO_PORT, path=DEMO_WEBSOCKET_PATH,
+            has_user_info=False, has_query=False, has_fragment=False,
+        ),
+        requested_capability=_RequestedCapability.DEMO_AUTHENTICATED_READ,
+        effective_capability=_RequestedCapability.DEMO_AUTHENTICATED_READ,
+        credential_reference_states=(
+            (_CredentialReferenceKind.API_KEY_ID_ENV_SOURCE, _CredentialReferenceState.CONFIGURED),
+            (_CredentialReferenceKind.PRIVATE_KEY_PEM_ENV_SOURCE, _CredentialReferenceState.CONFIGURED),
+        ),
+        allowlist_revision=_kalshi_orderbook._ACCEPTED_ALLOWLIST_REVISION,
+        validation_schema_revision=_kalshi_orderbook._ACCEPTED_VALIDATION_SCHEMA_REVISION,
+    )
+
+
+def _d07_orderbook_dispatch_expectation(
+    *, authorization_id: str, expected_implementation_commit: str,
+) -> "OrderBookExecutionDispatchExpectation":
+    """DSB-LIVE-AUTH-005/006 -- ``gustavo_execution_authorization_id`` is the
+    parsed external envelope's ``authorization_id`` (never a module constant or
+    task-id string); ``expected_implementation_commit`` is the explicit
+    external operator input (never a blocked-candidate / base / task-id
+    default)."""
+    return OrderBookExecutionDispatchExpectation(
+        gustavo_execution_authorization_id=authorization_id,
+        expected_raw_openapi_sha256=_kalshi_orderbook._ACCEPTED_RAW_OPENAPI_SHA256,
+        expected_source_binding_record_sha256=_kalshi_orderbook._ACCEPTED_SOURCE_BINDING_RECORD_SHA256,
+        expected_specification_sha256=_kalshi_orderbook._ACCEPTED_SPEC_SHA256,
+        expected_implementation_commit=expected_implementation_commit,
+    )
+
+
+class _LiveDemoOrderbookSeam(_ActiveV2OrderbookSeam):
+    """DSB-OB-004/007 -- the production closed two-phase active-V2 orderbook
+    seam.  ``prepare(ticker)`` builds the exact accepted
+    ``AuthenticatedOrderBookInput`` (validated Demo profile, the externally
+    authorized capability envelope, the operation capability, the exact
+    accepted source-binding record bytes, and the dispatch expectation whose
+    ``gustavo_execution_authorization_id`` equals the external envelope
+    ``authorization_id`` and whose ``expected_implementation_commit`` is the
+    externally supplied installed-implementation identity) and returns
+    ``plan_demo_authenticated_orderbook(input)`` -- pure and offline, NO
+    charge, NO network.  ``execute(plan, deadline)`` calls the canonical
+    ``execute_demo_authenticated_orderbook_within_deadline`` with the exact
+    active ``OperationDeadlineV1.absolute_deadline_monotonic_ns`` and the
+    runtime monotonic clock and adds NO signing / TLS / parse / body-cap /
+    snapshot-identity logic of its own.  Never invoked in the offline
+    implementation task or its tests."""
+
+    __slots__ = (
+        "_authorization_envelope", "_orderbook_dispatch_authorization_id",
+        "_expected_implementation_commit", "_monotonic_clock_ns",
+    )
+
+    def __init__(
+        self,
+        *,
+        authorization_envelope: "_TaskAuthorizationCapabilityEnvelope",
+        orderbook_dispatch_authorization_id: str,
+        expected_implementation_commit: str,
+        monotonic_clock_ns: "Callable[[], int]",
+    ) -> None:
+        if type(authorization_envelope) is not _TaskAuthorizationCapabilityEnvelope:
+            raise RunnerError(
+                RunnerFailureCode.LIVE_ENTRYPOINT_PRECONDITION_FAILED, detail="orderbook seam envelope type",
+            )
+        if (
+            type(orderbook_dispatch_authorization_id) is not str
+            or orderbook_dispatch_authorization_id == ""
+        ):
+            raise RunnerError(
+                RunnerFailureCode.LIVE_ENTRYPOINT_PRECONDITION_FAILED,
+                detail="orderbook seam dispatch authorization id",
+            )
+        # DSB-LIVE-AUTH-005: the orderbook dispatch expectation's
+        # gustavo_execution_authorization_id MUST equal the parsed external
+        # envelope's authorization_id -- a mismatch fails closed BEFORE the
+        # orderbook charge (the seam is constructed during runtime build,
+        # before Stage 3).
+        if orderbook_dispatch_authorization_id != authorization_envelope.authorization_id:
+            raise RunnerError(
+                RunnerFailureCode.LIVE_EXECUTION_AUTHORIZATION_ID_MISMATCH,
+                detail="orderbook dispatch authorization id does not equal the parsed envelope authorization_id",
+            )
+        if (
+            type(expected_implementation_commit) is not str
+            or _D07_GIT_COMMIT_PATTERN.fullmatch(expected_implementation_commit) is None
+        ):
+            raise RunnerError(
+                RunnerFailureCode.LIVE_ENTRYPOINT_PRECONDITION_FAILED,
+                detail="orderbook seam installed-implementation commit",
+            )
+        if not callable(monotonic_clock_ns):
+            raise RunnerError(
+                RunnerFailureCode.LIVE_ENTRYPOINT_PRECONDITION_FAILED, detail="orderbook seam clock",
+            )
+        self._authorization_envelope = authorization_envelope
+        self._orderbook_dispatch_authorization_id = orderbook_dispatch_authorization_id
+        self._expected_implementation_commit = expected_implementation_commit
+        self._monotonic_clock_ns = monotonic_clock_ns
+
+    def __repr__(self) -> str:
+        return "_LiveDemoOrderbookSeam(canonical_orderbook_reuse)"
+
+    __str__ = __repr__
+
+    def _input(self, ticker: str) -> "AuthenticatedOrderBookInput":
+        return AuthenticatedOrderBookInput(
+            validated_demo_profile=_d07_demo_authenticated_profile(),
+            authorization_envelope=self._authorization_envelope,
+            operation_capability=OrderBookRestCapability.KALSHI_DEMO_AUTHENTICATED_REST_READ,
+            market_ticker=ticker,
+            source_binding_record_bytes=_D07_ACCEPTED_ORDERBOOK_SOURCE_BINDING_RECORD_BYTES,
+            execution_dispatch_expectation=_d07_orderbook_dispatch_expectation(
+                authorization_id=self._orderbook_dispatch_authorization_id,
+                expected_implementation_commit=self._expected_implementation_commit,
+            ),
+        )
+
+    def prepare(self, ticker: str) -> "AuthenticatedOrderBookPlan | OrderBookHalt":
+        if type(ticker) is not str or _TICKER_PATTERN.fullmatch(ticker) is None:
+            return OrderBookHalt(
+                code=OrderBookHaltCode.MARKET_TICKER_INVALID, stage=OrderBookStage.PLAN_INPUT,
+            )
+        return plan_demo_authenticated_orderbook(self._input(ticker))
+
+    def execute(
+        self, plan: "AuthenticatedOrderBookPlan", deadline: "OperationDeadlineV1",
+    ) -> "KalshiNativeOrderBookSnapshot | OrderBookHalt":
+        return execute_demo_authenticated_orderbook_within_deadline(
+            plan,
+            caller_deadline_monotonic_ns=deadline.absolute_deadline_monotonic_ns,
+            caller_monotonic_clock_ns=self._monotonic_clock_ns,
+        )
+
+
+# ---------------------------------------------------------------------------
+# 40.4 -- strict SHA-bound external RiskLimitConfigV1 ingestion.
+# ---------------------------------------------------------------------------
+
+
+def _d07_risk_error(detail: str) -> RunnerError:
+    return RunnerError(RunnerFailureCode.LIVE_ENTRYPOINT_PRECONDITION_FAILED, detail=detail)
+
+
+def _d07_risk_decimal(value: object, *, field_name: str) -> Decimal:
+    # Decimal/fixed-point TEXT only -- a JSON number (int/float) is rejected so
+    # no binary-float policy value can enter.
+    if type(value) is not str:
+        raise _d07_risk_error(f"risk_config.{field_name} must be a decimal string")
+    try:
+        parsed = Decimal(value)
+    except InvalidOperation:
+        raise _d07_risk_error(f"risk_config.{field_name} is not a valid Decimal") from None
+    if not parsed.is_finite():
+        raise _d07_risk_error(f"risk_config.{field_name} is not finite")
+    return parsed
+
+
+def _d07_risk_int(value: object, *, field_name: str) -> int:
+    if type(value) is not int or type(value) is bool:
+        raise _d07_risk_error(f"risk_config.{field_name} must be an exact int")
+    return value
+
+
+def _d07_risk_bool(value: object, *, field_name: str) -> bool:
+    if type(value) is not bool:
+        raise _d07_risk_error(f"risk_config.{field_name} must be a bool")
+    return value
+
+
+def _d07_risk_str(value: object, *, field_name: str) -> str:
+    if type(value) is not str or value == "":
+        raise _d07_risk_error(f"risk_config.{field_name} must be a non-empty string")
+    return value
+
+
+# (field_name, kind) tables -- kind in {"decimal", "int", "bool", "str",
+# "str_or_none"}.  Every field is required; there is no omitted-field default.
+_D07_RISK_SECTIONS: "dict[str, tuple[tuple[str, str], ...]]" = {
+    "per_order": (
+        ("max_contracts", "decimal"),
+        ("max_worst_case_exposure_usd", "decimal"),
+        ("price_reasonability_required", "bool"),
+        ("max_abs_reference_price_deviation_usd", "decimal"),
+        ("max_market_data_age_ms", "int"),
+    ),
+    "per_market": (
+        ("max_abs_net_position_contracts", "decimal"),
+        ("max_gross_exposure_usd", "decimal"),
+        ("max_authoritative_working_orders", "int"),
+        ("max_working_contracts", "decimal"),
+        ("max_working_order_exposure_usd", "decimal"),
+    ),
+    "conflict_domain_account": (
+        ("max_aggregate_exposure_usd", "decimal"),
+        ("max_aggregate_working_orders", "int"),
+        ("max_aggregate_working_contracts", "decimal"),
+        ("max_unresolved_write_count", "int"),
+        ("max_conservative_unresolved_write_exposure_usd", "decimal"),
+    ),
+    "flow": (
+        ("create_max_sends", "int"),
+        ("create_window_ms", "int"),
+        ("modify_replace_max_sends", "int"),
+        ("modify_replace_window_ms", "int"),
+        ("ordinary_cancel_max_sends", "int"),
+        ("ordinary_cancel_window_ms", "int"),
+        ("automated_execution_max_sends", "int"),
+        ("automated_execution_window_ms", "int"),
+        ("emergency_cancel_max_sends", "int"),
+        ("emergency_cancel_window_ms", "int"),
+        ("emergency_cancel_max_in_flight", "int"),
+        ("emergency_cancel_request_deadline_ms", "int"),
+        ("emergency_retry_max_attempts_per_target_per_action", "int"),
+        ("emergency_backoff_base_ms", "int"),
+        ("emergency_backoff_max_ms", "int"),
+    ),
+    "state_integrity": (
+        ("max_reconciliation_lag_ms", "int"),
+        ("max_required_market_data_age_ms", "int"),
+        ("max_future_wall_clock_skew_ms", "int"),
+        ("max_reconciliation_attempts_per_cycle", "int"),
+        ("reconciliation_read_deadline_ms", "int"),
+        ("reconciliation_backoff_base_ms", "int"),
+        ("reconciliation_backoff_max_ms", "int"),
+    ),
+    "venue_defense": (
+        ("order_group_mode", "str"),
+        ("required_order_group_id", "str_or_none"),
+        ("cancel_order_on_pause_required", "bool"),
+        ("reduce_only_policy", "str"),
+        ("post_only_policy", "str"),
+    ),
+}
+_D07_RISK_TOP_LEVEL_KEYS = frozenset(
+    {"schema_version", "conflict_domain", "currency"} | set(_D07_RISK_SECTIONS)
+)
+_D07_RISK_SECTION_CLASSES = {
+    "per_order": PerOrderRiskLimits,
+    "per_market": PerMarketRiskLimits,
+    "conflict_domain_account": AccountRiskLimits,
+    "flow": FlowRiskLimits,
+    "state_integrity": StateIntegrityLimits,
+    "venue_defense": VenueDefensePolicy,
+}
+
+
+def _d07_reject_duplicate_json_keys(pairs: "list[tuple[str, object]]") -> "dict[str, object]":
+    seen: dict[str, object] = {}
+    for key, value in pairs:
+        if key in seen:
+            raise _d07_risk_error("risk_config JSON contains a duplicate key")
+        seen[key] = value
+    return seen
+
+
+def _d07_build_risk_section(name: str, obj: object) -> object:
+    if not isinstance(obj, Mapping):
+        raise _d07_risk_error(f"risk_config.{name} must be an object")
+    spec = _D07_RISK_SECTIONS[name]
+    expected = {field_name for field_name, _ in spec}
+    got = set(obj)
+    if got != expected:
+        raise _d07_risk_error(f"risk_config.{name} keys mismatch")
+    kwargs: dict[str, object] = {}
+    for field_name, kind in spec:
+        raw = obj[field_name]
+        qualified = f"{name}.{field_name}"
+        if kind == "decimal":
+            kwargs[field_name] = _d07_risk_decimal(raw, field_name=qualified)
+        elif kind == "int":
+            kwargs[field_name] = _d07_risk_int(raw, field_name=qualified)
+        elif kind == "bool":
+            kwargs[field_name] = _d07_risk_bool(raw, field_name=qualified)
+        elif kind == "str":
+            kwargs[field_name] = _d07_risk_str(raw, field_name=qualified)
+        elif kind == "str_or_none":
+            if raw is None:
+                kwargs[field_name] = None
+            else:
+                kwargs[field_name] = _d07_risk_str(raw, field_name=qualified)
+        else:  # pragma: no cover - table typo guard
+            raise _d07_risk_error(f"risk_config.{qualified} unknown field kind")
+    return _D07_RISK_SECTION_CLASSES[name](**kwargs)
+
+
+def _load_sha_bound_risk_config(*, path: str, expected_sha256: str) -> "RiskLimitConfigV1":
+    """MARCO_CLARIFICATION_01 Section 3.  Read-only file; expected hash verified
+    BEFORE use; strict complete schema; Decimal text only for monetary/quantity
+    fields; no omitted-field defaults; no permissive/unlimited fallback;
+    construction ends in the canonical ``RiskLimitConfigV1`` (whose
+    ``__post_init__`` re-validates every bound).  Absent/unaccepted risk config
+    fails closed here, BEFORE any current venue read.
+    """
+    if not _d07_is_sha256_hex(expected_sha256):
+        raise _d07_risk_error("risk_config expected sha256 must be exactly 64 lowercase hex")
+    try:
+        raw = Path(path).read_bytes()
+    except OSError:
+        raise _d07_risk_error("risk_config JSON file is unreadable") from None
+    actual_sha256 = hashlib.sha256(raw).hexdigest()
+    if actual_sha256 != expected_sha256:
+        raise _d07_risk_error("risk_config JSON sha256 does not match the expected accepted identity")
+    try:
+        text = raw.decode("utf-8")
+    except UnicodeDecodeError:
+        raise _d07_risk_error("risk_config JSON is not valid UTF-8") from None
+    try:
+        document = json.loads(text, object_pairs_hook=_d07_reject_duplicate_json_keys)
+    except ValueError:
+        raise _d07_risk_error("risk_config JSON is malformed") from None
+    if not isinstance(document, Mapping):
+        raise _d07_risk_error("risk_config JSON top level must be an object")
+    if set(document) != set(_D07_RISK_TOP_LEVEL_KEYS):
+        raise _d07_risk_error("risk_config JSON top-level keys mismatch")
+    schema_version = _d07_risk_int(document["schema_version"], field_name="schema_version")
+    conflict_domain = _d07_risk_str(document["conflict_domain"], field_name="conflict_domain")
+    currency = _d07_risk_str(document["currency"], field_name="currency")
+    sections = {
+        name: _d07_build_risk_section(name, document[name]) for name in _D07_RISK_SECTIONS
+    }
+    try:
+        return RiskLimitConfigV1(
+            schema_version,
+            conflict_domain,
+            currency,
+            sections["per_order"],
+            sections["per_market"],
+            sections["conflict_domain_account"],
+            sections["flow"],
+            sections["state_integrity"],
+            sections["venue_defense"],
+        )
+    except RiskControlError as exc:
+        raise _d07_risk_error(f"risk_config rejected by canonical RiskLimitConfigV1: {exc.code.value}") from None
+
+
+# ---------------------------------------------------------------------------
+# 40.5 -- read-only active-domain reconstruction + N1 route qualification.
+# ---------------------------------------------------------------------------
+
+
+def _reconstruct_n1_read_only_active_domain(
+    *,
+    account_scope_ref: str,
+    subaccount: int,
+    exchange_index: int,
+    bootstrap_contract_sha256: str,
+) -> "Tuple[ExecutionDomainBindingV1, ActiveExecutionDomainContractV1]":
+    """MARCO_CLARIFICATION_01 Section 2.  Deterministically reconstructs the
+    exact N1 ``ExecutionDomainBindingV1`` + ``ActiveExecutionDomainContractV1``
+    from the exact binding fields plus the explicit operator-supplied
+    ``bootstrap_contract_sha256`` (no default; strict 64-hex).  No ledger
+    initialization, repair, or silent replacement -- the existing active local
+    authority/ledger replay (``read_active_local_safety_state_v1``, wired
+    inside ``build_active_experiment_runner_runtime_v2``) rejects a mismatch.
+    """
+    if (
+        account_scope_ref != _D07_N1_ACCOUNT_SCOPE_REF
+        or subaccount != _D07_N1_SUBACCOUNT
+        or exchange_index != _D07_N1_SELECTED_EXCHANGE_INDEX
+    ):
+        raise RunnerError(
+            RunnerFailureCode.LIVE_ENTRYPOINT_PRECONDITION_FAILED,
+            detail="execution domain is not the exact accepted N1 binding",
+        )
+    if not _d07_is_sha256_hex(bootstrap_contract_sha256):
+        raise RunnerError(
+            RunnerFailureCode.LIVE_ENTRYPOINT_PRECONDITION_FAILED,
+            detail="bootstrap_contract_sha256 must be exactly 64 lowercase hex",
+        )
+    binding = ExecutionDomainBindingV1(
+        venue=_D07_N1_VENUE,
+        environment=_D07_N1_ENVIRONMENT,
+        account_scope_ref=account_scope_ref,
+        subaccount=subaccount,
+        exchange_index=exchange_index,
+    )
+    active_contract = ActiveExecutionDomainContractV1(
+        binding=binding, bootstrap_contract_sha256=bootstrap_contract_sha256,
+    )
+    return binding, active_contract
+
+
+def _n1_read_only_route_qualification(
+    domain_binding: "ExecutionDomainBindingV1",
+) -> "ActiveRouteQualificationV1":
+    """The spec-frozen N1 accepted route qualification -- identical fields to
+    the onboarding fixture: ``EMPIRICALLY_BOUND_AUTOROUTE`` bound to the
+    accepted N1 canonical empirical checkpoint identity.  Never inferred from
+    ``subaccount == 1``.
+    """
+    return ActiveRouteQualificationV1(
+        environment=domain_binding.environment,
+        account_scope_ref=domain_binding.account_scope_ref,
+        subaccount=domain_binding.subaccount,
+        exchange_index=domain_binding.exchange_index,
+        operation_request_shape_id=_ACTIVE_ROUTE_REQUEST_SHAPE_ID,
+        exchange_index_wire_policy="EMPIRICALLY_BOUND_AUTOROUTE",
+        qualification_evidence_identity_sha256=_N1_CANONICAL_EMPIRICAL_CHECKPOINT_SHA256,
+        provenance_class="PROJECT_EVIDENCE_RECORDED",
+    )
+
+
+# ---------------------------------------------------------------------------
+# 40.6 -- DSB-LIVE-AUTH: external SHA-bound execution-authorization ingestion.
+# ---------------------------------------------------------------------------
+
+
+# DSB-LIVE-AUTH-003 (Correction 04) -- the EXACT thirteen-field D07 capability
+# pattern.  This is an exact set, not a minimum.
+_D07_REQUIRED_ENVELOPE_PERMITTED = (
+    "network_access",
+    "demo_public_reads",
+    "demo_authenticated_reads",
+    "credential_use",
+)
+_D07_REQUIRED_ENVELOPE_PROHIBITED = (
+    "demo_writes",
+    "production_public_reads",
+    "production_authenticated_reads",
+    "production_writes",
+    "account_funding",
+    "code_changes",
+    "tests",
+    "artifact_generation",
+    "repository_commits",
+)
+
+
+def _d07_load_external_execution_authorization(
+    *, path: str, expected_sha256: str,
+) -> "_TaskAuthorizationCapabilityEnvelope":
+    """DSB-LIVE-AUTH-002/003/004 (Correction 03 + Correction 04).
+
+    Ordering (ALL before risk-config I/O, authority binding, restricted-session
+    lifecycle, runtime construction, credential loading, and any venue/network
+    activity):
+
+        1  read the external capability-envelope JSON file bytes (read-only);
+        2  verify sha256(file_bytes) == the supplied expected sha256 (exact 64
+           lowercase hex); mismatch/malformed expected value ->
+           LIVE_EXECUTION_AUTHORIZATION_UNVERIFIED, fail closed, contents never
+           echoed;
+        3  parse via arb.venues.kalshi.serialization.parse_capability_envelope_json
+           (the canonical JSON route; no alternate parser / dict substitute);
+        4  apply arb.venues.kalshi.models.require_usable_capability_envelope;
+        5  apply the EXACT thirteen-field D07 capability-set check -- the four
+           PERMITTED fields are PERMITTED and the nine PROHIBITED fields are
+           PROHIBITED; ANY deviation (including demo_public_reads not PERMITTED,
+           or artifact_generation PERMITTED) -> LIVE_EXECUTION_AUTHORIZATION_
+           TOO_BROAD (the existing Correction-03 closed classification for
+           "envelope capability set != exact D07 set"; Correction 04 adds NO
+           new code).
+
+    Returns the parsed envelope itself -- not a reconstructed copy.
+    No implementation-minted authorization value / identity is created.
+    """
+    if not _d07_is_sha256_hex(expected_sha256):
+        raise RunnerError(
+            RunnerFailureCode.LIVE_EXECUTION_AUTHORIZATION_UNVERIFIED,
+            detail="expected authorization sha256 must be exactly 64 lowercase hex",
+        )
+    try:
+        raw = Path(path).read_bytes()
+    except OSError:
+        raise RunnerError(
+            RunnerFailureCode.LIVE_EXECUTION_AUTHORIZATION_UNVERIFIED,
+            detail="external execution-authorization JSON is unreadable",
+        ) from None
+    if hashlib.sha256(raw).hexdigest() != expected_sha256:
+        raise RunnerError(
+            RunnerFailureCode.LIVE_EXECUTION_AUTHORIZATION_UNVERIFIED,
+            detail="external execution-authorization JSON sha256 does not match the expected identity",
+        )
+    try:
+        text = raw.decode("utf-8")
+    except UnicodeDecodeError:
+        raise RunnerError(
+            RunnerFailureCode.LIVE_EXECUTION_AUTHORIZATION_UNVERIFIED,
+            detail="external execution-authorization JSON is not valid UTF-8",
+        ) from None
+    try:
+        envelope = _parse_capability_envelope_json(text)
+    except Exception:
+        raise RunnerError(
+            RunnerFailureCode.LIVE_EXECUTION_AUTHORIZATION_UNVERIFIED,
+            detail="external execution-authorization JSON failed the canonical parse/invariant",
+        ) from None
+    try:
+        _require_usable_capability_envelope(envelope)
+    except Exception:
+        raise RunnerError(
+            RunnerFailureCode.LIVE_EXECUTION_AUTHORIZATION_UNVERIFIED,
+            detail="external execution-authorization envelope failed the canonical usability invariant",
+        ) from None
+    permitted = _AuthorizationValue.PERMITTED
+    prohibited = _AuthorizationValue.PROHIBITED
+    for name in _D07_REQUIRED_ENVELOPE_PERMITTED:
+        if getattr(envelope, name) is not permitted:
+            raise RunnerError(
+                RunnerFailureCode.LIVE_EXECUTION_AUTHORIZATION_TOO_BROAD,
+                detail="external execution-authorization envelope is not exactly the D07 read-only capability set",
+            )
+    for name in _D07_REQUIRED_ENVELOPE_PROHIBITED:
+        if getattr(envelope, name) is not prohibited:
+            raise RunnerError(
+                RunnerFailureCode.LIVE_EXECUTION_AUTHORIZATION_TOO_BROAD,
+                detail="external execution-authorization envelope is not exactly the D07 read-only capability set",
+            )
+    return envelope
+
+
+# ---------------------------------------------------------------------------
+# 40.7 -- launcher configuration, runtime construction, and entrypoint.
+# ---------------------------------------------------------------------------
+
+
+@dataclass(frozen=True, slots=True)
+class LiveReadOnlyStage3InvocationConfigV1:
+    """Parsed, non-secret launcher configuration for the R1-D07 read-only
+    Stage-3 live entrypoint.  Carries no secret value: credentials come only
+    from the operator environment through the Correction-02 bridge; the
+    execution authorization is an external SHA-bound capability-envelope JSON
+    file identity (never an embedded PERMITTED value)."""
+
+    market_ticker: str
+    authority_namespace_id: str
+    authority_namespace_root: str
+    canonical_repository_root: str
+    expected_ledger_path: str
+    bootstrap_contract_sha256: str
+    risk_config_json_path: str
+    risk_config_sha256: str
+    execution_authorization_json_path: str
+    execution_authorization_sha256: str
+    installed_implementation_commit: str
+    account_scope_ref: str = _D07_N1_ACCOUNT_SCOPE_REF
+    subaccount: int = _D07_N1_SUBACCOUNT
+    exchange_index: int = _D07_N1_SELECTED_EXCHANGE_INDEX
+    invocation_id: str = ""
+
+    def __post_init__(self) -> None:
+        if type(self.market_ticker) is not str or _TICKER_PATTERN.fullmatch(self.market_ticker) is None:
+            raise RunnerError(RunnerFailureCode.MARKET_IDENTITY_INVALID, detail="config market_ticker")
+        for name in (
+            "authority_namespace_id", "authority_namespace_root", "canonical_repository_root",
+            "expected_ledger_path", "risk_config_json_path", "risk_config_sha256",
+            "bootstrap_contract_sha256", "execution_authorization_json_path",
+            "execution_authorization_sha256", "installed_implementation_commit",
+        ):
+            value = getattr(self, name)
+            if type(value) is not str or value == "":
+                raise RunnerError(RunnerFailureCode.LIVE_ENTRYPOINT_PRECONDITION_FAILED, detail=f"config {name}")
+        if type(self.invocation_id) is not str:
+            raise RunnerError(RunnerFailureCode.LIVE_ENTRYPOINT_PRECONDITION_FAILED, detail="config invocation_id")
+        if type(self.subaccount) is not int or type(self.subaccount) is bool:
+            raise RunnerError(RunnerFailureCode.LIVE_ENTRYPOINT_PRECONDITION_FAILED, detail="config subaccount")
+        if type(self.exchange_index) is not int or type(self.exchange_index) is bool:
+            raise RunnerError(RunnerFailureCode.LIVE_ENTRYPOINT_PRECONDITION_FAILED, detail="config exchange_index")
+        if not _d07_is_sha256_hex(self.bootstrap_contract_sha256):
+            raise RunnerError(
+                RunnerFailureCode.LIVE_ENTRYPOINT_PRECONDITION_FAILED,
+                detail="config bootstrap_contract_sha256 must be exactly 64 lowercase hex",
+            )
+        if not _d07_is_sha256_hex(self.risk_config_sha256):
+            raise RunnerError(
+                RunnerFailureCode.LIVE_ENTRYPOINT_PRECONDITION_FAILED,
+                detail="config risk_config_sha256 must be exactly 64 lowercase hex",
+            )
+        if not _d07_is_sha256_hex(self.execution_authorization_sha256):
+            raise RunnerError(
+                RunnerFailureCode.LIVE_ENTRYPOINT_PRECONDITION_FAILED,
+                detail="config execution_authorization_sha256 must be exactly 64 lowercase hex",
+            )
+        if _D07_GIT_COMMIT_PATTERN.fullmatch(self.installed_implementation_commit) is None:
+            raise RunnerError(
+                RunnerFailureCode.LIVE_ENTRYPOINT_PRECONDITION_FAILED,
+                detail="config installed_implementation_commit must be 7..64 lowercase hex",
+            )
+
+
+def _build_read_only_stage3_live_runtime(
+    config: "LiveReadOnlyStage3InvocationConfigV1",
+    *,
+    monotonic_clock_ns: "Callable[[], int]",
+    wall_clock: "Callable[[], datetime]",
+    uuid_factory: "Callable[[], uuid.UUID]",
+    experiment_absolute_end_monotonic_ns: int,
+    authorization_envelope: "_TaskAuthorizationCapabilityEnvelope",
+    installed_implementation_commit: str,
+    orderbook_dispatch_authorization_id: "str | None" = None,
+    transport: object = None,
+    orderbook_seam: object = None,
+) -> "ExperimentRunnerRuntimeV2":
+    """DSB-LIVE-DEADLINE-002/003 -- construct the mandated active runtime ONLY
+    through ``build_active_experiment_runner_runtime_v2``.  The one 300-second
+    absolute end is passed IN unchanged from the entrypoint and is NEVER
+    re-sampled here.  Reads -- never initializes or repairs -- the active local
+    authority/ledger.  Building the required ``EmergencyCancelGate`` appends the
+    accepted ``RESTRICTED_SESSION_STARTED`` / ``RESTRICTED_SESSION_ENDED``
+    local control-plane lifecycle events (MARCO_CLARIFICATION_01 Section 1 /
+    DSB-LIVE-LIFECYCLE-001).  ``transport`` / ``orderbook_seam`` are injectable
+    ONLY for the offline tests; production binds the live signed transport +
+    the closed ``_LiveDemoOrderbookSeam``.
+    """
+    if type(experiment_absolute_end_monotonic_ns) is not int or type(experiment_absolute_end_monotonic_ns) is bool:
+        raise RunnerError(
+            RunnerFailureCode.LIVE_ENTRYPOINT_PRECONDITION_FAILED,
+            detail="experiment_absolute_end_monotonic_ns must be an exact int sampled at the live boundary",
+        )
+    risk_config = _load_sha_bound_risk_config(
+        path=config.risk_config_json_path, expected_sha256=config.risk_config_sha256,
+    )
+    binding, active_contract = _reconstruct_n1_read_only_active_domain(
+        account_scope_ref=config.account_scope_ref,
+        subaccount=config.subaccount,
+        exchange_index=config.exchange_index,
+        bootstrap_contract_sha256=config.bootstrap_contract_sha256,
+    )
+    authority_binding = AuthorityNamespaceBinding.bind(
+        authority_namespace_id=config.authority_namespace_id,
+        authority_namespace_root=config.authority_namespace_root,
+        canonical_repository_root=config.canonical_repository_root,
+    )
+    normal_gate = WriterEligibilityGate(
+        monotonic_clock_ns=monotonic_clock_ns, wall_clock=wall_clock, uuid_factory=uuid_factory,
+    )
+    emergency = acquire_active_emergency_control_only_v1(
+        authority_binding,
+        canonical_repository_root=str(config.canonical_repository_root),
+        active_contract=active_contract,
+        expected_ledger_path=str(config.expected_ledger_path),
+        clock=wall_clock,
+        uuid_factory=uuid_factory,
+    )
+    if emergency.handle is None:
+        raise RunnerError(
+            RunnerFailureCode.LIVE_ENTRYPOINT_PRECONDITION_FAILED,
+            detail="active emergency-control acquisition failed: "
+            + (emergency.failure_code.value if emergency.failure_code is not None else "UNKNOWN"),
+        )
+    try:
+        flow = risk_config.flow
+        rate_lane = EmergencyRateLane(EmergencyRateConfigV1(
+            flow.emergency_cancel_max_sends,
+            flow.emergency_cancel_window_ms,
+            flow.emergency_cancel_max_in_flight,
+            flow.emergency_cancel_request_deadline_ms,
+            flow.emergency_retry_max_attempts_per_target_per_action,
+            flow.emergency_backoff_base_ms,
+            flow.emergency_backoff_max_ms,
+        ))
+        emergency_gate = EmergencyCancelGate(
+            handle=emergency.handle,
+            rate_lane=rate_lane,
+            process_instance_id=normal_gate.process_instance_id,
+            monotonic_clock_ns=monotonic_clock_ns,
+            wall_clock=wall_clock,
+            uuid_factory=uuid_factory,
+            active_contract=active_contract,
+        )
+    finally:
+        # Close the restricted session: appends RESTRICTED_SESSION_ENDED
+        # (MARCO_CLARIFICATION_01 Section 1 -- accepted local lifecycle event).
+        emergency.handle.close()
+
+    send_operation_request = (
+        transport if transport is not None
+        else _LiveDemoSignedReadTransport(
+            wall_clock=wall_clock, monotonic_clock_ns=monotonic_clock_ns,
+        )
+    )
+    if orderbook_seam is not None:
+        fetch_orderbook = orderbook_seam
+    else:
+        fetch_orderbook = _LiveDemoOrderbookSeam(
+            authorization_envelope=authorization_envelope,
+            orderbook_dispatch_authorization_id=(
+                authorization_envelope.authorization_id
+                if orderbook_dispatch_authorization_id is None
+                else orderbook_dispatch_authorization_id
+            ),
+            expected_implementation_commit=installed_implementation_commit,
+            monotonic_clock_ns=monotonic_clock_ns,
+        )
+
+    return build_active_experiment_runner_runtime_v2(
+        normal_gate=normal_gate,
+        emergency_gate=emergency_gate,
+        send_operation_request=send_operation_request,
+        fetch_orderbook=fetch_orderbook,
+        monotonic_clock_ns=monotonic_clock_ns,
+        wall_clock=wall_clock,
+        uuid_factory=uuid_factory,
+        risk_config=risk_config,
+        experiment_absolute_end_monotonic_ns=experiment_absolute_end_monotonic_ns,
+        authority_binding=authority_binding,
+        canonical_repository_root=str(config.canonical_repository_root),
+        expected_ledger_path=str(config.expected_ledger_path),
+        domain_binding=binding,
+        active_contract=active_contract,
+        route_qualification=_n1_read_only_route_qualification(binding),
+        accepted_evidence_contract=n1_accepted_evidence_contract(binding),
+    )
+
+
+def run_read_only_stage3_live_entrypoint(
+    config: "LiveReadOnlyStage3InvocationConfigV1",
+    *,
+    confirm_live_read: bool = False,
+    monotonic_clock_ns: "Callable[[], int] | None" = None,
+    wall_clock: "Callable[[], datetime] | None" = None,
+    uuid_factory: "Callable[[], uuid.UUID] | None" = None,
+    runtime_builder: "Callable[..., ExperimentRunnerRuntimeV2] | None" = None,
+    credential_bridge: object = None,
+) -> "dict[str, object]":
+    """Correction 03 / Correction 04 -- the live read-only Stage-3 boundary.
+
+    Correction 02 BLOCK-02 / DSB-LIVE-AUTH-007: the callable live execution
+    boundary ITSELF consumes an exact confirmation input.  ``confirm_live_read``
+    MUST be exactly ``True`` (identity check -- ``1``, other truthy objects, and
+    non-bool values do NOT authorize the live boundary) before ANY monotonic
+    sampling, external-authorization file read, risk-config I/O, authority
+    binding, restricted-session lifecycle, runtime construction, credential
+    bridge entry, or venue activity.  ``main()`` passes the CLI
+    ``--confirm-live-read`` flag here; the CLI no-confirm PLAN_ONLY branch never
+    calls this function.  ``--confirm-live-read`` grants no authorization: it is
+    a technical interlock that must coexist with a verified external SHA-bound
+    capability envelope, and neither substitutes for the other.
+
+    DSB-LIVE-DEADLINE-001: the invocation-start monotonic time is sampled
+    EXACTLY ONCE at the very top of this function, BEFORE the external
+    execution-authorization file read / SHA verification / parse, BEFORE
+    risk-config file I/O, authority binding, restricted-session lifecycle, and
+    runtime construction.  The one derived absolute end is passed unchanged
+    into ``_build_read_only_stage3_live_runtime`` and thence
+    ``build_active_experiment_runner_runtime_v2``; no later component
+    re-samples, resets, extends, or refreshes it.
+
+    DSB-LIVE-AUTH: the external SHA-bound capability-envelope JSON is verified
+    (SHA -> canonical parse -> canonical invariant -> exact thirteen-field D07
+    capability set) BEFORE any runtime construction or credential activity.
+    A deviation fails closed (LIVE_EXECUTION_AUTHORIZATION_UNVERIFIED /
+    _TOO_BROAD / _ID_MISMATCH) with the envelope contents / any secret never
+    echoed.
+
+    Then the mandated runtime is built and ONLY ``run_pre_release_read_phase_v2``
+    (Stage 3A-3F) is executed, inside the Correction-02 PATH -> temporary PEM
+    credential compatibility bridge.  Returns a secret-free classification
+    mapping.  This function never references
+    ``run_active_experiment_stage3_and_gate_d`` /
+    ``_complete_stage3_active_release_and_normal_writer_v2`` / RELEASE_ONLY /
+    NORMAL_WRITER / Gate D.
+
+    ``*_clock*`` / ``uuid_factory`` / ``runtime_builder`` / ``credential_bridge``
+    are injectable ONLY so the offline tests can drive the exact composition
+    with a synthetic temp ledger, synthetic env, and synthetic transports.
+    """
+    if type(config) is not LiveReadOnlyStage3InvocationConfigV1:
+        raise RunnerError(RunnerFailureCode.LIVE_ENTRYPOINT_PRECONDITION_FAILED, detail="config type")
+
+    # Correction 02 BLOCK-02 / DSB-LIVE-AUTH-007: fail closed unless the live
+    # confirmation is EXACTLY True (identity, not truthiness), BEFORE any clock
+    # sample, file read, runtime/credential/lifecycle/venue activity.
+    if confirm_live_read is not True:
+        raise RunnerError(
+            RunnerFailureCode.LIVE_ENTRYPOINT_PRECONDITION_FAILED,
+            detail="live execution boundary requires confirm_live_read is exactly True",
+        )
+
+    # DSB-LIVE-DEADLINE-001: resolve the monotonic callable and sample it ONCE,
+    # at the very top of the live execution boundary, BEFORE any file I/O.
+    mono = time.monotonic_ns if monotonic_clock_ns is None else monotonic_clock_ns
+    invocation_start_monotonic_ns = mono()
+    if type(invocation_start_monotonic_ns) is not int or type(invocation_start_monotonic_ns) is bool:
+        raise RunnerError(
+            RunnerFailureCode.LIVE_ENTRYPOINT_PRECONDITION_FAILED,
+            detail="monotonic clock did not return an exact int",
+        )
+    experiment_absolute_end_monotonic_ns = (
+        invocation_start_monotonic_ns
+        + _D07_ABSOLUTE_EXPERIMENT_DEADLINE_SECONDS * 1_000_000_000
+    )
+
+    wall = (lambda: datetime.now(timezone.utc)) if wall_clock is None else wall_clock
+    make_uuid = uuid.uuid4 if uuid_factory is None else uuid_factory
+    builder = _build_read_only_stage3_live_runtime if runtime_builder is None else runtime_builder
+    bridge = _demo_path_to_pem_credential_bridge if credential_bridge is None else credential_bridge
+
+    # DSB-LIVE-AUTH-002/003 -- verified BEFORE runtime construction / credentials.
+    authorization_envelope = _d07_load_external_execution_authorization(
+        path=config.execution_authorization_json_path,
+        expected_sha256=config.execution_authorization_sha256,
+    )
+
+    runtime = builder(
+        config,
+        monotonic_clock_ns=mono,
+        wall_clock=wall,
+        uuid_factory=make_uuid,
+        experiment_absolute_end_monotonic_ns=experiment_absolute_end_monotonic_ns,
+        authorization_envelope=authorization_envelope,
+        installed_implementation_commit=config.installed_implementation_commit,
+    )
+    invocation = ExperimentRunnerInvocationV2(
+        invocation_id=config.invocation_id or ("d07_" + make_uuid().hex),
+        market_ticker=config.market_ticker,
+    )
+    with bridge():
+        result = run_pre_release_read_phase_v2(invocation, runtime)
+
+    if result.status not in ("LOCALLY_BLOCKED", "READ_PHASE_COMPLETE"):
+        raise RunnerError(
+            RunnerFailureCode.LIVE_ENTRYPOINT_PRECONDITION_FAILED,
+            detail="unexpected read-phase status",
+        )
+    return {
+        "task_id": _D07_TASK_ID,
+        "controlling_spec": "KALSHI_DEMO_DYNAMIC_SUBACCOUNT_EXECUTION_DOMAIN_BINDING_AND_RISK_CONTROL_SPEC_01_CORRECTION_04",
+        "stage": "STAGE_3A_3F_READ_ONLY",
+        "status": result.status,
+        "process_instance_id": result.process_instance_id,
+        "local_block_reasons": list(result.local_block_reasons),
+        "pre_release_requests_consumed": result.requests_consumed,
+        "trusted_dynamic_read_set_id": result.trusted_dynamic_read_set_id,
+        "execution_authorization_id": authorization_envelope.authorization_id,
+        "installed_implementation_commit": config.installed_implementation_commit,
+        "write_authorization": "NO_WRITE_AUTHORIZATION",
+        "stage_3g_plus": "NOT_ENTERED",
+        "release_only": "NOT_ACQUIRED",
+        "normal_writer": "NOT_ACQUIRED",
+        "gate_d": "NOT_ENTERED",
+    }
+
+
+# ---------------------------------------------------------------------------
+# 40.8 -- CLI.
+# ---------------------------------------------------------------------------
+
+
+def build_live_entrypoint_arg_parser() -> "argparse.ArgumentParser":
+    parser = argparse.ArgumentParser(
+        prog="python -m arb.venues.kalshi.minimal_market_maker_experiment_runner",
+        description=(
+            "R1-D07 read-only Stage-3 live entrypoint. Constructs the active "
+            "runtime through build_active_experiment_runner_runtime_v2 and "
+            "executes only run_pre_release_read_phase_v2 (Stage 3A-3F). It "
+            "never enters Stage 3G+, RELEASE_ONLY, NORMAL_WRITER, Gate D, or "
+            "any venue write. The later live permission is an EXTERNAL "
+            "SHA-bound capability-envelope JSON file (--execution-authorization"
+            "-json / --execution-authorization-sha256) verified against the "
+            "canonical serialization parser + the exact Correction-04 "
+            "thirteen-field D07 capability set; --confirm-live-read is a "
+            "technical interlock only."
+        ),
+    )
+    parser.add_argument("--ticker", required=True)
+    parser.add_argument("--authority-namespace-id", required=True)
+    parser.add_argument("--authority-namespace-root", required=True)
+    parser.add_argument("--canonical-repository-root", required=True)
+    parser.add_argument("--ledger-path", required=True)
+    parser.add_argument("--bootstrap-contract-sha256", required=True)
+    parser.add_argument("--risk-config-json", required=True)
+    parser.add_argument("--risk-config-sha256", required=True)
+    parser.add_argument("--execution-authorization-json", required=True)
+    parser.add_argument("--execution-authorization-sha256", required=True)
+    parser.add_argument("--installed-implementation-commit", required=True)
+    parser.add_argument("--account-scope-ref", default=_D07_N1_ACCOUNT_SCOPE_REF)
+    parser.add_argument("--subaccount", type=int, default=_D07_N1_SUBACCOUNT)
+    parser.add_argument("--exchange-index", type=int, default=_D07_N1_SELECTED_EXCHANGE_INDEX)
+    parser.add_argument("--invocation-id", default="")
+    parser.add_argument(
+        "--confirm-live-read",
+        action="store_true",
+        help=(
+            "Technical interlock ONLY -- it grants no authorization. The live "
+            "read-only Stage-3A-3F run proceeds only when BOTH a verified "
+            "external SHA-bound capability envelope AND this flag are present; "
+            "neither substitutes for the other. Without this flag the launcher "
+            "only validates configuration + the external envelope and prints "
+            "the plan; it builds no runtime, reads no risk config, enters no "
+            "credential bridge, touches no ledger, and performs no venue read."
+        ),
+    )
+    return parser
+
+
+def _config_from_live_entrypoint_args(args: "argparse.Namespace") -> "LiveReadOnlyStage3InvocationConfigV1":
+    return LiveReadOnlyStage3InvocationConfigV1(
+        market_ticker=args.ticker,
+        authority_namespace_id=args.authority_namespace_id,
+        authority_namespace_root=args.authority_namespace_root,
+        canonical_repository_root=args.canonical_repository_root,
+        expected_ledger_path=args.ledger_path,
+        bootstrap_contract_sha256=args.bootstrap_contract_sha256,
+        risk_config_json_path=args.risk_config_json,
+        risk_config_sha256=args.risk_config_sha256,
+        execution_authorization_json_path=args.execution_authorization_json,
+        execution_authorization_sha256=args.execution_authorization_sha256,
+        installed_implementation_commit=args.installed_implementation_commit,
+        account_scope_ref=args.account_scope_ref,
+        subaccount=args.subaccount,
+        exchange_index=args.exchange_index,
+        invocation_id=args.invocation_id,
+    )
+
+
+def main(argv: "Sequence[str] | None" = None) -> int:
+    parser = build_live_entrypoint_arg_parser()
+    args = parser.parse_args(list(sys.argv[1:] if argv is None else argv))
+    try:
+        config = _config_from_live_entrypoint_args(args)
+    except RunnerError as exc:
+        print(json.dumps(
+            {"status": "CONFIG_REJECTED", "failure": exc.code.value, "detail": exc.detail},
+            sort_keys=True,
+        ))
+        return 2
+    if not args.confirm_live_read:
+        # PLAN_ONLY mode: the external envelope MAY be validated (DSB-LIVE-AUTH
+        # ordering), but NO runtime is built, NO risk config is read, the
+        # credential bridge is NOT entered, the ledger is NOT touched, and NO
+        # venue read occurs.  A verified envelope without --confirm-live-read
+        # stays a no-op plan mode (DSB-LIVE-AUTH-007).
+        try:
+            authorization_envelope = _d07_load_external_execution_authorization(
+                path=config.execution_authorization_json_path,
+                expected_sha256=config.execution_authorization_sha256,
+            )
+        except RunnerError as exc:
+            print(json.dumps(
+                {"status": "PLAN_ONLY_AUTHORIZATION_REJECTED", "failure": exc.code.value, "detail": exc.detail},
+                sort_keys=True,
+            ))
+            return 1
+        print(json.dumps({
+            "task_id": _D07_TASK_ID,
+            "controlling_spec": "KALSHI_DEMO_DYNAMIC_SUBACCOUNT_EXECUTION_DOMAIN_BINDING_AND_RISK_CONTROL_SPEC_01_CORRECTION_04",
+            "mode": "PLAN_ONLY",
+            "would_execute": "run_pre_release_read_phase_v2 (Stage 3A-3F, read-only)",
+            "market_ticker": config.market_ticker,
+            "account_scope_ref": config.account_scope_ref,
+            "subaccount": config.subaccount,
+            "exchange_index": config.exchange_index,
+            "execution_authorization_id": authorization_envelope.authorization_id,
+            "installed_implementation_commit": config.installed_implementation_commit,
+            "note": "re-run with --confirm-live-read to perform the live read-only run",
+        }, sort_keys=True))
+        return 0
+    try:
+        # Correction 02 BLOCK-02: the CLI flag is the ONLY thing that flips the
+        # live boundary's own confirmation gate; ``args.confirm_live_read`` is an
+        # exact bool from argparse ``store_true``.
+        result = run_read_only_stage3_live_entrypoint(
+            config, confirm_live_read=args.confirm_live_read is True,
+        )
+    except RunnerError as exc:
+        print(json.dumps(
+            {"status": "LIVE_ENTRYPOINT_FAILED", "failure": exc.code.value, "detail": exc.detail},
+            sort_keys=True,
+        ))
+        return 1
+    print(json.dumps(result, sort_keys=True))
+    return 0
+
+
+if __name__ == "__main__":  # pragma: no cover - offline implementation task never runs this
+    raise SystemExit(main())

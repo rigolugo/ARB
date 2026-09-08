@@ -12,6 +12,14 @@ Public module interface (Spec Section 9.1) -- exact names, no substitutes:
     plan_demo_authenticated_orderbook(input) -> AuthenticatedOrderBookPlan | OrderBookHalt
     build_orderbook_signing_message(plan, timestamp_ms_text) -> OrderBookSigningMessage
     execute_demo_authenticated_orderbook(plan) -> KalshiNativeOrderBookSnapshot | OrderBookHalt
+    execute_demo_authenticated_orderbook_within_deadline(
+        plan, *, caller_deadline_monotonic_ns,
+        caller_monotonic_clock_ns=_current_monotonic_ns,
+    ) -> KalshiNativeOrderBookSnapshot | OrderBookHalt
+        (Correction 03 DSB-OB-002: the deadline-aware sibling of
+        execute_demo_authenticated_orderbook for a caller that already owns an
+        active per-operation / absolute-invocation deadline; shares one
+        execution core with the legacy executor, duplicates nothing.)
     parse_orderbook_response(plan, response_body, response_content_type) -> ParsedNativeOrderBook | OrderBookHalt
 
 Not implemented, and never added: a generic Kalshi client, generic
@@ -110,7 +118,7 @@ import ssl
 import threading
 import time
 from dataclasses import dataclass
-from typing import Optional, Tuple, Union
+from typing import Callable, Optional, Tuple, Union
 
 from cryptography.hazmat.primitives import hashes
 from cryptography.hazmat.primitives.asymmetric import padding, rsa
@@ -151,6 +159,7 @@ __all__ = [
     "plan_demo_authenticated_orderbook",
     "build_orderbook_signing_message",
     "execute_demo_authenticated_orderbook",
+    "execute_demo_authenticated_orderbook_within_deadline",
     "parse_orderbook_response",
 ]
 
@@ -2024,13 +2033,123 @@ def execute_demo_authenticated_orderbook(
     already-validated plan; accepts no transport or secret injection.
     `10000 ms` caller-visible deadline from the first instruction through
     final return, including through secret loading, signing, response
-    parsing, and canonical snapshot construction."""
+    parsing, and canonical snapshot construction.
+
+    Correction 03 (DSB-OB-001): this legacy entrypoint is unchanged for every
+    existing caller. It samples its own entry monotonic time and its own
+    `<entry> + _OVERALL_TIMEOUT_MS` deadline, using the module monotonic clock
+    `_current_monotonic_ns`, and delegates to the one shared execution core
+    (DSB-OB-002/009). No DNS / TLS / signing / receive / parser / snapshot /
+    current-value logic is duplicated for the new deadline-aware primitive."""
 
     start_ns = _current_monotonic_ns()
     deadline_ns = start_ns + _OVERALL_TIMEOUT_MS * 1_000_000
+    return _execute_demo_authenticated_orderbook_core(
+        plan, start_ns=start_ns, deadline_ns=deadline_ns, clock_ns=_current_monotonic_ns,
+    )
+
+
+def execute_demo_authenticated_orderbook_within_deadline(
+    plan: object,
+    *,
+    caller_deadline_monotonic_ns: int,
+    caller_monotonic_clock_ns: "Callable[[], int]" = _current_monotonic_ns,
+) -> Union[KalshiNativeOrderBookSnapshot, OrderBookHalt]:
+    """Correction 03 DSB-OB-002/003/005/006 -- the one additional
+    network-capable public function for the same exact authenticated Demo
+    orderbook operation (`GET /trade-api/v2/markets/{ticker}/orderbook`,
+    `DEMO_SIGNED_PRIVATE_READ`), for a caller that already owns an active
+    per-operation / absolute-invocation deadline (the active-V2 pre-release
+    path, DSB-OB-004).
+
+    Frozen semantics:
+
+    * ``plan`` MUST be an already-validated ``AuthenticatedOrderBookPlan``;
+      the identical ``require_usable_authenticated_order_book_plan`` gate and
+      the identical five inherited pre/at-transport current-value
+      ("anti-TOCTOU") gates run at the identical lifecycle stages, returning
+      the identical deterministic ``OrderBookHalt`` classifications. No plan
+      field is caller-overridable here.
+    * ``caller_deadline_monotonic_ns`` MUST be an exact built-in ``int``
+      (``bool`` prohibited) and ``>= 0``; a malformed value returns a
+      deterministic ``OrderBookHalt`` (``CURRENT_VALUE_MISMATCH`` /
+      ``PLAN_INPUT``) before any DNS / socket / TLS / secret activity. It is
+      interpreted on the SAME monotonic time base as
+      ``caller_monotonic_clock_ns()``.
+    * ``entry_ns = caller_monotonic_clock_ns()`` is sampled exactly once and
+      ``effective_deadline_ns = min(caller_deadline_monotonic_ns,
+      entry_ns + _OVERALL_TIMEOUT_MS * 1_000_000)`` -- never larger than the
+      caller deadline and never larger than ``entry_ns + 10000 ms``, never
+      reset / extended / re-sampled for any later step.
+    * a caller deadline already in the past at entry
+      (``effective_deadline_ns <= entry_ns``) returns a deterministic timeout
+      ``OrderBookHalt`` before any network activity.
+    * every internal remaining-time check runs against ``effective_deadline_ns``
+      using ``caller_monotonic_clock_ns`` as the clock source, at the identical
+      points as the legacy executor.
+    * all inherited signing / TLS / DNS-set verification / socket-stage caps /
+      body cap / header validation / strict JSON defenses / Decimal parsing /
+      canonical snapshot identity / source-binding verification are REUSED
+      UNCHANGED through the one shared execution core -- nothing is duplicated.
+    * NO generic HTTP client, signer, caller-selected transport / socket / TLS
+      / resolver / session object, production endpoint, WebSocket path, or
+      write / cancel capability is introduced. The only new parameters are the
+      caller deadline and the injectable monotonic clock.
+    * automatic retries = 0 and followed redirects = 0, exactly as inherited.
+    """
+
+    if (
+        type(caller_deadline_monotonic_ns) is not int
+        or type(caller_deadline_monotonic_ns) is bool
+        or caller_deadline_monotonic_ns < 0
+    ):
+        return _halt(OrderBookHaltCode.CURRENT_VALUE_MISMATCH, OrderBookStage.PLAN_INPUT)
+    if not callable(caller_monotonic_clock_ns):
+        return _halt(OrderBookHaltCode.CURRENT_VALUE_MISMATCH, OrderBookStage.PLAN_INPUT)
+
+    entry_ns = caller_monotonic_clock_ns()
+    if type(entry_ns) is not int or type(entry_ns) is bool:
+        return _halt(OrderBookHaltCode.CURRENT_VALUE_MISMATCH, OrderBookStage.PLAN_INPUT)
+
+    ceiling_ns = entry_ns + _OVERALL_TIMEOUT_MS * 1_000_000
+    effective_deadline_ns = min(caller_deadline_monotonic_ns, ceiling_ns)
+    if effective_deadline_ns <= entry_ns:
+        return _halt(
+            OrderBookHaltCode.CONNECTIVITY_TIMEOUT,
+            OrderBookStage.DNS_RESOLUTION_WAIT,
+            detail="caller deadline already in the past at entry",
+        )
+
+    return _execute_demo_authenticated_orderbook_core(
+        plan,
+        start_ns=entry_ns,
+        deadline_ns=effective_deadline_ns,
+        clock_ns=caller_monotonic_clock_ns,
+    )
+
+
+def _execute_demo_authenticated_orderbook_core(
+    plan: object,
+    *,
+    start_ns: int,
+    deadline_ns: int,
+    clock_ns: "Callable[[], int]",
+) -> Union[KalshiNativeOrderBookSnapshot, OrderBookHalt]:
+    """Correction 03 DSB-OB-002/009 -- the one shared network-capable
+    execution core. Parameterized ONLY by the already-computed entry sample,
+    the already-computed absolute deadline, and the monotonic clock callable.
+    Every DNS / socket / TLS / secret-load / signing / send / bounded receive
+    / header / parser / canonical-snapshot step below is the exact inherited
+    logic; the legacy ``execute_demo_authenticated_orderbook`` and the new
+    ``execute_demo_authenticated_orderbook_within_deadline`` differ ONLY in
+    which monotonic clock and which absolute deadline value the remaining-time
+    checks consult."""
 
     def _elapsed_ms() -> int:
-        return int((_current_monotonic_ns() - start_ns) / 1_000_000)
+        return int((clock_ns() - start_ns) / 1_000_000)
+
+    def _rem_ns() -> int:
+        return deadline_ns - clock_ns()
 
     if type(plan) is not AuthenticatedOrderBookPlan:
         return _halt(OrderBookHaltCode.CURRENT_VALUE_MISMATCH, OrderBookStage.PLAN_INPUT,
@@ -2059,7 +2178,7 @@ def execute_demo_authenticated_orderbook(
     if failure is not None:
         return failure
 
-    remaining_s = _remaining_ns(deadline_ns) / 1_000_000_000.0
+    remaining_s = _rem_ns() / 1_000_000_000.0
     if remaining_s <= 0:
         return _halt(OrderBookHaltCode.CONNECTIVITY_TIMEOUT, OrderBookStage.DNS_RESOLUTION_WAIT,
                      caller_visible_elapsed_ms=_elapsed_ms())
@@ -2086,7 +2205,7 @@ def execute_demo_authenticated_orderbook(
     if failure is not None:
         return failure
 
-    remaining_s = min(_remaining_ns(deadline_ns) / 1e9, plan.socket_stage_cap_ms / 1000.0)
+    remaining_s = min(_rem_ns() / 1e9, plan.socket_stage_cap_ms / 1000.0)
     if remaining_s <= 0:
         return _halt(OrderBookHaltCode.CONNECTIVITY_TIMEOUT, OrderBookStage.PRE_SOCKET_CURRENT_VALUES_REVERIFIED,
                      caller_visible_elapsed_ms=_elapsed_ms())
@@ -2106,7 +2225,7 @@ def execute_demo_authenticated_orderbook(
         return _halt(OrderBookHaltCode.TRANSPORT_FAILURE, OrderBookStage.TCP_CONNECTED_TO_PINNED_ADDRESS,
                      caller_visible_elapsed_ms=_elapsed_ms())
 
-    remaining_s = min(_remaining_ns(deadline_ns) / 1e9, plan.socket_stage_cap_ms / 1000.0)
+    remaining_s = min(_rem_ns() / 1e9, plan.socket_stage_cap_ms / 1000.0)
     if remaining_s <= 0:
         raw_sock.close()
         return _halt(OrderBookHaltCode.CONNECTIVITY_TIMEOUT, OrderBookStage.TLS_VERIFIED_FOR_DEMO_HOSTNAME,
@@ -2133,7 +2252,7 @@ def execute_demo_authenticated_orderbook(
     if failure is not None:
         tls_sock.close()
         return failure
-    if _remaining_ns(deadline_ns) <= 0:
+    if _rem_ns() <= 0:
         tls_sock.close()
         return _halt(OrderBookHaltCode.CONNECTIVITY_TIMEOUT, OrderBookStage.PRE_SECRET_LOAD_CURRENT_VALUES_REVERIFIED,
                      caller_visible_elapsed_ms=_elapsed_ms())
@@ -2167,7 +2286,7 @@ def execute_demo_authenticated_orderbook(
     api_key_id_loaded = None
     private_key_pem_loaded = None
 
-    if _remaining_ns(deadline_ns) <= 0:
+    if _rem_ns() <= 0:
         tls_sock.close()
         return _halt(OrderBookHaltCode.CONNECTIVITY_TIMEOUT, OrderBookStage.SECRETS_LOADED,
                      signature_lifecycle_state=SignatureLifecycleState.SECRET_LOADED_NO_SIGNATURE,
@@ -2204,7 +2323,7 @@ def execute_demo_authenticated_orderbook(
     api_key_id = secrets.api_key_id
     secrets = None
 
-    if _remaining_ns(deadline_ns) <= 0:
+    if _rem_ns() <= 0:
         tls_sock.close()
         api_key_id = None
         return _halt(OrderBookHaltCode.CONNECTIVITY_TIMEOUT, OrderBookStage.SIGNATURE_GENERATED_NOT_SENT,
@@ -2252,7 +2371,7 @@ def execute_demo_authenticated_orderbook(
     api_key_id = None
     signature_b64 = None
 
-    remaining_s = min(_remaining_ns(deadline_ns) / 1e9, plan.socket_stage_cap_ms / 1000.0)
+    remaining_s = min(_rem_ns() / 1e9, plan.socket_stage_cap_ms / 1000.0)
     if remaining_s <= 0:
         tls_sock.close()
         return _halt(OrderBookHaltCode.CONNECTIVITY_TIMEOUT, OrderBookStage.REQUEST_SEND_MAY_HAVE_BEGUN,
@@ -2260,7 +2379,7 @@ def execute_demo_authenticated_orderbook(
                      caller_visible_elapsed_ms=_elapsed_ms())
 
     request_timestamp_ms = int(timestamp_ms_text)
-    request_started_ns = _current_monotonic_ns()
+    request_started_ns = clock_ns()
 
     try:
         tls_sock.settimeout(remaining_s)
@@ -2305,7 +2424,7 @@ def execute_demo_authenticated_orderbook(
 
     try:
         while True:
-            remaining_overall_s = _remaining_ns(deadline_ns) / 1e9
+            remaining_overall_s = _rem_ns() / 1e9
             if remaining_overall_s <= 0:
                 receive_failed = True
                 break
@@ -2355,7 +2474,7 @@ def execute_demo_authenticated_orderbook(
         except OSError:
             pass
 
-    request_completed_ns = _current_monotonic_ns()
+    request_completed_ns = clock_ns()
 
     # Implementation-05 correction 1: any termination after send may
     # have begun but before a complete terminal HTTP response has been
@@ -2388,7 +2507,7 @@ def execute_demo_authenticated_orderbook(
             caller_visible_elapsed_ms=_elapsed_ms(),
         )
 
-    if _remaining_ns(deadline_ns) <= 0:
+    if _rem_ns() <= 0:
         return _halt(
             OrderBookHaltCode.CONNECTIVITY_TIMEOUT, OrderBookStage.RESPONSE_VALIDATED,
             request_count=1, retry_count=0, response_definitively_received=True,
@@ -2418,7 +2537,7 @@ def execute_demo_authenticated_orderbook(
             caller_visible_elapsed_ms=_elapsed_ms(),
         )
 
-    if _remaining_ns(deadline_ns) <= 0:
+    if _rem_ns() <= 0:
         return _halt(
             OrderBookHaltCode.CONNECTIVITY_TIMEOUT, OrderBookStage.ORDER_BOOK_RECONSTRUCTED,
             request_count=1, retry_count=0, response_definitively_received=True,
@@ -2451,7 +2570,7 @@ def execute_demo_authenticated_orderbook(
         specification_sha256=plan.execution_dispatch_expectation.expected_specification_sha256,
     ).with_canonical_identity()
 
-    if _remaining_ns(deadline_ns) <= 0:
+    if _rem_ns() <= 0:
         return _halt(
             OrderBookHaltCode.CONNECTIVITY_TIMEOUT, OrderBookStage.SUCCEEDED,
             request_count=1, retry_count=0, response_definitively_received=True,

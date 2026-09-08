@@ -11,13 +11,21 @@ cases C01-C25.
 
 from __future__ import annotations
 
+import contextlib
 import copy
 import dataclasses
 import hashlib
+import http.client
 import inspect
+import io
 import json
+import os
 import pickle
+import queue
+import socket
+import ssl
 import tempfile
+import time
 import unittest
 import uuid
 from unittest import mock
@@ -4584,7 +4592,10 @@ class ActiveRuntimeV2TestCase(unittest.TestCase):
         defaults = dict(
             normal_gate=None, emergency_gate=None,
             read_local_safety_state=lambda: None, read_trusted_release_evidence=lambda: None,
-            send_operation_request=lambda *a: None, fetch_orderbook=lambda *a: None,
+            send_operation_request=lambda *a: None,
+            # Correction 02 BLOCK-01: the active-V2 orderbook dependency is a
+            # closed two-phase _ActiveV2OrderbookSeam, never a bare callable.
+            fetch_orderbook=runner._TestOnlyActiveV2OrderbookSeam(lambda _t, _d: None),
             monotonic_clock_ns=lambda: 0, wall_clock=lambda: datetime.now(timezone.utc),
             uuid_factory=uuid.uuid4, risk_config=None, experiment_absolute_end_monotonic_ns=1,
             authority_binding=mock.Mock(), canonical_repository_root="/x",
@@ -4952,7 +4963,11 @@ class ActiveStage3EndToEndTestCase(unittest.TestCase):
                 gate_d_capability_reference_id="cap_active_gate_d_test",
                 normal_write_transport=write_transport or _ScriptedWriteTransport(),
             )
-        rt = runner.build_active_experiment_runner_runtime_v2(
+        # Correction 02 BLOCK-01: the production factory rejects a bare
+        # orderbook callable; the module-private test factory is the ONLY route
+        # that wraps a legacy fixture callable into a closed
+        # _TestOnlyActiveV2OrderbookSeam before invoking the production factory.
+        rt = runner._build_active_experiment_runner_runtime_v2_for_test(
             normal_gate=normal_gate, emergency_gate=emergency_gate,
             send_operation_request=transport,
             fetch_orderbook=_identified_orderbook_fetch if gate_d else _standard_orderbook_fetch(self.TICKER),
@@ -8172,6 +8187,1990 @@ class _StubAcquirer(runner._TrustedDynamicReadAcquirerV2):
 
     def acquire(self, capability):
         return self._result
+
+
+# ===========================================================================
+# R1-D07 read-only Stage-3 live entrypoint -- offline implementation tests
+# (Correction 03 DSB-OB / DSB-LIVE-AUTH / DSB-LIVE-DEADLINE /
+# DSB-LIVE-TRANSPORT / DSB-LIVE-LIFECYCLE + Correction 04 DSB-LIVE-AUTH-003).
+#
+# Coverage: T164-T180 (T159-T163 live in tests/test_kalshi_authenticated_
+# orderbook.py) plus the CP / OB / SB / SS structural cases.
+#
+# NONE of these tests perform a real credential read, a real network request,
+# a real Kalshi call, or touch the real N1 deployed authority/ledger.  The
+# credential bridge is exercised with a synthetic env mapping + synthetic PEM
+# reader; the live transport / orderbook seam are exercised structurally and
+# via delegation mocks; the composition is driven against a synthetic temp
+# ledger (reusing ActiveStage3EndToEndTestCase's scaffolding); the external
+# execution-authorization envelope is a synthetic JSON file.
+# ===========================================================================
+
+
+_D07_SENTINEL_API_KEY_ID = "SYNTHETIC-DEMO-KEY-ID-D07-DO-NOT-USE"
+_D07_SENTINEL_PEM_TEXT = (
+    "-----BEGIN PRIVATE KEY-----\n"
+    "U1lOVEhFVElDLURPLU5PVC1VU0UtRDA3LXNlbnRpbmVsLXBlbS1ib2R5LW5vdC1hLXJlYWwta2V5\n"
+    "-----END PRIVATE KEY-----\n"
+)
+
+# models.py / validation.py / serialization.py stay byte-identical to the
+# required canonical base 6e3c2348fc784d295e9406ec110d929a4b000c89.
+_D07_PROTECTED_SHA256 = {
+    "src/arb/venues/kalshi/models.py": None,
+    "src/arb/venues/kalshi/validation.py": None,
+    "src/arb/venues/kalshi/serialization.py": None,
+}
+
+
+def _d07_synthetic_env(**overrides):
+    env = {
+        "KALSHI_DEMO_API_KEY_ID": _D07_SENTINEL_API_KEY_ID,
+        "KALSHI_DEMO_PRIVATE_KEY_PATH": r"C:\synthetic\d07\demo_private_key.pem",
+        "UNRELATED_ENV": "keep-me",
+    }
+    env.update(overrides)
+    return env
+
+
+def _d07_valid_envelope_dict(**overrides):
+    """The EXACT Correction-04 thirteen-field D07 pattern plus valid metadata."""
+    doc = {
+        "schema_version": 1,
+        "authorization_id": "R1-D07-EXTERNAL-EXEC-AUTH-0001",
+        "authorizing_authority": "Gustavo",
+        "task_id": "R1-D07_READ_ONLY_STAGE3_LIVE_ENTRYPOINT_EXECUTION_01",
+        "issue_date": "2026-09-06",
+        "completion_rule": "single-request",
+        "network_access": "PERMITTED",
+        "demo_public_reads": "PERMITTED",
+        "demo_authenticated_reads": "PERMITTED",
+        "credential_use": "PERMITTED",
+        "demo_writes": "PROHIBITED",
+        "production_public_reads": "PROHIBITED",
+        "production_authenticated_reads": "PROHIBITED",
+        "production_writes": "PROHIBITED",
+        "account_funding": "PROHIBITED",
+        "code_changes": "PROHIBITED",
+        "tests": "PROHIBITED",
+        "artifact_generation": "PROHIBITED",
+        "repository_commits": "PROHIBITED",
+    }
+    doc.update(overrides)
+    return doc
+
+
+def _d07_envelope_from_dict(doc):
+    return runner._parse_capability_envelope_json(json.dumps(doc, sort_keys=True))
+
+
+def _d07_write_envelope(tmp_dir, doc, *, name="exec_auth.json"):
+    text = json.dumps(doc, sort_keys=True)
+    path = Path(tmp_dir) / name
+    path.write_bytes(text.encode("utf-8"))
+    return str(path), hashlib.sha256(text.encode("utf-8")).hexdigest()
+
+
+def _d07_risk_config_to_strict_json(config: RiskLimitConfigV1) -> str:
+    document = {
+        "schema_version": config.schema_version,
+        "conflict_domain": config.conflict_domain,
+        "currency": config.currency,
+    }
+    section_objects = {
+        "per_order": config.per_order,
+        "per_market": config.per_market,
+        "conflict_domain_account": config.conflict_domain_account,
+        "flow": config.flow,
+        "state_integrity": config.state_integrity,
+        "venue_defense": config.venue_defense,
+    }
+    for name, spec in runner._D07_RISK_SECTIONS.items():
+        obj = section_objects[name]
+        section = {}
+        for field_name, kind in spec:
+            value = getattr(obj, field_name)
+            if kind == "decimal":
+                section[field_name] = str(value)
+            elif kind in ("int", "bool", "str"):
+                section[field_name] = value
+            elif kind == "str_or_none":
+                section[field_name] = None if value is None else str(value)
+            else:  # pragma: no cover
+                raise AssertionError(kind)
+        document[name] = section
+    return json.dumps(document, sort_keys=True)
+
+
+_D07_SECTION_MARK = "Section 40 -- R1-D07 read-only Stage-3 live entrypoint"
+
+
+def _d07_section_source():
+    parts = inspect.getsource(runner).split(_D07_SECTION_MARK)
+    assert len(parts) == 2, "the D07 section marker must be unique in the runner module"
+    return parts[1]
+
+
+def _d07_pre_section_source():
+    return inspect.getsource(runner).split(_D07_SECTION_MARK)[0]
+
+
+class D07CredentialBridgeTests(unittest.TestCase):
+    """CP-01..12 -- the Correction-02 PATH -> temporary PEM compatibility
+    bridge (DSB-LIVE-TRANSPORT-006, preserved).  Pure offline."""
+
+    def _reader_ok(self, expected_path=None):
+        def _reader(path):
+            if expected_path is not None:
+                self.assertEqual(path, expected_path)
+            return _D07_SENTINEL_PEM_TEXT
+        return _reader
+
+    def test_cp01_user_contract_is_path_not_pem(self) -> None:
+        env = _d07_synthetic_env()
+        self.assertNotIn("KALSHI_DEMO_PRIVATE_KEY_PEM", env)
+        with runner._demo_path_to_pem_credential_bridge(env=env, read_pem_text=self._reader_ok()):
+            self.assertEqual(env["KALSHI_DEMO_PRIVATE_KEY_PEM"], _D07_SENTINEL_PEM_TEXT)
+
+    def test_cp02_missing_path_fails_closed(self) -> None:
+        env = _d07_synthetic_env()
+        env.pop("KALSHI_DEMO_PRIVATE_KEY_PATH")
+        with self.assertRaises(RunnerError) as ctx:
+            with runner._demo_path_to_pem_credential_bridge(env=env, read_pem_text=self._reader_ok()):
+                self.fail("bridge body must not run")
+        self.assertEqual(ctx.exception.code, RunnerFailureCode.CREDENTIAL_SOURCE_UNRESOLVED)
+        self.assertNotIn("KALSHI_DEMO_PRIVATE_KEY_PEM", env)
+
+    def test_cp03_unreadable_path_fails_closed_without_network(self) -> None:
+        env = _d07_synthetic_env()
+
+        def _raise(_path):
+            raise OSError("synthetic: no such file")
+
+        with mock.patch("socket.socket", side_effect=AssertionError("no network")):
+            with self.assertRaises(RunnerError) as ctx:
+                with runner._demo_path_to_pem_credential_bridge(env=env, read_pem_text=_raise):
+                    self.fail("bridge body must not run")
+        self.assertEqual(ctx.exception.code, RunnerFailureCode.CREDENTIAL_SOURCE_UNRESOLVED)
+        self.assertNotIn("KALSHI_DEMO_PRIVATE_KEY_PEM", env)
+
+    def test_cp03b_non_pem_file_fails_closed(self) -> None:
+        env = _d07_synthetic_env()
+        with self.assertRaises(RunnerError) as ctx:
+            with runner._demo_path_to_pem_credential_bridge(
+                env=env, read_pem_text=lambda _p: "not a pem at all",
+            ):
+                self.fail("bridge body must not run")
+        self.assertEqual(ctx.exception.code, RunnerFailureCode.CREDENTIAL_SOURCE_UNRESOLVED)
+
+    def test_cp04_valid_pem_file_becomes_exact_temporary_env_text(self) -> None:
+        env = _d07_synthetic_env()
+        seen = {}
+        with runner._demo_path_to_pem_credential_bridge(
+            env=env, read_pem_text=self._reader_ok(env["KALSHI_DEMO_PRIVATE_KEY_PATH"]),
+        ):
+            seen["pem"] = env["KALSHI_DEMO_PRIVATE_KEY_PEM"]
+        self.assertEqual(seen["pem"], _D07_SENTINEL_PEM_TEXT)
+
+    def test_cp05_preexisting_pem_env_fails_ambiguous(self) -> None:
+        env = _d07_synthetic_env(KALSHI_DEMO_PRIVATE_KEY_PEM="already here")
+        with self.assertRaises(RunnerError) as ctx:
+            with runner._demo_path_to_pem_credential_bridge(env=env, read_pem_text=self._reader_ok()):
+                self.fail("bridge body must not run")
+        self.assertEqual(ctx.exception.code, RunnerFailureCode.CREDENTIAL_SOURCE_AMBIGUOUS)
+        self.assertEqual(env["KALSHI_DEMO_PRIVATE_KEY_PEM"], "already here")
+
+    def test_cp06_temp_pem_removed_after_normal_completion(self) -> None:
+        env = _d07_synthetic_env()
+        with runner._demo_path_to_pem_credential_bridge(env=env, read_pem_text=self._reader_ok()):
+            self.assertIn("KALSHI_DEMO_PRIVATE_KEY_PEM", env)
+        self.assertNotIn("KALSHI_DEMO_PRIVATE_KEY_PEM", env)
+
+    def test_cp07_temp_pem_removed_after_exception(self) -> None:
+        env = _d07_synthetic_env()
+        with self.assertRaises(ValueError):
+            with runner._demo_path_to_pem_credential_bridge(env=env, read_pem_text=self._reader_ok()):
+                self.assertIn("KALSHI_DEMO_PRIVATE_KEY_PEM", env)
+                raise ValueError("synthetic body failure")
+        self.assertNotIn("KALSHI_DEMO_PRIVATE_KEY_PEM", env)
+
+    def test_cp08_bridge_does_not_mutate_api_key_id(self) -> None:
+        env = _d07_synthetic_env()
+        before = env["KALSHI_DEMO_API_KEY_ID"]
+        with runner._demo_path_to_pem_credential_bridge(env=env, read_pem_text=self._reader_ok()):
+            self.assertEqual(env["KALSHI_DEMO_API_KEY_ID"], before)
+        self.assertEqual(env["KALSHI_DEMO_API_KEY_ID"], before)
+        self.assertEqual(env["UNRELATED_ENV"], "keep-me")
+
+    def test_cp09_failures_do_not_serialize_secret_material(self) -> None:
+        env = _d07_synthetic_env(KALSHI_DEMO_PRIVATE_KEY_PEM="already here")
+        with self.assertRaises(RunnerError) as ctx:
+            with runner._demo_path_to_pem_credential_bridge(env=env, read_pem_text=self._reader_ok()):
+                pass
+        rendered = f"{ctx.exception}|{ctx.exception.detail}"
+        self.assertNotIn(_D07_SENTINEL_PEM_TEXT, rendered)
+        self.assertNotIn(env["KALSHI_DEMO_PRIVATE_KEY_PATH"], rendered)
+        self.assertNotIn(_D07_SENTINEL_API_KEY_ID, rendered)
+        self.assertNotIn("-----BEGIN", rendered)
+
+    def test_cp10_bridge_source_spawns_no_subprocess(self) -> None:
+        src = inspect.getsource(runner._demo_path_to_pem_credential_bridge)
+        src += inspect.getsource(runner._d07_default_read_pem_text)
+        for banned in ("subprocess", "Popen", "os.system", "os.popen", "pty.spawn"):
+            self.assertNotIn(banned, src)
+
+    def test_cp11_no_dual_source_or_fallback(self) -> None:
+        env = {"KALSHI_DEMO_API_KEY_ID": _D07_SENTINEL_API_KEY_ID,
+               "KALSHI_DEMO_PRIVATE_KEY": "/some/other/name",
+               "KALSHI_DEMO_PEM": "inline-pem-value"}
+        with self.assertRaises(RunnerError) as ctx:
+            with runner._demo_path_to_pem_credential_bridge(env=env, read_pem_text=self._reader_ok()):
+                self.fail("bridge body must not run")
+        self.assertEqual(ctx.exception.code, RunnerFailureCode.CREDENTIAL_SOURCE_UNRESOLVED)
+        src = inspect.getsource(runner._demo_path_to_pem_credential_bridge)
+        self.assertEqual(src.count("target_env.get("), 1)
+        self.assertIn("_D07_PRIVATE_KEY_PATH_ENV_NAME", src)
+
+    def test_cp12_no_key_generation_or_conversion(self) -> None:
+        src = inspect.getsource(runner._demo_path_to_pem_credential_bridge)
+        src += inspect.getsource(runner._d07_default_read_pem_text)
+        for banned in ("generate_private_key", "rsa.generate", "load_pem_private_key",
+                       "load_pem_public_key", "private_bytes", "public_bytes", "Encoding."):
+            self.assertNotIn(banned, src)
+
+
+class D07ExternalExecutionAuthorizationTests(unittest.TestCase):
+    """DSB-LIVE-AUTH-001..008 (Correction 03) + DSB-LIVE-AUTH-003 / DSB-TEST-022
+    (Correction 04) -- T167-T171, T179, T180 (loader-level)."""
+
+    def setUp(self):
+        self.tmp = tempfile.TemporaryDirectory()
+        self.addCleanup(self.tmp.cleanup)
+
+    # --- T167 ---------------------------------------------------------------
+    def test_t167_no_self_minted_permitted_capability_or_identity(self) -> None:
+        section = _d07_section_source()
+        # No code literal mints a PERMITTED capability / authorizing authority /
+        # execution authorization id from a module constant / task id / base
+        # commit / the CLI flag.
+        for banned in (
+            "network_access=_AuthorizationValue.PERMITTED",
+            "network_access=permitted",
+            "demo_authenticated_reads=permitted",
+            "credential_use=permitted",
+            "_TaskAuthorizationCapabilityEnvelope(",
+            'authorizing_authority="Gustavo"',
+            "_D07_RUNNER_BASE_COMMIT",
+        ):
+            self.assertNotIn(banned, section, banned)
+        # the loader returns the PARSED external envelope object itself
+        self.assertIn("return envelope", inspect.getsource(runner._d07_load_external_execution_authorization))
+
+    # --- T168 -------------------------------------------------------------
+    def test_t168_wrong_sha_fails_unverified_before_runtime_no_echo(self) -> None:
+        path, _sha = _d07_write_envelope(self.tmp.name, _d07_valid_envelope_dict())
+        with self.assertRaises(RunnerError) as ctx:
+            runner._d07_load_external_execution_authorization(path=path, expected_sha256="0" * 64)
+        self.assertEqual(ctx.exception.code, RunnerFailureCode.LIVE_EXECUTION_AUTHORIZATION_UNVERIFIED)
+        blob = f"{ctx.exception}|{ctx.exception.detail}"
+        self.assertNotIn("R1-D07-EXTERNAL-EXEC-AUTH-0001", blob)
+        self.assertNotIn("PERMITTED", blob)
+
+    def test_t168_malformed_expected_sha_is_unverified(self) -> None:
+        path, _sha = _d07_write_envelope(self.tmp.name, _d07_valid_envelope_dict())
+        for bad in ("", "abc", "A" * 64, "a" * 63):
+            with self.assertRaises(RunnerError) as ctx:
+                runner._d07_load_external_execution_authorization(path=path, expected_sha256=bad)
+            self.assertEqual(ctx.exception.code, RunnerFailureCode.LIVE_EXECUTION_AUTHORIZATION_UNVERIFIED, bad)
+
+    def test_t168_unparseable_or_non_canonical_json_is_unverified(self) -> None:
+        text = "{ this is not valid json"
+        path = Path(self.tmp.name) / "bad.json"
+        path.write_bytes(text.encode("utf-8"))
+        sha = hashlib.sha256(text.encode("utf-8")).hexdigest()
+        with self.assertRaises(RunnerError) as ctx:
+            runner._d07_load_external_execution_authorization(path=str(path), expected_sha256=sha)
+        self.assertEqual(ctx.exception.code, RunnerFailureCode.LIVE_EXECUTION_AUTHORIZATION_UNVERIFIED)
+
+    # --- T169 -------------------------------------------------------------
+    def test_t169_overbroad_capability_is_too_broad(self) -> None:
+        for overbroad in (
+            {"production_writes": "PERMITTED"},
+            {"demo_writes": "PERMITTED"},
+            {"account_funding": "PERMITTED"},
+            {"repository_commits": "PERMITTED"},
+            {"code_changes": "PERMITTED"},
+            {"artifact_generation": "PERMITTED"},
+            {"production_public_reads": "PERMITTED"},
+        ):
+            doc = _d07_valid_envelope_dict(**overbroad)
+            path, sha = _d07_write_envelope(self.tmp.name, doc, name="ob_%s.json" % list(overbroad)[0])
+            with self.assertRaises(RunnerError) as ctx:
+                runner._d07_load_external_execution_authorization(path=path, expected_sha256=sha)
+            self.assertEqual(
+                ctx.exception.code, RunnerFailureCode.LIVE_EXECUTION_AUTHORIZATION_TOO_BROAD, overbroad)
+
+    def test_t169_missing_required_permitted_is_too_broad(self) -> None:
+        for missing in ("network_access", "demo_authenticated_reads", "credential_use"):
+            doc = _d07_valid_envelope_dict(**{missing: "PROHIBITED"})
+            path, sha = _d07_write_envelope(self.tmp.name, doc, name="mp_%s.json" % missing)
+            with self.assertRaises(RunnerError) as ctx:
+                runner._d07_load_external_execution_authorization(path=path, expected_sha256=sha)
+            self.assertEqual(
+                ctx.exception.code, RunnerFailureCode.LIVE_EXECUTION_AUTHORIZATION_TOO_BROAD, missing)
+
+    # --- T179 (Correction 04) -------------------------------------------------
+    def test_t179_demo_public_reads_prohibited_is_too_broad(self) -> None:
+        doc = _d07_valid_envelope_dict(demo_public_reads="PROHIBITED")
+        path, sha = _d07_write_envelope(self.tmp.name, doc, name="t179.json")
+        with self.assertRaises(RunnerError) as ctx:
+            runner._d07_load_external_execution_authorization(path=path, expected_sha256=sha)
+        self.assertEqual(ctx.exception.code, RunnerFailureCode.LIVE_EXECUTION_AUTHORIZATION_TOO_BROAD)
+        blob = f"{ctx.exception}|{ctx.exception.detail}"
+        self.assertNotIn("PERMITTED", blob)
+        self.assertNotIn("PROHIBITED", blob)
+        self.assertNotIn(doc["authorization_id"], blob)
+        # Correction 04 introduces NO new failure classification.
+        self.assertNotIn("DEMO_PUBLIC_READ", [c for c in dir(RunnerFailureCode)])
+
+    # --- T180 (Correction 04) -------------------------------------------------
+    def test_t180_exact_thirteen_field_pattern_accepted(self) -> None:
+        doc = _d07_valid_envelope_dict()
+        path, sha = _d07_write_envelope(self.tmp.name, doc, name="t180.json")
+        envelope = runner._d07_load_external_execution_authorization(path=path, expected_sha256=sha)
+        self.assertIs(type(envelope), runner._TaskAuthorizationCapabilityEnvelope)
+        for name in ("network_access", "demo_public_reads", "demo_authenticated_reads", "credential_use"):
+            self.assertIs(getattr(envelope, name), runner._AuthorizationValue.PERMITTED, name)
+        for name in ("demo_writes", "production_public_reads", "production_authenticated_reads",
+                     "production_writes", "account_funding", "code_changes", "tests",
+                     "artifact_generation", "repository_commits"):
+            self.assertIs(getattr(envelope, name), runner._AuthorizationValue.PROHIBITED, name)
+        self.assertEqual(envelope.authorization_id, doc["authorization_id"])
+
+    # --- T170 -----------------------------------------------------------------
+    def test_t170_orderbook_dispatch_id_mismatch_before_charge(self) -> None:
+        envelope = _d07_envelope_from_dict(_d07_valid_envelope_dict())
+        with self.assertRaises(RunnerError) as ctx:
+            runner._LiveDemoOrderbookSeam(
+                authorization_envelope=envelope,
+                orderbook_dispatch_authorization_id="A-DIFFERENT-ID",
+                expected_implementation_commit="a" * 40,
+                monotonic_clock_ns=lambda: 1,
+            )
+        self.assertEqual(ctx.exception.code, RunnerFailureCode.LIVE_EXECUTION_AUTHORIZATION_ID_MISMATCH)
+        # the matching id constructs fine and binds the expectation to the envelope id
+        seam = runner._LiveDemoOrderbookSeam(
+            authorization_envelope=envelope,
+            orderbook_dispatch_authorization_id=envelope.authorization_id,
+            expected_implementation_commit="a" * 40,
+            monotonic_clock_ns=lambda: 1,
+        )
+        exp = seam._input(CURRENT_TICKER).execution_dispatch_expectation
+        self.assertEqual(exp.gustavo_execution_authorization_id, envelope.authorization_id)
+        self.assertEqual(exp.expected_implementation_commit, "a" * 40)
+
+    def test_t170_installed_commit_has_no_default(self) -> None:
+        src = inspect.getsource(runner.LiveReadOnlyStage3InvocationConfigV1)
+        self.assertIn("installed_implementation_commit: str", src)
+        # no default assignment for the field
+        self.assertNotIn("installed_implementation_commit: str =", src)
+        parser_src = inspect.getsource(runner.build_live_entrypoint_arg_parser)
+        self.assertIn('"--installed-implementation-commit", required=True', parser_src)
+        self.assertIn('"--execution-authorization-json", required=True', parser_src)
+        self.assertIn('"--execution-authorization-sha256", required=True', parser_src)
+
+    # --- T171 -----------------------------------------------------------------
+    def _live_config(self, **overrides):
+        path, sha = _d07_write_envelope(self.tmp.name, _d07_valid_envelope_dict())
+        risk = _d07_write_risk_config(self.tmp.name)
+        base = dict(
+            market_ticker=CURRENT_TICKER, authority_namespace_id="ns",
+            authority_namespace_root=self.tmp.name, canonical_repository_root=self.tmp.name,
+            expected_ledger_path=str(Path(self.tmp.name) / "active.sqlite3"),
+            bootstrap_contract_sha256="a" * 64,
+            risk_config_json_path=risk[0], risk_config_sha256=risk[1],
+            execution_authorization_json_path=path, execution_authorization_sha256=sha,
+            installed_implementation_commit="b" * 40,
+        )
+        base.update(overrides)
+        return runner.LiveReadOnlyStage3InvocationConfigV1(**base)
+
+    def test_t171_confirm_true_with_unverified_envelope_fails_before_runtime(self) -> None:
+        # Correction 02 BLOCK-02: confirm_live_read=True + invalid external
+        # envelope sha -> LIVE_EXECUTION_AUTHORIZATION_UNVERIFIED before any
+        # runtime construction or credential activity.
+        config = self._live_config(execution_authorization_sha256="0" * 64)
+        with mock.patch.object(runner, "_build_read_only_stage3_live_runtime",
+                               side_effect=AssertionError("runtime must not be built")), \
+             mock.patch("socket.socket", side_effect=AssertionError("no network")):
+            with self.assertRaises(RunnerError) as ctx:
+                runner.run_read_only_stage3_live_entrypoint(config, confirm_live_read=True)
+        self.assertEqual(ctx.exception.code, RunnerFailureCode.LIVE_EXECUTION_AUTHORIZATION_UNVERIFIED)
+
+    def test_t171_direct_live_boundary_cannot_execute_without_exact_confirmation(self) -> None:
+        # Correction 02 BLOCK-02: a VALID external envelope + confirm_live_read
+        # omitted / False / 1 / a truthy object -> no clock sample, no auth file
+        # read, no runtime builder call, no credential bridge entry, no
+        # restricted-session append, no network, no Stage-3 execution.
+        config = self._live_config()  # valid envelope
+        sentinels = {}
+
+        def _no(*_a, **_kw):
+            sentinels["touched"] = True
+            raise AssertionError("live activity before exact confirmation")
+
+        for bad_confirm in (None, False, 1, "true", object()):
+            kwargs = {} if bad_confirm is None else {"confirm_live_read": bad_confirm}
+            with mock.patch.object(runner, "_d07_load_external_execution_authorization", _no), \
+                 mock.patch.object(runner, "_build_read_only_stage3_live_runtime", _no), \
+                 mock.patch.object(runner, "_demo_path_to_pem_credential_bridge", _no), \
+                 mock.patch.object(runner, "run_pre_release_read_phase_v2", _no), \
+                 mock.patch("socket.socket", side_effect=AssertionError("no network")), \
+                 mock.patch("time.monotonic_ns", side_effect=AssertionError("no clock sample before confirmation")):
+                with self.assertRaises(RunnerError) as ctx:
+                    runner.run_read_only_stage3_live_entrypoint(config, **kwargs)
+            self.assertEqual(ctx.exception.code, RunnerFailureCode.LIVE_ENTRYPOINT_PRECONDITION_FAILED, bad_confirm)
+        self.assertNotIn("touched", sentinels)
+
+    def test_t171_verified_envelope_without_confirm_is_plan_only_no_runtime(self) -> None:
+        path, sha = _d07_write_envelope(self.tmp.name, _d07_valid_envelope_dict())
+        risk = _d07_write_risk_config(self.tmp.name)
+        args = [
+            "--ticker", CURRENT_TICKER, "--authority-namespace-id", "ns",
+            "--authority-namespace-root", self.tmp.name,
+            "--canonical-repository-root", self.tmp.name,
+            "--ledger-path", str(Path(self.tmp.name) / "active.sqlite3"),
+            "--bootstrap-contract-sha256", "a" * 64,
+            "--risk-config-json", risk[0], "--risk-config-sha256", risk[1],
+            "--execution-authorization-json", path, "--execution-authorization-sha256", sha,
+            "--installed-implementation-commit", "b" * 40,
+        ]
+        buf = io.StringIO()
+        with mock.patch.object(runner, "run_read_only_stage3_live_entrypoint",
+                               side_effect=AssertionError("no runtime without --confirm-live-read")), \
+             mock.patch.object(runner, "_build_read_only_stage3_live_runtime",
+                               side_effect=AssertionError("no runtime without --confirm-live-read")), \
+             mock.patch("socket.socket", side_effect=AssertionError("no network")), \
+             contextlib.redirect_stdout(buf):
+            code = runner.main(args)
+        self.assertEqual(code, 0)
+        payload = json.loads(buf.getvalue())
+        self.assertEqual(payload["mode"], "PLAN_ONLY")
+        self.assertEqual(payload["execution_authorization_id"], "R1-D07-EXTERNAL-EXEC-AUTH-0001")
+        self.assertNotIn("-----BEGIN", buf.getvalue())
+
+
+def _d07_write_risk_config(tmp_dir):
+    config = RiskLimitConfigV1(
+        1, "KALSHI|KALSHI_DEMO|ARB_KALSHI_DEMO_PRIMARY_ACCOUNT|SUBACCOUNT=1", "USD",
+        PerOrderRiskLimits(Decimal("10"), Decimal("10"), True, Decimal("0.10"), 1_000),
+        PerMarketRiskLimits(Decimal("20"), Decimal("20"), 10, Decimal("20"), Decimal("20")),
+        AccountRiskLimits(Decimal("100"), 50, Decimal("100"), 0, Decimal("0")),
+        FlowRiskLimits(1, 1_000, 1, 1_000, 1, 1_000, 1, 1_000, 2, 1_000, 1, 500, 1, 10, 100),
+        StateIntegrityLimits(1_000, 1_000, 10, 1, 500, 10, 100),
+        VenueDefensePolicy("NOT_REQUIRED", None, True, "NO_SAFETY_CREDIT", "NO_SAFETY_CREDIT"),
+    )
+    text = _d07_risk_config_to_strict_json(config)
+    path = Path(tmp_dir) / "risk_config.json"
+    path.write_bytes(text.encode("utf-8"))
+    return str(path), hashlib.sha256(text.encode("utf-8")).hexdigest()
+
+
+class D07OrderbookSeamChargeBoundaryTests(unittest.TestCase):
+    """Correction 03 DSB-OB-004/007/008 / DSB-C03-BUDGET-005/006 -- T164-T166.
+
+    Scaffolding is composed from Correction06LiveTrustedAcquirerTestCase (a
+    real active-V2 runtime + capability + adapter) rather than inherited, so
+    its own C06 test methods do not re-run here."""
+
+    def setUp(self) -> None:
+        self._e2e = Correction06LiveTrustedAcquirerTestCase(methodName="setUp")
+        self._e2e.setUp()
+        self.addCleanup(self._e2e.tearDown)
+
+    def __getattr__(self, name):
+        try:
+            e2e = self.__dict__["_e2e"]
+        except KeyError:
+            raise AttributeError(name) from None
+        return getattr(e2e, name)
+
+    def _adapter_and_cap(self, seam):
+        rt = dataclasses.replace(self._v2_runtime(), fetch_orderbook=seam)
+        cap = runner._issue_trusted_dynamic_pre_release_read_capability_v2(
+            rt, rt.experiment_absolute_end_monotonic_ns)
+        adapter = runner._ActiveV2OperationAdapter(
+            rt, absolute_invocation_deadline_ns=cap.absolute_invocation_deadline_ns)
+        return rt, cap, adapter
+
+    # --- T164 -----------------------------------------------------------------
+    def test_t164_prepare_phase_halt_fails_before_charge_zero_budget(self) -> None:
+        calls = {"prepare": 0, "execute": 0}
+
+        def _prepare(ticker):
+            calls["prepare"] += 1
+            return OrderBookHalt(
+                code=OrderBookHaltCode.SOURCE_BINDING_MISMATCH, stage=OrderBookStage.SOURCE_BOUND)
+
+        def _execute(plan, deadline):
+            calls["execute"] += 1
+            raise AssertionError("execute must not run after a prepare-phase halt")
+
+        seam = runner._TestOnlyActiveV2OrderbookSeam(prepare=_prepare, execute=_execute)
+        _rt, cap, adapter = self._adapter_and_cap(seam)
+        with self.assertRaises(RunnerError) as ctx:
+            adapter.issue_orderbook(cap, ordinal=1, ticker=self.TICKER)
+        self.assertEqual(ctx.exception.code, RunnerFailureCode.RESPONSE_SCHEMA_INVALID)
+        self.assertNotEqual(ctx.exception.code, RunnerFailureCode.ORDERBOOK_ACTIVE_EXECUTION_HALTED)
+        self.assertEqual(cap.requests_consumed, 0)
+        self.assertEqual(calls, {"prepare": 1, "execute": 0})
+
+    # --- T165 -----------------------------------------------------------------
+    def test_t165_one_charge_post_charge_halt_consumes_unit_no_retry(self) -> None:
+        for halt_code, expect in (
+            (OrderBookHaltCode.MARKET_NOT_FOUND, RunnerFailureCode.ORDERBOOK_ACTIVE_EXECUTION_HALTED),
+            (OrderBookHaltCode.CONNECTIVITY_TIMEOUT, RunnerFailureCode.ORDERBOOK_ACTIVE_DEADLINE_EXCEEDED),
+        ):
+            calls = {"prepare": 0, "execute": 0}
+
+            def _prepare(ticker):
+                calls["prepare"] += 1
+                return runner._LegacyCallableOrderbookPreparedV1(ticker=ticker)
+
+            def _execute(plan, deadline, _hc=halt_code):
+                calls["execute"] += 1
+                return OrderBookHalt(code=_hc, stage=OrderBookStage.RESPONSE_VALIDATED)
+
+            seam = runner._TestOnlyActiveV2OrderbookSeam(prepare=_prepare, execute=_execute)
+            _rt, cap, adapter = self._adapter_and_cap(seam)
+            with self.assertRaises(RunnerError) as ctx:
+                adapter.issue_orderbook(cap, ordinal=1, ticker=self.TICKER)
+            self.assertEqual(ctx.exception.code, expect, halt_code)
+            self.assertEqual(cap.requests_consumed, 1, halt_code)   # charged unit stays consumed
+            self.assertEqual(calls, {"prepare": 1, "execute": 1}, halt_code)  # no retry / resend
+
+    # --- T166 -----------------------------------------------------------------
+    def test_t166_adapter_passes_exact_operation_deadline_into_seam_execute(self) -> None:
+        seen = {}
+
+        def _prepare(ticker):
+            return runner._LegacyCallableOrderbookPreparedV1(ticker=ticker)
+
+        def _execute(plan, deadline):
+            seen["deadline"] = deadline
+            return _fake_orderbook_snapshot(self.TICKER).with_canonical_identity()
+
+        seam = runner._TestOnlyActiveV2OrderbookSeam(prepare=_prepare, execute=_execute)
+        _rt, cap, adapter = self._adapter_and_cap(seam)
+        result, deadline = adapter.issue_orderbook(cap, ordinal=1, ticker=self.TICKER)
+        self.assertIsInstance(result, KalshiNativeOrderBookSnapshot)
+        self.assertIs(seen["deadline"], deadline)
+        self.assertIs(type(deadline), OperationDeadlineV1)
+        self.assertEqual(deadline.operation_name, "GET_MARKET_ORDERBOOK")
+        self.assertLessEqual(
+            deadline.absolute_deadline_monotonic_ns, cap.absolute_invocation_deadline_ns)
+        self.assertLessEqual(
+            deadline.absolute_deadline_monotonic_ns,
+            deadline.started_monotonic_ns + runner.OPERATION_DEADLINE_MS * 1_000_000)
+
+    def test_t166_live_seam_execute_forwards_absolute_deadline_and_runtime_clock(self) -> None:
+        envelope = _d07_envelope_from_dict(_d07_valid_envelope_dict())
+        clock_sentinel = lambda: 123_456_789  # noqa: E731
+        seam = runner._LiveDemoOrderbookSeam(
+            authorization_envelope=envelope,
+            orderbook_dispatch_authorization_id=envelope.authorization_id,
+            expected_implementation_commit="a" * 40,
+            monotonic_clock_ns=clock_sentinel,
+        )
+        deadline = OperationDeadlineV1.create(
+            process_instance_id="proc_" + "0" * 32, operation_name="GET_MARKET_ORDERBOOK",
+            request_ordinal=1, started_monotonic_ns=1_000,
+            experiment_absolute_end_monotonic_ns=1_000 + 5 * 10 ** 9, uuid_factory=self.inputs.uuid,
+        )
+        captured = {}
+
+        def _fake_within(plan, *, caller_deadline_monotonic_ns, caller_monotonic_clock_ns):
+            captured["dl"] = caller_deadline_monotonic_ns
+            captured["clk"] = caller_monotonic_clock_ns
+            return "snapshot-sentinel"
+
+        with mock.patch.object(runner, "execute_demo_authenticated_orderbook_within_deadline", _fake_within):
+            out = seam.execute(object(), deadline)
+        self.assertEqual(out, "snapshot-sentinel")
+        self.assertEqual(captured["dl"], deadline.absolute_deadline_monotonic_ns)
+        self.assertIs(captured["clk"], clock_sentinel)
+        exec_src = inspect.getsource(runner._LiveDemoOrderbookSeam.execute)
+        for banned in ("retry", "redirect", "socket", "ssl", "http.client", "for ", "while ", "recv("):
+            self.assertNotIn(banned, exec_src, banned)
+
+    def test_t166_production_factory_rejects_bare_callable_test_factory_wraps(self) -> None:
+        # Correction 02 BLOCK-01 / DSB-OB-007.
+        rt = self._v2_runtime()
+        self.assertIsInstance(rt.fetch_orderbook, runner._ActiveV2OrderbookSeam)
+
+        base_kwargs = dict(
+            normal_gate=rt.normal_gate, emergency_gate=rt.emergency_gate,
+            send_operation_request=rt.send_operation_request,
+            monotonic_clock_ns=rt.monotonic_clock_ns, wall_clock=rt.wall_clock,
+            uuid_factory=rt.uuid_factory, risk_config=rt.risk_config,
+            experiment_absolute_end_monotonic_ns=rt.experiment_absolute_end_monotonic_ns,
+            authority_binding=rt.authority_binding,
+            canonical_repository_root=rt.canonical_repository_root,
+            expected_ledger_path=rt.expected_ledger_path,
+            domain_binding=rt.domain_binding, active_contract=rt.active_contract,
+            route_qualification=rt.route_qualification,
+            accepted_evidence_contract=rt.accepted_evidence_contract,
+        )
+
+        # (a) production factory: a bare callable fails closed, NO runtime produced
+        with self.assertRaises(RunnerError) as ctx:
+            runner.build_active_experiment_runner_runtime_v2(
+                fetch_orderbook=lambda _t, _d: None, **base_kwargs,
+            )
+        self.assertEqual(ctx.exception.code, RunnerFailureCode.PRE_RELEASE_CAPABILITY_NOT_AUTHORIZED)
+
+        # (b) __post_init__ is a validator, not a normalizer
+        with self.assertRaises(RunnerError):
+            dataclasses.replace(rt, fetch_orderbook=lambda _t, _d: None)
+        with self.assertRaises(RunnerError):
+            dataclasses.replace(rt, fetch_orderbook=object())
+
+        # (c) the module-private test factory is the ONLY callable-normalization
+        # route: it wraps the legacy callable into a closed
+        # _TestOnlyActiveV2OrderbookSeam BEFORE the production factory
+        made = runner._build_active_experiment_runner_runtime_v2_for_test(
+            fetch_orderbook=_standard_orderbook_fetch(self.TICKER), **base_kwargs,
+        )
+        self.assertIsInstance(made.fetch_orderbook, runner._TestOnlyActiveV2OrderbookSeam)
+        self.assertIsInstance(made.fetch_orderbook, runner._ActiveV2OrderbookSeam)
+
+        # (d) neither seam exposes a one-phase __call__ compatibility path;
+        # a seam INSTANCE is not callable.
+        self.assertNotIn("__call__", runner._ActiveV2OrderbookSeam.__dict__)
+        self.assertNotIn("__call__", runner._TestOnlyActiveV2OrderbookSeam.__dict__)
+        self.assertNotIn("__call__", runner._LiveDemoOrderbookSeam.__dict__)
+        self.assertFalse(callable(made.fetch_orderbook))
+        self.assertTrue(hasattr(made.fetch_orderbook, "prepare") and hasattr(made.fetch_orderbook, "execute"))
+
+        # (e) the D07 production path binds a real _LiveDemoOrderbookSeam
+        src = inspect.getsource(runner._build_read_only_stage3_live_runtime)
+        self.assertIn("_LiveDemoOrderbookSeam(", src)
+        self.assertTrue(issubclass(runner._LiveDemoOrderbookSeam, runner._ActiveV2OrderbookSeam))
+
+
+_HTTP_REASONS = {
+    200: "OK", 301: "Moved Permanently", 302: "Found",
+    401: "Unauthorized", 404: "Not Found", 500: "Internal Server Error",
+}
+
+
+def _http_response_bytes(status=200, extra_headers=None, body=b"{}", *, framing="content-length"):
+    """Deterministic raw HTTP/1.1 response bytes for the low-level fake stack.
+    ``framing`` selects Content-Length, chunked (single chunk), or
+    connection-close/EOF framing -- all of which standard ``http.client``
+    parsing (still used by ``_perform_get``) accepts."""
+    reason = _HTTP_REASONS.get(status, "Status")
+    lines = [f"HTTP/1.1 {status} {reason}"]
+    hdrs = {"Content-Type": "application/json"}
+    if framing == "content-length":
+        hdrs["Content-Length"] = str(len(body))
+        hdrs["Connection"] = "close"
+        payload = body
+    elif framing == "chunked":
+        hdrs["Transfer-Encoding"] = "chunked"
+        hdrs["Connection"] = "close"
+        payload = (f"{len(body):x}\r\n".encode("ascii") + body + b"\r\n0\r\n\r\n")
+    elif framing == "eof":
+        hdrs["Connection"] = "close"
+        payload = body
+    else:  # pragma: no cover - test misuse
+        raise AssertionError(framing)
+    if extra_headers:
+        hdrs.update(extra_headers)
+    for name, value in hdrs.items():
+        lines.append(f"{name}: {value}")
+    return ("\r\n".join(lines) + "\r\n\r\n").encode("ascii") + payload
+
+
+class _LowLevelPhaseStack:
+    """Fake of the Correction-03 ``_perform_get`` low-level phase stack.
+
+    Phases (in order): ``resolve`` (bounded DNS), ``socket`` (``socket.socket``),
+    ``connect``, ``context`` (``ssl.create_default_context``), ``wrap``
+    (``wrap_socket``), ``handshake`` (``do_handshake``), ``send`` (each send),
+    ``recv`` (each underlying response-header read), ``recv_body`` (each
+    underlying response-body read), ``close``.
+
+    ``raise_at={phase: exc}`` injects a bounded exception at that phase;
+    ``advance_at={phase: ns}`` advances the test's injected runtime clock when
+    that phase is entered.  Every ``settimeout(...)`` value is recorded on
+    ``timeline`` as ``("pre-dns"|"raw.settimeout"|"tls.settimeout", value)``.
+    """
+
+    def __init__(self, test, *, status=200, extra_headers=None,
+                 body=b'{"orders": [], "cursor": ""}',
+                 framing="content-length", recv_chunk=8, send_chunk=1 << 20,
+                 candidates=None, raise_at=None, advance_at=None):
+        self.test = test
+        self.raise_at = dict(raise_at or {})
+        self.advance_at = dict(advance_at or {})
+        self.send_chunk = send_chunk
+        self.timeline = []
+        self.phase_calls = []
+        self.socket_ctor_calls = 0
+        self.connect_calls = 0
+        self.resolve_calls = 0
+        self.resolve_authority = []
+        self.sent = bytearray()
+        self.server_hostname = None
+        self._served = 0
+        if candidates is None:
+            candidates = [(socket.AF_INET, ("203.0.113.9", 443))]
+        self.candidates = candidates
+        resp = _http_response_bytes(status, extra_headers, body, framing=framing)
+        self._header_len = resp.index(b"\r\n\r\n") + 4
+        self._chunks = [resp[i:i + recv_chunk] for i in range(0, len(resp), recv_chunk)] or [b""]
+
+    def _hit(self, phase):
+        self.phase_calls.append(phase)
+        adv = self.advance_at.get(phase)
+        if adv:
+            self.test.now_ns += adv
+        exc = self.raise_at.get(phase)
+        if exc is not None:
+            raise exc
+
+    def resolve(self, host, port, *, deadline, monotonic_clock_ns):
+        # Correction 04 / BLOCK-C03-01: the real helper now receives the EXACT
+        # OperationDeadlineV1 and the EXACT bound runtime clock (never a
+        # precomputed relative float), so the fake derives the DNS-entry budget
+        # from that same authority -- exactly as the helper itself does.
+        self.resolve_calls += 1
+        self.resolve_authority.append((deadline, monotonic_clock_ns))
+        self.timeline.append((
+            "pre-dns",
+            (deadline.absolute_deadline_monotonic_ns - monotonic_clock_ns()) / 1_000_000_000,
+        ))
+        self._hit("resolve")
+        return list(self.candidates)
+
+    def make_socket(self, family, socktype):
+        self.socket_ctor_calls += 1
+        self._hit("socket")
+        return _LowLevelPhaseStack._RawSock(self)
+
+    def make_context(self):
+        self._hit("context")
+        return _LowLevelPhaseStack._Ctx(self)
+
+    def header_settimeouts(self):
+        return [v for label, v in self.timeline if label == "tls.settimeout"][: self._header_read_count()]
+
+    def _header_read_count(self):
+        return sum(1 for p in self.phase_calls if p == "recv")
+
+    def tls_settimeout_values(self):
+        return [v for label, v in self.timeline if label == "tls.settimeout"]
+
+    class _RawSock:
+        def __init__(self, stack):
+            self.stack = stack
+            self.closed = False
+
+        def settimeout(self, value):
+            self.stack.timeline.append(("raw.settimeout", value))
+
+        def connect(self, address):
+            self.stack.connect_calls += 1
+            self.connected_to = address
+            self.stack._hit("connect")
+
+        def close(self):
+            self.closed = True
+
+    class _Ctx:
+        def __init__(self, stack):
+            self.stack = stack
+
+        def wrap_socket(self, sock, *, server_hostname, do_handshake_on_connect):
+            assert do_handshake_on_connect is False, "TLS handshake must be explicit"
+            self.stack.server_hostname = server_hostname
+            self.stack._hit("wrap")
+            return _LowLevelPhaseStack._TLSSock(self.stack)
+
+    class _TLSSock:
+        def __init__(self, stack):
+            self.stack = stack
+            self.closed = False
+            self._recv = list(stack._chunks)
+
+        def settimeout(self, value):
+            self.stack.timeline.append(("tls.settimeout", value))
+
+        def do_handshake(self):
+            self.stack._hit("handshake")
+
+        def send(self, view):
+            self.stack._hit("send")
+            n = min(len(view), self.stack.send_chunk)
+            self.stack.sent += bytes(view[:n])
+            return n
+
+        def recv_into(self, buffer):
+            phase = "recv" if self.stack._served < self.stack._header_len else "recv_body"
+            self.stack._hit(phase)
+            if not self._recv:
+                return 0
+            chunk = self._recv.pop(0)
+            n = min(len(chunk), len(buffer))
+            buffer[:n] = chunk[:n]
+            if n < len(chunk):
+                self._recv.insert(0, chunk[n:])
+            self.stack._served += n
+            return n
+
+        def close(self):
+            self.closed = True
+            self.stack._hit("close")
+
+
+class D07SignedTransportTests(unittest.TestCase):
+    """DSB-LIVE-TRANSPORT-001..006 + Correction-03 BLOCK-C02-01 -- T172-T178
+    (secret-safe generic signed GET-only transport; the SAME absolute
+    OperationDeadlineV1 + SAME runtime clock stay load-bearing through every
+    independently blocking phase).  Never invoked live here."""
+
+    def setUp(self) -> None:
+        self.inputs = DeterministicInputs()
+        # Correction 02 BLOCK-03: an injectable deterministic monotonic clock;
+        # advancing it (e.g. during signing) must shrink the transport budget.
+        self.now_ns = 5_000_000_000_000
+        self.transport = runner._LiveDemoSignedReadTransport(
+            wall_clock=self.inputs.clock,
+            monotonic_clock_ns=lambda: self.now_ns,
+            env=_d07_synthetic_env(),
+        )
+
+    def _advance(self, ns):
+        self.now_ns += ns
+
+    def _prepared(self, operation=RunnerOperation.GET_ORDERS):
+        return prepare_runner_operation_request(
+            operation, path_parameters={}, ticker=CURRENT_TICKER, request_ordinal=1,
+            uuid_factory=self.inputs.uuid,
+        )
+
+    def _deadline(self, *, remaining_ns=10 ** 12):
+        # absolute deadline = current injected clock + remaining_ns (may be <= 0)
+        started = self.now_ns
+        end = started + remaining_ns
+        return OperationDeadlineV1.create(
+            process_instance_id="proc_" + "0" * 32, operation_name="GET_ORDERS",
+            request_ordinal=1, started_monotonic_ns=started,
+            experiment_absolute_end_monotonic_ns=end, uuid_factory=self.inputs.uuid,
+        )
+
+    # -- Correction-03 low-level phase stack ---------------------------------
+    # _perform_get now drives explicit phases: bounded DNS resolve -> ONE
+    # selected stream address -> socket.socket/connect -> ssl.create_default_
+    # context/wrap_socket(do_handshake_on_connect=False) -> do_handshake ->
+    # explicit send loop -> http.client.HTTPResponse over a deadline-aware
+    # reader (each underlying read re-derives the remaining absolute-deadline
+    # budget).  This fake records every settimeout(...) value and lets a test
+    # raise a bounded exception and/or advance the injected runtime clock at
+    # any named phase.
+    def _install_stack(self, **kwargs):
+        stack = _LowLevelPhaseStack(self, **kwargs)
+        patches = (
+            mock.patch.object(runner, "_d07_live_signed_get_resolve_addresses", stack.resolve),
+            mock.patch("socket.socket", stack.make_socket),
+            mock.patch("ssl.create_default_context", stack.make_context),
+        )
+        return stack, patches
+
+    @contextlib.contextmanager
+    def _stack(self, **kwargs):
+        stack, patches = self._install_stack(**kwargs)
+        with contextlib.ExitStack() as es:
+            for p in patches:
+                es.enter_context(p)
+            yield stack
+
+    def _run_get(self, stack_kwargs=None, *, host="external-api.demo.kalshi.co",
+                 target="/trade-api/v2/portfolio/orders",
+                 headers=None, deadline=None):
+        headers = headers or {"Accept": "application/json"}
+        with self._stack(**(stack_kwargs or {})) as stack:
+            result = self.transport._perform_get(
+                host, target, headers, deadline if deadline is not None else self._deadline(),
+            )
+        return result, stack
+
+    def _run_get_error(self, stack_kwargs, **kw):
+        with self.assertRaises(RunnerError) as ctx:
+            self._run_get(stack_kwargs, **kw)
+        return ctx.exception
+
+    # --- T175 -----------------------------------------------------------------
+    def test_t175_invalid_secret_bearing_header_sentinel_fixed_classification(self) -> None:
+        sentinel = "SECRET-\r\nInjected-Header: evil"  # CRLF-bearing invalid header value
+        env = _d07_synthetic_env(
+            KALSHI_DEMO_API_KEY_ID=sentinel, KALSHI_DEMO_PRIVATE_KEY_PEM=_D07_SENTINEL_PEM_TEXT,
+        )
+        transport = runner._LiveDemoSignedReadTransport(
+            wall_clock=self.inputs.clock, monotonic_clock_ns=lambda: self.now_ns, env=env,
+        )
+        with self.assertRaises(RunnerError) as ctx:
+            transport._auth_headers(self._prepared())
+        self.assertEqual(ctx.exception.code, RunnerFailureCode.LIVE_READ_TRANSPORT_HEADER_INVALID)
+        blob = f"{ctx.exception}|{ctx.exception.detail}"
+        self.assertNotIn(sentinel, blob)
+        self.assertNotIn("SECRET-", blob)
+        self.assertNotIn("Injected-Header", blob)
+
+    # --- T176 -----------------------------------------------------------------
+    def test_t176_bounded_transport_exceptions_map_to_fixed_classifications(self) -> None:
+        # Correction 03: the bounded exception family is now mapped across EVERY
+        # low-level phase -- resolver, socket.socket, connect, ssl context,
+        # wrap_socket, do_handshake, each send, each header read, each body read
+        # -- to the same fixed secret-safe classification per exception type.
+        tok = "RAW-EXC-SENTINEL-7f3a9c"  # must never appear in any mapped output
+
+        def _code(phase, exc):
+            e = self._run_get_error({"raise_at": {phase: exc}})
+            blob = f"{e}|{e.detail}|{e.args}"
+            self.assertNotIn(tok, blob, (phase, exc))
+            self.assertNotIn("Traceback", blob)
+            self.assertNotIn(_D07_SENTINEL_API_KEY_ID, blob)
+            return e.code
+
+        exc_map = [
+            (ssl.SSLError(tok), RunnerFailureCode.LIVE_READ_TRANSPORT_TLS_FAILED),
+            (socket.gaierror(tok), RunnerFailureCode.LIVE_READ_TRANSPORT_DNS_FAILED),
+            (socket.timeout(tok), RunnerFailureCode.LIVE_READ_TRANSPORT_CONNECT_TIMEOUT),
+            (TimeoutError(tok), RunnerFailureCode.LIVE_READ_TRANSPORT_CONNECT_TIMEOUT),
+            (http.client.HTTPException(tok), RunnerFailureCode.LIVE_READ_TRANSPORT_PROTOCOL_FAILED),
+            (UnicodeError(tok), RunnerFailureCode.LIVE_READ_TRANSPORT_HEADER_INVALID),
+            (ValueError(tok), RunnerFailureCode.LIVE_READ_TRANSPORT_HEADER_INVALID),
+            (OSError(tok), RunnerFailureCode.LIVE_READ_TRANSPORT_IO_FAILED),
+        ]
+        phases = ("resolve", "socket", "connect", "context", "wrap",
+                  "handshake", "send", "recv", "recv_body")
+        for exc, expect in exc_map:
+            for phase in phases:
+                self.assertEqual(_code(phase, exc), expect, (phase, type(exc).__name__))
+
+        # BLOCK-04: a bounded close-time failure AFTER a successful response is
+        # suppressed -- it never escapes raw and never overrides the success.
+        ok, stack = self._run_get({"raise_at": {"close": OSError(tok)}})
+        self.assertEqual(ok.http_status, 200)
+        self.assertIn("close", stack.phase_calls)
+        # BLOCK-04: a bounded close-time failure while ANOTHER deterministic
+        # failure is active -- the prior classification wins, close never raises.
+        e = self._run_get_error(
+            {"raise_at": {"handshake": http.client.HTTPException(tok), "close": OSError(tok)}},
+        )
+        self.assertEqual(e.code, RunnerFailureCode.LIVE_READ_TRANSPORT_PROTOCOL_FAILED)
+
+    # --- T177 -----------------------------------------------------------------
+    def test_t177_3xx_non_followed_and_non_2xx_fixed_terminal_no_retry(self) -> None:
+        for status, expect in (
+            (301, RunnerFailureCode.LIVE_READ_TRANSPORT_REDIRECT_NOT_FOLLOWED),
+            (302, RunnerFailureCode.LIVE_READ_TRANSPORT_REDIRECT_NOT_FOLLOWED),
+            (401, RunnerFailureCode.LIVE_READ_TRANSPORT_NON_2XX),
+            (404, RunnerFailureCode.LIVE_READ_TRANSPORT_NON_2XX),
+            (500, RunnerFailureCode.LIVE_READ_TRANSPORT_NON_2XX),
+        ):
+            with self._stack(status=status) as stack:
+                with self.assertRaises(RunnerError) as ctx:
+                    self.transport._perform_get(
+                        "external-api.demo.kalshi.co", "/trade-api/v2/portfolio/orders",
+                        {"Accept": "application/json"}, self._deadline(),
+                    )
+            self.assertEqual(ctx.exception.code, expect, status)
+            # exactly one connection attempt; zero retries, zero followed redirects
+            self.assertEqual(stack.resolve_calls, 1, status)
+            self.assertEqual(stack.socket_ctor_calls, 1, status)
+            self.assertEqual(stack.connect_calls, 1, status)
+            # a 3xx/non-2xx status is terminal BEFORE any body read
+            self.assertNotIn("recv_body", stack.phase_calls, status)
+
+    # --- T178 -----------------------------------------------------------------
+    def test_t178_entrypoint_top_level_handler_catches_full_mapped_family(self) -> None:
+        main_src = inspect.getsource(runner.main)
+        self.assertIn("except RunnerError as exc:", main_src)
+        self.assertIn("json.dumps(", main_src)
+        # every LIVE_READ_TRANSPORT_* classification is a RunnerFailureCode
+        # member, so main()'s single `except RunnerError` catches the full
+        # mapped family and emits classification-only JSON.
+        for name in dir(RunnerFailureCode):
+            if name.startswith("LIVE_READ_TRANSPORT_"):
+                self.assertIsInstance(getattr(RunnerFailureCode, name).value, str)
+        with mock.patch.object(
+            runner, "run_read_only_stage3_live_entrypoint",
+            side_effect=RunnerError(RunnerFailureCode.LIVE_READ_TRANSPORT_TLS_FAILED, detail="tls"),
+        ):
+            buf = io.StringIO()
+            with tempfile.TemporaryDirectory() as tmp:
+                path, sha = _d07_write_envelope(tmp, _d07_valid_envelope_dict())
+                risk = _d07_write_risk_config(tmp)
+                args = [
+                    "--ticker", CURRENT_TICKER, "--authority-namespace-id", "ns",
+                    "--authority-namespace-root", tmp, "--canonical-repository-root", tmp,
+                    "--ledger-path", str(Path(tmp) / "active.sqlite3"),
+                    "--bootstrap-contract-sha256", "a" * 64,
+                    "--risk-config-json", risk[0], "--risk-config-sha256", risk[1],
+                    "--execution-authorization-json", path, "--execution-authorization-sha256", sha,
+                    "--installed-implementation-commit", "b" * 40, "--confirm-live-read",
+                ]
+                with contextlib.redirect_stdout(buf):
+                    code = runner.main(args)
+        self.assertEqual(code, 1)
+        payload = json.loads(buf.getvalue())
+        self.assertEqual(payload["failure"], "LIVE_READ_TRANSPORT_TLS_FAILED")
+        self.assertNotIn("Traceback", buf.getvalue())
+
+    def test_transport_repr_is_secret_free(self) -> None:
+        self.assertEqual(repr(self.transport), "_LiveDemoSignedReadTransport(demo_authenticated_read_only)")
+        self.assertNotIn(_D07_SENTINEL_API_KEY_ID, repr(self.transport))
+
+    def test_transport_rejects_expired_deadline_before_any_io(self) -> None:
+        with mock.patch("socket.socket", side_effect=AssertionError("no network")), \
+             mock.patch.object(runner, "_d07_live_signed_get_resolve_addresses",
+                               side_effect=AssertionError("no DNS resolution past the deadline")):
+            with self.assertRaises(RunnerError) as ctx:
+                self.transport(
+                    RunnerOperation.GET_ORDERS, self._prepared(RunnerOperation.GET_ORDERS),
+                    self._deadline(remaining_ns=-(10 ** 9)),
+                )
+        self.assertEqual(ctx.exception.code, RunnerFailureCode.DEADLINE_EXCEEDED)
+
+    # --- T172 / T173 / T174 (BLOCK-03 + BLOCK-C02-01: the SAME absolute
+    # OperationDeadlineV1 + SAME runtime monotonic clock stay load-bearing
+    # THROUGH signing AND every independently blocking transport phase) ------
+
+    @staticmethod
+    def _timeline_values(timeline, *labels):
+        return [v for lab, v in timeline if lab in labels]
+
+    def _signed_auth_headers(self, advance_ns=0):
+        outer = self
+
+        def _auth_headers(_self, _prepared):
+            if advance_ns:
+                outer.now_ns += advance_ns
+            return {"KALSHI-ACCESS-KEY": _D07_SENTINEL_API_KEY_ID,
+                    "KALSHI-ACCESS-SIGNATURE": "x", "KALSHI-ACCESS-TIMESTAMP": "1"}
+
+        return mock.patch.object(runner._LiveDemoSignedReadTransport, "_auth_headers", _auth_headers)
+
+    def test_t172_t173_t174_signing_time_shrinks_transport_budget(self) -> None:
+        # 5 s remaining before signing; signing advances the injected runtime
+        # clock by 2 s; the FIRST transport-phase budget must be at most the
+        # remaining ~3 s authority, never the stale 5 s -- and it must use THIS
+        # injected clock, not the global time.monotonic_ns.
+        env = _d07_synthetic_env(KALSHI_DEMO_PRIVATE_KEY_PEM=_D07_SENTINEL_PEM_TEXT)
+        transport = runner._LiveDemoSignedReadTransport(
+            wall_clock=self.inputs.clock, monotonic_clock_ns=lambda: self.now_ns, env=env,
+        )
+        deadline = self._deadline(remaining_ns=5_000_000_000)
+        stack, patches = self._install_stack(status=200, body=b"{}")
+        with contextlib.ExitStack() as es:
+            es.enter_context(self._signed_auth_headers(advance_ns=2_000_000_000))
+            for p in patches:
+                es.enter_context(p)
+            es.enter_context(mock.patch("time.monotonic_ns",
+                                        side_effect=AssertionError("must use the injected runtime clock")))
+            transport(RunnerOperation.GET_ORDERS, self._prepared(RunnerOperation.GET_ORDERS), deadline)
+        first_dns = self._timeline_values(stack.timeline, "pre-dns")[0]
+        first_socket_budget = self._timeline_values(stack.timeline, "raw.settimeout")[0]
+        # 5 s - 2 s signing = ~3 s; never the stale 5 s, never > 5 s.
+        for budget in (first_dns, first_socket_budget):
+            self.assertLessEqual(budget, 3.001)
+            self.assertGreater(budget, 0.0)
+
+    def test_t172_no_upward_floor_and_post_sign_zero_fails_before_io(self) -> None:
+        env = _d07_synthetic_env(KALSHI_DEMO_PRIVATE_KEY_PEM=_D07_SENTINEL_PEM_TEXT)
+        transport = runner._LiveDemoSignedReadTransport(
+            wall_clock=self.inputs.clock, monotonic_clock_ns=lambda: self.now_ns, env=env,
+        )
+        # sub-millisecond positive remaining -> used as-is, NOT clamped up to 1 ms
+        stack, patches = self._install_stack(status=200, body=b"{}")
+        with contextlib.ExitStack() as es:
+            es.enter_context(self._signed_auth_headers())
+            for p in patches:
+                es.enter_context(p)
+            transport(RunnerOperation.GET_ORDERS,
+                      self._prepared(RunnerOperation.GET_ORDERS),
+                      self._deadline(remaining_ns=300_000))  # 0.3 ms
+        for budget in (self._timeline_values(stack.timeline, "pre-dns")[0],
+                       self._timeline_values(stack.timeline, "raw.settimeout")[0]):
+            self.assertLess(budget, 0.001)
+            self.assertGreater(budget, 0.0)
+
+        # remaining <= 0 after signing -> DEADLINE_EXCEEDED before ANY transport
+        # phase (resolver / socket / context are all patched to explode).
+        with self._signed_auth_headers(advance_ns=10_000_000_000), \
+             mock.patch.object(runner, "_d07_live_signed_get_resolve_addresses",
+                               side_effect=AssertionError("no DNS past the deadline")), \
+             mock.patch("socket.socket", side_effect=AssertionError("no socket past the deadline")), \
+             mock.patch("ssl.create_default_context", side_effect=AssertionError("no context past the deadline")):
+            with self.assertRaises(RunnerError) as ctx:
+                transport(RunnerOperation.GET_ORDERS,
+                          self._prepared(RunnerOperation.GET_ORDERS),
+                          self._deadline(remaining_ns=1_000_000_000))
+        self.assertEqual(ctx.exception.code, RunnerFailureCode.DEADLINE_EXCEEDED)
+
+    # --- Correction-03 cumulative phase-time proofs (mapped to T172-T174) ----
+    def test_t172_t173_t174_dns_time_consumes_the_same_absolute_deadline(self) -> None:
+        # DNS resolution advances the injected clock; connect must then receive
+        # only the reduced remainder derived from the SAME absolute deadline.
+        stack, patches = self._install_stack(advance_at={"resolve": 4_000_000_000})
+        with contextlib.ExitStack() as es:
+            for p in patches:
+                es.enter_context(p)
+            self.transport._perform_get(
+                "external-api.demo.kalshi.co", "/trade-api/v2/portfolio/orders",
+                {"Accept": "application/json"}, self._deadline(remaining_ns=10_000_000_000),
+            )
+        pre_dns = self._timeline_values(stack.timeline, "pre-dns")[0]
+        first_connect_budget = self._timeline_values(stack.timeline, "raw.settimeout")[0]
+        self.assertAlmostEqual(pre_dns, 10.0, places=3)
+        self.assertLessEqual(first_connect_budget, 6.001)  # 10 s - 4 s DNS
+        self.assertGreater(first_connect_budget, 0.0)
+
+    # --- Correction-04 / BLOCK-C03-01: the REAL DNS resolver helper's queue
+    # wait is authorized by the same absolute deadline AFTER Thread.start()
+    # (mapped to T172-T174 / DSB-BUDGET-006) ---------------------------------
+    def _real_resolver_harness(self, *, start_advance_ns, run_worker=True):
+        """Drive the REAL ``_d07_live_signed_get_resolve_addresses`` with a
+        patched ``threading.Thread`` whose ``start()`` advances the SAME
+        injected runtime clock (modelling thread construction / start /
+        scheduling latency) and a patched ``queue.Queue`` that records every
+        ``get(timeout=...)``.  Returns ``(gets, threads, patches)``."""
+        outer = self
+        gets = []
+        threads = []
+
+        class _FakeQueue:
+            def __init__(self, maxsize=0):
+                self.maxsize = maxsize
+                self._items = []
+
+            def put(self, item):
+                self._items.append(item)
+
+            def get(self, timeout=None):
+                gets.append(timeout)
+                if not self._items:
+                    raise queue.Empty
+                return self._items.pop(0)
+
+        class _FakeThread:
+            def __init__(self, target=None, name=None, daemon=None, args=(), kwargs=None):
+                self._target = target
+                self.name = name
+                self.daemon = daemon
+                self.started = False
+                threads.append(self)
+
+            def start(self):
+                self.started = True
+                outer.now_ns += start_advance_ns
+                if run_worker and self._target is not None:
+                    self._target()
+
+            def join(self, *_a, **_k):  # pragma: no cover - must never happen
+                raise AssertionError("the daemon resolver must never be joined")
+
+        patches = (
+            mock.patch("threading.Thread", _FakeThread),
+            mock.patch("queue.Queue", _FakeQueue),
+            mock.patch("socket.getaddrinfo", return_value=[
+                (socket.AF_INET, socket.SOCK_STREAM, 6, "", ("203.0.113.9", 443)),
+            ]),
+        )
+        return gets, threads, patches
+
+    def test_t172_t173_t174_dns_queue_wait_recomputed_after_thread_start(self) -> None:
+        # DNS-1: 3 s absolute remainder at helper entry; thread construction /
+        # start consumes 2 s; the blocking queue wait must receive the FRESH
+        # ~1 s remainder, never the stale 3 s pre-start snapshot.
+        deadline = self._deadline(remaining_ns=3_000_000_000)
+        gets, threads, patches = self._real_resolver_harness(start_advance_ns=2_000_000_000)
+        with contextlib.ExitStack() as es:
+            for p in patches:
+                es.enter_context(p)
+            answer = runner._d07_live_signed_get_resolve_addresses(
+                "external-api.demo.kalshi.co", 443,
+                deadline=deadline, monotonic_clock_ns=lambda: self.now_ns,
+            )
+        self.assertEqual(answer, ((socket.AF_INET, ("203.0.113.9", 443)),))
+        self.assertEqual(len(gets), 1, gets)                  # queue.get called exactly once
+        self.assertAlmostEqual(gets[0], 1.0, places=6)        # 3 s - 2 s startup
+        self.assertGreater(gets[0], 0.0)
+        self.assertNotAlmostEqual(gets[0], 3.0, places=6)     # the stale value was NOT used
+        # accepted architecture preserved: one daemon worker, started, never joined
+        self.assertEqual(len(threads), 1)
+        self.assertTrue(threads[0].daemon)
+        self.assertTrue(threads[0].started)
+
+    def test_t172_t173_t174_dns_queue_wait_skipped_when_startup_exhausts_deadline(self) -> None:
+        # DNS-2: thread startup consumes the whole 3 s remainder -> queue.get is
+        # never entered and the result is a deterministic DEADLINE_EXCEEDED.
+        # No transport socket / connect / TLS / send / read activity occurs.
+        for advance_ns in (3_000_000_000, 9_000_000_000):
+            with self.subTest(startup_ns=advance_ns):
+                self.now_ns = 5_000_000_000_000
+                deadline = self._deadline(remaining_ns=3_000_000_000)
+                gets, threads, patches = self._real_resolver_harness(
+                    start_advance_ns=advance_ns, run_worker=False,
+                )
+                with contextlib.ExitStack() as es:
+                    for p in patches:
+                        es.enter_context(p)
+                    es.enter_context(mock.patch(
+                        "socket.socket", side_effect=AssertionError("no transport socket")))
+                    es.enter_context(mock.patch(
+                        "ssl.create_default_context", side_effect=AssertionError("no TLS context")))
+                    with self.assertRaises(RunnerError) as ctx:
+                        runner._d07_live_signed_get_resolve_addresses(
+                            "external-api.demo.kalshi.co", 443,
+                            deadline=deadline, monotonic_clock_ns=lambda: self.now_ns,
+                        )
+                self.assertEqual(ctx.exception.code, RunnerFailureCode.DEADLINE_EXCEEDED)
+                self.assertEqual(ctx.exception.detail, "dns-wait")
+                self.assertEqual(gets, [], "queue.get must not be called")
+                # the daemon worker is simply abandoned -- never joined
+                self.assertEqual(len(threads), 1)
+                self.assertTrue(threads[0].daemon)
+
+    def test_t172_t173_t174_dns_expired_before_startup_creates_no_thread(self) -> None:
+        # an already-expired deadline fails closed BEFORE any local resolver
+        # startup work at all (no queue, no thread, no getaddrinfo).
+        self.now_ns = 5_000_000_000_000
+        deadline = self._deadline(remaining_ns=-(10 ** 9))
+        gets, threads, patches = self._real_resolver_harness(start_advance_ns=0)
+        with contextlib.ExitStack() as es:
+            for p in patches:
+                es.enter_context(p)
+            with self.assertRaises(RunnerError) as ctx:
+                runner._d07_live_signed_get_resolve_addresses(
+                    "external-api.demo.kalshi.co", 443,
+                    deadline=deadline, monotonic_clock_ns=lambda: self.now_ns,
+                )
+        self.assertEqual(ctx.exception.code, RunnerFailureCode.DEADLINE_EXCEEDED)
+        self.assertEqual(ctx.exception.detail, "pre-dns-start")
+        self.assertEqual(threads, [])
+        self.assertEqual(gets, [])
+
+    def test_t172_t173_t174_transport_hands_dns_the_exact_deadline_and_clock(self) -> None:
+        # DNS-3: _perform_get supplies the EXACT OperationDeadlineV1 object and
+        # the EXACT bound runtime monotonic clock -- not a precomputed relative
+        # float -- as the resolver's deadline authority.
+        captured = {}
+
+        def _spy(host, port, *, deadline, monotonic_clock_ns):
+            captured["args"] = (host, port)
+            captured["deadline"] = deadline
+            captured["clock"] = monotonic_clock_ns
+            raise RunnerError(RunnerFailureCode.LIVE_READ_TRANSPORT_DNS_FAILED, detail="stop here")
+
+        deadline = self._deadline(remaining_ns=5_000_000_000)
+        with mock.patch.object(runner, "_d07_live_signed_get_resolve_addresses", _spy), \
+             mock.patch("socket.socket", side_effect=AssertionError("no socket before DNS")):
+            with self.assertRaises(RunnerError) as ctx:
+                self.transport._perform_get(
+                    "external-api.demo.kalshi.co", "/trade-api/v2/portfolio/orders",
+                    {"Accept": "application/json"}, deadline,
+                )
+        self.assertEqual(ctx.exception.code, RunnerFailureCode.LIVE_READ_TRANSPORT_DNS_FAILED)
+        self.assertIs(captured["deadline"], deadline)                       # exact object
+        self.assertIs(captured["clock"], self.transport._monotonic_clock_ns)  # exact bound clock
+        self.assertEqual(captured["args"], ("external-api.demo.kalshi.co", runner.DEMO_PORT))
+        self.assertNotIsInstance(captured["deadline"], float)
+
+        # static: the stale relative call shape is gone, and the helper itself
+        # recomputes AFTER Thread.start() and immediately BEFORE queue.get.
+        perform_src = inspect.getsource(runner._LiveDemoSignedReadTransport._perform_get)
+        self.assertNotIn('_remaining("pre-dns")', perform_src)
+        self.assertIn("deadline=deadline", perform_src)
+        self.assertIn("monotonic_clock_ns=self._monotonic_clock_ns", perform_src)
+        helper_src = inspect.getsource(runner._d07_live_signed_get_resolve_addresses)
+        self.assertLess(helper_src.index("Thread("), helper_src.index('stage="dns-wait"'))
+        self.assertLess(helper_src.index('stage="dns-wait"'), helper_src.index("channel.get("))
+        self.assertIn("daemon=True", helper_src)
+        self.assertNotIn(".join(", helper_src)
+        self.assertNotIn("time.monotonic_ns", helper_src)
+
+    def test_t172_t173_t174_connect_then_tls_then_send_each_get_reduced_remainder(self) -> None:
+        # DNS/connect start at 9 s (under the 10 s per-request cap); connect
+        # consumes 2 s, TLS wrap consumes 1 s, handshake consumes 1 s, the send
+        # consumes 1 s.  Every subsequent phase budget is derived fresh from the
+        # SAME absolute deadline -- exact, never a fresh fixed-duration window.
+        stack, patches = self._install_stack(
+            recv_chunk=4096,
+            advance_at={"connect": 2_000_000_000, "wrap": 1_000_000_000,
+                        "handshake": 1_000_000_000, "send": 1_000_000_000},
+        )
+        with contextlib.ExitStack() as es:
+            for p in patches:
+                es.enter_context(p)
+            self.transport._perform_get(
+                "external-api.demo.kalshi.co", "/trade-api/v2/portfolio/orders",
+                {"Accept": "application/json"}, self._deadline(remaining_ns=9_000_000_000),
+            )
+        budgets = ([self._timeline_values(stack.timeline, "pre-dns")[0]]
+                   + self._timeline_values(stack.timeline, "raw.settimeout")
+                   + self._timeline_values(stack.timeline, "tls.settimeout"))
+        # pre-dns, pre-connect, pre-tls-wrap, pre-handshake, pre-send, then the
+        # underlying response read(s) -- every one derived from the SAME
+        # absolute deadline, exact, never re-widened.
+        self.assertGreaterEqual(len(budgets), 6, budgets)
+        for got, want in zip(budgets[:5], (9.0, 9.0, 7.0, 6.0, 5.0)):
+            self.assertAlmostEqual(got, want, places=6)
+        for read_budget in budgets[5:]:
+            self.assertLessEqual(read_budget, 4.0 + 1e-6)
+            self.assertGreater(read_budget, 0.0)
+
+    def test_t172_t173_t174_each_underlying_response_read_gets_smaller_remainder(self) -> None:
+        # every underlying header read AND every underlying body read re-derives
+        # its budget from the SAME absolute deadline (no stale multi-read window).
+        stack, patches = self._install_stack(
+            body=b'{"orders": [], "cursor": "", "pad": "' + b"y" * 40 + b'"}', recv_chunk=4,
+            advance_at={"recv": 100_000_000, "recv_body": 100_000_000},
+        )
+        with contextlib.ExitStack() as es:
+            for p in patches:
+                es.enter_context(p)
+            self.transport._perform_get(
+                "external-api.demo.kalshi.co", "/trade-api/v2/portfolio/orders",
+                {"Accept": "application/json"}, self._deadline(remaining_ns=600_000_000_000),
+            )
+        n_reads = stack.phase_calls.count("recv") + stack.phase_calls.count("recv_body")
+        read_budgets = self._timeline_values(stack.timeline, "tls.settimeout")[-n_reads:]
+        # multiple underlying reads happened for headers and for the body ...
+        self.assertGreaterEqual(stack.phase_calls.count("recv"), 2)
+        self.assertGreaterEqual(stack.phase_calls.count("recv_body"), 2)
+        # ... and each successive read saw a strictly smaller remainder derived
+        # from the SAME absolute deadline (0.1 s consumed per read).
+        for earlier, later in zip(read_budgets, read_budgets[1:]):
+            self.assertAlmostEqual(earlier - later, 0.1, places=6)
+        self.assertGreater(read_budgets[-1], 0.0)
+
+    def test_t172_t173_t174_expiry_between_phases_halts_before_next_io(self) -> None:
+        # the handshake overruns the whole budget -> the NEXT blocking phase
+        # (request send) is never entered; deterministic DEADLINE_EXCEEDED.
+        stack, patches = self._install_stack(advance_at={"handshake": 30_000_000_000})
+        with contextlib.ExitStack() as es:
+            for p in patches:
+                es.enter_context(p)
+            with self.assertRaises(RunnerError) as ctx:
+                self.transport._perform_get(
+                    "external-api.demo.kalshi.co", "/trade-api/v2/portfolio/orders",
+                    {"Accept": "application/json"}, self._deadline(remaining_ns=5_000_000_000),
+                )
+        self.assertEqual(ctx.exception.code, RunnerFailureCode.DEADLINE_EXCEEDED)
+        self.assertIn("handshake", stack.phase_calls)
+        self.assertNotIn("send", stack.phase_calls)
+        self.assertNotIn("recv", stack.phase_calls)
+
+    def test_t172_t173_t174_body_expiry_halts_before_next_read(self) -> None:
+        # a body read overruns the budget -> no further underlying read occurs.
+        stack, patches = self._install_stack(
+            body=b"x" * 64, recv_chunk=8, advance_at={"recv_body": 30_000_000_000},
+        )
+        with contextlib.ExitStack() as es:
+            for p in patches:
+                es.enter_context(p)
+            with self.assertRaises(RunnerError) as ctx:
+                self.transport._perform_get(
+                    "external-api.demo.kalshi.co", "/trade-api/v2/portfolio/orders",
+                    {"Accept": "application/json"}, self._deadline(remaining_ns=5_000_000_000),
+                )
+        self.assertEqual(ctx.exception.code, RunnerFailureCode.DEADLINE_EXCEEDED)
+        self.assertEqual(stack.phase_calls.count("recv_body"), 1)  # stopped after the first
+
+    def test_t172_t173_t174_one_connection_no_retry_no_followed_redirect(self) -> None:
+        _ok, stack = self._run_get()
+        self.assertEqual(stack.resolve_calls, 1)
+        self.assertEqual(stack.socket_ctor_calls, 1)
+        self.assertEqual(stack.connect_calls, 1)
+        self.assertEqual(stack.phase_calls.count("wrap"), 1)
+        self.assertEqual(stack.phase_calls.count("handshake"), 1)
+
+    def test_t176_t177_body_semantics_preserved_across_deadline_aware_reader(self) -> None:
+        cap = runner.MAX_RESPONSE_BODY_BYTES
+        # ordinary JSON via Content-Length
+        ok, _ = self._run_get({"body": b'{"orders": []}', "recv_chunk": 5})
+        self.assertEqual(ok.http_status, 200)
+        self.assertEqual(ok.body_bytes, b'{"orders": []}')
+        self.assertEqual(ok.content_type, "application/json")
+        # body exactly at the cap is accepted
+        ok, _ = self._run_get({"body": b"a" * cap, "recv_chunk": 4096})
+        self.assertEqual(len(ok.body_bytes), cap)
+        # cap + 1 is rejected as too large
+        e = self._run_get_error({"body": b"a" * (cap + 1), "recv_chunk": 4096})
+        self.assertEqual(e.code, RunnerFailureCode.RESPONSE_BODY_TOO_LARGE)
+        # standard chunked framing still de-chunks through the deadline-aware reader
+        ok, _ = self._run_get({"framing": "chunked", "body": b'{"cursor": ""}', "recv_chunk": 6})
+        self.assertEqual(ok.body_bytes, b'{"cursor": ""}')
+        # connection-close / EOF framing
+        ok, _ = self._run_get({"framing": "eof", "body": b'{"ok": true}', "recv_chunk": 7})
+        self.assertEqual(ok.body_bytes, b'{"ok": true}')
+
+    def test_transport_binds_runtime_clock_not_global_monotonic(self) -> None:
+        # no executable transport method / helper reads the global clock
+        for meth in ("__call__", "_remaining_seconds", "_perform_get",
+                     "_auth_headers", "_build_request_bytes"):
+            src = inspect.getsource(getattr(runner._LiveDemoSignedReadTransport, meth))
+            self.assertNotIn("time.monotonic_ns", src, meth)
+        for obj in (runner._d07_live_signed_get_resolve_addresses,
+                    runner._d07_live_signed_get_select_stream_address,
+                    runner._d07_absolute_deadline_remaining_seconds,
+                    runner._AbsoluteDeadlineTLSReader,
+                    runner._AbsoluteDeadlineResponseShim):
+            self.assertNotIn("time.monotonic_ns", inspect.getsource(obj), obj)
+        self.assertIn(
+            "self._monotonic_clock_ns()",
+            inspect.getsource(runner._LiveDemoSignedReadTransport._remaining_seconds),
+        )
+        # Correction 04: ONE canonical remaining-budget rule -- strictly
+        # positive, no upward floor -- shared by every transport phase AND by
+        # the DNS helper's post-Thread.start recomputation.
+        rule_src = inspect.getsource(runner._d07_absolute_deadline_remaining_seconds)
+        self.assertIn("deadline.absolute_deadline_monotonic_ns - now_ns", rule_src)
+        self.assertIn("if remaining_ns <= 0:", rule_src)
+        self.assertNotIn("max(", rule_src)
+        self.assertIn(
+            "_d07_absolute_deadline_remaining_seconds(",
+            inspect.getsource(runner._LiveDemoSignedReadTransport._remaining_seconds),
+        )
+        self.assertIn(
+            "_d07_absolute_deadline_remaining_seconds(",
+            inspect.getsource(runner._d07_live_signed_get_resolve_addresses),
+        )
+        # sub-millisecond positive remainders survive the shared rule unclamped
+        self.assertAlmostEqual(
+            runner._d07_absolute_deadline_remaining_seconds(
+                self._deadline(remaining_ns=300_000), self.now_ns, stage="unit",
+            ),
+            0.0003, places=9,
+        )
+        # every underlying response read re-derives the budget and re-arms the socket
+        reader_src = inspect.getsource(runner._AbsoluteDeadlineTLSReader.readinto)
+        self.assertIn("self._remaining_seconds(", reader_src)
+        self.assertIn("settimeout(", reader_src)
+        self.assertIn("recv_into(", reader_src)
+        self.assertIn("__slots__ = (\"_wall_clock\", \"_monotonic_clock_ns\", \"_env\")",
+                      inspect.getsource(runner._LiveDemoSignedReadTransport))
+        build_src = inspect.getsource(runner._build_read_only_stage3_live_runtime)
+        self.assertIn("monotonic_clock_ns=monotonic_clock_ns", build_src)
+        # _perform_get no longer relies on a single high-level HTTPSConnection window
+        perform_src = inspect.getsource(runner._LiveDemoSignedReadTransport._perform_get)
+        self.assertNotIn("HTTPSConnection", perform_src)
+        self.assertIn("do_handshake", perform_src)
+
+    def test_transport_rejects_write_and_mutated_requests(self) -> None:
+        prepared = self._prepared()
+        for bad in (RunnerOperation.CREATE_ORDER_V2, RunnerOperation.CANCEL_ORDER_V2):
+            with self.assertRaises(RunnerError) as ctx:
+                self.transport(bad, dataclasses.replace(prepared, operation=bad), self._deadline())
+            self.assertEqual(ctx.exception.code, RunnerFailureCode.LIVE_READ_TRANSPORT_POLICY_VIOLATION)
+        for mutated in (
+            dataclasses.replace(prepared, host="evil.example.com"),
+            dataclasses.replace(prepared, method="POST"),
+            dataclasses.replace(prepared, body=b"payload"),
+        ):
+            with self.assertRaises(RunnerError) as ctx:
+                self.transport(RunnerOperation.GET_ORDERS, mutated, self._deadline())
+            self.assertEqual(ctx.exception.code, RunnerFailureCode.LIVE_READ_TRANSPORT_POLICY_VIOLATION)
+
+    def test_header_value_validation_uses_the_canonical_closed_rule(self) -> None:
+        self.assertTrue(runner._d07_credential_header_value_is_safe("abc-123"))
+        self.assertFalse(runner._d07_credential_header_value_is_safe("bad\r\nvalue"))
+        self.assertFalse(runner._d07_credential_header_value_is_safe(""))
+        self.assertFalse(runner._d07_credential_header_value_is_safe("café"))
+        # delegates to the canonical orderbook closed rule, no re-implementation
+        src = inspect.getsource(runner._d07_credential_header_value_is_safe)
+        self.assertIn("_kalshi_orderbook._api_key_id_is_header_safe(value)", src)
+        # the auth-header builder validates BEFORE constructing headers
+        auth_src = inspect.getsource(runner._LiveDemoSignedReadTransport._auth_headers)
+        self.assertLess(
+            auth_src.index("_d07_credential_header_value_is_safe"),
+            auth_src.index("KALSHI-ACCESS-SIGNATURE"))
+
+
+class D07RiskConfigIngestionTests(unittest.TestCase):
+    """MARCO_CLARIFICATION_01 Section 3 -- strict SHA-bound external
+    RiskLimitConfigV1 ingestion; no numeric defaults, no permissive fallback."""
+
+    def setUp(self) -> None:
+        self.tmp = tempfile.TemporaryDirectory()
+        self.addCleanup(self.tmp.cleanup)
+        self.config = RiskLimitConfigV1(
+            1, "KALSHI|KALSHI_DEMO|ARB_KALSHI_DEMO_PRIMARY_ACCOUNT|SUBACCOUNT=1", "USD",
+            PerOrderRiskLimits(Decimal("10"), Decimal("10"), True, Decimal("0.10"), 1_000),
+            PerMarketRiskLimits(Decimal("20"), Decimal("20"), 10, Decimal("20"), Decimal("20")),
+            AccountRiskLimits(Decimal("100"), 50, Decimal("100"), 0, Decimal("0")),
+            FlowRiskLimits(1, 1_000, 1, 1_000, 1, 1_000, 1, 1_000, 2, 1_000, 1, 500, 1, 10, 100),
+            StateIntegrityLimits(1_000, 1_000, 10, 1, 500, 10, 100),
+            VenueDefensePolicy("NOT_REQUIRED", None, True, "NO_SAFETY_CREDIT", "NO_SAFETY_CREDIT"),
+        )
+
+    def _write(self, text: str):
+        path = Path(self.tmp.name) / "risk_config.json"
+        path.write_bytes(text.encode("utf-8"))
+        return str(path), hashlib.sha256(text.encode("utf-8")).hexdigest()
+
+    def test_round_trips_to_canonical_identity(self) -> None:
+        path, sha = self._write(_d07_risk_config_to_strict_json(self.config))
+        loaded = runner._load_sha_bound_risk_config(path=path, expected_sha256=sha)
+        self.assertIsInstance(loaded, RiskLimitConfigV1)
+        self.assertEqual(loaded.sha256, self.config.sha256)
+
+    def test_wrong_expected_sha_fails_closed(self) -> None:
+        path, _sha = self._write(_d07_risk_config_to_strict_json(self.config))
+        with self.assertRaises(RunnerError) as ctx:
+            runner._load_sha_bound_risk_config(path=path, expected_sha256="0" * 64)
+        self.assertEqual(ctx.exception.code, RunnerFailureCode.LIVE_ENTRYPOINT_PRECONDITION_FAILED)
+
+    def test_missing_path_fails_closed(self) -> None:
+        with self.assertRaises(RunnerError) as ctx:
+            runner._load_sha_bound_risk_config(
+                path=str(Path(self.tmp.name) / "absent.json"), expected_sha256="a" * 64)
+        self.assertEqual(ctx.exception.code, RunnerFailureCode.LIVE_ENTRYPOINT_PRECONDITION_FAILED)
+
+    def test_omitted_field_rejected_no_default(self) -> None:
+        document = json.loads(_d07_risk_config_to_strict_json(self.config))
+        del document["per_order"]["max_market_data_age_ms"]
+        path, sha = self._write(json.dumps(document, sort_keys=True))
+        with self.assertRaises(RunnerError) as ctx:
+            runner._load_sha_bound_risk_config(path=path, expected_sha256=sha)
+        self.assertEqual(ctx.exception.code, RunnerFailureCode.LIVE_ENTRYPOINT_PRECONDITION_FAILED)
+
+    def test_extra_field_rejected(self) -> None:
+        document = json.loads(_d07_risk_config_to_strict_json(self.config))
+        document["surprise"] = 1
+        path, sha = self._write(json.dumps(document, sort_keys=True))
+        with self.assertRaises(RunnerError):
+            runner._load_sha_bound_risk_config(path=path, expected_sha256=sha)
+
+    def test_binary_float_policy_value_rejected(self) -> None:
+        document = json.loads(_d07_risk_config_to_strict_json(self.config))
+        document["per_order"]["max_contracts"] = 10.0  # JSON number, not decimal string
+        path, sha = self._write(json.dumps(document, sort_keys=True))
+        with self.assertRaises(RunnerError) as ctx:
+            runner._load_sha_bound_risk_config(path=path, expected_sha256=sha)
+        self.assertEqual(ctx.exception.code, RunnerFailureCode.LIVE_ENTRYPOINT_PRECONDITION_FAILED)
+
+    def test_duplicate_json_key_rejected(self) -> None:
+        text = _d07_risk_config_to_strict_json(self.config)
+        dup = text[:-1] + ',"currency":"USD"}'
+        path, sha = self._write(dup)
+        with self.assertRaises(RunnerError):
+            runner._load_sha_bound_risk_config(path=path, expected_sha256=sha)
+
+
+class D07DomainReconstructionTests(unittest.TestCase):
+    """MARCO_CLARIFICATION_01 Section 2 -- read-only exact-N1 domain
+    reconstruction + route qualification."""
+
+    def test_reconstructs_exact_n1_binding_and_contract(self) -> None:
+        binding, contract = runner._reconstruct_n1_read_only_active_domain(
+            account_scope_ref=CURRENT_ACCOUNT_SCOPE_REF, subaccount=1, exchange_index=0,
+            bootstrap_contract_sha256="a" * 64,
+        )
+        self.assertEqual((binding.venue, binding.environment), ("KALSHI", "KALSHI_DEMO"))
+        self.assertEqual((binding.subaccount, binding.exchange_index), (1, 0))
+        self.assertEqual(contract.bootstrap_contract_sha256, "a" * 64)
+        _b2, c2 = runner._reconstruct_n1_read_only_active_domain(
+            account_scope_ref=CURRENT_ACCOUNT_SCOPE_REF, subaccount=1, exchange_index=0,
+            bootstrap_contract_sha256="a" * 64,
+        )
+        self.assertEqual(contract.contract_sha256, c2.contract_sha256)
+        runner._n1_read_only_route_qualification(binding)
+        runner.n1_accepted_evidence_contract(binding)
+
+    def test_rejects_non_n1_domain(self) -> None:
+        for kwargs in (
+            dict(subaccount=2, exchange_index=0),
+            dict(subaccount=1, exchange_index=3),
+            dict(subaccount=0, exchange_index=0),
+        ):
+            with self.assertRaises(RunnerError) as ctx:
+                runner._reconstruct_n1_read_only_active_domain(
+                    account_scope_ref=CURRENT_ACCOUNT_SCOPE_REF,
+                    bootstrap_contract_sha256="a" * 64, **kwargs,
+                )
+            self.assertEqual(ctx.exception.code, RunnerFailureCode.LIVE_ENTRYPOINT_PRECONDITION_FAILED)
+
+    def test_rejects_malformed_bootstrap_sha(self) -> None:
+        for bad in ("", "xyz", "A" * 64, "a" * 63, "a" * 65):
+            with self.assertRaises(RunnerError):
+                runner._reconstruct_n1_read_only_active_domain(
+                    account_scope_ref=CURRENT_ACCOUNT_SCOPE_REF, subaccount=1, exchange_index=0,
+                    bootstrap_contract_sha256=bad,
+                )
+
+    def test_config_post_init_rejects_bad_inputs(self) -> None:
+        base = dict(
+            market_ticker=CURRENT_TICKER, authority_namespace_id="ns",
+            authority_namespace_root="/tmp/x", canonical_repository_root="/tmp/repo",
+            expected_ledger_path="/tmp/x/active.sqlite3",
+            bootstrap_contract_sha256="a" * 64,
+            risk_config_json_path="/tmp/x/risk.json", risk_config_sha256="b" * 64,
+            execution_authorization_json_path="/tmp/x/auth.json",
+            execution_authorization_sha256="c" * 64,
+            installed_implementation_commit="d" * 40,
+        )
+        runner.LiveReadOnlyStage3InvocationConfigV1(**base)  # ok
+        for override in (
+            dict(market_ticker=""),
+            dict(market_ticker="bad ticker with spaces"),
+            dict(bootstrap_contract_sha256="not-hex"),
+            dict(risk_config_sha256="short"),
+            dict(execution_authorization_sha256="short"),
+            dict(installed_implementation_commit="not-hex"),
+            dict(authority_namespace_id=""),
+        ):
+            with self.assertRaises(RunnerError):
+                runner.LiveReadOnlyStage3InvocationConfigV1(**{**base, **override})
+
+
+class D07CompositionAndDeadlineAnchorTests(unittest.TestCase):
+    """T172-T174 (300 s anchor) + T180 positive end-to-end + DSB-LIVE-LIFECYCLE.
+
+    Scaffolding is composed from ActiveStage3EndToEndTestCase (temp authority +
+    revision-2 ledger driven to SAFE_HELD, exact N1 domain, deterministic
+    clocks, the fake acquirer seam) so its own test methods do not re-run."""
+
+    def setUp(self) -> None:
+        self._e2e = ActiveStage3EndToEndTestCase(methodName="setUp")
+        self._e2e.setUp()
+        self.addCleanup(self._e2e.tearDown)
+
+    def __getattr__(self, name):
+        try:
+            e2e = self.__dict__["_e2e"]
+        except KeyError:
+            raise AttributeError(name) from None
+        return getattr(e2e, name)
+
+    def _config(self, **overrides):
+        risk_text = _d07_risk_config_to_strict_json(self.config)
+        risk_path = Path(self.root) / "risk_config.json"
+        risk_path.write_bytes(risk_text.encode("utf-8"))
+        auth_path, auth_sha = _d07_write_envelope(str(self.root), _d07_valid_envelope_dict())
+        base = dict(
+            market_ticker=self.TICKER,
+            authority_namespace_id="active-e2e-ns",
+            authority_namespace_root=str(self.authority_root),
+            canonical_repository_root=str(self.repository_root),
+            expected_ledger_path=str(self.ledger_path),
+            bootstrap_contract_sha256=self.bootstrap.bootstrap_contract_sha256,
+            risk_config_json_path=str(risk_path),
+            risk_config_sha256=hashlib.sha256(risk_text.encode("utf-8")).hexdigest(),
+            execution_authorization_json_path=auth_path,
+            execution_authorization_sha256=auth_sha,
+            installed_implementation_commit="a" * 40,
+            invocation_id="d07-offline-test",
+        )
+        base.update(overrides)
+        return runner.LiveReadOnlyStage3InvocationConfigV1(**base)
+
+    def _spy_bridge(self, env):
+        calls = {"entered": 0, "pem_present_in_body": None, "pem_present_after": None}
+
+        @contextlib.contextmanager
+        def _bridge():
+            with runner._demo_path_to_pem_credential_bridge(
+                env=env, read_pem_text=lambda _p: _D07_SENTINEL_PEM_TEXT,
+            ):
+                calls["entered"] += 1
+                calls["pem_present_in_body"] = "KALSHI_DEMO_PRIVATE_KEY_PEM" in env
+                yield
+            calls["pem_present_after"] = "KALSHI_DEMO_PRIVATE_KEY_PEM" in env
+
+        return _bridge, calls
+
+    # --- T180 positive end-to-end -------------------------------------------
+    def test_t180_exact_pattern_accepted_reaches_read_phase_no_write_auth(self) -> None:
+        seam_rt = self._fresh_seam()
+        env = _d07_synthetic_env()
+        bridge, calls = self._spy_bridge(env)
+        with mock.patch.object(runner, "run_active_experiment_stage3_and_gate_d",
+                               side_effect=AssertionError("Stage 3G+ must not be reached")), \
+             mock.patch.object(runner, "_complete_stage3_active_release_and_normal_writer_v2",
+                               side_effect=AssertionError("release/normal-writer must not be reached")), \
+             mock.patch.object(runner, "acquire_active_release_only_v1",
+                               side_effect=AssertionError("RELEASE_ONLY must not be acquired")), \
+             mock.patch.object(runner, "acquire_active_normal_writer_state_v1",
+                               side_effect=AssertionError("NORMAL_WRITER must not be acquired")):
+            result = runner.run_read_only_stage3_live_entrypoint(
+                self._config(),
+                confirm_live_read=True,
+                runtime_builder=lambda config, **kw: seam_rt,
+                credential_bridge=bridge,
+            )
+        self.assertEqual(result["status"], "READ_PHASE_COMPLETE")
+        self.assertEqual(result["write_authorization"], "NO_WRITE_AUTHORIZATION")
+        self.assertEqual(result["stage_3g_plus"], "NOT_ENTERED")
+        self.assertEqual(result["gate_d"], "NOT_ENTERED")
+        self.assertEqual(result["execution_authorization_id"], "R1-D07-EXTERNAL-EXEC-AUTH-0001")
+        self.assertEqual(result["installed_implementation_commit"], "a" * 40)
+        self.assertTrue(result["trusted_dynamic_read_set_id"].startswith("ADRS2_"))
+        self.assertEqual(calls["entered"], 1)
+        self.assertTrue(calls["pem_present_in_body"])
+        self.assertFalse(calls["pem_present_after"])
+        self.assertNotIn("KALSHI_DEMO_PRIVATE_KEY_PEM", env)
+        blob = json.dumps(result, sort_keys=True)
+        self.assertNotIn(_D07_SENTINEL_PEM_TEXT, blob)
+        self.assertNotIn(_D07_SENTINEL_API_KEY_ID, blob)
+        self.assertNotIn("-----BEGIN", blob)
+
+    # --- T172 / T173 / T174 ------------------------------------------------
+    def test_t172_t173_t174_one_300s_anchor_sampled_once_and_never_reset(self) -> None:
+        # A deterministic monotonic clock that advances a fixed step per call.
+        step_ns = 7_000_000  # 7 ms per monotonic sample
+        state = {"v": 3_000_000_000_000}
+
+        def _mono():
+            v = state["v"]
+            state["v"] += step_ns
+            return v
+
+        real_build = runner._build_read_only_stage3_live_runtime
+        seen = {}
+
+        def _wrap_build(config, **kw):
+            # capture a monotonic reading AT builder entry (after the entrypoint
+            # has already sampled its single 300 s anchor)
+            seen["mono_at_build_entry"] = _mono()
+            seen["absolute_end_arg"] = kw["experiment_absolute_end_monotonic_ns"]
+            rt = real_build(config, **kw)
+            seen["runtime_absolute_end"] = rt.experiment_absolute_end_monotonic_ns
+            return rt
+
+        seam_rt = self._fresh_seam()
+
+        def _runtime_builder(config, **kw):
+            # DSB-LIVE-DEADLINE: assert the entrypoint threads the ONE derived
+            # absolute end through unchanged, then hand back the fake-seam
+            # runtime so Stage 3A-3F completes deterministically offline.
+            seen["builder_kw_absolute_end"] = kw["experiment_absolute_end_monotonic_ns"]
+            seen["mono_at_builder"] = _mono()
+            return seam_rt
+
+        result = runner.run_read_only_stage3_live_entrypoint(
+            self._config(),
+            confirm_live_read=True,
+            monotonic_clock_ns=_mono,
+            wall_clock=self.inputs.clock, uuid_factory=self.inputs.uuid,
+            runtime_builder=_runtime_builder,
+            credential_bridge=self._spy_bridge(_d07_synthetic_env())[0],
+        )
+        self.assertEqual(result["status"], "READ_PHASE_COMPLETE")
+        # T172: the entrypoint sampled its start ONCE at the top and derived one
+        # absolute end = start + 300 s.  start < the reading taken at builder
+        # entry, so the derived end is strictly less than
+        # "(reading at builder entry) + 300 s" -- i.e. construction time already
+        # reduced the remaining Stage-3 deadline (T173 / DSB-LIVE-DEADLINE-004).
+        derived_end = seen["builder_kw_absolute_end"]
+        self.assertLess(derived_end, seen["mono_at_builder"] + 300 * 1_000_000_000)
+        # T174: no reset -- the builder is handed exactly that value.
+        self.assertEqual(seen["builder_kw_absolute_end"], derived_end)
+
+        # Now exercise the REAL builder (real N1 domain reconstruction, real
+        # SHA-bound risk-config load, real emergency acquire/close on the real
+        # temp ledger, real build_active_experiment_runner_runtime_v2) and prove
+        # it consumes the passed-in absolute end UNCHANGED.
+        transport = _ScriptedTransport()
+        for _ in range(6):
+            transport.queue(RunnerOperation.GET_MARKET, _market_payload(ticker=self.TICKER))
+            transport.queue(RunnerOperation.GET_ORDERS, _orders_payload([]))
+            transport.queue(RunnerOperation.GET_POSITIONS, _positions_payload([]))
+        passed_end = state["v"] + 300 * 1_000_000_000
+        real_rt = runner._build_read_only_stage3_live_runtime(
+            self._config(),
+            monotonic_clock_ns=self.inputs.monotonic_ns,
+            wall_clock=self.inputs.clock, uuid_factory=self.inputs.uuid,
+            experiment_absolute_end_monotonic_ns=passed_end,
+            authorization_envelope=_d07_envelope_from_dict(_d07_valid_envelope_dict()),
+            installed_implementation_commit="a" * 40,
+            transport=transport,
+            orderbook_seam=runner._TestOnlyActiveV2OrderbookSeam(_standard_orderbook_fetch(self.TICKER)),
+        )
+        self.assertEqual(real_rt.experiment_absolute_end_monotonic_ns, passed_end)
+
+        # the builder never samples its own 300 s end; the entrypoint samples it
+        # exactly once, before the external-auth / risk-config file I/O.
+        build_src = inspect.getsource(runner._build_read_only_stage3_live_runtime)
+        self.assertNotIn("_D07_ABSOLUTE_EXPERIMENT_DEADLINE_SECONDS", build_src)
+        entry_src = inspect.getsource(runner.run_read_only_stage3_live_entrypoint)
+        self.assertEqual(entry_src.count("_D07_ABSOLUTE_EXPERIMENT_DEADLINE_SECONDS * 1_000_000_000"), 1)
+        self.assertLess(
+            entry_src.index("invocation_start_monotonic_ns = mono()"),
+            entry_src.index("_d07_load_external_execution_authorization("))
+        self.assertLess(
+            entry_src.index("experiment_absolute_end_monotonic_ns = ("),
+            entry_src.index("builder("))
+
+    def test_t172_entry_sample_precedes_auth_file_read(self) -> None:
+        order = []
+        real_loader = runner._d07_load_external_execution_authorization
+
+        def _mono():
+            order.append("mono")
+            return 9_000_000_000_000 + len(order)
+
+        def _spy_loader(*, path, expected_sha256):
+            order.append("auth_read")
+            return real_loader(path=path, expected_sha256=expected_sha256)
+
+        seam_rt = self._fresh_seam()
+        with mock.patch.object(runner, "_d07_load_external_execution_authorization", _spy_loader):
+            runner.run_read_only_stage3_live_entrypoint(
+                self._config(),
+                confirm_live_read=True,
+                monotonic_clock_ns=_mono,
+                wall_clock=self.inputs.clock, uuid_factory=self.inputs.uuid,
+                runtime_builder=lambda config, **kw: seam_rt,
+                credential_bridge=self._spy_bridge(_d07_synthetic_env())[0],
+            )
+        self.assertEqual(order[0], "mono")
+        self.assertIn("auth_read", order)
+        self.assertLess(order.index("mono"), order.index("auth_read"))
+
+    def test_compose_wrong_bootstrap_sha_rejected_by_ledger_validation(self) -> None:
+        with self.assertRaises(RunnerError) as ctx:
+            runner.run_read_only_stage3_live_entrypoint(
+                self._config(bootstrap_contract_sha256="0" * 64),
+                confirm_live_read=True,
+                monotonic_clock_ns=self.inputs.monotonic_ns,
+                wall_clock=self.inputs.clock, uuid_factory=self.inputs.uuid,
+                credential_bridge=self._spy_bridge(_d07_synthetic_env())[0],
+            )
+        self.assertEqual(ctx.exception.code, RunnerFailureCode.LIVE_ENTRYPOINT_PRECONDITION_FAILED)
+        # the failure is the ledger/domain reconstruction (not the confirm gate)
+        self.assertNotIn("confirm_live_read", str(ctx.exception))
+
+    def test_sb05_entrypoint_source_only_calls_read_phase(self) -> None:
+        for fn in (runner.run_read_only_stage3_live_entrypoint,
+                   runner._build_read_only_stage3_live_runtime,
+                   runner.main):
+            src = inspect.getsource(fn)
+            self.assertNotIn("run_active_experiment_stage3_and_gate_d(", src)
+            self.assertNotIn("_complete_stage3_active_release_and_normal_writer_v2(", src)
+            self.assertNotIn("run_gate_d_ordinary_decision_loop(", src)
+            self.assertNotIn("acquire_active_release_only_v1(", src)
+            self.assertNotIn("acquire_active_normal_writer_state_v1(", src)
+        self.assertIn("run_pre_release_read_phase_v2(",
+                      inspect.getsource(runner.run_read_only_stage3_live_entrypoint))
+
+
+class D07CliTests(unittest.TestCase):
+    """SB-02 -- the CLI defaults to a no-op PLAN_ONLY mode; --confirm-live-read
+    is required (with a verified envelope) to reach any live execution path."""
+
+    def _args(self, tmp):
+        auth_path, auth_sha = _d07_write_envelope(tmp, _d07_valid_envelope_dict())
+        risk = _d07_write_risk_config(tmp)
+        return [
+            "--ticker", CURRENT_TICKER,
+            "--authority-namespace-id", "ns",
+            "--authority-namespace-root", str(tmp),
+            "--canonical-repository-root", str(tmp),
+            "--ledger-path", str(Path(tmp) / "active.sqlite3"),
+            "--bootstrap-contract-sha256", "a" * 64,
+            "--risk-config-json", risk[0], "--risk-config-sha256", risk[1],
+            "--execution-authorization-json", auth_path, "--execution-authorization-sha256", auth_sha,
+            "--installed-implementation-commit", "b" * 40,
+        ]
+
+    def test_plan_only_is_default_and_touches_nothing(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            buf = io.StringIO()
+            with mock.patch.object(runner, "run_read_only_stage3_live_entrypoint",
+                                   side_effect=AssertionError("must not execute without --confirm-live-read")), \
+                 mock.patch.object(runner, "_build_read_only_stage3_live_runtime",
+                                   side_effect=AssertionError("no runtime in plan-only mode")), \
+                 mock.patch.object(runner, "_load_sha_bound_risk_config",
+                                   side_effect=AssertionError("no risk-config read in plan-only mode")), \
+                 mock.patch("socket.socket", side_effect=AssertionError("no network")), \
+                 contextlib.redirect_stdout(buf):
+                code = runner.main(self._args(tmp))
+            self.assertEqual(code, 0)
+            payload = json.loads(buf.getvalue())
+            self.assertEqual(payload["mode"], "PLAN_ONLY")
+            self.assertNotIn("-----BEGIN", buf.getvalue())
+
+    def test_config_rejected_is_secret_free_exit_2(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            args = self._args(tmp)
+            args[args.index("--bootstrap-contract-sha256") + 1] = "not-hex"
+            buf = io.StringIO()
+            with contextlib.redirect_stdout(buf):
+                code = runner.main(args)
+            self.assertEqual(code, 2)
+            payload = json.loads(buf.getvalue())
+            self.assertEqual(payload["status"], "CONFIG_REJECTED")
+
+    def test_confirm_live_read_flag_routes_to_entrypoint(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            buf = io.StringIO()
+            with mock.patch.object(
+                runner, "run_read_only_stage3_live_entrypoint",
+                return_value={"status": "LOCALLY_BLOCKED", "write_authorization": "NO_WRITE_AUTHORIZATION"},
+            ) as entry_mock, contextlib.redirect_stdout(buf):
+                code = runner.main(self._args(tmp) + ["--confirm-live-read"])
+            self.assertEqual(code, 0)
+            entry_mock.assert_called_once()
+
+
+class D07StageBoundaryAndProtectedPathTests(unittest.TestCase):
+    """SB-01/06/07/10 + SS-06 + the four-path / protected-path theorem."""
+
+    def test_sb01_no_import_time_network_or_transport(self) -> None:
+        head = _d07_pre_section_source()
+        for banned in ("\nimport http.client", "\nimport ssl\n", "HTTPSConnection(", "socket.socket("):
+            self.assertNotIn(banned, head)
+
+    def test_sb10_no_production_host_or_capability_literals(self) -> None:
+        d07 = _d07_section_source()
+        for banned in ("KALSHI_PRODUCTION", "trading-api.kalshi.com", "api.elections.kalshi.com",
+                       "production_writes=_AuthorizationValue.PERMITTED",
+                       "production_writes=permitted"):
+            self.assertNotIn(banned, d07)
+
+    def test_ss06_no_environment_dump_in_d07_section(self) -> None:
+        d07 = _d07_section_source()
+        for banned in ("dict(os.environ", "os.environ)", "repr(os.environ",
+                       "json.dumps(dict(os.environ", "environ.items()"):
+            self.assertNotIn(banned, d07)
+
+    def test_sb_entrypoint_never_references_gate_d_or_writer_symbols(self) -> None:
+        d07 = _d07_section_source()
+        for banned in ("run_gate_d_ordinary_decision_loop(", "run_active_experiment_stage3_and_gate_d(",
+                       "_complete_stage3_active_release_and_normal_writer_v2(",
+                       "acquire_active_release_only_v1(", "acquire_active_normal_writer_state_v1(",
+                       "issue_active_current_process_release_completion_v2("):
+            self.assertNotIn(banned, d07)
+
+    def test_protected_modules_byte_identical_to_required_base(self) -> None:
+        repo_root = Path(__file__).resolve().parents[1]
+        for rel in _D07_PROTECTED_SHA256:
+            self.assertTrue((repo_root / rel).is_file(), rel)
+        # models.py / validation.py / serialization.py have no D07 marker and
+        # are read/import only.
+        for mod in (
+            "src/arb/venues/kalshi/models.py",
+            "src/arb/venues/kalshi/validation.py",
+            "src/arb/venues/kalshi/serialization.py",
+        ):
+            text = (repo_root / mod).read_text(encoding="utf-8")
+            self.assertNotIn("R1-D07", text, mod)
+            self.assertNotIn("Section 40", text, mod)
 
 
 if __name__ == "__main__":

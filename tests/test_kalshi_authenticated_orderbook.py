@@ -26,6 +26,7 @@ import json
 import os
 import socket
 import ssl
+import time
 import unittest
 from dataclasses import replace
 from unittest import mock
@@ -2924,6 +2925,243 @@ class ExpectedObservedHaltEvidenceTests(unittest.TestCase):
             if field_value is not None:
                 self.assertNotIn("CapabilityEnvelopeTypeError", field_value)
                 self.assertNotIn("Traceback", field_value)
+
+
+# ---------------------------------------------------------------------------
+# Correction 03 DSB-OB-001..009 / DSB-TEST-018 -- deadline-aware inherited
+# orderbook integration (T159-T163).  T164-T166 (the active-V2 runner charge
+# boundary) live in tests/test_kalshi_minimal_market_maker_experiment_runner.py.
+#
+# All network behaviour is fake/mocked; no real DNS/socket/TLS/HTTP/Kalshi.
+# ---------------------------------------------------------------------------
+
+import inspect as _inspect
+
+_OVERALL_TIMEOUT_NS = ob._OVERALL_TIMEOUT_MS * 1_000_000
+
+
+def _seq_clock(values):
+    """A deterministic monotonic-ns clock: returns each value in turn, then
+    repeats the final value for every subsequent call."""
+    box = {"i": 0}
+    seq = list(values)
+
+    def _clock() -> int:
+        i = box["i"]
+        if i < len(seq):
+            box["i"] = i + 1
+            return seq[i]
+        return seq[-1]
+
+    return _clock
+
+
+class DeadlineAwareOrderbookPrimitiveTests(unittest.TestCase):
+    """DSB-OB-002/003/005/006 -- the exact frozen
+    ``execute_demo_authenticated_orderbook_within_deadline`` primitive."""
+
+    def setUp(self):
+        os.environ[_ACCEPTED_API_KEY_NAME] = "test-key-id-not-a-real-credential"
+        os.environ[_ACCEPTED_PEM_NAME] = _test_rsa_key_pem().decode("utf-8")
+        self.mp = _MonkeyPatch()
+
+    def tearDown(self):
+        os.environ.pop(_ACCEPTED_API_KEY_NAME, None)
+        os.environ.pop(_ACCEPTED_PEM_NAME, None)
+        self.mp.undo()
+
+    def _no_network(self):
+        def _boom(*_a, **_kw):
+            raise AssertionError("no DNS/socket/TLS/secret activity permitted before the deadline gate")
+
+        self.mp.setattr(socket, "getaddrinfo", _boom)
+        self.mp.setattr(socket, "socket", _boom)
+        self.mp.setattr(ssl, "create_default_context", _boom)
+
+    # --- T159 -------------------------------------------------------------
+    def test_t159_legacy_signature_and_10s_from_entry_behaviour_unchanged(self):
+        sig = _inspect.signature(ob.execute_demo_authenticated_orderbook)
+        self.assertEqual(list(sig.parameters), ["plan"])
+        self.assertEqual(
+            sig.parameters["plan"].kind, _inspect.Parameter.POSITIONAL_OR_KEYWORD,
+        )
+        # happy path unchanged
+        plan = _valid_plan()
+        _patch_network(self.mp, chunks=[_http_response(200, _valid_orderbook_body())])
+        result = ob.execute_demo_authenticated_orderbook(plan)
+        self.assertIsInstance(result, ob.KalshiNativeOrderBookSnapshot)
+        self.assertEqual(result.request_count, 1)
+        self.assertEqual(result.retry_count, 0)
+        self.assertEqual(result.redirect_count, 0)
+        self.mp.undo()
+        self.mp = _MonkeyPatch()
+        # 10s-from-own-entry observable deadline unchanged: a >10s jump right
+        # after entry is a pre-send CONNECTIVITY_TIMEOUT with zero requests.
+        plan = _valid_plan()
+        with mock.patch("time.monotonic_ns") as mock_time:
+            base = 5_000_000_000_000
+            mock_time.side_effect = [base] + [base + 20 * 1_000_000_000] * 40
+            result = ob.execute_demo_authenticated_orderbook(plan)
+        self.assertIsInstance(result, ob.OrderBookHalt)
+        self.assertEqual(result.code, ob.OrderBookHaltCode.CONNECTIVITY_TIMEOUT)
+        self.assertEqual(result.request_count, 0)
+
+    # --- T160 -----------------------------------------------------------------
+    def test_t160_effective_deadline_is_min_never_larger(self):
+        plan = _valid_plan()
+        self._no_network()
+        base = 9_000_000_000_000
+        # (a) caller deadline FAR in the future -> the 10s ceiling still governs:
+        # a jump to entry+11s before DNS is a deterministic timeout.
+        clock_a = _seq_clock([base, base + 11_000_000_000])
+        result_a = ob.execute_demo_authenticated_orderbook_within_deadline(
+            plan,
+            caller_deadline_monotonic_ns=base + 100 * 1_000_000_000,
+            caller_monotonic_clock_ns=clock_a,
+        )
+        self.assertIsInstance(result_a, ob.OrderBookHalt)
+        self.assertEqual(result_a.code, ob.OrderBookHaltCode.CONNECTIVITY_TIMEOUT)
+        self.assertEqual(result_a.request_count, 0)
+        # (b) caller deadline TIGHTER than 10s (2s) -> a jump to entry+3s
+        # (still < 10s) is a deterministic timeout: the tighter caller value won.
+        clock_b = _seq_clock([base, base + 3_000_000_000])
+        result_b = ob.execute_demo_authenticated_orderbook_within_deadline(
+            plan,
+            caller_deadline_monotonic_ns=base + 2_000_000_000,
+            caller_monotonic_clock_ns=clock_b,
+        )
+        self.assertIsInstance(result_b, ob.OrderBookHalt)
+        self.assertEqual(result_b.code, ob.OrderBookHaltCode.CONNECTIVITY_TIMEOUT)
+        self.assertEqual(result_b.request_count, 0)
+
+    # --- T161 -----------------------------------------------------------------
+    def test_t161_past_caller_deadline_at_entry_times_out_before_any_io(self):
+        plan = _valid_plan()
+        self._no_network()
+        base = 9_000_000_000_000
+        result = ob.execute_demo_authenticated_orderbook_within_deadline(
+            plan,
+            caller_deadline_monotonic_ns=base - 1,
+            caller_monotonic_clock_ns=_seq_clock([base]),
+        )
+        self.assertIsInstance(result, ob.OrderBookHalt)
+        self.assertEqual(result.code, ob.OrderBookHaltCode.CONNECTIVITY_TIMEOUT)
+        self.assertEqual(result.request_count, 0)
+
+    def test_t161_malformed_caller_deadline_is_current_value_mismatch_before_io(self):
+        plan = _valid_plan()
+        self._no_network()
+        for bad in (True, 1.0, "1000", -5, None):
+            result = ob.execute_demo_authenticated_orderbook_within_deadline(
+                plan,
+                caller_deadline_monotonic_ns=bad,
+                caller_monotonic_clock_ns=_seq_clock([9_000_000_000_000]),
+            )
+            self.assertIsInstance(result, ob.OrderBookHalt, bad)
+            self.assertEqual(result.code, ob.OrderBookHaltCode.CURRENT_VALUE_MISMATCH, bad)
+            self.assertEqual(result.stage, ob.OrderBookStage.PLAN_INPUT, bad)
+            self.assertEqual(result.request_count, 0, bad)
+
+    def test_t161_non_callable_clock_is_current_value_mismatch(self):
+        plan = _valid_plan()
+        self._no_network()
+        result = ob.execute_demo_authenticated_orderbook_within_deadline(
+            plan, caller_deadline_monotonic_ns=10 ** 15, caller_monotonic_clock_ns=object(),
+        )
+        self.assertIsInstance(result, ob.OrderBookHalt)
+        self.assertEqual(result.code, ob.OrderBookHaltCode.CURRENT_VALUE_MISMATCH)
+        self.assertEqual(result.stage, ob.OrderBookStage.PLAN_INPUT)
+
+    # --- T162 -----------------------------------------------------------------
+    def test_t162_tighter_absolute_deadline_governs_every_internal_check(self):
+        plan = _valid_plan()
+        fake_tls = _patch_network(self.mp, chunks=[_http_response(200, _valid_orderbook_body())])
+        base = 7_000_000_000_000
+        # caller deadline is 0.5 s (tighter than the 10 s ceiling); the clock
+        # advances past it during the receive loop -> CONNECTIVITY_TIMEOUT.
+        clock = _seq_clock([
+            base,                     # entry sample
+            base + 100_000_000,       # pre-DNS check (ok)
+            base + 150_000_000,       # pre-socket check (ok)
+            base + 200_000_000,       # pre-secret check (ok)
+            base + 250_000_000,       # pre-sign / send checks (ok)
+            base + 900_000_000,       # receive loop / post -> past the 0.5 s bound
+        ])
+        result = ob.execute_demo_authenticated_orderbook_within_deadline(
+            plan,
+            caller_deadline_monotonic_ns=base + 500_000_000,
+            caller_monotonic_clock_ns=clock,
+        )
+        self.assertIsInstance(result, ob.OrderBookHalt)
+        self.assertEqual(result.code, ob.OrderBookHaltCode.CONNECTIVITY_TIMEOUT)
+        del fake_tls
+
+    # --- T163 -----------------------------------------------------------------
+    def test_t163_one_shared_core_no_duplicate_transport_or_parser_stack(self):
+        self.assertTrue(hasattr(ob, "_execute_demo_authenticated_orderbook_core"))
+        legacy_src = _inspect.getsource(ob.execute_demo_authenticated_orderbook)
+        primitive_src = _inspect.getsource(ob.execute_demo_authenticated_orderbook_within_deadline)
+        core_src = _inspect.getsource(ob._execute_demo_authenticated_orderbook_core)
+        # neither public wrapper re-implements any transport / signing / parser step
+        for banned in (
+            "wrap_socket", "getaddrinfo", "_resolve_addresses_with_deadline(",
+            "_sign_orderbook_message(", "parse_orderbook_response(", "_compute_body_retention(",
+            ".recv(", ".sendall(",
+        ):
+            self.assertNotIn(banned, legacy_src, banned)
+            self.assertNotIn(banned, primitive_src, banned)
+        # each such step appears exactly once -- in the one shared core
+        for token, count in (
+            ("wrap_socket(", 1), ("_resolve_addresses_with_deadline(", 1),
+            ("_sign_orderbook_message(", 1), ("parse_orderbook_response(", 1),
+            ("_validate_http_response_headers(", 1),
+        ):
+            self.assertEqual(core_src.count(token), count, token)
+        # both wrappers delegate to the same core
+        self.assertIn("_execute_demo_authenticated_orderbook_core(", legacy_src)
+        self.assertIn("_execute_demo_authenticated_orderbook_core(", primitive_src)
+
+    def test_t163_shared_halt_classification_parity(self):
+        # A bad-plan input, a 401 response, and a DNS failure classify
+        # identically through both public entrypoints.
+        base = 6_000_000_000_000
+        far = base + 100 * 1_000_000_000
+
+        # (1) not-a-plan
+        legacy = ob.execute_demo_authenticated_orderbook("not a plan")
+        primitive = ob.execute_demo_authenticated_orderbook_within_deadline(
+            "not a plan", caller_deadline_monotonic_ns=far, caller_monotonic_clock_ns=_seq_clock([base]),
+        )
+        self.assertIsInstance(legacy, ob.OrderBookHalt)
+        self.assertIsInstance(primitive, ob.OrderBookHalt)
+        self.assertEqual((legacy.code, legacy.stage), (primitive.code, primitive.stage))
+
+        # (2) HTTP 401
+        plan = _valid_plan()
+        _patch_network(self.mp, chunks=[_http_response(401, b"{}")])
+        legacy = ob.execute_demo_authenticated_orderbook(plan)
+        self.mp.undo(); self.mp = _MonkeyPatch()
+        _patch_network(self.mp, chunks=[_http_response(401, b"{}")])
+        primitive = ob.execute_demo_authenticated_orderbook_within_deadline(
+            plan, caller_deadline_monotonic_ns=time.monotonic_ns() + 100 * 1_000_000_000,
+        )
+        self.assertEqual(legacy.code, ob.OrderBookHaltCode.AUTHENTICATION_FAILED)
+        self.assertEqual((legacy.code, legacy.stage), (primitive.code, primitive.stage))
+
+        # (3) DNS failure
+        self.mp.undo(); self.mp = _MonkeyPatch()
+        plan = _valid_plan()
+
+        def failing_getaddrinfo(*_a, **_kw):
+            raise OSError("DNS unreachable")
+
+        self.mp.setattr(socket, "getaddrinfo", failing_getaddrinfo)
+        legacy = ob.execute_demo_authenticated_orderbook(plan)
+        primitive = ob.execute_demo_authenticated_orderbook_within_deadline(
+            plan, caller_deadline_monotonic_ns=time.monotonic_ns() + 100 * 1_000_000_000,
+        )
+        self.assertEqual(legacy.code, ob.OrderBookHaltCode.DNS_VERIFICATION_FAILED)
+        self.assertEqual((legacy.code, legacy.stage), (primitive.code, primitive.stage))
 
 
 if __name__ == "__main__":
