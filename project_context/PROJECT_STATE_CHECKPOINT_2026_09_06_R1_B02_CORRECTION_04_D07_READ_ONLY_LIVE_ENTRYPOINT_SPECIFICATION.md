@@ -3,21 +3,30 @@
 Authority level: canonical current-state overlay when installed on canonical main.
 
 This checkpoint captures the Marco-approved R1-B02/11 **Correction 04** milestone
-for the R1-D07 read-only Stage-3 live-entrypoint specification, so that a fresh
-ARB chat does not need prior chat history to know that Correction 03 was
-blocked and why, that Correction 04 was approved, the exact D07 read-only
-combined execution capability theorem, the corrected orderbook deadline
-architecture, the credential compatibility convention, the remaining
-live-execution prerequisites, and the next bounded action.
+for the R1-D07 read-only Stage-3 live-entrypoint specification **and** the
+Marco-approved, canonically installed R1-D07 Correction-04 live-entrypoint
+**implementation**, so that a fresh ARB chat does not need prior chat history to
+know that Correction 03 was blocked and why, that Correction 04 was approved,
+the exact D07 read-only combined execution capability theorem, the corrected
+orderbook deadline architecture, the credential compatibility convention, the
+complete implementation correction lineage (the blocked non-canonical seed
+candidate, the Correction-01/02/03 blocked candidates, and the approved
+Correction-04 successor), the exact installed implementation identity, the
+remaining live-execution prerequisites, and the next bounded action.
 
-It does **not** implement the D07 live entrypoint and does **not** authorize
-live execution, credential use, venue access, production, Stage 3G+, remote Git
-writes, or `main` installation. It is documentation/current-state overlay only.
+It does **not** itself implement the D07 live entrypoint and does **not**
+authorize live execution, credential use, venue access, production, Stage 3G+,
+R1-D08, or any remote Git write of its own. It is documentation/current-state
+overlay only. The implementation installation recorded in A12 was performed by a
+separate, separately authorized canonical installation task; recording that
+installation is historical Git provenance and grants no execution capability.
 
 The raw Correction-03/04 specification, handoff, and Marco review/approval
 artifacts are **not repository-resident**; they are referenced here by exact
-byte length and SHA-256. They must be supplied by exact bytes/SHA in the next
-implementation dispatch.
+byte length and SHA-256. The implementation Marco review/approval handoffs, the
+reviewed Correction-04 submission bundle, and the canonical-installation
+result/report are likewise **not repository-resident** and are referenced here
+by exact byte length and SHA-256.
 
 ---
 
@@ -30,9 +39,19 @@ precanonicalization_parent = 66de67d45d40f0edab77353f567270eea79211c5
 repository                 = rigolugo/ARB
 ```
 
-This checkpoint's own canonicalization candidate is prepared as one
+This checkpoint's own original canonicalization candidate was prepared as one
 documentation-only commit whose parent is exactly
 `d65af8c343df05df0a6810a0778a125e834ccd12`.
+
+The later R1-D07 Correction-04 **canonical continuity** update to this same
+checkpoint path is prepared as one further documentation-only commit whose
+parent is exactly the installed implementation commit:
+
+```text
+continuity_base_main   = 4c95fa72cdb7fd420950a2937629c253206f2e5f
+continuity_base_tree   = 71c3a37f3f7f521a3e83ced1ab45623a366dce5e
+continuity_base_parent = 6e3c2348fc784d295e9406ec110d929a4b000c89
+```
 
 ## A2. Specification lineage
 
@@ -284,21 +303,52 @@ or rebase. A future implementation correction must be exactly one fresh commit
 from the exact then-current canonical base. Blocked-candidate bytes may be used
 only as explicitly packaged non-canonical reference content seed.
 
+That future implementation correction has since occurred and the correction loop
+is now closed. See A10 for the complete implementation correction lineage, A11
+for the accepted Correction-04 implementation candidate evidence and installed
+payload identities, and A12 for the canonical installation evidence. This A7
+blocked-predecessor record is preserved unchanged, and
+`f0e5b19bb4635393fdcaf45ece56dca250b06537` is confirmed absent from the
+installed implementation's ancestry.
+
 ## A8. Current R1-D07 state and next action
 
 ```text
 R1-D07 market-selection empirical preparation   = ACCEPTED HISTORICAL INPUT EVIDENCE
 R1-D07 live-entrypoint availability diagnostic  = PREFLIGHT_LIVE_ENTRYPOINT_UNAVAILABLE
-R1-D07 live-entrypoint specification            = CORRECTION_04 APPROVED_PENDING_CANONICALIZATION (at this checkpoint's preparation)
-
-After this checkpoint is installed on canonical main:
 R1-D07 live-entrypoint specification            = CORRECTION_04 APPROVED_AND_CANONICALLY_REFERENCED
-R1-D07 offline implementation correction        = NEXT_BOUNDED_ACTION
+R1-D07 live-entrypoint implementation           = CORRECTION_04 APPROVED_AND_CANONICALLY_INSTALLED
+R1-D07 implementation correction loop           = CLOSED
+installed implementation commit                 = 4c95fa72cdb7fd420950a2937629c253206f2e5f
+installed implementation tree                   = 71c3a37f3f7f521a3e83ced1ab45623a366dce5e
 
-D07 live execution   = NOT_AUTHORIZED
-venue writes         = NOT_AUTHORIZED
-production            = NOT_AUTHORIZED
-R1-D08               = NOT_AUTHORIZED
+D07 live execution      = NOT_AUTHORIZED
+Kalshi/credential use   = NOT_AUTHORIZED
+venue writes            = NOT_AUTHORIZED
+production              = NOT_AUTHORIZED
+Stage 3G+               = NOT_AUTHORIZED
+R1-D08                  = NOT_AUTHORIZED
+```
+
+The `R1-D07 offline implementation correction = NEXT_BOUNDED_ACTION` route
+recorded at this checkpoint's original preparation is **superseded and no longer
+current**. That correction loop ran to completion: its Correction-04 successor
+was Marco-approved and canonically installed on `main` (A10, A11, A12).
+
+Installation of an implementation is not an execution authorization. The
+installed read-only live entrypoint exists in canonical source, and it must not
+be run against any venue until a separate task explicitly authorizes that run.
+
+### Next bounded action
+
+```text
+NEXT_BOUNDED_ACTION =
+  R1-D07 read-only live-preflight readiness/input/freshness preparation
+  for a later separately authorized execution task.
+
+This does NOT itself create an execution capability envelope, authorize
+credential use, perform task-current source retrieval, access Kalshi, mutate
+the real N1 ledger, or run the live preflight.
 ```
 
 The historical `P03_C2` selected ticker
@@ -310,15 +360,23 @@ Known later live-run inputs that remain separately required before any real D07
 run:
 
 ```text
-exact accepted bootstrap_contract_sha256
-exact accepted risk-config artifact + sha256
+exact accepted bootstrap_contract_sha256                     = UNRESOLVED
+exact accepted risk-config artifact + sha256                 = UNRESOLVED
 exact external execution-authorization capability-envelope JSON + sha256
     (with the exact Correction-04 thirteen-field pattern, incl. demo_public_reads = PERMITTED)
+                                                             = UNRESOLVED
 exact installed implementation identity (Git commit)
-task-current source / freshness binding
-explicit permission for the bounded restricted-session STARTED/ENDED local lifecycle appends
-exact fresh ticker / input state for that preflight
+    = RESOLVED -> 4c95fa72cdb7fd420950a2937629c253206f2e5f
+task-current source / freshness binding                      = UNRESOLVED
+explicit permission for the bounded restricted-session STARTED/ENDED local
+    lifecycle appends                                        = UNRESOLVED
+exact fresh ticker / input state for that preflight          = UNRESOLVED
 ```
+
+Only the installed implementation identity is resolved. Every input still marked
+`UNRESOLVED` must be supplied or separately authorized by a later bounded task.
+None of them may be synthesized, inferred, defaulted, or carried over from
+historical evidence.
 
 ## A9. Tests
 
@@ -344,6 +402,203 @@ and is not accepted implementation. The next bounded implementation correction
 re-establishes its own test evidence from the exact then-current canonical
 base.
 
+That re-establishment has since occurred. The accepted offline validation
+carried by the approved and canonically installed Correction-04 implementation
+candidate `4c95fa72cdb7fd420950a2937629c253206f2e5f` is:
+
+```text
+host-readiness = 1 passed
+focused        = 1564 passed + 21 subtests, 0 failed
+full           = 3493 passed + 570 subtests, 0 failed, exit 0
+```
+
+These are offline test results only. They are not live-venue evidence, do not
+prove venue behavior, and do not authorize a D07 live run.
+
+## A10. R1-D07 implementation correction lineage
+
+The offline implementation of the Correction-04 D07 read-only Stage-3 live
+entrypoint required four review cycles after the initial blocked seed candidate.
+The complete lineage is:
+
+```text
+initial blocked implementation candidate
+  commit = f0e5b19bb4635393fdcaf45ece56dca250b06537
+  status = BLOCKED_NONCANONICAL_CONTENT_SEED_ONLY
+  the existing A7 record of this candidate is preserved unchanged
+  Marco review handoff
+    R1-D07_READ_ONLY_STAGE3_LIVE_ENTRYPOINT_IMPLEMENTATION_01_MARCO_REVIEW_HANDOFF_01.md
+    bytes  = 8503
+    sha256 = e3b473da7d7579ef378ee5fa9eaefe51ef91f92205b450d8876914d7965452ba
+
+Correction-01 candidate
+  commit   = cd538f8733729424c548a811a41585c16cf60d5e
+  decision = BLOCK
+  Marco handoff
+    R1-D07_READ_ONLY_STAGE3_LIVE_ENTRYPOINT_IMPLEMENTATION_01_CORRECTION_01_MARCO_REVIEW_HANDOFF_01.md
+    bytes  = 12332
+    sha256 = 21ca91336a7057a9859555864e2d016596b0b74edde507d1be73e2c9c3cf6711
+  material blockers
+    production active-V2 arbitrary-callable seam;
+    direct live-boundary confirm bypass;
+    stale generic transport deadline;
+    incomplete bounded-exception scope
+
+Correction-02 candidate
+  commit   = d1b57763cfac00bd0f765e3fba8af9154ca84307
+  decision = BLOCK
+  Marco handoff
+    R1-D07_READ_ONLY_STAGE3_LIVE_ENTRYPOINT_IMPLEMENTATION_01_CORRECTION_02_MARCO_REVIEW_HANDOFF_01.md
+    bytes  = 10505
+    sha256 = 8622ba37247af2b5b2e29f613417bda2a1764510cab0037013a9ef64a7a3e7f6
+  material blocker
+    the same absolute request deadline was not load-bearing through the
+    complete high-level generic transport
+
+Correction-03 candidate
+  commit   = c7833e8d63c84540951356931d4c3af80a1d02ec
+  decision = BLOCK
+  Marco handoff
+    R1-D07_READ_ONLY_STAGE3_LIVE_ENTRYPOINT_IMPLEMENTATION_01_CORRECTION_03_MARCO_REVIEW_HANDOFF_01.md
+    bytes  = 9057
+    sha256 = 09ac1b1f71f1f4bdfb0613a159759847b4cad84dd9aeaeacebaf4043f3a0b037
+  material blocker
+    the DNS queue wait retained a stale pre-thread-start relative timeout
+
+Correction-04 accepted candidate
+  commit   = 4c95fa72cdb7fd420950a2937629c253206f2e5f
+  tree     = 71c3a37f3f7f521a3e83ced1ab45623a366dce5e
+  parent   = 6e3c2348fc784d295e9406ec110d929a4b000c89
+  decision = APPROVE
+  Marco approval handoff
+    R1-D07_READ_ONLY_STAGE3_LIVE_ENTRYPOINT_IMPLEMENTATION_01_CORRECTION_04_MARCO_APPROVAL_HANDOFF_01.md
+    bytes  = 5928
+    sha256 = dd0702e160d62fc0092b29671193557d1b7e1dd190a3046ba08abdd21d972519
+  status   = APPROVED_AND_CANONICALLY_INSTALLED
+  closure  = the DNS helper receives the exact request deadline and the exact
+             bound runtime clock, performs a pre-start deadline check, starts the
+             single daemon resolver worker, then recomputes the queue wait budget
+             from that same absolute deadline immediately before the queue read;
+             an exhausted deadline never enters the queue wait
+```
+
+```text
+R1-D07 implementation correction loop = CLOSED
+```
+
+Each blocked candidate above remains blocked historical lineage only. None of
+them is approved implementation authority, and none of them is Git ancestry of
+the installed implementation.
+
+## A11. Accepted Correction-04 implementation candidate evidence
+
+Exact reviewed Correction-04 candidate review evidence:
+
+```text
+outer submission bundle
+  R1D07_READ_ONLY_STAGE3_LIVE_ENTRYPOINT_IMPLEMENTATION_01_CORRECTION_04_MARCO_SUBMISSION_BUNDLE.zip
+  bytes  = 371671
+  sha256 = 58dd90554e2d3fea21b3c4dbdbd307e52a5eb970252ecf8061f8b48524453d74
+
+inner review ZIP
+  R1-D07_READ_ONLY_STAGE3_LIVE_ENTRYPOINT_IMPLEMENTATION_01_CORRECTION_04_MARCO_REVIEW.zip
+  bytes  = 355353
+  sha256 = 532503ce4875ef08dcaa13d93bbca27d9a09478050d52846dc5b222a843eede8
+
+candidate.patch
+  bytes  = 255941
+  sha256 = 91ccb234e66635564bd38aa143d2e1a611ffa76a35d2e62441d51154005a5806
+```
+
+Exact installed payload, at the four-path direct edit set fixed by A4:
+
+```text
+src/arb/venues/kalshi/minimal_market_maker_experiment_runner.py
+  bytes  = 570530
+  sha256 = 02dec750e2a51a0ee76db2fca5ff130b4ac3c65927c278e94fa52daea004cd19
+  blob   = 061eae94efcecf694002b3dd9e07834951d6dc29
+
+tests/test_kalshi_minimal_market_maker_experiment_runner.py
+  bytes  = 574022
+  sha256 = 0d338433fd996dc0152019799dfd5dbc99abba4c9273343c1bd8a98147f7514d
+  blob   = 67b201d3a0cad5de9bef8c0f8eb2c86c5d730178
+
+src/arb/venues/kalshi/orderbook.py
+  bytes  = 115667
+  sha256 = 0546f95f2560a480b45dda30fb14c939fd9721b74ab2ba0f720a55ff83fdfd08
+  blob   = 4d0c8b8407ddb941decaa5cf6a493ac6ab3063c5
+
+tests/test_kalshi_authenticated_orderbook.py
+  bytes  = 148363
+  sha256 = d788cbda777ccca85b1fda3008de479a054b56f3d26c0dbf98ec0e60bbbbea4e
+  blob   = 40df77cc472aff9b93e84bf97e075e7d283c8c57
+```
+
+`models.py`, `validation.py`, and `serialization.py` remained readable-PROTECTED
+as required by A4; no new module was added.
+
+The accepted final offline validation carried by this reviewed candidate is
+recorded in A9.
+
+The raw review bundles and handoffs remain external/local. Only their exact byte
+lengths and SHA-256 identities above are canonical.
+
+## A12. Canonical installation evidence
+
+The approved Correction-04 implementation candidate was installed on canonical
+`main` by a separate, separately authorized installation task:
+
+```text
+task_id    = R1-D07_READ_ONLY_STAGE3_LIVE_ENTRYPOINT_IMPLEMENTATION_01_CORRECTION_04_CANONICAL_INSTALLATION_01
+repository = rigolugo/ARB
+remote_ref = refs/heads/main
+installed_at_utc = 2026-09-08T17:02:10Z
+
+transition = 6e3c2348fc784d295e9406ec110d929a4b000c89
+          -> 4c95fa72cdb7fd420950a2937629c253206f2e5f
+push_mode  = NON_FORCE_FAST_FORWARD
+force_push = 0
+only refs/heads/main intentionally changed
+
+postinstall_remote_main   = 4c95fa72cdb7fd420950a2937629c253206f2e5f
+postinstall_remote_tree   = 71c3a37f3f7f521a3e83ced1ab45623a366dce5e
+postinstall_remote_parent = 6e3c2348fc784d295e9406ec110d929a4b000c89
+changed_path_count        = 4
+```
+
+Installation evidence identities:
+
+```text
+R1D07_READ_ONLY_STAGE3_LIVE_ENTRYPOINT_IMPLEMENTATION_01_CORRECTION_04_CANONICAL_INSTALLATION_01_INSTALLATION_RESULT.json
+  bytes  = 7558
+  sha256 = f941652e506f7570b186854f9d079c236391518a8e6ce7a8b4d0beefd448806d
+
+R1D07_READ_ONLY_STAGE3_LIVE_ENTRYPOINT_IMPLEMENTATION_01_CORRECTION_04_CANONICAL_INSTALLATION_01_INSTALLATION_COMPLETION_REPORT.md
+  bytes  = 10535
+  sha256 = e5305c11d25ad486936d5c32bedbf668c6755caa1b3542d5f3338ce7f5569909
+```
+
+The installation task confirmed that none of
+
+```text
+c7833e8d63c84540951356931d4c3af80a1d02ec
+d1b57763cfac00bd0f765e3fba8af9154ca84307
+cd538f8733729424c548a811a41585c16cf60d5e
+f0e5b19bb4635393fdcaf45ece56dca250b06537
+```
+
+is ancestry of the installed commit.
+
+The installation result and completion report are direct Git installation
+evidence for exactly that repository, ref, and time. They prove the exact
+canonical installation only. They do **not** prove live venue behavior, do not
+constitute Demo or production execution evidence, and do not authorize
+execution. The installation task itself performed no Kalshi request, no real
+credential use beyond ambient Git remote authentication, no venue write, no
+production activity, no project test or runtime execution, and no real N1
+deployed-state access. Both raw files remain external/local and are canonical
+here only by the exact identities above.
+
 ## Supersession relation
 
 This checkpoint supersedes the prior D07 checkpoint
@@ -359,6 +614,19 @@ authority, incomplete-pagination fail-closed rule, and
 `PREFLIGHT_LIVE_ENTRYPOINT_UNAVAILABLE` availability finding are preserved
 unchanged.
 
+This checkpoint further supersedes its **own** earlier preparation-time text
+only where that text states that the R1-D07 offline implementation correction is
+the next bounded action, that the Correction-04 live-entrypoint implementation is
+unresolved or pending, or that the Correction-04 implementation has not been
+installed on canonical `main`. Its Correction-02/03/04 specification lineage and
+exact identities, the D07 combined execution capability theorem, the preserved
+orderbook deadline architecture, the credential compatibility convention, the
+restricted-session lifecycle theorem, the A7 blocked-predecessor record, and the
+Correction-04 `T179`/`T180` test theorem are preserved unchanged.
+
 This checkpoint grants no production capability, no venue write, no credential
-use, no Kalshi access, no Stage 3G+, no remote Git write, no `main`
-installation, and no R1-D08 authorization.
+use, no Kalshi access, no D07 live execution, no Stage 3G+, no remote Git write,
+no further `main` installation, and no R1-D08 authorization. The
+already-completed canonical installation recorded in A12 is historical Git
+provenance for exactly that transition; it is not an execution authorization and
+does not prove live venue behavior.
