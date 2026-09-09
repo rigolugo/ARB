@@ -599,6 +599,146 @@ production activity, no project test or runtime execution, and no real N1
 deployed-state access. Both raw files remain external/local and are canonical
 here only by the exact identities above.
 
+## A13. R1-D07 read-only local-state readiness result
+
+A separately dispatched, Marco-approved bounded read-only task inspected the
+local Windows execution root for the persistent ARB control-plane state that the
+installed D07 architecture will require before any real live run. It made zero
+Kalshi/API requests and performed zero persistent-state mutations.
+
+```text
+local_state_readiness_task
+  = R1-D07_READ_ONLY_STAGE3_LIVE_PREFLIGHT_LOCAL_STATE_READINESS_READ_ONLY_01
+
+terminal_classification
+  = LOCAL_STATE_READINESS_COMPLETE__PARTIAL_UNRESOLVED
+
+probe_scope
+  = read-only local filesystem/SQLite inspection within C:\b1\kals
+
+canonical_repository_root
+  = C:\b1\kals\ARB
+  status = RESOLVED_FROM_VERIFIED_LOCAL_STATE
+
+target_conflict_domain
+  = KALSHI|KALSHI_DEMO|ARB_KALSHI_DEMO_PRIMARY_ACCOUNT|SUBACCOUNT=1
+
+matching local ARB authority store for target conflict domain
+  = NOT_FOUND within authorized root at probe time
+
+authority_namespace_id
+  = UNRESOLVED_NOT_FOUND
+
+authority_namespace_root
+  = UNRESOLVED_NOT_FOUND
+
+expected_ledger_path
+  = UNRESOLVED_NOT_FOUND
+
+bootstrap_contract_sha256
+  = UNRESOLVED_BOOTSTRAP_NOT_PERSISTED
+```
+
+### A13.1 Required semantic distinction
+
+This local negative finding does NOT mean Kalshi Demo subaccount N1 is absent.
+
+The previously qualified Kalshi Demo N1 execution domain remains accepted
+historical empirical evidence:
+
+```text
+account_scope_ref = ARB_KALSHI_DEMO_PRIMARY_ACCOUNT
+subaccount        = 1
+exchange_index    = 0
+```
+
+The new negative finding is only:
+
+```text
+no corresponding local ARB persisted authority / active-ledger / bootstrap
+state for that N1 domain was found inside C:\b1\kals at probe time.
+```
+
+This canonicalization does not claim task-current remote existence was
+reverified by the probe; the probe made zero Kalshi/API requests.
+
+### A13.2 Archived non-target N0 finding
+
+```text
+The only discovered ARB persistent state was an archived historical
+SUBACCOUNT=0 legacy-import authority/ledger pair under
+C:\b1\kals\Archive\arb_state\kalshi_demo_primary_v1\.
+
+It is non-target historical evidence and MUST NOT be renamed, rebound, copied,
+or treated as N1 persistent state.
+```
+
+The archived path contents are not current N0 runtime-state claims.
+
+### A13.3 Evidence identity
+
+```text
+local-state review ZIP
+  R1-D07_READ_ONLY_STAGE3_LIVE_PREFLIGHT_LOCAL_STATE_READINESS_READ_ONLY_01_MARCO_REVIEW.zip
+  bytes  = 22072
+  sha256 = b49256109746a1e772107aa5e36a57f84697fd2e740d52369d5a1fa43bddb097
+
+Marco approval handoff
+  R1-D07_READ_ONLY_STAGE3_LIVE_PREFLIGHT_LOCAL_STATE_READINESS_READ_ONLY_01_MARCO_APPROVAL_HANDOFF_01.md
+  bytes    = 7205
+  sha256   = 77bde598fd35909468bbb7c7ffec8324857478ceeee41c03b09a48a2e38b7886
+  decision = APPROVE
+```
+
+Mutation-proof summary:
+
+```text
+persistent_state_mutations = 0
+database_write_statements = 0
+sqlite_companion_files_created = 0
+restricted_session_lifecycle_appends = 0
+credential_or_key_reads = 0
+Kalshi/venue/API access = 0
+repository edits/commits/remote writes = 0
+```
+
+The review ZIP is accepted direct empirical/local evidence for exactly the
+authorized Windows root and probe time. It proves no local target N1 ARB store
+was found inside that boundary; it does not prove global filesystem absence and
+does not reverify remote Kalshi state.
+
+### A13.4 Corrected current D07 route
+
+This section supersedes the A8 "Next bounded action" text that names generic
+R1-D07 read-only live-preflight readiness/input/freshness preparation as the
+next bounded route. That generic-preparation route is no longer current.
+
+```text
+NEXT_BOUNDED_ACTION =
+  separately specify/review the R1-D07 N1 LOCAL ARB STATE
+  CREATION / BOOTSTRAP task for the already-qualified Kalshi Demo N1 domain.
+
+That later state-changing task requires separate explicit local-state-mutation
+authorization and an exact accepted bootstrap-contract artifact.
+
+It must not create, fund, recreate, or modify the Kalshi Demo subaccount
+itself, choose risk thresholds, access Kalshi, read credentials, issue an
+execution-authorization envelope, or run D07.
+```
+
+Risk-config approval remains AFTER local N1 state creation/bootstrap. The A8
+list of still-`UNRESOLVED` later live-run inputs (`bootstrap_contract_sha256`,
+risk-config artifact + sha256, external execution-authorization envelope +
+sha256, task-current source/freshness binding, restricted-session lifecycle
+append permission, fresh ticker/input state) is unchanged; only the installed
+implementation identity `4c95fa72cdb7fd420950a2937629c253206f2e5f` remains
+resolved. `R1-D07 live execution = NOT_AUTHORIZED`.
+
+This section is documentation/current-state overlay only. It authorizes no
+local-state creation/bootstrap, no ledger or authority mutation, no risk-config
+selection, no credential use, no Kalshi/venue access, no execution envelope, no
+live run, no production, no Stage 3G+, and no R1-D08.
+
 ## Supersession relation
 
 This checkpoint supersedes the prior D07 checkpoint
