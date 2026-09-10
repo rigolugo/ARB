@@ -739,6 +739,239 @@ local-state creation/bootstrap, no ledger or authority mutation, no risk-config
 selection, no credential use, no Kalshi/venue access, no execution envelope, no
 live run, no production, no Stage 3G+, and no R1-D08.
 
+## A14. R1-D07 N1 local ARB state creation/bootstrap Correction 01 (Marco-approved specification)
+
+A separately dispatched R1-D07 N1 local ARB state creation/bootstrap
+specification was reviewed. The initial `SPEC_01` was Marco-`BLOCK`ed; the
+corrected `SPEC_01_CORRECTION_01` was Marco-`APPROVE`d. This section records
+the approved specification content only; it does not record or authorize
+canonical installation, local-state creation, or bootstrap execution.
+
+### A14.1 Specification lineage
+
+Blocked predecessor (historical lineage only):
+
+```text
+KALSHI_DEMO_N1_LOCAL_ARB_STATE_CREATION_AND_BOOTSTRAP_SPEC_01.md
+review ZIP:
+  bytes  = 29889
+  sha256 = 911f1e7e45a3cc5b8e9be146fe1c7e15b780737e2fe3acc668a077ec21cc9c60
+
+Marco BLOCK:
+  bytes  = 8058
+  sha256 = 2da1787e191a322a50195fe9b0da9ec965a8809b13b091dedd1ec51e98a743d4
+
+blocker =
+  EXECUTION_TIME_CANONICAL_IDENTITY_CONFLICT_AFTER_REQUIRED_SPEC_INSTALLATION
+
+classification = BLOCKED_HISTORICAL_LINEAGE_ONLY
+```
+
+Approved successor:
+
+```text
+KALSHI_DEMO_N1_LOCAL_ARB_STATE_CREATION_AND_BOOTSTRAP_SPEC_01_CORRECTION_01.md
+  bytes  = 52930
+  sha256 = 24822a18f74a5944bcd9d19a9e4eb3ca7abeb5402ced8779044825e3082a4f8d
+
+HANDOFF_KALSHI_DEMO_N1_LOCAL_ARB_STATE_CREATION_AND_BOOTSTRAP_SPEC_01_CORRECTION_01.md
+  bytes  = 8539
+  sha256 = e3873c72b71c4702ed2921628a6ea22e4eb57e1e808c8c8ebc6c706c100d475a
+
+DERIVATION_EVIDENCE.json
+  bytes  = 25945
+  sha256 = 9cb72249e65be9be7ee72d00b16aa6e53d2e85ffab948f0a9b810184e1f01013
+
+SOURCE_TRACEABILITY.md
+  bytes  = 8567
+  sha256 = 7ea9a5d7beff14f4cce77410e517efb37f487ce128952ef1a522e1f259d8c8c0
+
+REVIEW_MANIFEST.json
+  bytes  = 6035
+  sha256 = 29686e18a25e675174eec5a785263b5035bc3bd19ec95df769f4b93a2931aa5c
+
+MARCO_REVIEW.zip
+  bytes  = 33370
+  sha256 = 9b6901477c088066f47947bde4f4ee00471589dd80becab09db7cfb590f23695
+
+MARCO_APPROVAL_HANDOFF_01.md
+  bytes    = 8365
+  sha256   = 52286b03882e2d946cead25787a09785ed894bc43bab302cbfa2a51e13c30350
+  decision = APPROVE
+```
+
+All raw artifacts above remain external/local, matching the established R1-D07
+controlling-spec canonicalization pattern; they are not repository-resident.
+
+### A14.2 Corrected provenance theorem
+
+```text
+SPEC_AUTHORING_BASE
+  commit = e7480d24464e7a122993f58e6b3554a629e9aeb4
+  tree   = 14c2ad6553d9392b60cbd1ddc9279bdb1901e0c8
+  parent = 9fa603642588dd0c0e32ec25f45cb3bcf0f6e133
+
+SOURCE_IMPLEMENTATION_BASE
+  commit = e7480d24464e7a122993f58e6b3554a629e9aeb4
+  tree   = 14c2ad6553d9392b60cbd1ddc9279bdb1901e0c8
+  parent = 9fa603642588dd0c0e32ec25f45cb3bcf0f6e133
+
+frozen source blobs:
+  src/arb/execution_ledger.py
+    = e39f7f400714510a6a6b32a3dfd5f84125571d5c
+  src/arb/venues/kalshi/ledger_binding.py
+    = 43b36965466d42c611daa64fec71f86363a3e0f7
+
+INSTALLED_SPEC_CANONICAL_IDENTITY
+  status = TO_BE_BOUND_BY_SEPARATE_CANONICAL_INSTALLATION_RESULT
+  commit = UNBOUND_AT_CANDIDATE_AUTHOR_TIME
+  tree   = UNBOUND_AT_CANDIDATE_AUTHOR_TIME
+  parent = UNBOUND_AT_CANDIDATE_AUTHOR_TIME
+```
+
+This candidate's own local documentation commit SHA must never be substituted
+for the unbound `INSTALLED_SPEC_CANONICAL_IDENTITY` values above; that identity
+is an output of a later, separate canonical-installation result only.
+
+Future mutation rule:
+
+```text
+current main commit/tree/parent must equal the exact later reviewed
+INSTALLED_SPEC_CANONICAL identity
+
+AND
+
+the two load-bearing source blobs at that identity must remain the exact frozen
+blobs above.
+
+newer descendant != automatically acceptable
+post-install main drift -> fail closed / reviewed refresh required
+source blob drift -> reviewed technical successor required
+```
+
+### A14.3 Approved local bootstrap contract (specification-level; not yet created)
+
+A13's local state remains physically absent/not-created. A14 supersedes only
+the earlier statement that the **specification values themselves** are
+unresolved; it does not supersede A13's mutation-proof or absence findings.
+
+Approved planned topology:
+
+```text
+authority_topology_gate = AUTHORITY_TOPOLOGY_RESOLVED
+
+authority_namespace_id =
+  ARB_KALSHI_DEMO_PRIMARY_AUTHORITY_V1
+
+authority_namespace_root =
+  C:\b1\kals\arb_state\kalshi_demo_primary_v1\authority
+
+authority_store =
+  C:\b1\kals\arb_state\kalshi_demo_primary_v1\authority\arb_execution_authority_v1.sqlite3
+
+N1_active_ledger =
+  C:\b1\kals\arb_state\kalshi_demo_primary_v1\ledger\subaccount1_execution_v2.sqlite3
+
+active_deployment_root =
+  C:\b1\kals\arb_state
+
+canonical_repository_root =
+  C:\b1\kals\ARB
+```
+
+Approved exact path/hash identities:
+
+```text
+authority_store_path_identity_sha256
+= dbf0afa85aa59c82879cc78e24340d7035074b43879df39eca98a1e3ac83f899
+
+active_ledger_path_identity_sha256
+= ab36fd934f013f16795f161f20f1d63daecf8a385bfe260fc3a7bb8945e4d3b3
+
+domain_binding_sha256
+= f6aa344c8b573f2d436f76e5dc58601f8583af71a2555922d35f250ded123a02
+
+bootstrap_contract_sha256
+= c387e47c2862e6082e75bc8eb8dfa47ed085ec7be98e8426970a278a953e7360
+
+bootstrap_class = KNOWN_NONEMPTY_PRESTACK
+bootstrap_cutoff_at_utc = 2026-09-01T23:34:46.398722Z
+
+active_contract_sha256
+= f2d62188997b28d2d36f4686c271cb9be43f10d1cbdf217960dda0ecf8e61c53
+
+active_incident_id
+= adi_2c5c16c8e7299d0e6fccb23caec7c4d4
+
+active_writer_proof_id
+= adwp_0b247ef6546e88308017a3168b9ad2b8
+
+bootstrap_event_id
+= evt_c078e5802ee65566285f654acfa3bb67
+```
+
+Approved preservation set:
+
+```text
+retained_position_ticker = KXAAAGASD-26SEP02-4.1200
+retained_position_floor_contracts = Decimal("1.00")
+automatic_flatten_authorized = false
+
+genesis:
+  1 LEDGER_INITIALIZED
+  2 EXECUTION_DOMAIN_BOOTSTRAP_RECORDED
+  3 WRITER_PROOF_HELD
+
+initial writer proof = HELD
+release_eligible = false
+venue transport during bootstrap = 0
+automatic retry = 0
+```
+
+None of these values are yet instantiated as local persistent state; A13's
+`NOT_FOUND` / `UNRESOLVED_NOT_FOUND` findings stand unchanged until a separate,
+explicitly authorized local N1 bootstrap task creates them.
+
+### A14.4 Archive / N1 distinction (unchanged)
+
+```text
+Kalshi Demo N1 already exists and is qualified historical remote/Demo evidence.
+This local specification does not create/fund/modify Kalshi N1.
+
+The archived SUBACCOUNT=0 authority/ledger pair remains historical/non-target
+and must not be copied, rebound, migrated, renamed, or selected as N1 state.
+```
+
+### A14.5 Current route
+
+```text
+Correction-01 spec review = APPROVED.
+
+This documentation candidate, if not yet installed on canonical main:
+  NEXT = separate canonical installation of the reviewed candidate.
+
+Once this exact canonicalization content is installed on main:
+  require reviewed canonical-installation evidence that freezes exact
+  INSTALLED_SPEC_CANONICAL_COMMIT/TREE/PARENT.
+
+Only after that installation evidence is accepted:
+  NEXT = prepare the one-shot local N1 bootstrap mutation package binding both
+  the installed-spec identity and SOURCE_IMPLEMENTATION_BASE/frozen blobs.
+
+Actual local-state mutation still requires a separate explicit user
+authorization.
+
+Risk-config work remains after successful local bootstrap + review +
+canonicalization.
+```
+
+This section grants no local-state creation/bootstrap, no ledger or authority
+mutation, no risk-config selection, no credential use, no Kalshi/venue access,
+no execution envelope, no live run, no production, no Stage 3G+, and no
+R1-D08. Approval/canonicalization of this specification does not itself
+authorize local state creation, Kalshi access, credentials, venue writes,
+risk-config, D07 live preflight, production, Stage 3G+, or R1-D08.
+
 ## Supersession relation
 
 This checkpoint supersedes the prior D07 checkpoint
