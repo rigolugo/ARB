@@ -972,6 +972,210 @@ R1-D08. Approval/canonicalization of this specification does not itself
 authorize local state creation, Kalshi access, credentials, venue writes,
 risk-config, D07 live preflight, production, Stage 3G+, or R1-D08.
 
+## A15. R1-D07 N1 local ARB state bootstrap execution (Marco-approved, completed)
+
+A separately dispatched and Marco-approved one-shot local ARB N1 bootstrap
+execution has been performed against the approved offline execution package and
+an accepted external mutation-authorization artifact. This section canonicalizes
+the accepted execution milestone into current state. It records documentation
+only; it performs and authorizes no runtime, persistent-state, venue,
+credential, release, restricted-session, risk-config, production, Stage 3G+, or
+R1-D08 action.
+
+### A15.1 Accepted terminal theorem
+
+```text
+terminal_classification            = LOCAL_N1_BOOTSTRAP_COMPLETE
+created_at_utc                      = 2026-09-10T18:09:28.812345Z
+intent_create_calls                = 1
+authority_initialize_calls         = 1
+active_ledger_initialize_calls     = 1
+automatic_retries                  = 0
+venue_requests                     = 0
+venue_writes                       = 0
+credential_value_reads             = 0
+risk_config_ops                    = 0
+repo_writes_by_execution           = 0
+release_ops                        = 0
+restricted_session_appends         = 0
+archived_historical_N0_identities  = UNCHANGED
+```
+
+### A15.2 Exact three-event genesis (PERSISTED)
+
+```text
+1  LEDGER_INITIALIZED
+     event_id   = evt_d8022c5bbfd546eaa83811a29bc7fade
+     event_hash = 15e04bb6771847a4709a4bfb0951a6dbe694ae31179152aad8ca8624baa7cadd
+2  EXECUTION_DOMAIN_BOOTSTRAP_RECORDED
+     event_id   = evt_c078e5802ee65566285f654acfa3bb67
+     event_hash = e8774fe356d43d573077419b34db818584f56b273ff210b7a87aa5ec4a540629
+3  WRITER_PROOF_HELD
+     event_id   = evt_1fbb81279f554c88b4b7257950086219
+     event_hash = be0d2aa61ee507b5103bfe3d9c0a1387e97ec9d8b2eb97a7d74b4c7f134bc1c7
+     incident_id = adi_2c5c16c8e7299d0e6fccb23caec7c4d4
+```
+
+### A15.3 Runtime identities (INDEPENDENTLY_VERIFIED local runtime facts)
+
+```text
+authority_namespace_id             = ARB_KALSHI_DEMO_PRIMARY_AUTHORITY_V1
+authority_runtime_instance_id      = 772b53a9-7915-4133-957b-3d6c24dfdfc7
+authority_schema_revision          = 1
+authority_trusted_sequence         = 3
+authority_trusted_event_hash       = be0d2aa61ee507b5103bfe3d9c0a1387e97ec9d8b2eb97a7d74b4c7f134bc1c7
+authority_conflict_domain_row_count_total = 1
+authority_store_path_identity_sha256 = dbf0afa85aa59c82879cc78e24340d7035074b43879df39eca98a1e3ac83f899
+
+ledger_runtime_instance_id         = 485b37e9-738d-49f8-99cf-5f2e69589de6
+ledger_schema_revision             = 2
+ledger_event_count                 = 3
+preledger_history_mode             = KNOWN_NONEMPTY_PRESTACK
+ledger_path_identity_sha256        = ab36fd934f013f16795f161f20f1d63daecf8a385bfe260fc3a7bb8945e4d3b3
+
+domain_binding_id                  = KEDB1_f6aa344c8b573f2d436f76e5dc58601f8583af71a2555922d35f250ded123a02
+domain_binding_sha256              = f6aa344c8b573f2d436f76e5dc58601f8583af71a2555922d35f250ded123a02
+bootstrap_contract_sha256          = c387e47c2862e6082e75bc8eb8dfa47ed085ec7be98e8426970a278a953e7360
+active_contract_id                 = AEDC1_f2d62188997b28d2d36f4686c271cb9be43f10d1cbdf217960dda0ecf8e61c53
+active_contract_sha256             = f2d62188997b28d2d36f4686c271cb9be43f10d1cbdf217960dda0ecf8e61c53
+active_incident_id                 = adi_2c5c16c8e7299d0e6fccb23caec7c4d4
+active_writer_proof_id             = adwp_0b247ef6546e88308017a3168b9ad2b8
+writer_proof_state                 = HELD
+```
+
+### A15.4 Exact accepted external/local evidence identities
+
+Raw files remain external/local and are NOT repository-resident; canonical
+reference is by exact bytes / SHA-256 only.
+
+```text
+RESULT
+  R1-D07_N1_LOCAL_ARB_STATE_CREATION_BOOTSTRAP_EXECUTION_01_RESULT.json
+  raw_bytes = 8081
+  sha256    = 07728e3f5d48f786e6a7a3a5af8be3847cce41c5a8d2419a8198db61210a12cf
+
+REPORT
+  R1-D07_N1_LOCAL_ARB_STATE_CREATION_BOOTSTRAP_EXECUTION_01_REPORT.md
+  raw_bytes = 1095
+  sha256    = af90167c47cc39b0328dd0a33e7d46883932de77479645ede78c9d41b4452474
+
+DURABLE INTENT
+  R1-D07_N1_LOCAL_ARB_STATE_CREATION_BOOTSTRAP_EXECUTION_01_INTENT_V1.json
+  raw_bytes = 3122
+  sha256    = 1bba4f7c9c4908d7b44ec8238708828c0b293aa09f0a5dc46eb79ed60297c1b6
+
+EXTERNAL MUTATION AUTHORIZATION
+  R1-D07_N1_LOCAL_ARB_STATE_CREATION_BOOTSTRAP_EXECUTION_01_MUTATION_AUTHORIZATION_01.json
+  raw_bytes = 2625
+  sha256    = 48e43aff23d860c3ff4e511d3d8251d721a5aebf14d18523cf59d9e4c981d2cc
+  mutation_authorization_ref = R1-D07_N1_LOCAL_ARB_STATE_CREATION_BOOTSTRAP_EXECUTION_01_MUTATION_AUTHORIZATION_01
+
+APPROVED EXECUTION PACKAGE (Correction 01)
+  runner sha256               = 6aa6ca2f468f3161660034648322d5f9bbc565be839c3f1427a45aa83eb7b8e9  (87499 bytes)
+  execution manifest sha256   = 634a19101c1ee33bdcd1b72e0a4d6fe54cee1655771159365d1bfea0c3f7b550  (4741 bytes)
+  execution package zip sha256 = 964f2de82418e5c0b8e826e8e75849bd14b832566f64b8a090b606e3c66e0ef9  (29539 bytes)
+  package Marco approval handoff sha256 = b06cc1c9b73d3f5447ecb43ecce294ec71decaf4da414cd6f30541294c05d523  (5526 bytes, decision APPROVE)
+  package-preparation outer submission sha256 = 831079aaa0d95849909524c4e02708708a754b6db84005a154a4e45a206f816a  (83984 bytes)
+
+MARCO EXECUTION APPROVAL
+  R1-D07_N1_LOCAL_ARB_STATE_CREATION_BOOTSTRAP_EXECUTION_01_MARCO_EXECUTION_APPROVAL_HANDOFF_01.md
+  raw_bytes = 3943
+  sha256    = ac4c73aedd7efd5d8a81954eec9250b115dcff7a2015efd734dc3eea9538e8ad
+  decision  = APPROVE
+```
+
+### A15.5 Installed-spec canonical identity actually bound and used
+
+The bootstrap execution bound and used, as its `INSTALLED_SPEC_CANONICAL_IDENTITY`,
+the exact identity established by the Correction-01 specification canonical
+installation:
+
+```text
+commit = 71486d6c447b5334c869123050f079ff059b7229
+tree   = 40be3d3418e460d9aa6313a7a28236b583477ff3
+parent = e7480d24464e7a122993f58e6b3554a629e9aeb4
+```
+
+with the two load-bearing source blobs unchanged at that identity
+(`src/arb/execution_ledger.py` = `e39f7f400714510a6a6b32a3dfd5f84125571d5c`;
+`src/arb/venues/kalshi/ledger_binding.py` = `43b36965466d42c611daa64fec71f86363a3e0f7`).
+
+For current state this supersedes A14.2's
+`INSTALLED_SPEC_CANONICAL_IDENTITY = UNBOUND_AT_CANDIDATE_AUTHOR_TIME`. It does
+NOT rewrite A14.2's historical author-time statement, and this checkpoint's own
+documentation commit SHA is still never substituted for the identity above.
+
+### A15.6 Supersession for current state (history preserved verbatim)
+
+```text
+A13    remains a CORRECT historical read-only absence finding AT ITS PROBE TIME.
+       Superseded FOR CURRENT STATE only: the local ARB N1 authority store,
+       active ledger, and three-event bootstrap genesis now EXIST. A13's
+       mutation-proof (zero mutations by that probe) is unchanged.
+
+A14    approved bootstrap specification theorem is PRESERVED. A14 remains the
+       controlling specification-level record.
+
+A14.2  UNBOUND installed-spec identity -> superseded for current state by A15.5.
+
+A14.3  "Approved local bootstrap contract (specification-level; not yet
+       created)" and "None of these values are yet instantiated as local
+       persistent state" -> superseded for current state: the approved topology
+       (authority namespace/root/store path, N1 active-ledger path, path-identity
+       hashes, domain binding, bootstrap contract, active contract / incident /
+       writer-proof identities, deterministic bootstrap event id, three-event
+       HELD genesis) is now instantiated exactly as A14.3 specified.
+
+A14.5  "Current route" state machine (canonicalize/install spec -> prepare the
+       one-shot local N1 bootstrap mutation package -> execute/reconcile/review/
+       canonicalize the local bootstrap) -> superseded: package preparation,
+       Marco approval, one-shot execution, Marco execution approval, and this
+       canonicalization are DONE.
+```
+
+### A15.7 What remains unresolved (no inference from bootstrap success)
+
+```text
+writer_proof_state                          = HELD
+release_operations                          = 0  (no release performed; no release
+                                                  or writer eligibility is inferred)
+normal_writer_permit                        = NOT_GRANTED
+restricted_session_lifecycle_permission     = UNRESOLVED / REQUIRES_SEPARATE_AUTHORIZATION
+risk_config                                 = UNRESOLVED / NOT_STARTED
+external_D07_live_execution_authorization    = UNRESOLVED / NOT_ISSUED
+task_current_source/freshness/live_input     = UNRESOLVED / REQUIRES_FRESH_REVALIDATION
+R1-D07 live execution                        = NOT_AUTHORIZED
+```
+
+The historical `P03_C2` ticker `KXNCAAFGAME-26SEP05CLEMLSU-CLEM` remains
+historical only and requires task-current revalidation before any future real
+preflight.
+
+### A15.8 Next bounded action
+
+```text
+NEXT_BOUNDED_ACTION =
+  separately prepare / specify / review the exact D07 N1 risk-config
+  artifact/approval required by the installed controlling stack.
+
+This task performs none of that work. Risk-config selection, thresholds,
+approval, credential use, Kalshi/venue access, execution-authorization
+envelope issuance, writer-proof release, restricted-session appends, D07 live
+preflight, production, Stage 3G+, and R1-D08 all remain separately
+unauthorized.
+```
+
+### A15.9 Boundary
+
+This section is documentation/current-state overlay only. It authorizes no
+local-state creation/bootstrap/re-execution, no ledger or authority mutation,
+no writer-proof release, no restricted-session append, no risk-config work, no
+credential use, no Kalshi/venue access, no execution envelope, no live run, no
+production, no Stage 3G+, no remote Git write, no `main` installation of itself,
+and no R1-D08. Recording an accepted execution milestone is provenance, not an
+execution authorization, and is not evidence of live venue behavior,
+profitability, or arbitrage.
+
 ## Supersession relation
 
 This checkpoint supersedes the prior D07 checkpoint
