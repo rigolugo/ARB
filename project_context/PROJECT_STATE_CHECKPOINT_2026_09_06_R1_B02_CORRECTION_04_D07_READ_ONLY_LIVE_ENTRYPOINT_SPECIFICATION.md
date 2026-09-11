@@ -1176,6 +1176,158 @@ and no R1-D08. Recording an accepted execution milestone is provenance, not an
 execution authorization, and is not evidence of live venue behavior,
 profitability, or arbitrage.
 
+## A16. R1-D07 N1 pre-release risk-config specification (Marco-approved, Stage 3A-3F read-phase only)
+
+A separately dispatched R1-D07 N1 pre-release risk-config specification and its
+external/local candidate artifact were reviewed and Marco-`APPROVE`d for the
+exact bounded scope `R1-D07 Stage 3A-3F PRE-RELEASE READ PHASE ONLY`. This
+section canonicalizes that accepted milestone. A15 remains correct historical
+state before this acceptance and is not rewritten. This section records
+documentation only; it does not consume the risk config, perform a live read,
+release writer proof, or create runtime capability.
+
+### A16.1 Accepted milestone
+
+```text
+task_id            = R1-D07_N1_PRE_RELEASE_RISK_CONFIG_SPEC_01
+Marco_decision     = APPROVE
+approved_scope     = R1-D07 Stage 3A-3F PRE-RELEASE READ PHASE ONLY
+
+specification
+  KALSHI_DEMO_R1_D07_N1_PRE_RELEASE_RISK_CONFIG_SPEC_01.md
+  raw_bytes = 16569
+  sha256    = d69d8c73cf2db203603461f7521fab4a16a11cc64b2825fd9c93fd5aaefcda5e
+
+handoff
+  HANDOFF_KALSHI_DEMO_R1_D07_N1_PRE_RELEASE_RISK_CONFIG_SPEC_01.md
+  raw_bytes = 3790
+  sha256    = 504a5fe0644b97e1798ec2ccbfa34e0f2c4520009ec2d6800963567463d0bc8d
+
+external/local candidate
+  R1-D07_N1_PRE_RELEASE_RISK_CONFIG_CANDIDATE_01.json
+  raw_bytes = 1721
+  raw_sha256 = 7266ca2a60d58b21547dca66e7016b37a4cbe9c5289e741f9b746b8296bc649c
+  semantic_RiskLimitConfigV1_sha256 = 7ca6730117af4e1398e061e8184bb31af113683e34475fb66185931724a435c1
+
+value traceability
+  R1-D07_N1_PRE_RELEASE_RISK_CONFIG_SPEC_01_VALUE_TRACEABILITY.md
+  raw_bytes = 13836
+  sha256    = 6899d1d4a447e658af3f66f917d13854bdd53f445ee1cf207655dabbe7060aff
+
+corrected inner Marco review
+  raw_bytes = 16189
+  sha256    = 9d79b2e730aeacc8bb386159fd109dcf0717a729f242190b5046452182965377
+
+corrected outer Marco submission
+  raw_bytes = 24324
+  sha256    = fd6330cd754e76c46ed0c85189ec97bc13c13e259da1b1101e3423192f492643
+
+Marco approval handoff
+  R1-D07_N1_PRE_RELEASE_RISK_CONFIG_SPEC_01_MARCO_APPROVAL_HANDOFF_01.md
+  raw_bytes = 5869
+  sha256    = 29b567984f0ae853eef9173524e86556b40e0f77922b360cf01121e409283e08
+  decision  = APPROVE
+
+controlling emergency/risk specification (unchanged; no policy redesign performed here)
+  KALSHI_DEMO_EMERGENCY_CANCELLATION_AND_RISK_LIMITS_SPEC_03.md
+  raw_bytes = 183042
+  sha256    = bb8f078185eb766ed1589441712d9cc6fcd77f574a1a2100a1901cfb75e9c8cb
+```
+
+### A16.2 Risk-config identity theorem
+
+The risk-config artifact has two distinct, non-interchangeable identity layers:
+
+```text
+raw external-file SHA-256 (exact bytes of the candidate JSON file)
+  = 7266ca2a60d58b21547dca66e7016b37a4cbe9c5289e741f9b746b8296bc649c
+
+semantic RiskLimitConfigV1.sha256 (canonical Decimal-tagged serialization of
+the parsed configuration object, independent of incidental file formatting)
+  = 7ca6730117af4e1398e061e8184bb31af113683e34475fb66185931724a435c1
+```
+
+These are separate identity layers over the same accepted configuration. Neither
+substitutes for the other; a future consumer MUST verify both against the exact
+values above.
+
+### A16.3 Policy acceptance theorem
+
+```text
+total_leaves                                      = 45
+CONTROLLING_FIXED                                  = 4
+DERIVED_FROM_CONTROLLING_BOUND                     = 5
+CONSERVATIVE_POLICY_PROPOSAL_REQUIRES_ACCEPTANCE   = 36
+EMPIRICAL_INPUT_REQUIRED                           = 0
+USER_RISK_CHOICE_REQUIRED                          = 0
+```
+
+The 36 class-3 conservative proposal values are accepted ONLY for
+`R1-D07 Stage 3A-3F PRE-RELEASE READ PHASE`. This acceptance does NOT extend to
+`RELEASE_ONLY`, `SAFE_HELD -> WRITER_ELIGIBLE`, `NormalWriterPermit`, Gate D or
+any venue write, emergency cancellation, later market-making execution,
+production, or R1-D08. Any reuse for a write-capable or later execution scope
+requires a separate review/acceptance even if the risk-config hashes are
+unchanged.
+
+### A16.4 Safety/current-state supersession
+
+This supersedes A15.7/A15.8 **for current state only** where they say
+`risk_config = UNRESOLVED / NOT_STARTED` and that risk-config
+preparation/review is the next bounded action. A15's own text is not rewritten;
+it remains correct historical state as of the bootstrap-execution
+canonicalization.
+
+Current theorem:
+
+```text
+risk_config                 = RESOLVED_AND_MARCO_APPROVED_FOR_STAGE_3A_TO_3F_PRE_RELEASE_READ_PHASE_ONLY
+risk_config_raw_sha256      = 7266ca2a60d58b21547dca66e7016b37a4cbe9c5289e741f9b746b8296bc649c
+risk_config_semantic_sha256 = 7ca6730117af4e1398e061e8184bb31af113683e34475fb66185931724a435c1
+risk_config_consumed        = false
+```
+
+### A16.5 Preserve unresolved later prerequisites
+
+```text
+writer_proof_state                          = HELD
+writer_release                              = NOT_AUTHORIZED
+normal_writer_permit                        = NOT_GRANTED
+external_D07_live_execution_authorization    = UNRESOLVED / NOT_ISSUED
+task_current_source/freshness/live_input     = UNRESOLVED / REQUIRES_FRESH_REVALIDATION
+restricted_session_lifecycle_permission     = UNRESOLVED / REQUIRES_SEPARATE_AUTHORIZATION
+R1-D07 live execution                       = NOT_AUTHORIZED
+Stage 3G+                                   = NOT_AUTHORIZED
+R1-D08                                      = NOT_AUTHORIZED
+```
+
+Risk-config approval grants no runtime capability.
+
+### A16.6 Next bounded action
+
+```text
+NEXT_BOUNDED_ACTION =
+  separately prepare / specify / review the bounded R1-D07 Stage 3A-3F
+  live-read execution package that binds:
+    - the exact accepted bootstrap contract;
+    - this exact accepted risk config (raw + semantic identity);
+    - the exact external execution-authorization envelope;
+    - task-current source/freshness/live-input revalidation;
+    - explicit permission for the bounded restricted-session lifecycle appends.
+
+This task performs none of that work and does not itself authorize the live
+run. It does not route directly to writer release or Stage 3G+.
+```
+
+### A16.7 Boundary
+
+This section is documentation/current-state overlay only. It authorizes no
+risk-config consumption, no deployed N1 state read or write, no Kalshi/API
+access, no credential use, no restricted-session append, no writer-proof
+release, no D07 live execution, no production, and no R1-D08. Recording an
+accepted risk-config milestone is provenance, not an execution authorization,
+and is not evidence of live venue behavior, profitability, or arbitrage.
+
 ## Supersession relation
 
 This checkpoint supersedes the prior D07 checkpoint
