@@ -5158,6 +5158,163 @@ class ActiveStage3EndToEndTestCase(unittest.TestCase):
             expected_ticker=self.TICKER, expected_outcome_side="YES", expected_yes_price=Decimal("0.45")))
 
 
+class D07GateBBootHoldReadPhaseTests(ActiveStage3EndToEndTestCase):
+    """D07 Stage-3 Gate-B correction: the active V2 pre-release READ gate
+    (``run_pre_release_read_phase_v2``) must accept the genuine N1 bootstrap
+    state -- ``BOOT_HOLD`` risk state, writer proof structurally ``HELD`` but
+    NOT yet release-eligible, zero unresolved writes -- because Gate C's own
+    ``BOOT_HOLD -> ... -> SAFE_HELD -> WRITER_ELIGIBLE`` transition only runs
+    AFTER these Stage 3D-3F reads, not before them. ``ActiveStage3End
+    ToEndTestCase.setUp`` normally calls ``self._drive_to_safe_held()`` to
+    push the ledger to ``SAFE_HELD`` before every test; overriding it as a
+    no-op here leaves the ledger exactly where ``initialize_active_execution_
+    domain_ledger`` left it -- genuine ``BOOT_HOLD``, writer proof ``HELD``,
+    zero unresolved writes -- i.e. the real N1 pre-release state."""
+
+    def _drive_to_safe_held(self) -> None:
+        pass  # leave the ledger in its genuine post-bootstrap BOOT_HOLD state.
+
+    def _invocation(self):
+        return runner.ExperimentRunnerInvocationV2(invocation_id="d07-boot-hold", market_ticker=self.TICKER)
+
+    # These two inherited fixtures assume the parent's SAFE_HELD-driven setUp
+    # (a full active release chain succeeding end to end). They do not apply
+    # to this BOOT_HOLD fixture, whose whole point is that Gate C must still
+    # fail-closed from BOOT_HOLD -- exactly what
+    # test_gate_c_still_requires_normal_release_predicates_from_boot_hold
+    # below asserts instead.
+    @unittest.skip("not applicable to the BOOT_HOLD fixture; see test_gate_c_still_requires_normal_release_predicates_from_boot_hold")
+    def test_finding04_full_active_release_chain(self) -> None:
+        pass
+
+    @unittest.skip("not applicable to the BOOT_HOLD fixture; see test_gate_c_still_requires_normal_release_predicates_from_boot_hold")
+    def test_finding04_v1_token_cannot_enter_active_normal_writer(self) -> None:
+        pass
+
+    def test_boot_hold_held_not_eligible_zero_unresolved_proceeds_to_read_phase(self) -> None:
+        rt = self._fresh_seam()
+        opened = rt.read_local_safety_state()
+        self.assertEqual(opened.projection.risk_control_state, "BOOT_HOLD")
+        self.assertEqual(
+            opened.projection.writer_proof_state_by_proof_id.get(self.active_contract.writer_proof_id),
+            "HELD")
+        self.assertIsNot(
+            opened.projection.writer_proof_release_eligible_by_proof_id.get(
+                self.active_contract.writer_proof_id),
+            True)
+        self.assertEqual(opened.projection.protected_unresolved_legacy_write_count, 0)
+        self.assertEqual(opened.projection.unresolved_write_request_ids, ())
+
+        result = runner.run_pre_release_read_phase_v2(self._invocation(), rt)
+
+        self.assertEqual(result.status, "READ_PHASE_COMPLETE", result.local_block_reasons)
+        self.assertIsInstance(result.active_release_state, ledger_binding.ActiveReleaseEvaluationStateV1)
+
+    def test_gate_c_still_requires_normal_release_predicates_from_boot_hold(self) -> None:
+        """Gate B permitting Stage 3D-3F reads from BOOT_HOLD must not let
+        Gate C release solely because those reads succeeded: Gate C's own
+        release-predicate vector (``state_safe_held``,
+        ``writer_proof_release_eligible``, ...) is untouched by this
+        correction and must still fail-closed while risk state is BOOT_HOLD
+        and the writer proof is not yet release-eligible."""
+        rt = self._fresh_seam()
+        read_phase = runner.run_pre_release_read_phase_v2(self._invocation(), rt)
+        self.assertEqual(read_phase.status, "READ_PHASE_COMPLETE", read_phase.local_block_reasons)
+
+        with self.assertRaises(RunnerError) as ctx:
+            runner._complete_stage3_active_release_and_normal_writer_v2(read_phase, rt)
+        self.assertEqual(ctx.exception.code, RunnerFailureCode.DURABLE_RELEASE_SEQUENCE_FAILED)
+
+    def test_unresolved_write_still_blocks_active_read_gate(self) -> None:
+        from types import SimpleNamespace
+        fake_projection = SimpleNamespace(
+            history_completeness="COMPLETE_KNOWN_NONEMPTY_PRESTACK",
+            protected_unresolved_legacy_write_count=0,
+            unresolved_write_request_ids=("wr-1",), fill_conflicts=(),
+            writer_proof_state_by_proof_id={self.active_contract.writer_proof_id: "HELD"},
+            writer_proof_release_eligible_by_proof_id={self.active_contract.writer_proof_id: False},
+            risk_control_state="BOOT_HOLD", restart_classification=runner.RestartClassification.UNRESOLVED_WRITE_HELD,
+        )
+        fake_opened = OpenResult(fake_projection, runner.RestartClassification.UNRESOLVED_WRITE_HELD, None)
+        reasons = runner._local_impossibility_reasons(
+            fake_opened, writer_proof_id=self.active_contract.writer_proof_id,
+            allowed_completeness=runner._ACTIVE_LOCAL_COMPLETENESS_VALUES,
+            require_writer_proof_release_eligible=False,
+            allowed_risk_control_states=runner._ACTIVE_LOCAL_PRE_RELEASE_READ_RISK_STATES,
+        )
+        self.assertIn("UNRESOLVED_WRITE_EXISTS", reasons)
+
+    def test_abnormal_restricted_session_still_blocks_active_read_gate(self) -> None:
+        from types import SimpleNamespace
+        fake_projection = SimpleNamespace(
+            history_completeness="COMPLETE_KNOWN_NONEMPTY_PRESTACK",
+            protected_unresolved_legacy_write_count=0,
+            unresolved_write_request_ids=(), fill_conflicts=(),
+            writer_proof_state_by_proof_id={self.active_contract.writer_proof_id: "HELD"},
+            writer_proof_release_eligible_by_proof_id={self.active_contract.writer_proof_id: False},
+            risk_control_state="BOOT_HOLD",
+            restart_classification=runner.RestartClassification.CONCURRENT_WRITER_BLOCKED,
+        )
+        fake_opened = OpenResult(fake_projection, runner.RestartClassification.CONCURRENT_WRITER_BLOCKED, None)
+        reasons = runner._local_impossibility_reasons(
+            fake_opened, writer_proof_id=self.active_contract.writer_proof_id,
+            allowed_completeness=runner._ACTIVE_LOCAL_COMPLETENESS_VALUES,
+            require_writer_proof_release_eligible=False,
+            allowed_risk_control_states=runner._ACTIVE_LOCAL_PRE_RELEASE_READ_RISK_STATES,
+        )
+        self.assertIn(
+            f"RESTART_CLASSIFICATION:{runner.RestartClassification.CONCURRENT_WRITER_BLOCKED.value}", reasons)
+
+    def test_halted_still_blocks_active_read_gate(self) -> None:
+        from types import SimpleNamespace
+        fake_projection = SimpleNamespace(
+            history_completeness="COMPLETE_KNOWN_NONEMPTY_PRESTACK",
+            protected_unresolved_legacy_write_count=0,
+            unresolved_write_request_ids=(), fill_conflicts=(),
+            writer_proof_state_by_proof_id={self.active_contract.writer_proof_id: "HELD"},
+            writer_proof_release_eligible_by_proof_id={self.active_contract.writer_proof_id: False},
+            risk_control_state="HALTED", restart_classification=runner.RestartClassification.UNRESOLVED_WRITE_HELD,
+        )
+        fake_opened = OpenResult(fake_projection, runner.RestartClassification.UNRESOLVED_WRITE_HELD, None)
+        reasons = runner._local_impossibility_reasons(
+            fake_opened, writer_proof_id=self.active_contract.writer_proof_id,
+            allowed_completeness=runner._ACTIVE_LOCAL_COMPLETENESS_VALUES,
+            require_writer_proof_release_eligible=False,
+            allowed_risk_control_states=runner._ACTIVE_LOCAL_PRE_RELEASE_READ_RISK_STATES,
+        )
+        self.assertIn("RISK_CONTROL_STATE_NOT_SAFE_HELD:HALTED", reasons)
+
+    def test_legacy_v1_gate_behavior_unchanged(self) -> None:
+        """The legacy V1 default parameterisation of the shared predicate
+        function is untouched: SAFE_HELD + release-eligible still passes
+        (byte-identical reasons: empty tuple), and BOOT_HOLD (not yet
+        SAFE_HELD) still blocks V1 exactly as before this correction."""
+        from types import SimpleNamespace
+        proof_id = CURRENT_WRITER_PROOF_ID
+        passing_projection = SimpleNamespace(
+            history_completeness="COMPLETE", protected_unresolved_legacy_write_count=0,
+            unresolved_write_request_ids=(), fill_conflicts=(),
+            writer_proof_state_by_proof_id={proof_id: "HELD"},
+            writer_proof_release_eligible_by_proof_id={proof_id: True},
+            risk_control_state="SAFE_HELD", restart_classification=runner.RestartClassification.UNRESOLVED_WRITE_HELD,
+        )
+        passing_opened = OpenResult(passing_projection, runner.RestartClassification.UNRESOLVED_WRITE_HELD, None)
+        self.assertEqual(
+            runner._local_impossibility_reasons(passing_opened, writer_proof_id=proof_id), ())
+
+        boot_hold_projection = SimpleNamespace(
+            history_completeness="COMPLETE", protected_unresolved_legacy_write_count=0,
+            unresolved_write_request_ids=(), fill_conflicts=(),
+            writer_proof_state_by_proof_id={proof_id: "HELD"},
+            writer_proof_release_eligible_by_proof_id={proof_id: False},
+            risk_control_state="BOOT_HOLD", restart_classification=runner.RestartClassification.UNRESOLVED_WRITE_HELD,
+        )
+        boot_hold_opened = OpenResult(boot_hold_projection, runner.RestartClassification.UNRESOLVED_WRITE_HELD, None)
+        legacy_reasons = runner._local_impossibility_reasons(boot_hold_opened, writer_proof_id=proof_id)
+        self.assertIn("WRITER_PROOF_NOT_RELEASE_ELIGIBLE", legacy_reasons)
+        self.assertIn("RISK_CONTROL_STATE_NOT_SAFE_HELD:BOOT_HOLD", legacy_reasons)
+
+
 class ActiveGateDDomainBoundPermitTestCase(ActiveStage3EndToEndTestCase):
     """R1-B03 Correction-02 Finding 01: the active ordinary Gate-D CREATE and
     CANCEL permit/assessment/prepared-request paths carry and verify the exact

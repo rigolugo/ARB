@@ -2810,9 +2810,22 @@ _ACTIVE_LOCAL_COMPLETENESS_VALUES = frozenset({
 })
 
 
+# D07 Stage-3 Gate-B correction: the active runner architecture starts Stage 3
+# in BOOT_HOLD and performs Stage 3D-3F reads BEFORE Gate C's own
+# RISK_RELEASE_RECORDED -> WRITER_PROOF_RELEASED -> SAFE_HELD ->
+# WRITER_ELIGIBLE transition (which only runs afterward, at Gate C).
+# Requiring SAFE_HELD here -- as the legacy single-purpose gate does -- would
+# make Stage 3D unreachable on every genuine bootstrap path, since SAFE_HELD
+# does not exist yet when Gate B runs. BOOT_HOLD is therefore an accepted
+# pre-release READ risk state alongside an already-SAFE_HELD ledger.
+_ACTIVE_LOCAL_PRE_RELEASE_READ_RISK_STATES = frozenset({"BOOT_HOLD", "SAFE_HELD"})
+
+
 def _local_impossibility_reasons(
     opened: OpenResult, *, writer_proof_id: str,
     allowed_completeness: frozenset = frozenset({"COMPLETE"}),
+    require_writer_proof_release_eligible: bool = True,
+    allowed_risk_control_states: frozenset = frozenset({"SAFE_HELD"}),
 ) -> Tuple[str, ...]:
     """Evaluate the full local release-impossibility predicate set (Spec 04
     ER04-PRE-004; dispatch Implementation-02 Section 8) against a
@@ -2826,6 +2839,19 @@ def _local_impossibility_reasons(
     ``allowed_completeness`` defaults to the legacy single ``{"COMPLETE"}``
     set (V1 behaviour byte-identical).  The revision-2 active path passes
     the two accepted bootstrap-completeness values instead.
+
+    ``require_writer_proof_release_eligible`` and ``allowed_risk_control_states``
+    default to the legacy V1 predicate -- writer-proof release eligibility is
+    required and the risk state must already be exactly ``SAFE_HELD`` --
+    which remains byte-identical to the original gate. The active V2
+    pre-release READ gate (``run_pre_release_read_phase_v2``) passes
+    ``require_writer_proof_release_eligible=False`` and
+    ``allowed_risk_control_states=_ACTIVE_LOCAL_PRE_RELEASE_READ_RISK_STATES``
+    for the reason given above. This does not weaken Gate C: the later,
+    separately invoked Gate-C completion helper independently re-derives and
+    re-checks the full release-predicate vector (including SAFE_HELD-state
+    and writer-proof-eligibility membership) against the ledger and fails
+    closed there regardless of what this READ gate permitted.
     """
 
     if opened.projection is None:
@@ -2845,11 +2871,11 @@ def _local_impossibility_reasons(
         reasons.append("WRITER_PROOF_ABSENT")
     elif proof_state not in ("HELD", "RELEASED"):
         reasons.append(f"WRITER_PROOF_STRUCTURALLY_INCOMPATIBLE:{proof_state}")
-    else:
+    elif require_writer_proof_release_eligible:
         eligible = projection.writer_proof_release_eligible_by_proof_id.get(writer_proof_id)
         if eligible is not True:
             reasons.append("WRITER_PROOF_NOT_RELEASE_ELIGIBLE")
-    if projection.risk_control_state != "SAFE_HELD":
+    if projection.risk_control_state not in allowed_risk_control_states:
         reasons.append(f"RISK_CONTROL_STATE_NOT_SAFE_HELD:{projection.risk_control_state}")
     if projection.restart_classification in _BLOCKING_RESTART_CLASSIFICATIONS:
         reasons.append(f"RESTART_CLASSIFICATION:{projection.restart_classification.value}")
@@ -8764,6 +8790,8 @@ def run_pre_release_read_phase_v2(
     reasons = _local_impossibility_reasons(
         opened, writer_proof_id=runtime.active_contract.writer_proof_id,
         allowed_completeness=_ACTIVE_LOCAL_COMPLETENESS_VALUES,
+        require_writer_proof_release_eligible=False,
+        allowed_risk_control_states=_ACTIVE_LOCAL_PRE_RELEASE_READ_RISK_STATES,
     )
     if reasons:
         return PreReleaseReadPhaseResultV2(
