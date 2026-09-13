@@ -1328,6 +1328,136 @@ release, no D07 live execution, no production, and no R1-D08. Recording an
 accepted risk-config milestone is provenance, not an execution authorization,
 and is not evidence of live venue behavior, profitability, or arbitrage.
 
+## A17. Permanent D07 selector installed and precanonical live-canary accepted
+
+A separately dispatched R1-D07 Correction-01 implementation candidate was
+Marco-`APPROVE`d and canonically installed by one non-force fast-forward, and
+the exact installed candidate subsequently passed one accepted bounded
+precanonical live Demo read-only canary. This section canonicalizes both
+milestones. A16 remains correct historical state before this installation and
+is not rewritten. This section records documentation only; it authorizes no
+Kalshi access, no credential use, no selector execution, no Stage 3, no venue
+write, and no production.
+
+### A17.1 Permanent selector implementation installed
+
+```text
+task               = R1-D07_PERMANENT_DYNAMIC_TICKER_SELECTOR_IMPLEMENTATION_01_CORRECTION_01
+installation_task  = R1-D07_PERMANENT_DYNAMIC_TICKER_SELECTOR_IMPLEMENTATION_01_CORRECTION_01_CANONICAL_INSTALLATION_01_REV02
+installation_state = APPROVED_AND_CANONICALLY_INSTALLED
+
+installed_commit = b3792083b92687700037f23bd00ec67b9377902c
+installed_tree   = 0e88586bf3ed1fab2ea7ac979b8b42bd1529d3ca
+installed_parent = f62c3da5d358e8f760d57021ad82c96fa7e80fea
+```
+
+Exact installed paths:
+- `src/arb/venues/kalshi/d07_market_selector.py` — 51169 bytes / SHA-256 `e5600cece8e292761fd9793739825090ab299575ef8f3aa966ef4f2db965de14` / blob `47028082032b285b86c8ece51b864345ad707f34`
+- `tests/test_kalshi_d07_market_selector.py` — 45688 bytes / SHA-256 `81c45b884184ccacae120c7f6feb2db5e94e1261d8bc2a2225f857b08ca7f697` / blob `e9da2d374639c3d659c7d27f1f22ca857107bd8a`
+
+Correction loop:
+- predecessor candidate `44b56b5b18498f75f52ad5ac41a5ecfb043ec33c` = Marco-BLOCKED / NONCANONICAL / not ancestry;
+- Correction-01 candidate `b3792083b92687700037f23bd00ec67b9377902c` = Marco-APPROVED and installed.
+
+### A17.2 Selector contract now controlling as installed code
+
+- reusable dynamic A4 -> C1 -> B1 -> C2 selector;
+- no caller ticker/candidate/market override;
+- no embedded historical ticker/candidate arrays;
+- no stale historical fallback;
+- Demo only;
+- GET only;
+- zero automatic retries / zero redirect following;
+- credentials deferred until authenticated C1/C2 requirement;
+- selector remains outside Stage-3 risk/release/writer authority.
+
+### A17.3 Accepted precanonical live canary
+
+```text
+result identity
+  R1-D07_PERMANENT_DYNAMIC_TICKER_SELECTOR_PRECANONICAL_LIVE_CANARY_01_RESULT.json
+  raw_bytes = 1097
+  sha256    = 700654d96e33d9527a7aa1f6b406cc93afd5c6a2fc8753733213ca1add553fb4
+
+acceptance handoff
+  sha256   = a260e94ce97e01285d0107f7d3d1c2da262bfc25083fec96e09a2a872c877ab1
+  decision = ACCEPT FINDING
+
+discovery_anchor_utc = 2026-09-12T21:31:00.719367Z
+A4_eligible_count    = 100
+C1_shortlist_count   = 20
+B1_finalist_count    = 5
+selected_ticker_at_observation_time = KXNCAAFGAME-26SEP12MSSTMINN-MSST
+final_observed_spread               = 0.0100
+
+capability_activity: zero venue writes / production / Stage 3 / N1 / risk-config activity
+```
+
+This is direct Demo empirical evidence for the exact installed selector bytes
+above. The selected ticker is freshness-bound historical/current-at-observation
+evidence only; it MUST NOT become a permanent strategy constant or be
+automatically reused later.
+
+### A17.4 Installation review evidence
+
+```text
+installation review ZIP
+  raw_bytes = 10078
+  sha256    = 533c51b093a9e4e704577bfb692c2a29be5c1846a0b6b87b6288d54f56b2e015
+
+installation approval handoff
+  sha256   = 950b5dd5b5b427fbe39b945c1c7172c067638899cae4e81bcf76540160152942
+  decision = APPROVE
+
+remote_git_write = one non-force fast-forward, refs/heads/main:
+  f62c3da5d358e8f760d57021ad82c96fa7e80fea -> b3792083b92687700037f23bd00ec67b9377902c
+```
+
+No other repository path changed in the installation commit.
+
+### A17.5 Current capability / next route
+
+Preserved unchanged from A16:
+
+```text
+writer_proof_state    = HELD
+writer_release        = NOT_AUTHORIZED
+normal_writer_permit  = NOT_GRANTED
+Stage_3G_plus         = NOT_AUTHORIZED
+production            = NOT_AUTHORIZED
+R1-D08                = NOT_AUTHORIZED
+```
+
+Accepted N1 local bootstrap state (A14/A15) and accepted risk config (A16)
+remain unchanged; the risk config remains approved only for Stage 3A-3F
+pre-release/read phase and remains unconsumed.
+
+Current theorem:
+
+```text
+permanent_D07_dynamic_selector = INSTALLED_AND_LIVE_CANARY_VALIDATED
+selector_current_ticker        = REQUIRES_FRESH_SELECTION_WHEN_USED
+```
+
+The next bounded route after this continuity update is preparation/
+revalidation for a fresh Stage 3A-3F read-only execution using the installed
+selector, subject to all still-required separate execution authorization,
+credential/network capability, restricted-session permission, source/
+freshness, and N1/risk/reconciliation preconditions. This section does not
+authorize or perform that route.
+
+### A17.6 Boundary
+
+This section is documentation/current-state overlay only. It authorizes no
+Kalshi/API access, no credential use, no selector execution, no deployed N1
+state read or write, no risk-config consumption, no restricted-session
+append, no writer-proof release, no Stage 3 execution, no venue write, no
+production, and no R1-D08. The installation recorded here is Git provenance
+for exactly that ref transition, and the canary recorded here is empirical
+Demo read-only evidence at the recorded observation time; neither is an
+execution authorization, and neither proves profitability or a permanent
+selected ticker.
+
 ## Supersession relation
 
 This checkpoint supersedes the prior D07 checkpoint
