@@ -201,7 +201,7 @@ def _json_response(payload: Mapping[str, object]) -> RawOperationResponseV1:
     return RawOperationResponseV1(http_status=200, content_type="application/json", body_bytes=body)
 
 
-_PRICE_RANGES = [{"start_dollars": "0.00", "end_dollars": "1.00", "step_dollars": "0.01"}]
+_PRICE_RANGES = [{"start": "0.00", "end": "1.00", "step": "0.01"}]
 
 
 def _market_payload(*, ticker: str, status: str = "active", exchange_index: int = 0, price_ranges=None) -> RawOperationResponseV1:
@@ -1377,6 +1377,61 @@ class ReadPhaseTests(GateBTestCase):
         with self.assertRaises(RunnerError) as ctx:
             capability.get_market()
         self.assertEqual(ctx.exception.code, RunnerFailureCode.MARKET_GRID_INVALID)
+
+    def test_c08c_get_market_accepts_observed_start_end_step_shape(self) -> None:
+        transport = _ScriptedTransport()
+        transport.queue(RunnerOperation.GET_MARKET, _market_payload(
+            ticker=self.TICKER,
+            price_ranges=[{"start": "0.0000", "end": "1.0000", "step": "0.0100"}],
+        ))
+        capability = self._ready_capability(transport)
+        market = capability.get_market()
+        self.assertEqual(market["ticker"], self.TICKER)
+
+    def test_c08d_get_market_rejects_stale_dollars_suffixed_row_shape(self) -> None:
+        transport = _ScriptedTransport()
+        transport.queue(RunnerOperation.GET_MARKET, _market_payload(
+            ticker=self.TICKER,
+            price_ranges=[{"start_dollars": "0.00", "end_dollars": "1.00", "step_dollars": "0.01"}],
+        ))
+        capability = self._ready_capability(transport)
+        with self.assertRaises(RunnerError) as ctx:
+            capability.get_market()
+        self.assertEqual(ctx.exception.code, RunnerFailureCode.MARKET_GRID_INVALID)
+        self.assertEqual(ctx.exception.detail, "missing field: start")
+
+    def test_c08e_get_market_rejects_row_missing_start(self) -> None:
+        transport = _ScriptedTransport()
+        transport.queue(RunnerOperation.GET_MARKET, _market_payload(
+            ticker=self.TICKER, price_ranges=[{"end": "1.0000", "step": "0.0100"}],
+        ))
+        capability = self._ready_capability(transport)
+        with self.assertRaises(RunnerError) as ctx:
+            capability.get_market()
+        self.assertEqual(ctx.exception.code, RunnerFailureCode.MARKET_GRID_INVALID)
+        self.assertEqual(ctx.exception.detail, "missing field: start")
+
+    def test_c08f_get_market_rejects_row_missing_end(self) -> None:
+        transport = _ScriptedTransport()
+        transport.queue(RunnerOperation.GET_MARKET, _market_payload(
+            ticker=self.TICKER, price_ranges=[{"start": "0.0000", "step": "0.0100"}],
+        ))
+        capability = self._ready_capability(transport)
+        with self.assertRaises(RunnerError) as ctx:
+            capability.get_market()
+        self.assertEqual(ctx.exception.code, RunnerFailureCode.MARKET_GRID_INVALID)
+        self.assertEqual(ctx.exception.detail, "missing field: end")
+
+    def test_c08g_get_market_rejects_row_missing_step(self) -> None:
+        transport = _ScriptedTransport()
+        transport.queue(RunnerOperation.GET_MARKET, _market_payload(
+            ticker=self.TICKER, price_ranges=[{"start": "0.0000", "end": "1.0000"}],
+        ))
+        capability = self._ready_capability(transport)
+        with self.assertRaises(RunnerError) as ctx:
+            capability.get_market()
+        self.assertEqual(ctx.exception.code, RunnerFailureCode.MARKET_GRID_INVALID)
+        self.assertEqual(ctx.exception.detail, "missing field: step")
 
     def test_c09_malformed_get_order_response_rejected(self) -> None:
         transport = _ScriptedTransport()

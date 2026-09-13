@@ -1258,9 +1258,9 @@ def _parse_price_ranges(raw: object) -> Tuple[PriceRangeV1, ...]:
     ranges: list[PriceRangeV1] = []
     for entry in raw:
         row = _require_dict(entry, code=RunnerFailureCode.MARKET_GRID_INVALID, detail="price_range row")
-        start = _decimal_from_price_string(_require_field(row, "start_dollars", code=RunnerFailureCode.MARKET_GRID_INVALID))
-        end = _decimal_from_price_string(_require_field(row, "end_dollars", code=RunnerFailureCode.MARKET_GRID_INVALID))
-        step_raw = _require_field(row, "step_dollars", code=RunnerFailureCode.MARKET_GRID_INVALID)
+        start = _decimal_from_price_string(_require_field(row, "start", code=RunnerFailureCode.MARKET_GRID_INVALID))
+        end = _decimal_from_price_string(_require_field(row, "end", code=RunnerFailureCode.MARKET_GRID_INVALID))
+        step_raw = _require_field(row, "step", code=RunnerFailureCode.MARKET_GRID_INVALID)
         if type(step_raw) is not str:
             raise RunnerError(RunnerFailureCode.MARKET_GRID_INVALID, detail="step type")
         try:
