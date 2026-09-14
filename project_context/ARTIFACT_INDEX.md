@@ -284,3 +284,47 @@ Prepared from exact canonical base `b3792083b92687700037f23bd00ec67b9377902c` (t
 | ART-0126 | external/local accepted permanent-selector implementation approval + canonical installation approval + precanonical live-canary evidence set | `R1-D07_PERMANENT_DYNAMIC_TICKER_SELECTOR_IMPLEMENTATION_01_CORRECTION_01` (implementation approval) / `R1-D07_PERMANENT_DYNAMIC_TICKER_SELECTOR_IMPLEMENTATION_01_CORRECTION_01_CANONICAL_INSTALLATION_01_REV02` (installation approval) / `R1-D07_PERMANENT_DYNAMIC_TICKER_SELECTOR_PRECANONICAL_LIVE_CANARY_01` (canary) | CLAUDE_CODE / Marco review | 2026-09-12 | implementation candidate `b3792083b92687700037f23bd00ec67b9377902c` reviewed and Marco-`APPROVE`d; installed by one non-force fast-forward from `f62c3da5d358e8f760d57021ad82c96fa7e80fea`; canary run against the exact installed candidate | implementation/static review and installation-transcript packaging only, plus one bounded live Demo read-only canary run (Kalshi Demo public + authenticated reads only, zero writes) performed outside this documentation task | External accepted review/evidence | Public (sensitive-safe metadata only; no credential/secret/private-key material) | implementation Marco `APPROVE`; installation Marco `APPROVE`; canary Marco `ACCEPT FINDING` | raw handoff/result/review files remain external/local; canonical reference is by the exact identities here and in ART-0125; the live-canary selected ticker specifically MUST NOT be treated as a permanent strategy constant | `KALSHI_DEMO_R1_D07_PERMANENT_DYNAMIC_TICKER_SELECTOR_SPEC_01.md` and its `_CORRECTION_01` successor (controlling technical specs; unchanged); ART-0125 (installed-state description) | implementation approval handoff sha256 `ea9a58f72a37b407b9ab3da5cd54abf770b12ef45cdd03a0d63238a2dadcabc0`; canary result `R1-D07_PERMANENT_DYNAMIC_TICKER_SELECTOR_PRECANONICAL_LIVE_CANARY_01_RESULT.json` 1097 bytes / sha256 `700654d96e33d9527a7aa1f6b406cc93afd5c6a2fc8753733213ca1add553fb4`; canary acceptance handoff sha256 `a260e94ce97e01285d0107f7d3d1c2da262bfc25083fec96e09a2a872c877ab1`; installation review ZIP 10078 bytes / sha256 `533c51b093a9e4e704577bfb692c2a29be5c1846a0b6b87b6288d54f56b2e015`; installation approval handoff sha256 `950b5dd5b5b427fbe39b945c1c7172c067638899cae4e81bcf76540160152942`; installed commit `b3792083b92687700037f23bd00ec67b9377902c` / tree `0e88586bf3ed1fab2ea7ac979b8b42bd1529d3ca` / parent `f62c3da5d358e8f760d57021ad82c96fa7e80fea`; source blob `47028082032b285b86c8ece51b864345ad707f34` (`d07_market_selector.py`, 51169 bytes, sha256 `e5600cece8e292761fd9793739825090ab299575ef8f3aa966ef4f2db965de14`); test blob `e9da2d374639c3d659c7d27f1f22ca857107bd8a` (`test_kalshi_d07_market_selector.py`, 45688 bytes, sha256 `81c45b884184ccacae120c7f6feb2db5e94e1261d8bc2a2225f857b08ca7f697`) |
 
 ART-0125/ART-0126 raw artifacts are external/local and are not repository-resident except where they are the exact installed repository blobs identified above. Not indexed by this update: the continuity dispatch bundle ZIP and its detached checksum, this task's inner Marco review ZIP and outer submission bundle and their detached checksums, local worktrees, and any local/temporary extraction, staging, or evidence-handling files. Recording this milestone proves an accepted, Marco-approved, canonically installed permanent D07 selector implementation plus one accepted live-canary observation only; it grants no runtime capability, no Kalshi or credential capability, no selector execution, no venue write, no writer-proof release, no restricted-session authorization, no risk-config consumption, no local/N1-state mutation, no production capability, no Stage 3G+, and no R1-D08 authorization, and it is not evidence of profitability or arbitrage. It explicitly supersedes the current-state description recorded in ART-0111 (`NOT_YET_IMPLEMENTED` / `NOT_YET_CONTROLLING`) without altering ART-0111/ART-0112's own historical text.
+
+
+## R1-D07 Stage 3A-3F CANARY_03 proven execution harness and accepted result
+
+- task/artifact ID: `R1-D07_STAGE3A3F_PRECANONICAL_CANARY_03`
+- canonical archive path:
+  `project_archive/r1_d07_2026_09_13/stage3a3f_precanonical_canary_03/`
+- routed checkpoint:
+  `project_context/PROJECT_STATE_CHECKPOINT_2026_09_06_R1_B02_CORRECTION_04_D07_READ_ONLY_LIVE_ENTRYPOINT_SPECIFICATION.md` section `A18`
+- role: lossless proven execution harness + normalized accepted terminal-result provenance
+- authority: accepted direct Demo empirical evidence within the exact CANARY_03 scope; not a capability grant
+- status: `ACCEPTED_CANONICAL_PROVENANCE`
+- launcher classification: `PROVEN_EXECUTION_HARNESS`
+- launcher replay: `PROHIBITED`
+- embedded authorization: `CONSUMED`
+- allowed launcher reuse: `REFERENCE_TEMPLATE_ONLY`
+- exact tested/canonical implementation commit:
+  `a52949b37fe87c6f7595a7137d001e383b12ab55`
+- launcher:
+  - bytes: `27623`
+  - SHA-256: `28eda8da7386233603f3afbb18fbc5005cfd71d384d9cc9e7f878143b9bed530`
+- launcher SHA-256 sidecar:
+  - bytes: `115`
+  - SHA-256: `cb1d814b423f13113639c59215dc734ac3cef7c6d2ed72fac08a0c5cc9c37d3e`
+- normalized terminal-result capture:
+  - bytes: `3186`
+  - SHA-256: `e46da7b0971ee05cde1acf9ae6cf07b64f04888cb56acddfad2111a958b408f0`
+  - source class: `NORMALIZED_FROM_OPERATOR_STDOUT_IN_MARCO_CHAT`
+  - original raw result file: `NOT_PROVIDED`
+- archive README:
+  - bytes: `3332`
+  - SHA-256: `9f8ac4575f08e052c83ced9c6e15f7a2b62037afde8290026867996f428e8c4a`
+- archive manifest:
+  - bytes: `1220`
+  - SHA-256: `23f99c0cad8cf7c373c6250a9c488485cf62b94958cffbcda5901e2e39ad39bb`
+- accepted theorem:
+  `stage3_exit_code=0`, `status=READ_PHASE_COMPLETE`,
+  `pre_release_requests_consumed=18`,
+  trusted read set `ADRS2_8798c1f54ecd11695c39728a29931fc95fef6203ca2c588db714164c9e2c768c`
+- source/evidence class: direct empirical Demo read-only execution + canonical Git provenance
+- freshness: ticker/result freshness-bound to discovery anchor `2026-09-14T00:28:53.253812Z`
+- risk-config finding: `1000 ms` empirically inadequate for the observed live topology;
+  `30000 ms` successful as diagnostic only; permanent policy correction remains separate
+- supersession/current-route relation: adds A18 current-state facts after A17; preserves A17 historical selector theorem

@@ -1489,3 +1489,217 @@ no further `main` installation, and no R1-D08 authorization. The
 already-completed canonical installation recorded in A12 is historical Git
 provenance for exactly that transition; it is not an execution authorization and
 does not prove live venue behavior.
+
+
+## A18. R1-D07 Stage 3A-3F CANARY_03 proven harness, successful read phase, and market-grid correction installation
+
+This section supersedes A17 only for the current D07 route/state facts described
+here. Earlier historical facts remain preserved. This section records accepted
+provenance and empirical evidence; it grants no execution capability.
+
+### A18.1 Market-grid correction exact canonical installation
+
+```text
+task = R1-D07_STAGE3_MARKET_GRID_SCHEMA_CORRECTION_01_CANONICAL_INSTALLATION_01
+status = CANONICAL_INSTALLATION_VERIFIED
+repository = rigolugo/ARB
+branch = main
+
+installed_commit = a52949b37fe87c6f7595a7137d001e383b12ab55
+installed_tree   = 0c9382bd73c8cbd9e07876408cb145d0fb2a2440
+installed_parent = f5ed9bb3f55807e347f43285f57b057f3048168f
+
+runner_blob = cd8082586ca19bedb2fa806a33c3f173df580347
+test_blob   = 260dcfebe3649253e2ede6b2dc77637ff0072018
+
+installation = non-force fast-forward
+new_commit_created_by_installation = false
+Kalshi_access = NONE
+credential_activity = NONE
+N1_state_changes_by_installation = NONE
+```
+
+The exact commit above is the same immutable candidate exercised by CANARY_03.
+
+### A18.2 Prestack fill durable materialization predecessor
+
+Immediately before CANARY_03, the previously known N1 fill was durably
+materialized through one separately authorized `EMERGENCY_CONTROL_ONLY` local
+restricted session.
+
+```text
+task = R1-D07_N1_PRESTACK_FILL_DURABLE_MATERIALIZATION_01
+status = VERIFIED_LOCAL_STATE_RESULT
+authorization = CONSUMED
+
+fill_id = 07212270-bae1-9bda-8e24-cd2221a09d60
+order_id = 01a05f53-3238-7b6d-8cf2-eb152d909826
+client_order_id = 930d77bb-9ae9-47d6-8576-07cfc0ebf706
+ticker = KXAAAGASD-26SEP02-4.1200
+outcome_side = YES
+quantity = 1.00
+yes_price = 0.5000
+fee = 0.017500
+authoritative_created_time_utc = 2026-09-01T23:34:43.231843Z
+canonical_fill_sha256 = d9fc20024b341840add831eba8b6e479c95e32ab16c74fa4e8d76bd459e6bafd
+
+fill_event_id = evt_64a34f581264426d9695c117aebbab7c
+fill_event_sequence = 13
+fill_event_hash = e1c1fad0080fdd45b141c26324f169f4dc4f4950ce000854b37d02ba82bb4eb6
+
+verified_post_materialization_trusted_sequence = 14
+verified_post_materialization_trusted_hash =
+  d3f88597cc22692c32a21fadaa2caed1057d77e786ca887597a3e1b80e4917a2
+
+risk_control_state = BOOT_HOLD
+risk_state_epoch = 0
+writer_proof_state/eligibility = unchanged
+network = NONE
+Kalshi_access = NONE
+Demo_venue_writes = NONE
+production = NONE
+```
+
+### A18.3 CANARY_03 accepted empirical theorem
+
+```text
+task = R1-D07_STAGE3A3F_PRECANONICAL_CANARY_03
+authorization_id = R1-D07_STAGE3A3F_PRECANONICAL_CANARY_03_AUTHORIZATION_01
+authorization_sha256 = ac03f04f01c4817e56753dc03674bb0dea7cc486085bdfa93d8a1e35e49ef49f
+authorization_disposition = CONSUMED
+automatic_retries = 0
+
+tested_commit = a52949b37fe87c6f7595a7137d001e383b12ab55
+tested_tree   = 0c9382bd73c8cbd9e07876408cb145d0fb2a2440
+tested_parent = f5ed9bb3f55807e347f43285f57b057f3048168f
+
+starting_N1_trusted_sequence = 14
+starting_N1_trusted_hash =
+  d3f88597cc22692c32a21fadaa2caed1057d77e786ca887597a3e1b80e4917a2
+starting_durable_fill_id = 07212270-bae1-9bda-8e24-cd2221a09d60
+
+selector_status = SUCCEEDED
+A4_eligible_count = 100
+C1_shortlist_count = 10
+B1_finalist_count = 5
+selected_ticker_at_observation_time = KXTRUMPSAY-26SEP14-MOON
+final_spread_dollars = 0.0001
+
+stage3_exit_code = 0
+stage3_elapsed_ms = 18539
+stage3_status = READ_PHASE_COMPLETE
+pre_release_requests_consumed = 18
+trusted_dynamic_read_set_id =
+  ADRS2_8798c1f54ecd11695c39728a29931fc95fef6203ca2c588db714164c9e2c768c
+
+Gate_D = NOT_ENTERED
+Stage_3G_plus = NOT_ENTERED
+NORMAL_WRITER = NOT_ACQUIRED
+RELEASE_ONLY = NOT_ACQUIRED
+write_authorization = NO_WRITE_AUTHORIZATION
+Demo_venue_writes = PROHIBITED
+production = PROHIBITED
+```
+
+The selected ticker is freshness-bound empirical evidence only and is not a
+permanent strategy constant.
+
+### A18.4 Proven execution harness preserved losslessly
+
+Canonical repository archive:
+
+`project_archive/r1_d07_2026_09_13/stage3a3f_precanonical_canary_03/`
+
+```text
+RUN_R1-D07_STAGE3A3F_PRECANONICAL_CANARY_03.ps1
+  bytes  = 27623
+  sha256 = 28eda8da7386233603f3afbb18fbc5005cfd71d384d9cc9e7f878143b9bed530
+  classification = PROVEN_EXECUTION_HARNESS
+  authorization = CONSUMED
+  replay = PROHIBITED
+  allowed reuse = REFERENCE_TEMPLATE_ONLY
+
+RUN_R1-D07_STAGE3A3F_PRECANONICAL_CANARY_03.ps1.sha256
+  bytes  = 115
+  sha256 = cb1d814b423f13113639c59215dc734ac3cef7c6d2ed72fac08a0c5cc9c37d3e
+
+R1-D07_STAGE3A3F_PRECANONICAL_CANARY_03_TERMINAL_RESULT_CAPTURE.json
+  bytes  = 3186
+  sha256 = e46da7b0971ee05cde1acf9ae6cf07b64f04888cb56acddfad2111a958b408f0
+  source = NORMALIZED_FROM_OPERATOR_STDOUT_IN_MARCO_CHAT
+  original_raw_result_file = NOT_PROVIDED
+
+README.md
+  bytes  = 3332
+  sha256 = 9f8ac4575f08e052c83ced9c6e15f7a2b62037afde8290026867996f428e8c4a
+
+MANIFEST.json
+  bytes  = 1220
+  sha256 = 23f99c0cad8cf7c373c6250a9c488485cf62b94958cffbcda5901e2e39ad39bb
+```
+
+The launcher is preserved byte-for-byte because it is the first accepted harness
+that produced the complete Stage 3A-3F read path. Its embedded authorization is
+consumed; canonical preservation is NOT authorization to replay it.
+
+### A18.5 Diagnostic risk-config finding
+
+```text
+accepted_candidate_raw_sha256 =
+  7266ca2a60d58b21547dca66e7016b37a4cbe9c5289e741f9b746b8296bc649c
+
+CANARY_01 empirical result:
+  reconciliation_read_deadline_ms = 1000
+  -> DYNAMIC_READ_FRESHNESS_STALE
+  -> operationally falsified for that exact live topology/time
+
+CANARY_03 diagnostic config sha256 =
+  ce29cc69997b36a8721b1c60c02c7e2b83176fbd0fcd2ceb4a4e63115f3e7074
+
+only diagnostic semantic delta =
+  state_integrity.reconciliation_read_deadline_ms: 1000 -> 30000
+
+CANARY_03 with 30000:
+  READ_PHASE_COMPLETE
+```
+
+This evidence supports a separate bounded permanent risk-config correction.
+It does not itself rewrite the controlling A16 risk-config artifact and does not
+make `30000` binding policy until that successor is separately reviewed and
+canonically accepted.
+
+### A18.6 Current route and unresolved state
+
+```text
+market_grid_correction = INSTALLED_AND_LIVE_VALIDATED
+CANARY_03_read_phase = COMPLETE
+proven_CANARY_03_harness = CANONICALLY_PRESERVED_REPLAY_PROHIBITED
+
+NEXT_BOUNDED_ACTION =
+  prepare/review/install the narrow N1 pre-release risk-config successor that
+  replaces reconciliation_read_deadline_ms = 1000 with the empirically supported
+  30000 value while preserving all other accepted risk-config semantics.
+
+Before any later live execution or state-changing action:
+  re-read current N1 authority/ledger state;
+  do not infer the post-CANARY_03 trusted tail from the starting tail recorded here.
+```
+
+Still prohibited / not inferred:
+
+```text
+writer release
+NORMAL_WRITER
+Gate D
+Stage 3G+
+Demo venue writes absent separate authorization
+production
+profitability or arbitrage theorem
+```
+
+### A18.7 Boundary
+
+This section and its repository archive preserve accepted provenance only.
+They grant no permission to replay CANARY_03, use its consumed authorization,
+access Kalshi, use credentials, mutate N1, release writer proof, enter Gate D or
+Stage 3G+, write Demo orders, access production, or claim profitability/arbitrage.

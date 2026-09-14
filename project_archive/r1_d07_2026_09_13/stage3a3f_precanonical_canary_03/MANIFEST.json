@@ -1,0 +1,32 @@
+{
+  "archive_role": "LOSSLESS_PROVEN_EXECUTION_HARNESS_AND_ACCEPTED_RESULT_PROVENANCE",
+  "authorization_state": "CONSUMED",
+  "files": [
+    {
+      "bytes": 27623,
+      "filename": "RUN_R1-D07_STAGE3A3F_PRECANONICAL_CANARY_03.ps1",
+      "sha256": "28eda8da7386233603f3afbb18fbc5005cfd71d384d9cc9e7f878143b9bed530"
+    },
+    {
+      "bytes": 115,
+      "filename": "RUN_R1-D07_STAGE3A3F_PRECANONICAL_CANARY_03.ps1.sha256",
+      "sha256": "cb1d814b423f13113639c59215dc734ac3cef7c6d2ed72fac08a0c5cc9c37d3e"
+    },
+    {
+      "bytes": 3186,
+      "filename": "R1-D07_STAGE3A3F_PRECANONICAL_CANARY_03_TERMINAL_RESULT_CAPTURE.json",
+      "sha256": "e46da7b0971ee05cde1acf9ae6cf07b64f04888cb56acddfad2111a958b408f0"
+    },
+    {
+      "bytes": 3332,
+      "filename": "README.md",
+      "sha256": "9f8ac4575f08e052c83ced9c6e15f7a2b62037afde8290026867996f428e8c4a"
+    }
+  ],
+  "reference_template_only": true,
+  "replay_policy": "REPLAY_PROHIBITED",
+  "schema": "ARB_R1_D07_STAGE3A3F_CANARY_03_PROVEN_HARNESS_ARCHIVE_MANIFEST_V1",
+  "tested_commit": "a52949b37fe87c6f7595a7137d001e383b12ab55",
+  "tested_parent": "f5ed9bb3f55807e347f43285f57b057f3048168f",
+  "tested_tree": "0c9382bd73c8cbd9e07876408cb145d0fb2a2440"
+}

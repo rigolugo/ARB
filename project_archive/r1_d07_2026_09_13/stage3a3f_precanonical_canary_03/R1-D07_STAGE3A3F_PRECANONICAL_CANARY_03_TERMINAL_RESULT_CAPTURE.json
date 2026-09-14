@@ -1,0 +1,49 @@
+{
+  "capture_kind": "NORMALIZED_FROM_OPERATOR_STDOUT_IN_MARCO_CHAT",
+  "raw_original_result_file": "NOT_PROVIDED",
+  "raw_original_result_file_sha256": null,
+  "schema": "ARB_OPERATOR_STDOUT_TERMINAL_RESULT_CAPTURE_V1",
+  "terminal_result": {
+    "accepted_risk_config_raw_sha256": "7266ca2a60d58b21547dca66e7016b37a4cbe9c5289e741f9b746b8296bc649c",
+    "authorization_disposition": "CONSUMED",
+    "automatic_retry": 0,
+    "candidate_commit": "a52949b37fe87c6f7595a7137d001e383b12ab55",
+    "candidate_parent": "f5ed9bb3f55807e347f43285f57b057f3048168f",
+    "candidate_tree": "0c9382bd73c8cbd9e07876408cb145d0fb2a2440",
+    "demo_writes": "PROHIBITED",
+    "diagnostic_risk_config_sha256": "ce29cc69997b36a8721b1c60c02c7e2b83176fbd0fcd2ceb4a4e63115f3e7074",
+    "diagnostic_risk_delta": "state_integrity.reconciliation_read_deadline_ms:1000->30000",
+    "execution_authorization_id": "R1-D07_STAGE3A3F_PRECANONICAL_CANARY_03_AUTHORIZATION_01",
+    "execution_authorization_sha256": "ac03f04f01c4817e56753dc03674bb0dea7cc486085bdfa93d8a1e35e49ef49f",
+    "expected_n1_durable_fill_id": "07212270-bae1-9bda-8e24-cd2221a09d60",
+    "expected_n1_trusted_hash": "d3f88597cc22692c32a21fadaa2caed1057d77e786ca887597a3e1b80e4917a2",
+    "expected_n1_trusted_sequence": 14,
+    "gate_d": "PROHIBITED",
+    "installed_implementation_commit": "a52949b37fe87c6f7595a7137d001e383b12ab55",
+    "invocation_id": "r1d07_precanonical_canary03_5449b4b1dd2b46b3871d20a7e123eee4",
+    "normal_writer": "PROHIBITED",
+    "production": "PROHIBITED",
+    "release_only": "PROHIBITED",
+    "schema": "ARB_R1_D07_STAGE3A3F_PRECANONICAL_CANARY_RESULT_WRAPPER_V1",
+    "selector_invocation_count": 1,
+    "selector_result": {
+      "a4_eligible_count": 100,
+      "b1_finalist_count": 5,
+      "c1_shortlist_count": 10,
+      "discovery_anchor_utc": "2026-09-14T00:28:53.253812Z",
+      "event_ticker": "KXTRUMPSAY-26SEP14",
+      "final_spread_dollars": "0.0001",
+      "selected_ticker": "KXTRUMPSAY-26SEP14-MOON",
+      "status": "SUCCEEDED"
+    },
+    "stage3_elapsed_ms": 18539,
+    "stage3_exit_code": 0,
+    "stage3_invocation_count": 1,
+    "stage3_output_lines": [
+      "{\"controlling_spec\": \"KALSHI_DEMO_DYNAMIC_SUBACCOUNT_EXECUTION_DOMAIN_BINDING_AND_RISK_CONTROL_SPEC_01_CORRECTION_04\", \"execution_authorization_id\": \"R1-D07_STAGE3A3F_PRECANONICAL_CANARY_03_AUTHORIZATION_01\", \"gate_d\": \"NOT_ENTERED\", \"installed_implementation_commit\": \"a52949b37fe87c6f7595a7137d001e383b12ab55\", \"local_block_reasons\": [], \"normal_writer\": \"NOT_ACQUIRED\", \"pre_release_requests_consumed\": 18, \"process_instance_id\": \"proc_bd33410c9a9846d3af71b9ed9697628e\", \"release_only\": \"NOT_ACQUIRED\", \"stage\": \"STAGE_3A_3F_READ_ONLY\", \"stage_3g_plus\": \"NOT_ENTERED\", \"status\": \"READ_PHASE_COMPLETE\", \"task_id\": \"R1-D07_READ_ONLY_STAGE3_LIVE_ENTRYPOINT_IMPLEMENTATION_01\", \"trusted_dynamic_read_set_id\": \"ADRS2_8798c1f54ecd11695c39728a29931fc95fef6203ca2c588db714164c9e2c768c\", \"write_authorization\": \"NO_WRITE_AUTHORIZATION\"}"
+    ],
+    "stage_3g_plus": "PROHIBITED",
+    "task_id": "R1-D07_STAGE3A3F_PRECANONICAL_CANARY_03",
+    "writer_release": "PROHIBITED"
+  }
+}
