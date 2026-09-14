@@ -328,3 +328,65 @@ ART-0125/ART-0126 raw artifacts are external/local and are not repository-reside
 - risk-config finding: `1000 ms` empirically inadequate for the observed live topology;
   `30000 ms` successful as diagnostic only; permanent policy correction remains separate
 - supersession/current-route relation: adds A18 current-state facts after A17; preserves A17 historical selector theorem
+
+## R1-D07 N1 pre-release risk-config SPEC_02 accepted successor
+
+- task/artifact ID: `R1-D07_N1_PRE_RELEASE_RISK_CONFIG_SPEC_02`
+- routed checkpoint:
+  `project_context/PROJECT_STATE_CHECKPOINT_2026_09_06_R1_B02_CORRECTION_04_D07_READ_ONLY_LIVE_ENTRYPOINT_SPECIFICATION.md` section `A19`
+- artifact role: approved Stage 3A-3F-only risk-config successor / exact external-local artifact identities
+- review state: `APPROVE`
+- approved scope: `R1-D07 Stage 3A-3F PRE-RELEASE READ PHASE ONLY`
+- canonical review base:
+  `45a5229c6281b4d396d9263013275fd69668506a`
+  / tree `04e8ed3fd209b7414472be33f5fc35772dbb0fca`
+  / parent `a52949b37fe87c6f7595a7137d001e383b12ab55`
+- candidate 02:
+  - bytes: `1722`
+  - raw SHA-256:
+    `4495ade7fed522bf17a202d6f5422f608765b65a4463121175695c862b3f904c`
+  - semantic `RiskLimitConfigV1.sha256`:
+    `e16c9219b495062647b82b9e8a4d5e9c1b98f3e54ce43f0044c1a85fea162bbb`
+- exact accepted delta:
+  `state_integrity.reconciliation_read_deadline_ms: 1000 -> 30000`
+- preservation theorem: other `44/45` leaves unchanged exactly; four normal risk-increasing send maxima remain zero
+- SPEC_02:
+  - bytes: `16836`
+  - SHA-256:
+    `9ae570ef1b2cf87925b5e655b5cf846bf99596f7ff28320b8bc30cdc56c368c2`
+- handoff:
+  - bytes: `4796`
+  - SHA-256:
+    `640ebcc8362da61c66cdc25c0188511f99056bed3f4e865dce60991d8a161ae2`
+- value traceability:
+  - bytes: `14120`
+  - SHA-256:
+    `281f666f4fd8db7096ee425f355a6a64ec2bebd425670905e60d5fa7139b1c76`
+- static conformance matrix:
+  - bytes: `5907`
+  - SHA-256:
+    `9b4cb9a634e754fc74f9b47e5b40a73669223ac2ad2595276c7f57afae2bb492`
+- review manifest:
+  - bytes: `4616`
+  - SHA-256:
+    `707733bbc0ad625bc2c5204c3efb016447e5d179f07c0196bf80be87c858b9e0`
+- delivery manifest:
+  - bytes: `4313`
+  - SHA-256:
+    `6fe16a598fa6c83a63fd3aada364b7cc8fc7209bbc746ea07c432957b26d8251`
+- inner Marco review ZIP:
+  - bytes: `36894`
+  - SHA-256:
+    `c7c6ea43c713209ae6b6f9f00a41b90fd4ef54344514b50071fd73d121e5d65e`
+- outer Marco submission ZIP:
+  - bytes: `95959`
+  - SHA-256:
+    `8b91bc911cad7e10bb7c2468a139dbfce397c5430fdc38836641ae159105e992`
+- Marco approval handoff:
+  - bytes: `7165`
+  - SHA-256:
+    `549dc149650068f5542117232d28ddf04327cf894a1eedc62d76c97fcaf95584`
+  - decision: `APPROVE`
+- evidence basis: canonical A18 direct Demo read-only evidence (`1000 ms -> DYNAMIC_READ_FRESHNESS_STALE`; diagnostic `30000 ms -> READ_PHASE_COMPLETE`, elapsed `18539 ms`, 18 pre-release reads)
+- storage class: primary SPEC_02/review/submission artifacts remain external/local; canonical repository stores their exact identities and accepted state theorem
+- capability effect: none; no config consumption, N1 activity, Kalshi/credential access, release, Gate D, Stage 3G+, Demo venue write, production, or R1-D08 authorization

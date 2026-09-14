@@ -1703,3 +1703,225 @@ This section and its repository archive preserve accepted provenance only.
 They grant no permission to replay CANARY_03, use its consumed authorization,
 access Kalshi, use credentials, mutate N1, release writer proof, enter Gate D or
 Stage 3G+, write Demo orders, access production, or claim profitability/arbitrage.
+
+## A19. R1-D07 N1 pre-release risk-config SPEC_02 accepted successor
+
+A separately dispatched `SPEC_ONLY` risk-config successor was reviewed and
+Marco-`APPROVE`d after the A18 CANARY_03 evidence established that the accepted
+SPEC_01 `1000 ms` reconciliation-read deadline was inadequate for the observed
+Stage 3A-3F Demo read topology and that a diagnostic `30000 ms` deadline
+completed the same bounded read phase. This section canonicalizes the approved
+successor identities and decision only. It does not consume the configuration,
+execute D07, access Kalshi, use credentials, read or mutate deployed N1 state,
+release writer proof, or grant any later-stage capability.
+
+### A19.1 Review and package identities
+
+```text
+task_id = R1-D07_N1_PRE_RELEASE_RISK_CONFIG_SPEC_02
+Marco_decision = APPROVE
+approved_scope = R1-D07 Stage 3A-3F PRE-RELEASE READ PHASE ONLY
+
+canonical_review_base:
+  commit = 45a5229c6281b4d396d9263013275fd69668506a
+  tree   = 04e8ed3fd209b7414472be33f5fc35772dbb0fca
+  parent = a52949b37fe87c6f7595a7137d001e383b12ab55
+
+KALSHI_DEMO_R1_D07_N1_PRE_RELEASE_RISK_CONFIG_SPEC_02.md
+  bytes  = 16836
+  sha256 = 9ae570ef1b2cf87925b5e655b5cf846bf99596f7ff28320b8bc30cdc56c368c2
+
+HANDOFF_KALSHI_DEMO_R1_D07_N1_PRE_RELEASE_RISK_CONFIG_SPEC_02.md
+  bytes  = 4796
+  sha256 = 640ebcc8362da61c66cdc25c0188511f99056bed3f4e865dce60991d8a161ae2
+
+R1-D07_N1_PRE_RELEASE_RISK_CONFIG_SPEC_02_VALUE_TRACEABILITY.md
+  bytes  = 14120
+  sha256 = 281f666f4fd8db7096ee425f355a6a64ec2bebd425670905e60d5fa7139b1c76
+
+R1-D07_N1_PRE_RELEASE_RISK_CONFIG_SPEC_02_STATIC_CONFORMANCE_MATRIX.md
+  bytes  = 5907
+  sha256 = 9b4cb9a634e754fc74f9b47e5b40a73669223ac2ad2595276c7f57afae2bb492
+
+R1-D07_N1_PRE_RELEASE_RISK_CONFIG_SPEC_02_REVIEW_MANIFEST.json
+  bytes  = 4616
+  sha256 = 707733bbc0ad625bc2c5204c3efb016447e5d179f07c0196bf80be87c858b9e0
+
+R1-D07_N1_PRE_RELEASE_RISK_CONFIG_SPEC_02_DELIVERY_MANIFEST.json
+  bytes  = 4313
+  sha256 = 6fe16a598fa6c83a63fd3aada364b7cc8fc7209bbc746ea07c432957b26d8251
+
+R1-D07_N1_PRE_RELEASE_RISK_CONFIG_SPEC_02_MARCO_REVIEW.zip
+  bytes  = 36894
+  sha256 = c7c6ea43c713209ae6b6f9f00a41b90fd4ef54344514b50071fd73d121e5d65e
+
+R1-D07_N1_PRE_RELEASE_RISK_CONFIG_SPEC_02_MARCO_SUBMISSION_BUNDLE.zip
+  bytes  = 95959
+  sha256 = 8b91bc911cad7e10bb7c2468a139dbfce397c5430fdc38836641ae159105e992
+
+source Bruno dispatch bundle
+  bytes  = 40321
+  sha256 = bcf723d5e12110a8a73ff9cf78a66055d5fde2823bb2bc09471339d6bb20f4b5
+
+R1-D07_N1_PRE_RELEASE_RISK_CONFIG_SPEC_02_MARCO_APPROVAL_HANDOFF_01.md
+  bytes    = 7165
+  sha256   = 549dc149650068f5542117232d28ddf04327cf894a1eedc62d76c97fcaf95584
+  decision = APPROVE
+```
+
+The raw SPEC_02/review/submission artifacts remain external/local, following the
+existing D07 risk-config continuity pattern. This checkpoint is the canonical
+reference to their exact identities; it is not an artifact-byte store.
+
+### A19.2 Accepted successor configuration identity
+
+```text
+R1-D07_N1_PRE_RELEASE_RISK_CONFIG_CANDIDATE_02.json
+
+raw_bytes = 1722
+
+raw_sha256 =
+  4495ade7fed522bf17a202d6f5422f608765b65a4463121175695c862b3f904c
+
+semantic_RiskLimitConfigV1_sha256 =
+  e16c9219b495062647b82b9e8a4d5e9c1b98f3e54ce43f0044c1a85fea162bbb
+```
+
+The raw-file SHA-256 and semantic `RiskLimitConfigV1.sha256` remain distinct,
+non-interchangeable identity layers. A later consumer must verify both against
+the exact values above.
+
+### A19.3 Exact policy delta and preservation theorem
+
+Accepted predecessor:
+
+```text
+R1-D07_N1_PRE_RELEASE_RISK_CONFIG_CANDIDATE_01.json
+raw_bytes = 1721
+raw_sha256 =
+  7266ca2a60d58b21547dca66e7016b37a4cbe9c5289e741f9b746b8296bc649c
+semantic_RiskLimitConfigV1_sha256 =
+  7ca6730117af4e1398e061e8184bb31af113683e34475fb66185931724a435c1
+```
+
+Accepted SPEC_02 changes exactly one of the 45 semantic leaves:
+
+```text
+state_integrity.reconciliation_read_deadline_ms
+1000 -> 30000
+```
+
+All other 44 leaves are unchanged exactly, including the four normal
+risk-increasing send maxima:
+
+```text
+flow.create_max_sends              = 0
+flow.modify_replace_max_sends      = 0
+flow.ordinary_cancel_max_sends     = 0
+flow.automated_execution_max_sends = 0
+```
+
+No other timeout, reconciliation-lag, market-data-age, backoff, emergency
+request-deadline, economic limit, venue-defense policy, Decimal lexical value,
+boolean, or nullability changed.
+
+### A19.4 Evidence basis and bounded interpretation
+
+Canonical A18 remains the accepted direct empirical basis:
+
+```text
+CANARY_01:
+  reconciliation_read_deadline_ms = 1000
+  -> DYNAMIC_READ_FRESHNESS_STALE
+
+CANARY_03:
+  only diagnostic risk-config semantic delta = 1000 -> 30000
+  stage3_exit_code = 0
+  stage3_elapsed_ms = 18539
+  stage3_status = READ_PHASE_COMPLETE
+  pre_release_requests_consumed = 18
+  Gate D = NOT_ENTERED
+  Stage 3G+ = NOT_ENTERED
+  NORMAL_WRITER = NOT_ACQUIRED
+  RELEASE_ONLY = NOT_ACQUIRED
+  write_authorization = NO_WRITE_AUTHORIZATION
+```
+
+The accepted inference is limited to the exact D07 Stage 3A-3F pre-release
+Demo read-phase configuration. It is not a production result, a universal venue
+timeout, a writer-release theorem, a write-capable risk policy, a profitability
+result, or an arbitrage result.
+
+### A19.5 Preserved controlling risk architecture
+
+SPEC_02 changes no controlling SPEC_03 safety contract. Preserved unchanged:
+
+```text
+UNKNOWN / unproven exposure -> UNKNOWN_UNBOUNDED / fail closed
+HALT before emergency cancel boundary
+cancel only exact proven authoritative order_id
+ambiguous cancellation/write result -> reconcile and remain held
+restart/reconnect/timer -> no automatic release or resend
+Decimal economic semantics
+explicit durable release only after the controlling release predicates
+separate EMERGENCY_CONTROL_ONLY / RELEASE_ONLY / NORMAL_WRITER capabilities
+```
+
+### A19.6 Current-state supersession
+
+A16 remains correct historical state for the original SPEC_01 acceptance.
+A18 remains correct historical/direct empirical evidence for CANARY_01,
+CANARY_03, the durable prestack fill, and the market-grid correction.
+
+For current D07 risk-config state, A19 supersedes A16/A18 only where they say
+the permanent `30000` successor is not yet reviewed/accepted.
+
+```text
+risk_config =
+  RESOLVED_AND_MARCO_APPROVED_FOR_STAGE_3A_TO_3F_PRE_RELEASE_READ_PHASE_ONLY
+
+active_approved_risk_config_artifact =
+  R1-D07_N1_PRE_RELEASE_RISK_CONFIG_CANDIDATE_02.json
+
+risk_config_raw_sha256 =
+  4495ade7fed522bf17a202d6f5422f608765b65a4463121175695c862b3f904c
+
+risk_config_semantic_sha256 =
+  e16c9219b495062647b82b9e8a4d5e9c1b98f3e54ce43f0044c1a85fea162bbb
+
+risk_config_consumed_by_this_canonicalization = false
+
+writer_proof_state = HELD
+writer_release = NOT_AUTHORIZED
+normal_writer_permit = NOT_GRANTED
+Gate_D = NOT_AUTHORIZED
+Stage_3G_plus = NOT_AUTHORIZED
+production = NOT_AUTHORIZED
+R1_D08 = NOT_AUTHORIZED
+```
+
+### A19.7 Next bounded route
+
+This continuity update does not decide or authorize the next live/promotion
+operation. Before any later live execution or state-changing step:
+
+```text
+- re-read current N1 authority/ledger state;
+- use a fresh task/authorization identity;
+- verify candidate 02 raw + semantic identities;
+- obtain explicit permission for every required capability and any persistent
+  local control-plane appends;
+- do not replay the consumed CANARY_03 authorization or archived launcher.
+```
+
+A later D07 live-read, release-boundary, Gate-D, or write-capable task requires
+its own separately reviewed scope and explicit authorization. This canonical
+continuity task stops after recording the approved SPEC_02 milestone.
+
+### A19.8 Boundary
+
+This section is documentation/current-state continuity only. It authorizes no
+risk-config consumption, no deployed N1 read/write, no Kalshi/API access, no
+credential use, no restricted-session append, no writer-proof release, no
+NormalWriterPermit, no Gate D, no Stage 3G+, no Demo venue write, no production,
+and no R1-D08.
