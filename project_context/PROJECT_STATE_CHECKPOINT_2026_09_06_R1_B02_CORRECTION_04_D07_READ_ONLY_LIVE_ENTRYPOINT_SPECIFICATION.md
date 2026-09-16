@@ -1925,3 +1925,337 @@ risk-config consumption, no deployed N1 read/write, no Kalshi/API access, no
 credential use, no restricted-session append, no writer-proof release, no
 NormalWriterPermit, no Gate D, no Stage 3G+, no Demo venue write, no production,
 and no R1-D08.
+
+## A20. R1-D07 N1 fresh read-only state revalidation V2 canonical successor
+
+This section canonicalizes the accepted 2026-09-14 local-only empirical
+milestone (the corrected V1 revalidation result) and records the exact
+identity of its durable V2 successor tooling. It grants no capability beyond
+what A14-A19 already establish; it is documentation/continuity only.
+
+### A20.1 Accepted local-only empirical result
+
+```text
+task = R1-D07_N1_FRESH_READ_ONLY_STATE_REVALIDATION_01
+Marco_decision = ACCEPT FINDING
+
+result_filename = R1-D07_N1_FRESH_READ_ONLY_STATE_REVALIDATION_01_CORRECTED_RESULT.json
+result_bytes    = 7899
+result_sha256   =
+  a0568f5617c313b51edaf1e8787e0e75855b6ed6be650aea8caa2241d0feb0b0
+
+observation_timestamp_utc = 2026-09-14T20:12:09.309612Z
+evidence_class  = DIRECT_EMPIRICAL_LOCAL_STATE_READ_ONLY
+storage_class   = LOCAL_ONLY_CANONICAL_REFERENCE_REQUIRED
+```
+
+The raw 7899-byte result remains `LOCAL_ONLY`; this checkpoint is the
+canonical reference to its exact identity and accepted theorem, not an
+artifact-byte store.
+
+### A20.2 Accepted local-state theorem at observation time
+
+```text
+canonical commit/tree matched = b30236e974b708dfa5e7ab7dac8b848d2ca88d8d /
+  d5efb61c2278eb2a40f40444ed327262f2ce8239
+authority/ledger relation = AUTHORITY_EQUAL_TO_LEDGER
+authority and ledger terminal sequence = 16
+authority and ledger terminal hash =
+  76f48d88fd869df9c79ffe17d318006071e80f2048e5cde351962e2aa2d73a4e
+authority schema revision = 1
+ledger schema revision = 2
+bootstrap contract sha256 =
+  c387e47c2862e6082e75bc8eb8dfa47ed085ec7be98e8426970a278a953e7360
+writer proof = HELD, release eligibility = false
+risk control state = BOOT_HOLD, epoch = 0
+no active/abnormal writer or restricted session
+no unresolved write request; no unresolved cancel attempt; no fill conflict
+exact known durable prestack fill present once
+no local trusted working order observed
+Candidate-02 raw + semantic identities matched
+authority and ledger bytes remained unchanged across the observation
+Kalshi/network/credentials/repository-write/risk-config-consumption/
+  writer-release/production activity all NONE
+live venue exposure was NOT checked
+```
+
+This is a **local-only** observation. It does not prove current live Kalshi
+Demo venue freshness, and the trusted terminal sequence/hash above is the
+observed value at this one observation time only -- it is not installed as a
+standing "current" fact for any later run.
+
+### A20.3 V1 reporting defect and V2 correction rationale
+
+```text
+V1 defect = RESULT_COMPLETENESS_GAP, not a state-reader safety failure
+missing fields at V1 = observation_timestamp_utc, authority_schema_revision,
+  bootstrap_contract_sha256, literal ledger_path
+correction  = durable V2 launcher with a machine-checkable completeness gate,
+  not another post-run correction probe
+```
+
+V1's own safety/read-only-state logic was correct; the defect was that its
+result omitted handoff-required observations. `CORRECTION_02` (2026-09-14,
+Marco `ACCEPT FINDING`) closed that gap for one run only, and is retained as
+historical/reference logic. The durable fix is V2, canonicalized below.
+
+### A20.3a Blocked V2 candidates: noncanonical, non-ancestry
+
+Three V2 candidates were reviewed and Marco-**BLOCK**ed before the proposed
+successor recorded in A20.4. None is installed, accepted, canonical, or Git
+ancestry of the proposed successor. They are recorded here only so a
+future reader does not mistake a historical BLOCK for acceptance.
+
+First blocked candidate:
+
+```text
+task_id          = R1-D07_N1_FRESH_READ_ONLY_STATE_REVALIDATION_V2_IMPLEMENTATION_CANONICALIZATION_01
+candidate_commit = 1ae681f6648c6f2197b1991e75b8b2c11abb07ef
+candidate_tree   = 706817a1f32583cbdacaa2744eeba54f3b2785ef
+candidate_parent = b30236e974b708dfa5e7ab7dac8b848d2ca88d8d
+review_state     = MARCO_BLOCK
+allowed_use      = NONCANONICAL_CONTENT_SEED_ONLY
+ancestry_use     = PROHIBITED
+
+blocked_defects:
+  1. production terminal PASS was not bound to the frozen accepted N1
+     identity set -- an internally consistent, caller-selected synthetic
+     ledger with a different authority/ledger/domain identity could reach
+     PASS;
+  2. a failing state-read path could emit a reduced 3-field result object
+     rather than the complete mandatory V2 envelope;
+  3. the negative regression proof envelope was incomplete.
+```
+
+Second blocked candidate:
+
+```text
+task_id          = R1-D07_N1_FRESH_READ_ONLY_STATE_REVALIDATION_V2_IMPLEMENTATION_CANONICALIZATION_01_CORRECTION_01
+candidate_commit = 1c4d44c7b9af67da57f19f0e4423803a26bbdbc4
+candidate_tree   = 0e3ca2ad699d7c59caf19646b54cb56868f39795
+candidate_parent = b30236e974b708dfa5e7ab7dac8b848d2ca88d8d
+review_state     = MARCO_BLOCK
+allowed_use      = NONCANONICAL_CONTENT_SEED_ONLY
+ancestry_use     = PROHIBITED
+
+blocked_defects:
+  1. production PASS was bound only to identity strings stored INSIDE the
+     SQLite databases, so a stale byte-copy of the accepted stores at
+     another filesystem location retained those identities and satisfied
+     the gate;
+  2. the default result sink was `$PSScriptRoot\...` -- inside canonical
+     `project_archive/...` -- so an ordinary installed invocation created a
+     repository file while declaring `repository_writes = NONE`, and the
+     sink was caller-selectable with no protected-root/alias guard;
+  3. the post-read mutation proof could be skipped when a readable store
+     failed a schema/integrity/open check;
+  4. the mandatory-field removal theorem was not directly proven;
+  5. the expected durable fill ID and the Candidate-02 expected raw and
+     semantic identities remained ordinary runtime parameters although the
+     V2 observation contract already fixes them.
+```
+
+Third blocked candidate:
+
+```text
+task_id          = R1-D07_N1_FRESH_READ_ONLY_STATE_REVALIDATION_V2_IMPLEMENTATION_CANONICALIZATION_01_CORRECTION_02
+candidate_commit = b30a8870ad033bc71698fc6c621c29be66f9d59a
+candidate_tree   = 58c9c2410c2a22a0a2ef54bf7b9bdd08fba3f531
+candidate_parent = b30236e974b708dfa5e7ab7dac8b848d2ca88d8d
+review_state     = MARCO_BLOCK
+allowed_use      = NONCANONICAL_CONTENT_SEED_ONLY
+ancestry_use     = PROHIBITED
+
+blocked_defect:
+  RESULT_OUTPUT_EXISTING_OBJECT_HARDLINK_AND_TOCTOU_OVERWRITE -- the result
+  sink was validated by PATH but written with truncating replacement
+  semantics, so a pathname outside every protected root that was an NTFS
+  hard link to a protected store (or any other pre-existing object, or one
+  created by a racing process after validation) could be truncated and
+  replaced after the mutation proof had already passed.
+```
+
+The corrected successor is `R1-D07_N1_FRESH_READ_ONLY_STATE_REVALIDATION_V2_
+IMPLEMENTATION_CANONICALIZATION_01_CORRECTION_03`, identities below.
+
+### A20.4 Proposed V2 successor launcher identity (CORRECTION_03)
+
+These identities describe the candidate proposed for installation. They are
+not an acceptance record: installation remains a separately authorized step.
+
+```text
+task_id = R1-D07_N1_FRESH_READ_ONLY_STATE_REVALIDATION_V2_IMPLEMENTATION_CANONICALIZATION_01_CORRECTION_03
+archive path =
+  project_archive/r1_d07_2026_09_14/n1_fresh_read_only_state_revalidation_v2/
+
+RUN_R1-D07_N1_FRESH_READ_ONLY_STATE_REVALIDATION_02.ps1
+  bytes  = 92690
+  sha256 = cb42c4fc72822d71634bc82074c073c654bad876307641a64249b7bc56256bcb
+  result_schema = ARB_R1_D07_N1_FRESH_READ_ONLY_STATE_REVALIDATION_RESULT_V2
+
+RUN_R1-D07_N1_FRESH_READ_ONLY_STATE_REVALIDATION_02.ps1.sha256
+  bytes  = 121
+  sha256 = c9fbf08e8a6e813a41d42654d7bf2b43d0ef177b1daec2984c162a2b0688af42
+  (detached checksum sidecar)
+
+README.md
+  bytes  = 15713
+  sha256 = 8f33f265b3371d31f815f8d1e9ac8e83f6c217fac7ddfde234c671dcad73652b
+
+MANIFEST.json
+  (archive member manifest; self-referential entry not included in its own
+  byte/hash accounting)
+
+tests/test_r1_d07_n1_fresh_read_only_state_revalidation_v2.py
+  bytes  = 96566
+  sha256 = 41d84fbd6084f6e79e6bed6ad68f186efd12635926bad919cf2123938e057fdb
+```
+
+V2 is self-contained: the entire read-only probe is embedded in the single
+`.ps1` file (materialized to a private temp file at invocation time and
+removed afterward), so this one archived file is the whole deliverable.
+Every SQLite connection it opens uses URI `mode=ro`; the canonical
+"open + catch up" writer-candidate machinery
+(`_open_locked` and everything built on it, including
+`ledger_binding.read_active_local_safety_state_v1`) is deliberately not
+used, because that path can perform a legitimate authority-anchor
+catch-up write. `canonical_main_commit`/`canonical_main_tree` are captured
+fresh each invocation and are informational only, never gated against a
+frozen historical commit, and the trusted tail is read fresh every
+invocation -- historical sequence 16 above is not hard-coded as current
+truth for any future run.
+
+`CORRECTION_01` (retained in this successor) binds production terminal
+`PASS` to a frozen 17-field accepted N1 identity set (authority
+namespace/instance/path/schema-revision/identity-hash, ledger
+instance/schema-revision/path/identity-hash, conflict domain,
+execution-domain binding id/hash, bootstrap contract hash, active contract
+id/hash, incident id, writer-proof id) with no CLI override, and guarantees
+the complete V2 envelope on every failure path (missing/unreadable/corrupt
+store, schema/integrity failure, candidate rejection, or any unanticipated
+exception).
+
+`CORRECTION_02` (retained in this successor) adds five bounded closures on
+top of that:
+
+```text
+A. production PASS is additionally bound to the ACTUAL RESOLVED filesystem
+   sources, independently of the identity strings stored inside the
+   databases:
+     repo      = C:\b1\kals\ARB
+     authority = C:\b1\kals\arb_state\kalshi_demo_primary_v1\authority\
+                 arb_execution_authority_v1.sqlite3
+     ledger    = C:\b1\kals\arb_state\kalshi_demo_primary_v1\ledger\
+                 subaccount1_execution_v2.sqlite3
+   There is no production -Repo/-AuthorityPath/-LedgerPath/-ConflictDomain
+   parameter, so a stale internally valid byte-copy at another location can
+   no longer reach production PASS.
+
+B. the result sink is safe by construction: the default destination is a
+   unique OS-temp file (never $PSScriptRoot, which is repository-resident),
+   and every requested destination is normalized, link-resolved through its
+   nearest existing parent, and rejected if it lands under the canonical
+   repository root, under C:\b1\kals\arb_state, or on an alias of the
+   authority store, ledger store, Candidate-02 artifact, or the launcher.
+   An unsafe sink receives zero bytes, still yields one complete V2 failure
+   JSON on stdout, exits non-zero, and emits no production PASS marker, so
+   `repository_writes = NONE` and `persistent_state_writes = NONE` remain
+   truthful declarations.
+
+C. the before/after mutation proof is attempted in a finally-equivalent
+   path, after the SQLite connections are closed, for every store whose
+   pre-proof succeeded -- including readable stores that then failed a
+   schema/integrity/domain/replay/candidate check. An unobtainable
+   post-proof is classified POST_READ_PROOF_UNOBTAINABLE:<store> and fails
+   closed; a store that was never readable keeps explicit nulls rather than
+   a fabricated proof.
+
+D. a final machine-checkable mandatory-observation validator runs last over
+   the fully assembled result, so individually removing or nulling any
+   mandatory observation -- including observation_timestamp_utc,
+   identity.authority_schema_revision, domain.bootstrap_contract_sha256,
+   identity.ledger_path, and the new actual-source-path observations --
+   provably blocks PASS.
+
+E. the expected durable fill ID and the Candidate-02 expected raw and
+   semantic identities are closed contract constants rather than runtime
+   parameters, and the contract's Candidate-02 values
+   (reconciliation_read_deadline_ms = 30000, all four normal send maxima
+   = 0) are additionally gated for a production observation.
+```
+
+`CORRECTION_03` closes the one defect that remained:
+
+```text
+F. the result file is created ATOMICALLY AND EXCLUSIVELY with a single
+   create-if-absent open (open(path, "x") = O_CREAT|O_EXCL / CREATE_NEW).
+   Any object already at the destination pathname -- an ordinary file, an
+   NTFS hard link to any file object (including the authority store, ledger
+   store, or Candidate-02 artifact), or an object a racing process created
+   after the B path checks accepted the destination -- makes creation fail
+   before a single byte is written. That object is never truncated,
+   replaced, renamed, unlinked, or re-created. The run fails closed with
+   OUTPUT_PATH_ALREADY_EXISTS, output_sink.output_written = false, one
+   complete V2 failure JSON on stdout, a non-zero exit, no production PASS
+   marker, and no retry. The default OS-temp destination uses the same
+   primitive. The B path checks all remain as defense in depth.
+
+   The PowerShell wrapper reports a result file's size and hash only when
+   the probe reports output_written = true, so it never stats or reads a
+   refused or pre-existing pathname. A refused invocation (fixture override
+   without fixture mode) no longer resolves the frozen production source
+   paths, because on Windows Path.resolve() opens a zero-access handle to an
+   existing path.
+```
+
+The launcher exposes an explicitly nonproduction fixture seam
+(`-NonProductionFixtureMode`) so the offline suite can exercise it against
+synthetic SQLite fixtures. It is not an operator path: a fixture result
+carries `mode.observation_mode = NONPRODUCTION_TEST_FIXTURE` and an
+unmistakable test-only marker, a complete fixture observation returns status
+`NONPRODUCTION_FIXTURE_COMPLETE` and exit code `3` rather than `0`, the
+launcher prints `READ_ONLY_REVALIDATION_TERMINAL=PASS` only for exit `0`,
+and a fixture override supplied without the mode flag is rejected as
+`FIXTURE_OVERRIDE_WITHOUT_FIXTURE_MODE` with no state read and no
+source-path resolution. A further fixture-only hook,
+`-FixtureRaceOccupyOutputBeforeCreate`, exists solely to prove the
+validation-to-create race is closed.
+
+The offline test module proves the CORRECTION_03 targeted requirements
+C03-T01..C03-T08 -- including a real NTFS hard-link attack against
+synthetic authority and ledger stores, an ordinary pre-existing output
+file, and a deterministic validation-to-create race -- and preserves every
+CORRECTION_01 and CORRECTION_02 test: 58 tests / 117 subtests, offline only,
+zero deployed-N1/Kalshi/credential/network activity.
+
+### A20.5 No capability advancement
+
+```text
+risk_config_consumption = NONE
+deployed_n1_read_or_write_by_this_canonicalization = NONE
+kalshi_access = NONE
+credential_activity = NONE
+restricted_session_append = NONE
+writer_release = NOT_AUTHORIZED
+Gate_D = NOT_AUTHORIZED
+Stage_3G_plus = NOT_AUTHORIZED
+production = NOT_AUTHORIZED
+R1_D08 = NOT_AUTHORIZED
+```
+
+This section records an accepted local-only empirical milestone and the
+identity of the durable, offline-tested tooling proposed for producing a
+complete result on a future authorized run. None of the three blocked
+predecessors is installed or accepted, and the CORRECTION_03 candidate above
+is a proposed successor only -- canonical installation remains a separately
+authorized step. This section does not authorize that future run, any deployed N1
+access, or any later-stage capability. A16/A18/A19 risk-config and
+writer-proof state remain unchanged and controlling.
+
+### A20.6 Boundary
+
+This section is documentation/current-state continuity only. It authorizes
+no risk-config consumption, no deployed N1 read/write, no Kalshi/API access,
+no credential use, no restricted-session append, no writer-proof release, no
+NormalWriterPermit, no Gate D, no Stage 3G+, no Demo venue write, no
+production, and no R1-D08.

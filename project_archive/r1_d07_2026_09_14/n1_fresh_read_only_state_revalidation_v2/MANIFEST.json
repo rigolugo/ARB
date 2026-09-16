@@ -1,0 +1,197 @@
+{
+  "schema": "ARB_R1_D07_N1_FRESH_READ_ONLY_STATE_REVALIDATION_V2_ARCHIVE_MANIFEST_V1",
+  "task_id": "R1-D07_N1_FRESH_READ_ONLY_STATE_REVALIDATION_V2_IMPLEMENTATION_CANONICALIZATION_01_CORRECTION_03",
+  "role": "canonical successor launcher archive for the accepted V1 read-only N1 state revalidation diagnostic",
+  "required_git_base": {
+    "repository": "rigolugo/ARB",
+    "branch": "main",
+    "commit": "b30236e974b708dfa5e7ab7dac8b848d2ca88d8d",
+    "tree": "d5efb61c2278eb2a40f40444ed327262f2ce8239",
+    "parent": "45a5229c6281b4d396d9263013275fd69668506a"
+  },
+  "blocked_predecessors": [
+    {
+      "ordinal": 1,
+      "task_id": "R1-D07_N1_FRESH_READ_ONLY_STATE_REVALIDATION_V2_IMPLEMENTATION_CANONICALIZATION_01",
+      "candidate_commit": "1ae681f6648c6f2197b1991e75b8b2c11abb07ef",
+      "candidate_tree": "706817a1f32583cbdacaa2744eeba54f3b2785ef",
+      "candidate_parent": "b30236e974b708dfa5e7ab7dac8b848d2ca88d8d",
+      "review_state": "MARCO_BLOCK",
+      "allowed_use": "NONCANONICAL_CONTENT_SEED_ONLY",
+      "ancestry_use": "PROHIBITED",
+      "blocked_defects": [
+        "PRODUCTION_PASS_NOT_BOUND_TO_FROZEN_ACCEPTED_N1_IDENTITIES",
+        "FAILURE_PATH_CAN_EMIT_REDUCED_OR_NO_V2_ENVELOPE",
+        "NEGATIVE_REGRESSION_ENVELOPE_INCOMPLETE"
+      ]
+    },
+    {
+      "ordinal": 2,
+      "task_id": "R1-D07_N1_FRESH_READ_ONLY_STATE_REVALIDATION_V2_IMPLEMENTATION_CANONICALIZATION_01_CORRECTION_01",
+      "candidate_commit": "1c4d44c7b9af67da57f19f0e4423803a26bbdbc4",
+      "candidate_tree": "0e3ca2ad699d7c59caf19646b54cb56868f39795",
+      "candidate_parent": "b30236e974b708dfa5e7ab7dac8b848d2ca88d8d",
+      "review_state": "MARCO_BLOCK",
+      "allowed_use": "NONCANONICAL_CONTENT_SEED_ONLY",
+      "ancestry_use": "PROHIBITED",
+      "blocked_defects": [
+        "PRODUCTION_PASS_NOT_BOUND_TO_ACTUAL_RESOLVED_REPO_AUTHORITY_LEDGER_SOURCES",
+        "DEFAULT_RESULT_SINK_WRITES_REPOSITORY_AND_LACKS_PROTECTED_ALIAS_GUARD",
+        "POST_READ_MUTATION_PROOF_SKIPPED_ON_EARLY_READABLE_FAILURES",
+        "T09_MANDATORY_FIELD_REMOVAL_THEOREM_NOT_DIRECTLY_PROVEN",
+        "PRODUCTION_FILL_AND_CANDIDATE_EXPECTED_IDENTITIES_MUST_BE_NONOVERRIDABLE"
+      ]
+    },
+    {
+      "ordinal": 3,
+      "task_id": "R1-D07_N1_FRESH_READ_ONLY_STATE_REVALIDATION_V2_IMPLEMENTATION_CANONICALIZATION_01_CORRECTION_02",
+      "candidate_commit": "b30a8870ad033bc71698fc6c621c29be66f9d59a",
+      "candidate_tree": "58c9c2410c2a22a0a2ef54bf7b9bdd08fba3f531",
+      "candidate_parent": "b30236e974b708dfa5e7ab7dac8b848d2ca88d8d",
+      "review_state": "MARCO_BLOCK",
+      "allowed_use": "NONCANONICAL_CONTENT_SEED_ONLY",
+      "ancestry_use": "PROHIBITED",
+      "blocked_defects": [
+        "RESULT_OUTPUT_EXISTING_OBJECT_HARDLINK_AND_TOCTOU_OVERWRITE"
+      ]
+    }
+  ],
+  "members": [
+    {
+      "path": "RUN_R1-D07_N1_FRESH_READ_ONLY_STATE_REVALIDATION_02.ps1",
+      "role": "self-contained canonical successor launcher (CORRECTION_03)",
+      "bytes": 92690,
+      "sha256": "cb42c4fc72822d71634bc82074c073c654bad876307641a64249b7bc56256bcb",
+      "result_schema": "ARB_R1_D07_N1_FRESH_READ_ONLY_STATE_REVALIDATION_RESULT_V2"
+    },
+    {
+      "path": "RUN_R1-D07_N1_FRESH_READ_ONLY_STATE_REVALIDATION_02.ps1.sha256",
+      "role": "detached checksum sidecar for the launcher",
+      "bytes": 121,
+      "sha256": "c9fbf08e8a6e813a41d42654d7bf2b43d0ef177b1daec2984c162a2b0688af42"
+    },
+    {
+      "path": "README.md",
+      "role": "usage, safety model, correction history, and provenance documentation",
+      "bytes": 15713,
+      "sha256": "8f33f265b3371d31f815f8d1e9ac8e83f6c217fac7ddfde234c671dcad73652b"
+    },
+    {
+      "path": "MANIFEST.json",
+      "role": "this file",
+      "bytes": "SELF_REFERENTIAL_NOT_INCLUDED",
+      "sha256": "SELF_REFERENTIAL_NOT_INCLUDED"
+    }
+  ],
+  "related_test_source": {
+    "path": "tests/test_r1_d07_n1_fresh_read_only_state_revalidation_v2.py",
+    "bytes": 96566,
+    "sha256": "41d84fbd6084f6e79e6bed6ad68f186efd12635926bad919cf2123938e057fdb",
+    "note": "Not part of this archive directory; lives at the repository-standard tests/ path. Proves the CORRECTION_03 targeted requirements C03-T01..C03-T08, including a real NTFS hard-link attack against synthetic authority and ledger stores, an ordinary pre-existing output file, and a deterministic validation-to-create race, and preserves every CORRECTION_01 and CORRECTION_02 test. Three proof strategies: pure-function tests of the exact embedded gate logic (extracted verbatim from the delivered .ps1), static proofs about the production parameter surface and the single exclusive result-write site, and real powershell.exe end-to-end invocations against synthetic fixtures built with the same canonical construction helpers as tests/test_kalshi_ledger_binding.py. Offline only; every end-to-end invocation that performs a state read runs in the launcher's explicitly nonproduction fixture mode."
+  },
+  "predecessor_provenance": {
+    "v1_launcher": {
+      "path": "C:\\b1\\kals\\arb_local\\d8\\RUN_R1-D07_N1_FRESH_READ_ONLY_STATE_REVALIDATION_01.ps1",
+      "sha256": "0f589beb8de90621b9ad0224ad7aab48a47712955cd576ca2df58e08c1fed3e2",
+      "storage_class": "EXTERNAL_LOCAL_NOT_REPOSITORY_RESIDENT",
+      "classification": "REFERENCE_CONTENT_SEED_LOGIC_ONLY"
+    },
+    "correction_02_accepted_evidence": {
+      "path": "R1-D07_N1_FRESH_READ_ONLY_STATE_REVALIDATION_01_CORRECTED_RESULT.json",
+      "bytes": 7899,
+      "sha256": "a0568f5617c313b51edaf1e8787e0e75855b6ed6be650aea8caa2241d0feb0b0",
+      "observation_timestamp_utc": "2026-09-14T20:12:09.309612Z",
+      "authority_class": "DIRECT_EMPIRICAL_LOCAL_STATE_READ_ONLY",
+      "storage_class": "LOCAL_ONLY_CANONICAL_REFERENCE_REQUIRED",
+      "marco_disposition": "ACCEPT_FINDING"
+    }
+  },
+  "production_pass_gates": {
+    "note": "Production terminal PASS requires ALL of these. Exit code 0 and status READ_ONLY_REVALIDATION_PASS are reserved for a production observation; the nonproduction fixture seam returns exit 3 / NONPRODUCTION_FIXTURE_COMPLETE and can never emit the production terminal marker.",
+    "frozen_internal_identity_gate": {
+      "field_count": 17,
+      "source": "03_REVIEW_DECISION/MARCO_BLOCK_CORRECTION_01_HANDOFF.md",
+      "authority_namespace_id": "ARB_KALSHI_DEMO_PRIMARY_AUTHORITY_V1",
+      "authority_instance_id": "772b53a9-7915-4133-957b-3d6c24dfdfc7",
+      "authority_schema_revision": 1,
+      "ledger_instance_id": "485b37e9-738d-49f8-99cf-5f2e69589de6",
+      "ledger_schema_revision": 2,
+      "conflict_domain_ref": "KALSHI|KALSHI_DEMO|ARB_KALSHI_DEMO_PRIMARY_ACCOUNT|SUBACCOUNT=1",
+      "bootstrap_contract_sha256": "c387e47c2862e6082e75bc8eb8dfa47ed085ec7be98e8426970a278a953e7360"
+    },
+    "frozen_actual_source_binding_gate": {
+      "note": "CORRECTION_02. The ACTUAL resolved filesystem source of each input must equal its frozen expectation, independently of the identity strings stored inside the databases. No production parameter can substitute any of them. CORRECTION_03: a refused invocation does not resolve these paths at all.",
+      "repo": "C:\\b1\\kals\\ARB",
+      "authority": "C:\\b1\\kals\\arb_state\\kalshi_demo_primary_v1\\authority\\arb_execution_authority_v1.sqlite3",
+      "ledger": "C:\\b1\\kals\\arb_state\\kalshi_demo_primary_v1\\ledger\\subaccount1_execution_v2.sqlite3"
+    },
+    "output_sink_safety": {
+      "note": "CORRECTION_02. The default result destination is a unique OS-temp file, never $PSScriptRoot. Every requested destination is normalized, link-resolved through its nearest existing parent, and rejected if it lands under a protected root or aliases a protected input. An unsafe sink receives zero bytes, yields a complete V2 failure JSON on stdout, exits non-zero, and emits no production PASS marker.",
+      "protected_roots": [
+        "C:\\b1\\kals\\ARB",
+        "C:\\b1\\kals\\arb_state"
+      ],
+      "protected_file_aliases": [
+        "authority SQLite store",
+        "ledger SQLite store",
+        "Candidate-02 artifact",
+        "this launcher"
+      ]
+    },
+    "exclusive_result_creation": {
+      "note": "CORRECTION_03. The result file is created with one atomic create-if-absent open (open(path, \"x\") = O_CREAT|O_EXCL / CREATE_NEW). Any object already at the pathname -- ordinary file, NTFS hard link to any file object, or an object a racing process created after the path checks -- makes creation fail before any byte is written; that object is never truncated, replaced, renamed, unlinked, or re-created. The default OS-temp destination uses the same primitive. No retry.",
+      "primitive": "open(path, \"x\", encoding=\"utf-8\")",
+      "failure_classifications": [
+        "OUTPUT_PATH_ALREADY_EXISTS",
+        "OUTPUT_EXCLUSIVE_CREATE_FAILED:<error>",
+        "OUTPUT_WRITE_FAILED:<error>"
+      ],
+      "on_failure": "output_sink.output_written=false; complete V2 failure JSON on stdout; non-zero exit; no production PASS marker; no retry",
+      "wrapper_post_probe_report": "result byte length and SHA-256 are reported only when the probe reports output_written=true; the requested pathname is never stat-ed or read otherwise"
+    },
+    "mutation_proof": {
+      "note": "CORRECTION_02. For every store whose pre-read proof succeeded, the post-read proof is attempted in a finally-equivalent path after the SQLite connections are closed, on successful runs and on readable failing runs alike. An unobtainable post-proof is classified POST_READ_PROOF_UNOBTAINABLE:<store> and fails closed; a store that was never readable keeps explicit nulls rather than a fabricated proof."
+    },
+    "mandatory_observation_validator": {
+      "note": "CORRECTION_02. validate_mandatory_observations() runs last, over the fully assembled result, and emits MISSING_REQUIRED_FIELD:<dotted.path> for any mandatory observation that is absent or nulled.",
+      "non_null_observation_count": 79,
+      "present_observation_count": 16
+    }
+  },
+  "frozen_contract_constants_not_parameters": {
+    "note": "CORRECTION_02: these are closed contract constants. The only way to bind an alternate value is the explicitly nonproduction fixture seam, which cannot emit production PASS.",
+    "expected_durable_fill_id": "07212270-bae1-9bda-8e24-cd2221a09d60",
+    "candidate02_raw_bytes": 1722,
+    "candidate02_raw_sha256": "4495ade7fed522bf17a202d6f5422f608765b65a4463121175695c862b3f904c",
+    "candidate02_semantic_sha256": "e16c9219b495062647b82b9e8a4d5e9c1b98f3e54ce43f0044c1a85fea162bbb",
+    "candidate02_reconciliation_read_deadline_ms": 30000,
+    "candidate02_create_max_sends": 0,
+    "candidate02_modify_replace_max_sends": 0,
+    "candidate02_ordinary_cancel_max_sends": 0,
+    "candidate02_automated_execution_max_sends": 0
+  },
+  "production_parameter_surface": [
+    "-Candidate02Path (required)",
+    "-Python",
+    "-OutputPath"
+  ],
+  "nonproduction_fixture_seam": {
+    "note": "Offline test seam only. NOT a production operator path and must never be used for a real observation.",
+    "activation": "-NonProductionFixtureMode",
+    "result_marker": "NONPRODUCTION_TEST_FIXTURE_RESULT_NOT_A_PRODUCTION_OBSERVATION",
+    "complete_status": "NONPRODUCTION_FIXTURE_COMPLETE",
+    "complete_exit_code": 3,
+    "production_pass_possible": false,
+    "override_without_mode": "rejected as FIXTURE_OVERRIDE_WITHOUT_FIXTURE_MODE with no state read, no source-path resolution, and a non-zero exit",
+    "race_hook": "-FixtureRaceOccupyOutputBeforeCreate places a fixed marker object at the already-validated destination immediately before the exclusive create (CORRECTION_03 race regression); fixture mode only; the hook itself creates exclusively"
+  },
+  "capability_activity_at_authoring_time": {
+    "network_used": "GitHub read-only ls-remote of refs/heads/main only (permitted canonical verification); no Kalshi, API, or package registry access",
+    "credential_activity": "NONE",
+    "kalshi_access": "NONE",
+    "venue_activity": "NONE",
+    "deployed_n1_state_access": "NONE",
+    "package_installation": "NONE",
+    "remote_git_writes": "NONE"
+  }
+}
