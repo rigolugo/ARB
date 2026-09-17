@@ -1,7 +1,15 @@
 """Offline tests for the R1-D07 N1 fresh read-only state revalidation V2
-successor launcher, CORRECTION_03
+successor launcher, CORRECTION_04
 (`project_archive/r1_d07_2026_09_14/n1_fresh_read_only_state_revalidation_v2/
 RUN_R1-D07_N1_FRESH_READ_ONLY_STATE_REVALIDATION_02.ps1`).
+
+CORRECTION_04 (C04-T01..C04-T09) corrects a validator implementation defect
+accepted after a halted empirical run: `check_frozen_production_identity()`
+now compares only the two frozen `authority_path`/`ledger_path` metadata
+strings with Windows drive-letter/component case-insensitive lexical
+`casefold()` equality, while every other of the 17 frozen identity fields,
+and the wholly independent actual-source-binding gate
+(`check_production_source_binding`), remain exact and unchanged.
 
 CORRECTION_03 adds direct proofs that the result artifact is created
 atomically and exclusively (C03-T01..C03-T07): a real NTFS hard link outside
@@ -229,6 +237,133 @@ class TestEmbeddedPureLogic(unittest.TestCase):
                 observed = dict(EXPECTED_FROZEN_PRODUCTION_IDENTITY)
                 observed[field] = 99 if isinstance(expected, int) else "WRONG"
                 self.assertEqual(check(observed), [f"PRODUCTION_IDENTITY_MISMATCH:{field}"])
+
+    # -- CORRECTION_04 (authority_path / ledger_path Windows drive-letter /
+    # -- component case-only lexical casefold equality; every other frozen
+    # -- identity field remains exact) -------------------------------------
+
+    def test_c04_t01_authority_path_drive_letter_case_change_produces_zero_mismatch(self) -> None:
+        """correction_04_theorem: T01."""
+        check = self.probe["check_frozen_production_identity"]
+        observed = dict(EXPECTED_FROZEN_PRODUCTION_IDENTITY)
+        observed["authority_path"] = observed["authority_path"].replace("C:\\", "c:\\", 1)
+        self.assertEqual(check(observed), [])
+
+    def test_c04_t02_ledger_path_drive_letter_case_change_produces_zero_mismatch(self) -> None:
+        """correction_04_theorem: T02."""
+        check = self.probe["check_frozen_production_identity"]
+        observed = dict(EXPECTED_FROZEN_PRODUCTION_IDENTITY)
+        observed["ledger_path"] = observed["ledger_path"].replace("C:\\", "c:\\", 1)
+        self.assertEqual(check(observed), [])
+
+    def test_c04_t03_arbitrary_component_case_only_variation_produces_zero_mismatch(self) -> None:
+        """correction_04_theorem: T03."""
+        check = self.probe["check_frozen_production_identity"]
+        observed = dict(EXPECTED_FROZEN_PRODUCTION_IDENTITY)
+        observed["authority_path"] = observed["authority_path"].replace("arb_state", "ARB_STATE")
+        observed["ledger_path"] = observed["ledger_path"].upper()
+        self.assertEqual(check(observed), [])
+
+    def test_c04_t04_materially_different_authority_path_still_fails_closed(self) -> None:
+        """correction_04_theorem: T04."""
+        check = self.probe["check_frozen_production_identity"]
+        observed = dict(EXPECTED_FROZEN_PRODUCTION_IDENTITY)
+        observed["authority_path"] = (
+            "C:\\b1\\kals\\arb_state\\kalshi_demo_primary_v1\\authority\\other_store.sqlite3"
+        )
+        self.assertEqual(check(observed), ["PRODUCTION_IDENTITY_MISMATCH:authority_path"])
+
+    def test_c04_t05_materially_different_ledger_path_still_fails_closed(self) -> None:
+        """correction_04_theorem: T05."""
+        check = self.probe["check_frozen_production_identity"]
+        observed = dict(EXPECTED_FROZEN_PRODUCTION_IDENTITY)
+        observed["ledger_path"] = (
+            "C:\\b1\\kals\\arb_state\\kalshi_demo_primary_v1\\ledger\\other_ledger.sqlite3"
+        )
+        self.assertEqual(check(observed), ["PRODUCTION_IDENTITY_MISMATCH:ledger_path"])
+
+    def test_c04_t06_no_normalization_broadening(self) -> None:
+        """correction_04_theorem: T06 -- the casefold-only rule must not
+        accept forward-slash substitution, an inserted dot-segment, a
+        different drive, UNC spelling, or a prefix/suffix alteration."""
+        check = self.probe["check_frozen_production_identity"]
+        base = EXPECTED_FROZEN_PRODUCTION_IDENTITY["authority_path"]
+        variants = {
+            "forward_slash": base.replace("\\", "/"),
+            "dot_segment": base.replace("\\kals\\", "\\kals\\.\\"),
+            "different_drive": "D:" + base[2:],
+            "unc": "\\\\localhost\\" + base[0] + "$" + base[2:],
+            "prefix": "X" + base,
+            "suffix": base + "X",
+        }
+        for label, variant_value in variants.items():
+            with self.subTest(variant=label):
+                observed = dict(EXPECTED_FROZEN_PRODUCTION_IDENTITY)
+                observed["authority_path"] = variant_value
+                self.assertEqual(check(observed), ["PRODUCTION_IDENTITY_MISMATCH:authority_path"])
+
+    def test_c04_t07_non_path_identities_remain_case_sensitive(self) -> None:
+        """correction_04_theorem: T07 -- the casefold relaxation applies only
+        to `authority_path`/`ledger_path`; every other identity key must
+        still fail closed on a case-only mutation."""
+        check = self.probe["check_frozen_production_identity"]
+        for field in ("authority_namespace_id", "execution_domain_binding_id", "incident_id"):
+            with self.subTest(field=field):
+                observed = dict(EXPECTED_FROZEN_PRODUCTION_IDENTITY)
+                observed[field] = observed[field].swapcase()
+                self.assertEqual(check(observed), [f"PRODUCTION_IDENTITY_MISMATCH:{field}"])
+
+    def test_c04_t08_case_equivalent_identity_metadata_does_not_relax_source_binding(self) -> None:
+        """correction_04_theorem: T08 -- the independent stale-copy
+        source-binding gate must still refuse a byte-identical copy at the
+        wrong actual location even when the embedded authority_path/
+        ledger_path metadata strings are only Windows-drive-letter-case
+        different from (and therefore now accepted by) the frozen metadata
+        identity gate."""
+        identity_check = self.probe["check_frozen_production_identity"]
+        observed_identity = dict(EXPECTED_FROZEN_PRODUCTION_IDENTITY)
+        observed_identity["authority_path"] = observed_identity["authority_path"].replace("C:\\", "c:\\", 1)
+        observed_identity["ledger_path"] = observed_identity["ledger_path"].replace("C:\\", "c:\\", 1)
+        self.assertEqual(identity_check(observed_identity), [])
+
+        source_check = self.probe["check_production_source_binding"]
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            accepted = root / "accepted_deployment"
+            copies = root / "stale_copies"
+            accepted.mkdir()
+            copies.mkdir()
+            repo = root / "repo"
+            repo.mkdir()
+            content = {"authority": b"accepted authority store bytes", "ledger": b"accepted ledger store bytes"}
+            for name, data in content.items():
+                (accepted / f"{name}.sqlite3").write_bytes(data)
+                (copies / f"{name}.sqlite3").write_bytes(data)
+            failures = source_check(
+                resolved_repo=str(repo),
+                resolved_authority=str(copies / "authority.sqlite3"),
+                resolved_ledger=str(copies / "ledger.sqlite3"),
+                expected_repo=str(repo),
+                expected_authority=str(accepted / "authority.sqlite3"),
+                expected_ledger=str(accepted / "ledger.sqlite3"),
+            )
+            self.assertEqual(
+                failures,
+                ["PRODUCTION_SOURCE_PATH_MISMATCH:authority", "PRODUCTION_SOURCE_PATH_MISMATCH:ledger"],
+            )
+
+    def test_c04_t09_path_case_only_variant_does_not_block_completeness(self) -> None:
+        """correction_04_theorem: T09 -- a path case-only variant alone must
+        not itself create any failure key; a materially different path must
+        still prevent it."""
+        check = self.probe["check_frozen_production_identity"]
+        observed_case_only = dict(EXPECTED_FROZEN_PRODUCTION_IDENTITY)
+        observed_case_only["authority_path"] = observed_case_only["authority_path"].replace("C:\\", "c:\\", 1)
+        observed_case_only["ledger_path"] = observed_case_only["ledger_path"].replace("C:\\", "c:\\", 1)
+        self.assertEqual(check(observed_case_only), [])
+        observed_material = dict(EXPECTED_FROZEN_PRODUCTION_IDENTITY)
+        observed_material["authority_path"] = "C:\\different\\authority.sqlite3"
+        self.assertEqual(check(observed_material), ["PRODUCTION_IDENTITY_MISMATCH:authority_path"])
 
     # -- preserved CORRECTION_01 T11-T13 (unresolved/conflict gates) -------
 

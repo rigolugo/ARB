@@ -834,6 +834,17 @@ def validate_mandatory_observations(result: dict) -> list[str]:
     return failures
 
 
+
+# --- CORRECTION_04 defect C04-01 (preserved boundary): the frozen path
+# --- fields alone use lexical Windows-drive-letter-case-insensitive
+# --- equality; every other frozen identity field remains exact. This is
+# --- deliberately narrower than `normalize_for_compare` -- no separator
+# --- conversion, dot-segment collapse, or resolution is applied here. The
+# --- independent actual-source-binding gate (`check_production_source_
+# --- binding`) is unaffected and remains load-bearing. -------------------
+CASE_INSENSITIVE_FROZEN_IDENTITY_KEYS = frozenset({"authority_path", "ledger_path"})
+
+
 def check_frozen_production_identity(observed: dict, expected: dict | None = None) -> list[str]:
     """Pure identity gate: compares each observed value against the frozen
     accepted N1 identity. A field the caller could not observe at all (None)
@@ -841,14 +852,24 @@ def check_frozen_production_identity(observed: dict, expected: dict | None = Non
     `validate_mandatory_observations` as a MISSING_REQUIRED_FIELD, and
     re-flagging it here would only produce a confusing duplicate. A field
     that WAS observed but does not equal the frozen expected value is always
-    reported, distinctly, as a production identity mismatch."""
+    reported, distinctly, as a production identity mismatch. `authority_path`
+    and `ledger_path` accept a Windows drive-letter/component case-only
+    difference (CORRECTION_04); every other key remains exact equality."""
     expected_identity = FROZEN_PRODUCTION_IDENTITY if expected is None else expected
     failures = []
     for key, expected_value in expected_identity.items():
         value = observed.get(key)
         if value is None:
             continue
-        if value != expected_value:
+        if (
+            key in CASE_INSENSITIVE_FROZEN_IDENTITY_KEYS
+            and isinstance(value, str)
+            and isinstance(expected_value, str)
+        ):
+            matches = value.casefold() == expected_value.casefold()
+        else:
+            matches = value == expected_value
+        if not matches:
             failures.append(f"PRODUCTION_IDENTITY_MISMATCH:{key}")
     return failures
 

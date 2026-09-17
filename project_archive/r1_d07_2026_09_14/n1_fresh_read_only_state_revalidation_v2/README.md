@@ -39,9 +39,19 @@ none is ancestry of this candidate:
   outside every protected root that was an NTFS hard link to a protected store
   (or any other pre-existing object) could be truncated and replaced.
 
-This archived file is `CORRECTION_03`, which closes that last defect while
-preserving everything `CORRECTION_01` and `CORRECTION_02` established
-(sections A–E below).
+This archived file carries the exact `CORRECTION_04` technical bytes forward
+through `CORRECTION_05` into `CORRECTION_06`. `CORRECTION_04` first
+corrected the validator defect found by the accepted 2026-09-16 one-shot
+empirical run (section G below) while preserving everything `CORRECTION_01`,
+`CORRECTION_02`, and `CORRECTION_03` established (sections A-F below); its
+implementation theorem was accepted on substance, but its archive/context
+documentation was Marco-**BLOCK**ed for a provenance defect (see Provenance
+below). `CORRECTION_05` correctly fixed that provenance defect, but was
+itself Marco-**BLOCK**ed because its repository-resident archive
+`MANIFEST.json` retained a stale byte/SHA-256 identity for this README file
+(`ARCHIVE_MEMBER_IDENTITY_STALE_README`; see Provenance below).
+`CORRECTION_06` is the proposed successor: same launcher bytes, same
+corrected two-commit provenance, corrected archive member identity.
 
 ### F. The result file is created atomically and exclusively
 
@@ -228,6 +238,32 @@ Exit code `0` and `READ_ONLY_REVALIDATION_TERMINAL=PASS` are emitted only for
 a complete **production** observation. Otherwise the script still emits the
 complete JSON result (for human review) but exits non-zero.
 
+### G. `authority_path` / `ledger_path` frozen metadata comparison is
+Windows drive-letter/component case-insensitive
+
+The one-shot authorized production execution on 2026-09-16 halted with
+`RESULT_SCHEMA_INCOMPLETE` and exactly two failures,
+`PRODUCTION_IDENTITY_MISMATCH:authority_path` and
+`PRODUCTION_IDENTITY_MISMATCH:ledger_path`, even though every other frozen
+identity field matched, the independent actual-source-binding gate passed
+for all three real sources, both path-identity SHA-256 fields matched, and
+mutation proof passed. The observed durable metadata path strings used
+lowercase Windows drive-letter spelling (`c:\...`); the frozen constants use
+uppercase (`C:\...`). This was a validator implementation defect, not
+evidence that a different source file was read.
+
+`check_frozen_production_identity()` now compares exactly these two keys
+with `str(observed).casefold() == str(expected).casefold()`. Every other
+frozen identity field, including `authority_store_path_identity_sha256` and
+`ledger_path_identity_sha256`, remains exact case-sensitive equality. No
+`os.path.normpath`/`normcase`, separator conversion, dot-segment collapse,
+alias/symlink acceptance, or path relocation was added to this comparison,
+and the independent actual-source-binding gate
+(`check_production_source_binding`, section A) is unchanged and remains
+load-bearing: a byte-identical copy of the accepted stores at another
+filesystem location is still refused even when its embedded metadata path
+strings are case-equivalent to the frozen ones.
+
 ## Result contract
 
 Implements `02_CONTROLLING/OBSERVATION_CONTRACT_V2.md` from the accepting
@@ -235,11 +271,11 @@ dispatch bundle in full: result schema identity
 `ARB_R1_D07_N1_FRESH_READ_ONLY_STATE_REVALIDATION_RESULT_V2`, an explicit
 machine-checkable `observation_completeness` section, and terminal `PASS`
 gated on all nine completeness preconditions in that contract, plus the
-`CORRECTION_01` frozen-identity gate, the `CORRECTION_02` actual-source
-binding and output-sink gates, and the `CORRECTION_03` exclusive
-result-creation rule. A missing required observation is classified
-`RESULT_SCHEMA_INCOMPLETE`, never silently omitted, and never yields a false
-`PASS`.
+`CORRECTION_01` frozen-identity gate (`CORRECTION_04`-corrected per section G
+above), the `CORRECTION_02` actual-source binding and output-sink gates, and
+the `CORRECTION_03` exclusive result-creation rule. A missing required
+observation is classified `RESULT_SCHEMA_INCOMPLETE`, never silently
+omitted, and never yields a false `PASS`.
 
 ## Nonproduction fixture mode — not an operator path
 
@@ -289,8 +325,64 @@ Gate D, Stage 3G+, Demo venue write, production access, or R1-D08.
   `1c4d44c7b9af67da57f19f0e4423803a26bbdbc4`, and
   `b30a8870ad033bc71698fc6c621c29be66f9d59a`) were used only as noncanonical
   content seeds and are never this candidate's Git ancestors.
-- This corrected V2 successor was implemented under task
-  `R1-D07_N1_FRESH_READ_ONLY_STATE_REVALIDATION_V2_IMPLEMENTATION_CANONICALIZATION_01_CORRECTION_03`.
+- `CORRECTION_03` was installed canonically through installation commit
+  `a16f1286edf72215b372bca1146d248eac55f0c4` (tree `8b8bd8c715600e6c936ece2167004b9ffab58a4b`,
+  parent `b30236e974b708dfa5e7ab7dac8b848d2ca88d8d`, exactly the reviewed
+  candidate `5e97e09600afab60392628679757b5015b731623`, 7 changed paths). A
+  later, separate documentation-continuity task installed commit
+  `5cfe81e48da44741b3d229c92da0f64bbf34e9fc` (tree
+  `fd02a506c7f3bd8f6308db6d85017342899a7f41`, parent `a16f1286edf72215b372bca1146d248eac55f0c4`,
+  2 changed documentation paths) solely to record the already-completed
+  CORRECTION_03 installation in A20/`ARTIFACT_INDEX.md`. These are two
+  distinct canonical events: `5cfe81e48da44741b3d229c92da0f64bbf34e9fc` is the
+  later continuity documentation commit and the current base for this
+  candidate, not the commit that installed the CORRECTION_03 implementation.
+- The accepted one-shot authorized production execution against `CORRECTION_03`
+  (task `R1-D07_N1_FRESH_READ_ONLY_STATE_REVALIDATION_V2_EXECUTION_01`,
+  2026-09-16) halted `READ_ONLY_REVALIDATION_V2_EXECUTION_HALTED_RETURN_TO_MARCO`
+  with terminal `READ_ONLY_REVALIDATION_TERMINAL=RESULT_SCHEMA_INCOMPLETE` and
+  exactly the two `authority_path`/`ledger_path` failures corrected in section
+  G. The transient 6016-byte result JSON
+  (SHA-256 `d18b71468e880e9146ba3629625c7d98a9c1c54e9ba6061224b19baa92e3d397`)
+  was deleted by the authorized execution contract after capture, per its
+  design, and its exact bytes are not available as a review input; the
+  accepted material finding is the user-reported observation record in
+  `03_REVIEW_DECISION/MARCO_ACCEPT_FINDING_CORRECTION_04_HANDOFF.md` of the
+  CORRECTION_04 correction dispatch bundle. That one-shot execution
+  authorization is consumed; no correction since has authorized another
+  deployed-N1 read.
+- The `CORRECTION_04` candidate (commit `e6e5b913e1da8ae2960e328ce3f70c122179a4a1`,
+  tree `3ef6629ef27b2811e9d332c65b6b5e8ff24b0db1`, parent
+  `5cfe81e48da44741b3d229c92da0f64bbf34e9fc`) implemented the section-G
+  correction correctly and its implementation theorem was accepted on
+  substance, but Marco **BLOCK**ed it for `PROVENANCE_CONFLATION_
+  IMPLEMENTATION_INSTALL_COMMIT_VS_CONTINUITY_COMMIT`: its archive/context
+  documentation described `5cfe81e48da44741b3d229c92da0f64bbf34e9fc` as the
+  commit that installed CORRECTION_03. It is noncanonical content-seed only
+  and is never Git ancestry of this candidate; its launcher, launcher
+  sidecar, and V2 test bytes are carried forward byte-identical here.
+- The `CORRECTION_05` candidate (commit `e7f0bf536d6bcf4a7e0025f35ca43cc706b8cb60`,
+  tree `73f5f1be419a6f59ac12a69acf9d59a42589437b`, parent
+  `5cfe81e48da44741b3d229c92da0f64bbf34e9fc`) correctly fixed the
+  `CORRECTION_04` provenance-conflation defect above, but Marco
+  **BLOCK**ed it for `ARCHIVE_MEMBER_IDENTITY_STALE_README`: its
+  repository-resident archive `MANIFEST.json` retained the pre-edit
+  README tuple (18514 bytes, SHA-256
+  `84cc87742883ce407f387ad9dc4c4d3060b4a1a2bf72a25aae5cfe524d9a172d`)
+  instead of the actual final `CORRECTION_05` README bytes (20453 bytes,
+  SHA-256 `be31473f3c3e8c2afd809d47591c9f109d115c54ce62f82fa64dc7a2d6a24984`).
+  The review-package `MANIFEST.txt`/`DELIVERY_MANIFEST.json` recorded the
+  correct final identity; the defect was isolated to the repository-resident
+  archive manifest. It is noncanonical content-seed only and is never Git
+  ancestry of this candidate; its launcher, launcher sidecar, and V2 test
+  bytes are carried forward byte-identical here.
+- This corrected V2 successor is implemented under task
+  `R1-D07_N1_FRESH_READ_ONLY_STATE_REVALIDATION_V2_IMPLEMENTATION_CANONICALIZATION_01_CORRECTION_06`,
+  descends directly from canonical base `5cfe81e48da44741b3d229c92da0f64bbf34e9fc`,
+  and is a proposed candidate only, not yet canonically installed. This
+  archive `MANIFEST.json`'s `README.md` member identity is derived from
+  this file's own final `CORRECTION_06` bytes (see `MANIFEST.json` in this
+  directory), not copied from any predecessor's recorded value.
 
 See `MANIFEST.json` in this directory for exact file identities, and
 `project_context/PROJECT_STATE_CHECKPOINT_2026_09_06_R1_B02_CORRECTION_04_D07_READ_ONLY_LIVE_ENTRYPOINT_SPECIFICATION.md`

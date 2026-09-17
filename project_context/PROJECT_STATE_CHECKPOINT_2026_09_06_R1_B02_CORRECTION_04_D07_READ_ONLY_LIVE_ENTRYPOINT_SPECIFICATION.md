@@ -1936,10 +1936,24 @@ what A14-A19 already establish; it is documentation/continuity only.
 ```text
 current_state:
   V2 successor (CORRECTION_03)  = APPROVED_AND_CANONICALLY_INSTALLED
-  installed main commit         = a16f1286edf72215b372bca1146d248eac55f0c4
+  installed main commit (CORRECTION_03 implementation installation) =
+    a16f1286edf72215b372bca1146d248eac55f0c4
   installed tree                = 8b8bd8c715600e6c936ece2167004b9ffab58a4b
-  V2 implementation correction loop = CLOSED
-  next bounded action           = RETURN_TO_MARCO_FOR_POST_INSTALL_D07_PLANNING
+  later continuity documentation commit (current CORRECTION_06 Git base) =
+    5cfe81e48da44741b3d229c92da0f64bbf34e9fc
+  These are two distinct canonical events; the continuity commit did NOT
+  install the CORRECTION_03 implementation (A20.7).
+  V2 implementation correction loop (CORRECTION_03) = CLOSED
+  one-shot authorized execution against CORRECTION_03 (2026-09-16) =
+    HALTED_RETURN_TO_MARCO / RESULT_SCHEMA_INCOMPLETE (A20.7)
+  V2 successor (CORRECTION_04)  = MARCO_BLOCK / PROVENANCE_CONFLATION_
+    IMPLEMENTATION_INSTALL_COMMIT_VS_CONTINUITY_COMMIT; noncanonical,
+    non-ancestry, never installed (A20.7.1)
+  V2 successor (CORRECTION_05)  = MARCO_BLOCK / ARCHIVE_MEMBER_IDENTITY_
+    STALE_README; noncanonical, non-ancestry, never installed; its
+    provenance-theorem fix was substantively correct (A20.7.2)
+  V2 successor (CORRECTION_06)  = PROPOSED_CANDIDATE_NOT_YET_CANONICALLY_INSTALLED
+  next bounded action           = RETURN_CORRECTION_06_CANDIDATE_TO_MARCO_FOR_REVIEW
 ```
 
 Installation is provenance, not execution authorization (A20.5).
@@ -2376,3 +2390,283 @@ no risk-config consumption, no deployed N1 read/write, no Kalshi/API access,
 no credential use, no restricted-session append, no writer-proof release, no
 NormalWriterPermit, no Gate D, no Stage 3G+, no Demo venue write, no
 production, and no R1-D08.
+
+### A20.7 Halted-execution validator defect and its lineage of corrections
+(CORRECTION_04 BLOCKED, CORRECTION_05 BLOCKED, CORRECTION_06 proposed; not
+yet canonically installed)
+
+This subsection records the triggering one-shot authorized execution against
+the installed `CORRECTION_03` successor, the accepted material finding, the
+BLOCKED `CORRECTION_04` correction candidate, the BLOCKED `CORRECTION_05`
+correction candidate, and the proposed successor `CORRECTION_06` candidate.
+It does not modify A20.1 through A20.6 above, which remain the exact record
+of the installed `CORRECTION_03` state.
+
+Two-commit distinction, controlling for every provenance sentence in this
+subsection and in `ARTIFACT_INDEX.md`:
+
+```text
+CORRECTION_03 implementation-installation commit = a16f1286edf72215b372bca1146d248eac55f0c4
+  (reviewed candidate 5e97e09600afab60392628679757b5015b731623, installed
+  tree 8b8bd8c715600e6c936ece2167004b9ffab58a4b, 7 changed paths)
+
+later continuity documentation commit = 5cfe81e48da44741b3d229c92da0f64bbf34e9fc
+  (tree fd02a506c7f3bd8f6308db6d85017342899a7f41, parent a16f1286edf72215b372bca1146d248eac55f0c4,
+  2 changed documentation paths, role = records the already-completed
+  CORRECTION_03 installation in this A20 section and in ARTIFACT_INDEX.md;
+  is the current CORRECTION_06 Git base)
+
+These are two distinct canonical events and must never be collapsed into
+one. 5cfe81e48da44741b3d229c92da0f64bbf34e9fc did NOT install CORRECTION_03.
+```
+
+```text
+triggering_execution_task = R1-D07_N1_FRESH_READ_ONLY_STATE_REVALIDATION_V2_EXECUTION_01
+observation_timestamp_utc = 2026-09-16
+launcher_invocation_count = 1
+automatic_retries         = 0
+exit_code                 = 1
+terminal =
+  READ_ONLY_REVALIDATION_V2_EXECUTION_HALTED_RETURN_TO_MARCO
+launcher_terminal =
+  READ_ONLY_REVALIDATION_TERMINAL=RESULT_SCHEMA_INCOMPLETE
+
+transient_result_bytes  = 6016
+transient_result_sha256 =
+  d18b71468e880e9146ba3629625c7d98a9c1c54e9ba6061224b19baa92e3d397
+transient_result_availability =
+  DELETED_BY_AUTHORIZED_EXECUTION_CONTRACT_AFTER_CAPTURE;
+  exact bytes are NOT available as a review input and are not reconstructed
+  here -- the accepted material finding is the user-reported observation
+  record in the CORRECTION_04 correction dispatch bundle's
+  MARCO_ACCEPT_FINDING_CORRECTION_04_HANDOFF.md
+
+Marco_decision = ACCEPT FINDING
+```
+
+Exact material failure:
+
+```text
+status = RESULT_SCHEMA_INCOMPLETE
+observation_completeness.complete = false
+
+failures =
+  PRODUCTION_IDENTITY_MISMATCH:authority_path
+  PRODUCTION_IDENTITY_MISMATCH:ledger_path
+```
+
+The same run reported every other frozen identity field matching, the
+independent actual-source-binding gate passing for all three real sources,
+both path-identity SHA-256 fields matching, authority/ledger before/after
+bytes/hash/mtime unchanged, authority trusted sequence `16`, ledger terminal
+sequence `16`, `authority_ledger_relation = AUTHORITY_EQUAL_TO_LEDGER`, the
+expected durable prestack fill present and exact, Candidate-02 raw and
+semantic hashes matched, zero unresolved writes/cancels/fill conflicts,
+writer proof `HELD`, risk control state `BOOT_HOLD`, and every prohibited
+activity field `NONE`. The observed durable metadata path strings had
+lowercase Windows drive-letter spelling (`c:\...`); the frozen production
+identity constants used uppercase (`C:\...`). This is a validator
+implementation defect, not evidence that a different source file was read.
+
+Accepted correction theorem:
+
+```text
+In check_frozen_production_identity(), exactly these two frozen fields:
+  authority_path
+  ledger_path
+gain Windows drive-letter/component case-insensitive lexical equality:
+  str(observed).casefold() == str(expected).casefold()
+
+Every other of the 17 frozen identity fields remains exact case-sensitive
+equality. No generic path normalization (os.path.normpath/normcase,
+separator conversion, dot-segment collapse, alias/symlink acceptance, or
+path relocation) was added. The independent actual-source-binding gate
+(check_production_source_binding / A20.4.5 item A) is unchanged and remains
+load-bearing.
+```
+
+### A20.7.1 CORRECTION_04 candidate — Marco BLOCK (provenance conflation)
+
+CORRECTION_04 candidate identity (offline implementation; reviewed and
+BLOCKED; never installed):
+
+```text
+task_id =
+  R1-D07_N1_FRESH_READ_ONLY_STATE_REVALIDATION_V2_IMPLEMENTATION_CANONICALIZATION_01_CORRECTION_04
+required_base_commit  = 5cfe81e48da44741b3d229c92da0f64bbf34e9fc
+required_base_tree    = fd02a506c7f3bd8f6308db6d85017342899a7f41
+required_base_parent  = a16f1286edf72215b372bca1146d248eac55f0c4
+candidate_commit       = e6e5b913e1da8ae2960e328ce3f70c122179a4a1
+candidate_tree         = 3ef6629ef27b2811e9d332c65b6b5e8ff24b0db1
+candidate_parent       = 5cfe81e48da44741b3d229c92da0f64bbf34e9fc
+Marco_decision = BLOCK
+blocked_reason = PROVENANCE_CONFLATION_IMPLEMENTATION_INSTALL_COMMIT_VS_CONTINUITY_COMMIT
+status = NONCANONICAL_CONTENT_SEED_ONLY; not Git ancestry of installed main
+  or of the CORRECTION_05 candidate below
+```
+
+The candidate's archive/context documentation incorrectly described
+`5cfe81e48da44741b3d229c92da0f64bbf34e9fc` as the commit that installed the
+CORRECTION_03 implementation. The narrow `authority_path`/`ledger_path`
+casefold implementation theorem itself was accepted on substance; only the
+provenance documentation was defective. Its launcher, launcher sidecar, and
+V2 test bytes (identities below) are carried forward byte-identical into
+CORRECTION_05.
+
+CORRECTION_04's exact seven-path cumulative diff (relative to canonical base
+`5cfe81e48da44741b3d229c92da0f64bbf34e9fc`; blocked, never installed):
+
+```text
+project_archive/r1_d07_2026_09_14/n1_fresh_read_only_state_revalidation_v2/MANIFEST.json
+project_archive/r1_d07_2026_09_14/n1_fresh_read_only_state_revalidation_v2/README.md
+project_archive/r1_d07_2026_09_14/n1_fresh_read_only_state_revalidation_v2/RUN_R1-D07_N1_FRESH_READ_ONLY_STATE_REVALIDATION_02.ps1
+project_archive/r1_d07_2026_09_14/n1_fresh_read_only_state_revalidation_v2/RUN_R1-D07_N1_FRESH_READ_ONLY_STATE_REVALIDATION_02.ps1.sha256
+tests/test_r1_d07_n1_fresh_read_only_state_revalidation_v2.py
+project_context/PROJECT_STATE_CHECKPOINT_2026_09_06_R1_B02_CORRECTION_04_D07_READ_ONLY_LIVE_ENTRYPOINT_SPECIFICATION.md
+project_context/ARTIFACT_INDEX.md
+```
+
+Confirmed-good technical bytes from the BLOCKED CORRECTION_04 candidate,
+carried forward byte-identical into CORRECTION_05 (not re-edited there):
+
+```text
+RUN_R1-D07_N1_FRESH_READ_ONLY_STATE_REVALIDATION_02.ps1
+  bytes  = 93733
+  sha256 = f51d73d3efe807585daafbebf84577f99a3978c2d40674c5fc2eb4380d956f6b
+
+RUN_R1-D07_N1_FRESH_READ_ONLY_STATE_REVALIDATION_02.ps1.sha256
+  bytes  = 121
+  sha256 = eaa8dfb77f47ba571f91ebaeee9232493ecf57e713976a362855fdfa2921b180
+
+tests/test_r1_d07_n1_fresh_read_only_state_revalidation_v2.py
+  bytes  = 104371
+  sha256 = abe840c3e00d3428d48773a78ab94a1250e8c644e36d1d7a84c52436a135550d
+```
+
+Predecessor test evidence (executed for CORRECTION_04 only; NOT re-executed
+for CORRECTION_05 -- see A20.7.2): the CORRECTION_04 targeted module (`67`
+tests / `126` subtests, including new theorems `C04-T01`..`C04-T09`) and the
+full repository suite (`3690` passed / `2` pre-existing unrelated skips)
+both passed under `PYTHONPATH=src` with the required `pmresearch` CPython
+3.12.13 interpreter; no real N1, Kalshi, credential, or network activity
+occurred in any test.
+
+Rerun authorization: the one-shot authorized N1 execution above is
+consumed. Neither CORRECTION_04 nor CORRECTION_05 authorizes a second
+deployed-N1 read; a later rerun requires a new explicit user authorization
+after correction review and canonical installation.
+
+### A20.7.2 CORRECTION_05 candidate — Marco BLOCK (stale archive member
+identity)
+
+CORRECTION_05 was a fresh candidate descending directly from canonical base
+`5cfe81e48da44741b3d229c92da0f64bbf34e9fc` (tree
+`fd02a506c7f3bd8f6308db6d85017342899a7f41`, parent
+`a16f1286edf72215b372bca1146d248eac55f0c4`). It was NOT built on, merged
+with, rebased onto, or cherry-picked from the blocked CORRECTION_04
+candidate `e6e5b913e1da8ae2960e328ce3f70c122179a4a1`; that candidate was used
+only as a noncanonical technical-byte content seed for the three files
+listed above.
+
+```text
+task_id =
+  R1-D07_N1_FRESH_READ_ONLY_STATE_REVALIDATION_V2_IMPLEMENTATION_CANONICALIZATION_01_CORRECTION_05
+required_base_commit  = 5cfe81e48da44741b3d229c92da0f64bbf34e9fc
+required_base_tree    = fd02a506c7f3bd8f6308db6d85017342899a7f41
+required_base_parent  = a16f1286edf72215b372bca1146d248eac55f0c4
+candidate_commit       = e7f0bf536d6bcf4a7e0025f35ca43cc706b8cb60
+candidate_tree         = 73f5f1be419a6f59ac12a69acf9d59a42589437b
+candidate_parent       = 5cfe81e48da44741b3d229c92da0f64bbf34e9fc
+Marco_decision = BLOCK
+blocked_reason = ARCHIVE_MEMBER_IDENTITY_STALE_README
+status = NONCANONICAL_CONTENT_SEED_ONLY; not Git ancestry of installed main
+  or of the CORRECTION_06 candidate below
+```
+
+Exact defect: the candidate's repository-resident archive `MANIFEST.json`
+recorded a stale `members[].README.md` tuple --
+
+```text
+recorded (stale):  bytes = 18514,  sha256 = 84cc87742883ce407f387ad9dc4c4d3060b4a1a2bf72a25aae5cfe524d9a172d
+actual (final C05): bytes = 20453, sha256 = be31473f3c3e8c2afd809d47591c9f109d115c54ce62f82fa64dc7a2d6a24984
+  git_blob = 0e6c21ec272f023d8f5a99ba03dc9f2c9d6ee379
+```
+
+The review-package `MANIFEST.txt`/`DELIVERY_MANIFEST.json` recorded the
+correct final README identity; the defect was isolated to the
+repository-resident archive manifest itself. The correction scope attempted
+was exactly four direct provenance/current-state edits (this file's A20.7,
+plus the archive MANIFEST.json, archive README.md, and
+`ARTIFACT_INDEX.md`) restating that `a16f1286edf72215b372bca1146d248eac55f0c4`
+-- not `5cfe81e48da44741b3d229c92da0f64bbf34e9fc` -- installed the
+CORRECTION_03 implementation; that provenance theorem was substantively
+correct and is carried forward unchanged into CORRECTION_06. No
+implementation logic, launcher behavior, or test behavior was changed.
+
+Test evidence for CORRECTION_05 itself: no pytest rerun was performed.
+Because the launcher, launcher sidecar, and V2 test file were required to
+remain byte-identical to the CORRECTION_04 seed, and were independently
+verified byte/SHA-256/Git-blob identical to it, the CORRECTION_04 test
+evidence above was carried forward as predecessor evidence rather than
+re-executed, per `TEST_EVIDENCE_REUSE_RULE.md` in the CORRECTION_05 dispatch
+bundle.
+
+### A20.7.3 CORRECTION_06 candidate — proposed archive-identity/provenance
+successor (not yet canonically installed)
+
+CORRECTION_06 is a fresh candidate descending directly from canonical base
+`5cfe81e48da44741b3d229c92da0f64bbf34e9fc` (tree
+`fd02a506c7f3bd8f6308db6d85017342899a7f41`, parent
+`a16f1286edf72215b372bca1146d248eac55f0c4`). It is NOT built on, merged
+with, rebased onto, or cherry-picked from the blocked CORRECTION_05
+candidate `e7f0bf536d6bcf4a7e0025f35ca43cc706b8cb60`; that candidate is used
+only as a noncanonical technical-byte content seed.
+
+```text
+task_id =
+  R1-D07_N1_FRESH_READ_ONLY_STATE_REVALIDATION_V2_IMPLEMENTATION_CANONICALIZATION_01_CORRECTION_06
+required_base_commit  = 5cfe81e48da44741b3d229c92da0f64bbf34e9fc
+required_base_tree    = fd02a506c7f3bd8f6308db6d85017342899a7f41
+required_base_parent  = a16f1286edf72215b372bca1146d248eac55f0c4
+candidate_parent       = 5cfe81e48da44741b3d229c92da0f64bbf34e9fc (exactly
+  one fresh local commit; exact candidate commit/tree identities are
+  recorded in the CORRECTION_06 Marco review package, since this checkpoint
+  file is itself one of the seven cumulative changed paths and cannot state
+  its own final identity)
+status = PROPOSED_CANDIDATE_NOT_YET_CANONICALLY_INSTALLED
+```
+
+Correction scope: exactly four direct provenance/current-state edits
+(this file's A20.7, plus the archive MANIFEST.json, archive README.md, and
+`ARTIFACT_INDEX.md`). The archive `MANIFEST.json`'s `README.md` member
+tuple was derived from the FINAL CORRECTION_06 `README.md` bytes (22025
+bytes, SHA-256 `b165d18346b1c169ae2025652773cc7164fdc9228d39729e14c9aa512722df39`),
+computed only after all CORRECTION_06 `README.md` edits were complete --
+never copied from a predecessor's recorded value. After that edit, the
+manifest was parsed and every non-self `members[]` entry was independently
+recomputed against its actual sibling file:
+
+```text
+ARCHIVE_MEMBER_IDENTITY_SELF_CHECK = PASS
+mismatches = 0
+```
+
+The `a16f1286edf72215b372bca1146d248eac55f0c4` (implementation install) vs
+`5cfe81e48da44741b3d229c92da0f64bbf34e9fc` (continuity commit) provenance
+distinction from CORRECTION_05 is preserved unchanged. No implementation
+logic, launcher behavior, or test behavior is changed.
+
+Test evidence for CORRECTION_06 itself: no pytest rerun performed. Because
+the launcher, launcher sidecar, and V2 test file are required to remain
+byte-identical to the CORRECTION_05 seed, and were independently verified
+byte/SHA-256/Git-blob identical to it, the CORRECTION_04 test evidence above
+is carried forward as predecessor evidence rather than re-executed, per
+`VALIDATION_RULES.md` in the CORRECTION_06 dispatch bundle.
+
+This subsection does not itself claim a terminal V2 `PASS`, does not
+authorize another deployed-N1 read, V2 rerun, risk-config consumption,
+restricted-session append, writer release, Gate D, Stage 3G+, or production
+access, and does not advance A20's installed `CORRECTION_03` state. It
+records two BLOCKED predecessor candidates (CORRECTION_04 and CORRECTION_05)
+and a proposed, offline-implemented, not-yet-installed successor candidate
+(CORRECTION_06) awaiting independent Marco review.

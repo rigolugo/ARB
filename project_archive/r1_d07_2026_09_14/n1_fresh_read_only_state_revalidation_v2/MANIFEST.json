@@ -1,13 +1,47 @@
 {
   "schema": "ARB_R1_D07_N1_FRESH_READ_ONLY_STATE_REVALIDATION_V2_ARCHIVE_MANIFEST_V1",
-  "task_id": "R1-D07_N1_FRESH_READ_ONLY_STATE_REVALIDATION_V2_IMPLEMENTATION_CANONICALIZATION_01_CORRECTION_03",
+  "task_id": "R1-D07_N1_FRESH_READ_ONLY_STATE_REVALIDATION_V2_IMPLEMENTATION_CANONICALIZATION_01_CORRECTION_06",
   "role": "canonical successor launcher archive for the accepted V1 read-only N1 state revalidation diagnostic",
+  "candidate_status": "PROPOSED_CANDIDATE_NOT_YET_CANONICALLY_INSTALLED",
+  "provenance_correction_note": "CORRECTION_06 is an archive-member-identity and provenance correction. The launcher, its checksum sidecar, and the related V2 test source are carried forward byte-identical from the blocked CORRECTION_05 candidate; only this MANIFEST.json, README.md, ARTIFACT_INDEX.md, and the A20 checkpoint were directly edited. CORRECTION_05 correctly fixed the CORRECTION_04 provenance conflation (see two_commit_provenance below) but was itself blocked because this MANIFEST.json retained a stale byte/SHA-256 identity for the sibling README.md member; this file's README member tuple below is derived from the FINAL CORRECTION_06 README.md bytes, computed after all README edits were complete, per ARCHIVE_MEMBER_IDENTITY_RULE.md.",
+  "archive_member_identity_self_check": {
+    "status": "ARCHIVE_MEMBER_IDENTITY_SELF_CHECK = PASS",
+    "method": "Every non-self members[] entry's bytes/sha256 were recomputed directly from the final on-disk sibling file after all edits were complete and compared to the recorded tuple.",
+    "mismatches": 0
+  },
   "required_git_base": {
     "repository": "rigolugo/ARB",
     "branch": "main",
-    "commit": "b30236e974b708dfa5e7ab7dac8b848d2ca88d8d",
-    "tree": "d5efb61c2278eb2a40f40444ed327262f2ce8239",
-    "parent": "45a5229c6281b4d396d9263013275fd69668506a"
+    "commit": "5cfe81e48da44741b3d229c92da0f64bbf34e9fc",
+    "tree": "fd02a506c7f3bd8f6308db6d85017342899a7f41",
+    "parent": "a16f1286edf72215b372bca1146d248eac55f0c4",
+    "role": "later continuity documentation commit; current CORRECTION_06 Git base -- NOT the CORRECTION_03 implementation-installation commit"
+  },
+  "two_commit_provenance": {
+    "note": "These are two distinct canonical events and must never be collapsed into one.",
+    "correction_03_implementation_installation": {
+      "reviewed_candidate": "5e97e09600afab60392628679757b5015b731623",
+      "reviewed_tree": "8b8bd8c715600e6c936ece2167004b9ffab58a4b",
+      "installation_commit": "a16f1286edf72215b372bca1146d248eac55f0c4",
+      "installation_tree": "8b8bd8c715600e6c936ece2167004b9ffab58a4b",
+      "installation_parent": "b30236e974b708dfa5e7ab7dac8b848d2ca88d8d",
+      "changed_path_count": 7,
+      "role": "the commit that actually installed the CORRECTION_03 implementation tree"
+    },
+    "later_continuity_documentation_installation": {
+      "commit": "5cfe81e48da44741b3d229c92da0f64bbf34e9fc",
+      "tree": "fd02a506c7f3bd8f6308db6d85017342899a7f41",
+      "parent": "a16f1286edf72215b372bca1146d248eac55f0c4",
+      "changed_path_count": 2,
+      "role": "documentation-continuity only; records the already-completed CORRECTION_03 installation in A20/ARTIFACT_INDEX.md; is the current CORRECTION_06 Git base"
+    }
+  },
+  "canonically_installed_predecessor": {
+    "task_id": "R1-D07_N1_FRESH_READ_ONLY_STATE_REVALIDATION_V2_IMPLEMENTATION_CANONICALIZATION_01_CORRECTION_03",
+    "installation_commit": "a16f1286edf72215b372bca1146d248eac55f0c4",
+    "installation_tree": "8b8bd8c715600e6c936ece2167004b9ffab58a4b",
+    "installation_parent": "b30236e974b708dfa5e7ab7dac8b848d2ca88d8d",
+    "status": "APPROVED_AND_CANONICALLY_INSTALLED"
   },
   "blocked_predecessors": [
     {
@@ -54,27 +88,56 @@
       "blocked_defects": [
         "RESULT_OUTPUT_EXISTING_OBJECT_HARDLINK_AND_TOCTOU_OVERWRITE"
       ]
+    },
+    {
+      "ordinal": 4,
+      "task_id": "R1-D07_N1_FRESH_READ_ONLY_STATE_REVALIDATION_V2_IMPLEMENTATION_CANONICALIZATION_01_CORRECTION_04",
+      "candidate_commit": "e6e5b913e1da8ae2960e328ce3f70c122179a4a1",
+      "candidate_tree": "3ef6629ef27b2811e9d332c65b6b5e8ff24b0db1",
+      "candidate_parent": "5cfe81e48da44741b3d229c92da0f64bbf34e9fc",
+      "review_state": "MARCO_BLOCK",
+      "allowed_use": "NONCANONICAL_CONTENT_SEED_ONLY",
+      "ancestry_use": "PROHIBITED",
+      "blocked_defects": [
+        "PROVENANCE_CONFLATION_IMPLEMENTATION_INSTALL_COMMIT_VS_CONTINUITY_COMMIT"
+      ],
+      "note": "The narrow authority_path/ledger_path casefold implementation theorem was accepted; only the archive/context provenance documentation was defective. Its exact launcher, launcher sidecar, and V2 test bytes are carried forward byte-identical into this CORRECTION_06 candidate (via CORRECTION_05)."
+    },
+    {
+      "ordinal": 5,
+      "task_id": "R1-D07_N1_FRESH_READ_ONLY_STATE_REVALIDATION_V2_IMPLEMENTATION_CANONICALIZATION_01_CORRECTION_05",
+      "candidate_commit": "e7f0bf536d6bcf4a7e0025f35ca43cc706b8cb60",
+      "candidate_tree": "73f5f1be419a6f59ac12a69acf9d59a42589437b",
+      "candidate_parent": "5cfe81e48da44741b3d229c92da0f64bbf34e9fc",
+      "review_state": "MARCO_BLOCK",
+      "allowed_use": "NONCANONICAL_CONTENT_SEED_ONLY",
+      "ancestry_use": "PROHIBITED",
+      "blocked_defects": [
+        "ARCHIVE_MEMBER_IDENTITY_STALE_README"
+      ],
+      "note": "The two-commit provenance correction itself was substantively correct (CORRECTION_04's implementation-install-vs-continuity conflation was fixed). The candidate was blocked because this MANIFEST.json's own members[] README.md tuple retained the pre-edit value (18514 bytes / SHA-256 84cc87742883ce407f387ad9dc4c4d3060b4a1a2bf72a25aae5cfe524d9a172d) instead of the actual final CORRECTION_05 README.md bytes (20453 bytes / SHA-256 be31473f3c3e8c2afd809d47591c9f109d115c54ce62f82fa64dc7a2d6a24984). The review-package MANIFEST.txt/DELIVERY_MANIFEST.json recorded the correct final identity; the defect was isolated to this repository-resident archive manifest. Its exact launcher, launcher sidecar, and V2 test bytes are carried forward byte-identical into this CORRECTION_06 candidate."
     }
   ],
   "members": [
     {
       "path": "RUN_R1-D07_N1_FRESH_READ_ONLY_STATE_REVALIDATION_02.ps1",
-      "role": "self-contained canonical successor launcher (CORRECTION_03)",
-      "bytes": 92690,
-      "sha256": "cb42c4fc72822d71634bc82074c073c654bad876307641a64249b7bc56256bcb",
+      "role": "self-contained canonical successor launcher; technical bytes carried forward byte-identical from the blocked CORRECTION_04 candidate through the blocked CORRECTION_05 candidate (CORRECTION_06 is an archive-identity/provenance correction and does not modify this file)",
+      "bytes": 93733,
+      "sha256": "f51d73d3efe807585daafbebf84577f99a3978c2d40674c5fc2eb4380d956f6b",
       "result_schema": "ARB_R1_D07_N1_FRESH_READ_ONLY_STATE_REVALIDATION_RESULT_V2"
     },
     {
       "path": "RUN_R1-D07_N1_FRESH_READ_ONLY_STATE_REVALIDATION_02.ps1.sha256",
       "role": "detached checksum sidecar for the launcher",
       "bytes": 121,
-      "sha256": "c9fbf08e8a6e813a41d42654d7bf2b43d0ef177b1daec2984c162a2b0688af42"
+      "sha256": "eaa8dfb77f47ba571f91ebaeee9232493ecf57e713976a362855fdfa2921b180"
     },
     {
       "path": "README.md",
       "role": "usage, safety model, correction history, and provenance documentation",
-      "bytes": 15713,
-      "sha256": "8f33f265b3371d31f815f8d1e9ac8e83f6c217fac7ddfde234c671dcad73652b"
+      "bytes": 22025,
+      "sha256": "b165d18346b1c169ae2025652773cc7164fdc9228d39729e14c9aa512722df39",
+      "identity_note": "Recomputed from the final CORRECTION_06 README.md bytes after all README edits were complete, per ARCHIVE_MEMBER_IDENTITY_RULE.md. The blocked CORRECTION_05 candidate's manifest incorrectly retained a stale pre-edit tuple (18514 bytes / SHA-256 84cc87742883ce407f387ad9dc4c4d3060b4a1a2bf72a25aae5cfe524d9a172d) here; that value is historical defect evidence only and is not this member's current identity."
     },
     {
       "path": "MANIFEST.json",
@@ -85,9 +148,9 @@
   ],
   "related_test_source": {
     "path": "tests/test_r1_d07_n1_fresh_read_only_state_revalidation_v2.py",
-    "bytes": 96566,
-    "sha256": "41d84fbd6084f6e79e6bed6ad68f186efd12635926bad919cf2123938e057fdb",
-    "note": "Not part of this archive directory; lives at the repository-standard tests/ path. Proves the CORRECTION_03 targeted requirements C03-T01..C03-T08, including a real NTFS hard-link attack against synthetic authority and ledger stores, an ordinary pre-existing output file, and a deterministic validation-to-create race, and preserves every CORRECTION_01 and CORRECTION_02 test. Three proof strategies: pure-function tests of the exact embedded gate logic (extracted verbatim from the delivered .ps1), static proofs about the production parameter surface and the single exclusive result-write site, and real powershell.exe end-to-end invocations against synthetic fixtures built with the same canonical construction helpers as tests/test_kalshi_ledger_binding.py. Offline only; every end-to-end invocation that performs a state read runs in the launcher's explicitly nonproduction fixture mode."
+    "bytes": 104371,
+    "sha256": "abe840c3e00d3428d48773a78ab94a1250e8c644e36d1d7a84c52436a135550d",
+    "note": "Not part of this archive directory; lives at the repository-standard tests/ path. Bytes carried forward byte-identical from the blocked CORRECTION_04 candidate through the blocked CORRECTION_05 candidate; CORRECTION_06 does not modify this file. Proves the CORRECTION_04 targeted requirements C04-T01..C04-T09 (authority_path/ledger_path Windows drive-letter/component case-only lexical casefold equality; every other frozen identity field and the independent actual-source-binding gate remain exact and unchanged), and preserves every CORRECTION_01, CORRECTION_02, and CORRECTION_03 test unchanged. Three proof strategies: pure-function tests of the exact embedded gate logic (extracted verbatim from the delivered .ps1), static proofs about the production parameter surface and the single exclusive result-write site, and real powershell.exe end-to-end invocations against synthetic fixtures built with the same canonical construction helpers as tests/test_kalshi_ledger_binding.py. Offline only; every end-to-end invocation that performs a state read runs in the launcher's explicitly nonproduction fixture mode. This CORRECTION_06 candidate did not rerun pytest: its exact predecessor evidence is 67 passed / 126 subtests (targeted) and 3690 passed / 2 pre-existing unrelated skips (full suite), both exit 0, per the blocked CORRECTION_05 review package's TEST_RESULTS.txt."
   },
   "predecessor_provenance": {
     "v1_launcher": {
@@ -104,6 +167,43 @@
       "authority_class": "DIRECT_EMPIRICAL_LOCAL_STATE_READ_ONLY",
       "storage_class": "LOCAL_ONLY_CANONICAL_REFERENCE_REQUIRED",
       "marco_disposition": "ACCEPT_FINDING"
+    },
+    "correction_04_triggering_evidence": {
+      "task_id": "R1-D07_N1_FRESH_READ_ONLY_STATE_REVALIDATION_V2_EXECUTION_01",
+      "terminal": "READ_ONLY_REVALIDATION_V2_EXECUTION_HALTED_RETURN_TO_MARCO",
+      "launcher_terminal": "READ_ONLY_REVALIDATION_TERMINAL=RESULT_SCHEMA_INCOMPLETE",
+      "failures": [
+        "PRODUCTION_IDENTITY_MISMATCH:authority_path",
+        "PRODUCTION_IDENTITY_MISMATCH:ledger_path"
+      ],
+      "transient_result_bytes": 6016,
+      "transient_result_sha256": "d18b71468e880e9146ba3629625c7d98a9c1c54e9ba6061224b19baa92e3d397",
+      "transient_result_availability": "DELETED_BY_AUTHORIZED_EXECUTION_CONTRACT_AFTER_CAPTURE_NOT_AVAILABLE_AS_A_REVIEW_INPUT",
+      "observation_timestamp_utc": "2026-09-16",
+      "authority_class": "DIRECT_EMPIRICAL_LOCAL_STATE_READ_ONLY",
+      "storage_class": "LOCAL_ONLY_CANONICAL_REFERENCE_REQUIRED",
+      "marco_disposition": "ACCEPT_FINDING",
+      "rerun_authorization": "CONSUMED_NOT_REAUTHORIZED_BY_THIS_CORRECTION"
+    },
+    "correction_04_block_disposition": {
+      "task_id": "R1-D07_N1_FRESH_READ_ONLY_STATE_REVALIDATION_V2_IMPLEMENTATION_CANONICALIZATION_01_CORRECTION_04",
+      "candidate_commit": "e6e5b913e1da8ae2960e328ce3f70c122179a4a1",
+      "candidate_tree": "3ef6629ef27b2811e9d332c65b6b5e8ff24b0db1",
+      "candidate_parent": "5cfe81e48da44741b3d229c92da0f64bbf34e9fc",
+      "marco_decision": "BLOCK",
+      "blocked_reason": "PROVENANCE_CONFLATION_IMPLEMENTATION_INSTALL_COMMIT_VS_CONTINUITY_COMMIT",
+      "implementation_theorem_status": "ACCEPTED_ON_SUBSTANCE; only the archive/context provenance documentation was defective",
+      "allowed_use": "NONCANONICAL_CONTENT_SEED_ONLY; not Git ancestry of this CORRECTION_06 candidate"
+    },
+    "correction_05_block_disposition": {
+      "task_id": "R1-D07_N1_FRESH_READ_ONLY_STATE_REVALIDATION_V2_IMPLEMENTATION_CANONICALIZATION_01_CORRECTION_05",
+      "candidate_commit": "e7f0bf536d6bcf4a7e0025f35ca43cc706b8cb60",
+      "candidate_tree": "73f5f1be419a6f59ac12a69acf9d59a42589437b",
+      "candidate_parent": "5cfe81e48da44741b3d229c92da0f64bbf34e9fc",
+      "marco_decision": "BLOCK",
+      "blocked_reason": "ARCHIVE_MEMBER_IDENTITY_STALE_README",
+      "provenance_theorem_status": "SUBSTANTIVELY_CORRECT; the CORRECTION_04 implementation-install-vs-continuity conflation fix was accepted, and only the archive MANIFEST.json's own README.md member tuple was stale",
+      "allowed_use": "NONCANONICAL_CONTENT_SEED_ONLY; not Git ancestry of this CORRECTION_06 candidate"
     }
   },
   "production_pass_gates": {
@@ -117,7 +217,8 @@
       "ledger_instance_id": "485b37e9-738d-49f8-99cf-5f2e69589de6",
       "ledger_schema_revision": 2,
       "conflict_domain_ref": "KALSHI|KALSHI_DEMO|ARB_KALSHI_DEMO_PRIMARY_ACCOUNT|SUBACCOUNT=1",
-      "bootstrap_contract_sha256": "c387e47c2862e6082e75bc8eb8dfa47ed085ec7be98e8426970a278a953e7360"
+      "bootstrap_contract_sha256": "c387e47c2862e6082e75bc8eb8dfa47ed085ec7be98e8426970a278a953e7360",
+      "correction_04_path_comparison_note": "authority_path and ledger_path only: str(observed).casefold() == str(expected).casefold(), accepting a Windows drive-letter/component case-only difference. All other 15 of the 17 fields, and the separate frozen_actual_source_binding_gate below, remain exact case-sensitive equality, unchanged."
     },
     "frozen_actual_source_binding_gate": {
       "note": "CORRECTION_02. The ACTUAL resolved filesystem source of each input must equal its frozen expectation, independently of the identity strings stored inside the databases. No production parameter can substitute any of them. CORRECTION_03: a refused invocation does not resolve these paths at all.",
@@ -186,11 +287,13 @@
     "race_hook": "-FixtureRaceOccupyOutputBeforeCreate places a fixed marker object at the already-validated destination immediately before the exclusive create (CORRECTION_03 race regression); fixture mode only; the hook itself creates exclusively"
   },
   "capability_activity_at_authoring_time": {
-    "network_used": "GitHub read-only ls-remote of refs/heads/main only (permitted canonical verification); no Kalshi, API, or package registry access",
+    "network_used": "NONE; canonical local main already equaled the exact required base commit, so no remote fetch/ls-remote was needed for base verification",
     "credential_activity": "NONE",
     "kalshi_access": "NONE",
     "venue_activity": "NONE",
     "deployed_n1_state_access": "NONE",
+    "v2_live_rerun": "NONE",
+    "pytest_rerun": "NOT_PERFORMED; archive-identity/provenance-only correction with exact technical-byte carry-forward per CORRECTION_06_VALIDATION_RULES.md",
     "package_installation": "NONE",
     "remote_git_writes": "NONE"
   }
