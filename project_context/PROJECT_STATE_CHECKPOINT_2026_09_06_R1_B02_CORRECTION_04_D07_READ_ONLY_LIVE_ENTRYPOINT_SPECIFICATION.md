@@ -1933,6 +1933,17 @@ milestone (the corrected V1 revalidation result) and records the exact
 identity of its durable V2 successor tooling. It grants no capability beyond
 what A14-A19 already establish; it is documentation/continuity only.
 
+```text
+current_state:
+  V2 successor (CORRECTION_03)  = APPROVED_AND_CANONICALLY_INSTALLED
+  installed main commit         = a16f1286edf72215b372bca1146d248eac55f0c4
+  installed tree                = 8b8bd8c715600e6c936ece2167004b9ffab58a4b
+  V2 implementation correction loop = CLOSED
+  next bounded action           = RETURN_TO_MARCO_FOR_POST_INSTALL_D07_PLANNING
+```
+
+Installation is provenance, not execution authorization (A20.5).
+
 ### A20.1 Accepted local-only empirical result
 
 ```text
@@ -2001,10 +2012,11 @@ historical/reference logic. The durable fix is V2, canonicalized below.
 
 ### A20.3a Blocked V2 candidates: noncanonical, non-ancestry
 
-Three V2 candidates were reviewed and Marco-**BLOCK**ed before the proposed
-successor recorded in A20.4. None is installed, accepted, canonical, or Git
-ancestry of the proposed successor. They are recorded here only so a
-future reader does not mistake a historical BLOCK for acceptance.
+Three V2 candidates were reviewed and Marco-**BLOCK**ed before the approved
+and canonically installed successor recorded in A20.4. None is installed,
+accepted, canonical, or Git ancestry of that successor or of installed
+`main`. They are recorded here only so a future reader does not mistake a
+historical BLOCK for acceptance.
 
 First blocked candidate:
 
@@ -2076,40 +2088,136 @@ blocked_defect:
 ```
 
 The corrected successor is `R1-D07_N1_FRESH_READ_ONLY_STATE_REVALIDATION_V2_
-IMPLEMENTATION_CANONICALIZATION_01_CORRECTION_03`, identities below.
+IMPLEMENTATION_CANONICALIZATION_01_CORRECTION_03`, approved and canonically
+installed as recorded below.
 
-### A20.4 Proposed V2 successor launcher identity (CORRECTION_03)
-
-These identities describe the candidate proposed for installation. They are
-not an acceptance record: installation remains a separately authorized step.
+### A20.4 Approved and canonically installed V2 successor (CORRECTION_03)
 
 ```text
-task_id = R1-D07_N1_FRESH_READ_ONLY_STATE_REVALIDATION_V2_IMPLEMENTATION_CANONICALIZATION_01_CORRECTION_03
+state = APPROVED_AND_CANONICALLY_INSTALLED
+V2 implementation correction loop = CLOSED
+```
+
+### A20.4.1 Marco implementation approval
+
+```text
+implementation_task =
+  R1-D07_N1_FRESH_READ_ONLY_STATE_REVALIDATION_V2_IMPLEMENTATION_CANONICALIZATION_01_CORRECTION_03
+Marco_implementation_decision = APPROVE
+
+reviewed_candidate_commit = 5e97e09600afab60392628679757b5015b731623
+reviewed_candidate_tree   = 8b8bd8c715600e6c936ece2167004b9ffab58a4b
+reviewed_candidate_parent = b30236e974b708dfa5e7ab7dac8b848d2ca88d8d
+
+reviewed_package:
+  MARCO_REVIEW.zip            bytes = 212418
+    sha256 = 386efd992ce17bf5a979720bba44211fda8065af60403150b530f1b85ff68d57
+  MARCO_SUBMISSION_BUNDLE.zip bytes = 223082
+    sha256 = 7facc89aff00398dbb5d8e949ad0fcf0fdc3ebe9e020f00d99eace4f162018ef
+  candidate.patch             bytes = 252668
+    sha256 = 6ddd2fda1397d6a9c2eae666ec5e8088dc5cbb018ec921deef65a106804ef045
+
+reviewed test evidence:
+  targeted = 58 passed / 117 subtests / 0 skipped / 0 failed
+  full     = 3681 passed / 2 pre-existing skips / 687 subtests / 0 failed
+```
+
+Packaging note: the CORRECTION_03 outer `DELIVERY_MANIFEST.json` carried a
+package-builder field `network = NONE`. That field was inaccurate: the
+implementation task performed one read-only GitHub `git ls-remote` of
+`refs/heads/main` to verify its base, as its `TEST_RESULTS.txt` and the
+archive `MANIFEST.json` disclose. Marco accepted this as a nonmaterial
+packaging inconsistency; it is not a claim of zero repository-network reads.
+
+### A20.4.2 Canonical installation
+
+```text
+installation_task =
+  R1-D07_N1_FRESH_READ_ONLY_STATE_REVALIDATION_V2_IMPLEMENTATION_CANONICAL_INSTALLATION_01
+Marco_installation_decision = APPROVE
+installation_terminal       = CANONICAL_INSTALLATION_COMPLETE_RETURN_TO_MARCO
+
+installed_commit = a16f1286edf72215b372bca1146d248eac55f0c4
+installed_tree   = 8b8bd8c715600e6c936ece2167004b9ffab58a4b
+installed_parent = b30236e974b708dfa5e7ab7dac8b848d2ca88d8d
+parent_count     = 1
+installed_tree_equals_reviewed_tree = true
+changed_paths    = exact approved seven
+installed_blob_mismatches = 0
+canonical local main == origin/main == installed commit
+
+installation_mode = ONE_NON_FORCE_FAST_FORWARD
+push              = <installed commit>:refs/heads/main, b30236e..a16f128
+push_attempts     = 1
+push_retries      = 0
+force / force_with_lease / merge / rebase / cherry_pick = 0
+installation_network_activity = GITHUB_REPOSITORY_SYNC_AND_EXACT_MAIN_PUSH_ONLY
+```
+
+The installed commit SHA differs from the reviewed candidate SHA because the
+installation created a fresh commit; its tree is byte-identical to the
+reviewed tree and its only parent is the reviewed candidate's parent.
+
+### A20.4.3 External installation evidence (external/local, by identity only)
+
+```text
+R1-D07_N1_FRESH_READ_ONLY_STATE_REVALIDATION_V2_IMPLEMENTATION_CANONICAL_INSTALLATION_01_RESULT.json
+  bytes  = 10492
+  sha256 = 1977d5ae756fe262812b790c9de73d8a041faa34404b79c4d77854b9bab258fc
+
+R1-D07_N1_FRESH_READ_ONLY_STATE_REVALIDATION_V2_IMPLEMENTATION_CANONICAL_INSTALLATION_01_REPORT.md
+  bytes  = 7292
+  sha256 = b3be00d2008e0fb6d85bdf4ab0324a743b81ebe01164df0a9e2590c9386b8cc5
+
+R1-D07_N1_FRESH_READ_ONLY_STATE_REVALIDATION_V2_IMPLEMENTATION_CANONICAL_INSTALLATION_01_EVIDENCE_BUNDLE.zip
+  bytes  = 77770
+  sha256 = 00475be7376d5bd26b2d08920487c6081018b3b438500769e8b72c1f511f481e
+```
+
+These artifacts are not repository-resident; this checkpoint is the canonical
+reference to their exact identities.
+
+### A20.4.4 Installed repository-resident identities
+
+```text
 archive path =
   project_archive/r1_d07_2026_09_14/n1_fresh_read_only_state_revalidation_v2/
 
 RUN_R1-D07_N1_FRESH_READ_ONLY_STATE_REVALIDATION_02.ps1
-  bytes  = 92690
-  sha256 = cb42c4fc72822d71634bc82074c073c654bad876307641a64249b7bc56256bcb
+  bytes    = 92690
+  sha256   = cb42c4fc72822d71634bc82074c073c654bad876307641a64249b7bc56256bcb
+  git_blob = 8f842d9de01712b3d033cf003863475a89903979
   result_schema = ARB_R1_D07_N1_FRESH_READ_ONLY_STATE_REVALIDATION_RESULT_V2
 
 RUN_R1-D07_N1_FRESH_READ_ONLY_STATE_REVALIDATION_02.ps1.sha256
-  bytes  = 121
-  sha256 = c9fbf08e8a6e813a41d42654d7bf2b43d0ef177b1daec2984c162a2b0688af42
+  bytes    = 121
+  sha256   = c9fbf08e8a6e813a41d42654d7bf2b43d0ef177b1daec2984c162a2b0688af42
+  git_blob = 83977797424b1ff1c1ff9829a415f05011e18bc5
   (detached checksum sidecar)
 
 README.md
-  bytes  = 15713
-  sha256 = 8f33f265b3371d31f815f8d1e9ac8e83f6c217fac7ddfde234c671dcad73652b
+  bytes    = 15713
+  sha256   = 8f33f265b3371d31f815f8d1e9ac8e83f6c217fac7ddfde234c671dcad73652b
+  git_blob = ccf70a0cc7c8e94a8d2a947cc20d4547ce1787cc
 
 MANIFEST.json
-  (archive member manifest; self-referential entry not included in its own
-  byte/hash accounting)
+  bytes    = 12076
+  sha256   = d9d1ac111cf8fe8122695832a63c341646dd144e3ed65175257f34d270a4e31a
+  git_blob = 02214574db6f4255fbb84be0df0bec084e54753c
 
 tests/test_r1_d07_n1_fresh_read_only_state_revalidation_v2.py
-  bytes  = 96566
-  sha256 = 41d84fbd6084f6e79e6bed6ad68f186efd12635926bad919cf2123938e057fdb
+  bytes    = 96566
+  sha256   = 41d84fbd6084f6e79e6bed6ad68f186efd12635926bad919cf2123938e057fdb
+  git_blob = c54c6452dbc9180f82688bdc13c925a61626f02a
 ```
+
+The installed checkpoint and `project_context/ARTIFACT_INDEX.md` blobs at
+`a16f1286edf72215b372bca1146d248eac55f0c4` were the reviewed bytes, which still
+described this successor as proposed. This A20 revision is the separately
+authorized continuity update that records the installed state; it changes no
+installed runtime, test, or archive byte.
+
+### A20.4.5 Implementation summary
 
 V2 is self-contained: the entire read-only probe is embedded in the single
 `.ps1` file (materialized to a private temp file at invocation time and
@@ -2225,32 +2333,41 @@ The offline test module proves the CORRECTION_03 targeted requirements
 C03-T01..C03-T08 -- including a real NTFS hard-link attack against
 synthetic authority and ledger stores, an ordinary pre-existing output
 file, and a deterministic validation-to-create race -- and preserves every
-CORRECTION_01 and CORRECTION_02 test: 58 tests / 117 subtests, offline only,
-zero deployed-N1/Kalshi/credential/network activity.
+CORRECTION_01 and CORRECTION_02 test: 58 tests / 117 subtests. The test
+module itself is offline and performs no deployed-N1, Kalshi, credential, or
+network activity.
 
 ### A20.5 No capability advancement
 
 ```text
-risk_config_consumption = NONE
-deployed_n1_read_or_write_by_this_canonicalization = NONE
+risk_config_consumption = NONE / NOT_AUTHORIZED
+deployed_n1_activity_by_this_continuity_task = NONE
 kalshi_access = NONE
-credential_activity = NONE
+credential_use = NONE
 restricted_session_append = NONE
-writer_release = NOT_AUTHORIZED
+writer_proof_release = NONE / NOT_AUTHORIZED
+NormalWriterPermit = NOT_GRANTED
 Gate_D = NOT_AUTHORIZED
 Stage_3G_plus = NOT_AUTHORIZED
+Demo_venue_write = NOT_AUTHORIZED
 production = NOT_AUTHORIZED
 R1_D08 = NOT_AUTHORIZED
+
+next bounded action = RETURN_TO_MARCO_FOR_POST_INSTALL_D07_PLANNING
 ```
 
 This section records an accepted local-only empirical milestone and the
-identity of the durable, offline-tested tooling proposed for producing a
-complete result on a future authorized run. None of the three blocked
-predecessors is installed or accepted, and the CORRECTION_03 candidate above
-is a proposed successor only -- canonical installation remains a separately
-authorized step. This section does not authorize that future run, any deployed N1
-access, or any later-stage capability. A16/A18/A19 risk-config and
-writer-proof state remain unchanged and controlling.
+identity of the durable, offline-tested tooling that is now approved and
+canonically installed for producing a complete result on a future authorized
+run. None of the three blocked predecessors is installed, accepted, or
+ancestry of installed `main`.
+
+Installation is provenance, not execution authorization. Installing the V2
+launcher does not authorize running it: a deployed-N1 read, any Kalshi read,
+risk-config consumption, restricted-session append, writer-proof release, or
+any later-stage step each requires a separate task with explicit capability
+authorization. A16/A18/A19 risk-config and writer-proof state remain
+unchanged and controlling.
 
 ### A20.6 Boundary
 
