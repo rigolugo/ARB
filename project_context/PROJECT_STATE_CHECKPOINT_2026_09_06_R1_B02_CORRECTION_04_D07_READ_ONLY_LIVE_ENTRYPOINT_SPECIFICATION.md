@@ -1939,21 +1939,38 @@ current_state:
   installed main commit (CORRECTION_03 implementation installation) =
     a16f1286edf72215b372bca1146d248eac55f0c4
   installed tree                = 8b8bd8c715600e6c936ece2167004b9ffab58a4b
-  later continuity documentation commit (current CORRECTION_06 Git base) =
+  later continuity documentation commit (the CORRECTION_06 Git base) =
     5cfe81e48da44741b3d229c92da0f64bbf34e9fc
   These are two distinct canonical events; the continuity commit did NOT
   install the CORRECTION_03 implementation (A20.7).
   V2 implementation correction loop (CORRECTION_03) = CLOSED
   one-shot authorized execution against CORRECTION_03 (2026-09-16) =
-    HALTED_RETURN_TO_MARCO / RESULT_SCHEMA_INCOMPLETE (A20.7)
+    HALTED_RETURN_TO_MARCO / RESULT_SCHEMA_INCOMPLETE; consumed (A20.7)
   V2 successor (CORRECTION_04)  = MARCO_BLOCK / PROVENANCE_CONFLATION_
     IMPLEMENTATION_INSTALL_COMMIT_VS_CONTINUITY_COMMIT; noncanonical,
     non-ancestry, never installed (A20.7.1)
   V2 successor (CORRECTION_05)  = MARCO_BLOCK / ARCHIVE_MEMBER_IDENTITY_
     STALE_README; noncanonical, non-ancestry, never installed; its
     provenance-theorem fix was substantively correct (A20.7.2)
-  V2 successor (CORRECTION_06)  = PROPOSED_CANDIDATE_NOT_YET_CANONICALLY_INSTALLED
-  next bounded action           = RETURN_CORRECTION_06_CANDIDATE_TO_MARCO_FOR_REVIEW
+  V2 successor (CORRECTION_06)  = APPROVED_AND_CANONICALLY_INSTALLED
+    (A20.7.3, A20.7.4)
+  installed main commit (CORRECTION_06; the exact Marco-reviewed commit
+    object, no replacement installation commit) =
+    01bc330ce5f94c72576150127b071398519282a5
+  installed tree                = 4ec88ac79887fe1757ef2f5989410f229c02038a
+  installed parent              = 5cfe81e48da44741b3d229c92da0f64bbf34e9fc
+  V2 correction loop            = CLOSED
+  current installed V2 launcher/sidecar/archive/test identities =
+    the CORRECTION_06 identities in A20.7.4.2 (the A20.4.4 identities are the
+    historical CORRECTION_03 record)
+  terminal V2 revalidation PASS = NOT_ESTABLISHED (the one-shot execution
+    above remains HALTED / RESULT_SCHEMA_INCOMPLETE and consumed; nothing
+    here claims a terminal V2 PASS)
+  continuity_update_pending     = true  # until the commit carrying this A20
+                                        # update is itself installed (A20.7.4.4)
+  next bounded action           = RETURN_TO_MARCO_FOR_REVIEW_OF_THIS_CONTINUITY_
+    CANDIDATE; after its separately authorized canonical installation:
+    RETURN_TO_MARCO_FOR_POST_INSTALL_D07_PLANNING (A20.7.4.4)
 ```
 
 Installation is provenance, not execution authorization (A20.5).
@@ -2392,15 +2409,18 @@ NormalWriterPermit, no Gate D, no Stage 3G+, no Demo venue write, no
 production, and no R1-D08.
 
 ### A20.7 Halted-execution validator defect and its lineage of corrections
-(CORRECTION_04 BLOCKED, CORRECTION_05 BLOCKED, CORRECTION_06 proposed; not
-yet canonically installed)
+(CORRECTION_04 BLOCKED, CORRECTION_05 BLOCKED, CORRECTION_06 APPROVED AND
+CANONICALLY INSTALLED)
 
 This subsection records the triggering one-shot authorized execution against
 the installed `CORRECTION_03` successor, the accepted material finding, the
 BLOCKED `CORRECTION_04` correction candidate, the BLOCKED `CORRECTION_05`
-correction candidate, and the proposed successor `CORRECTION_06` candidate.
-It does not modify A20.1 through A20.6 above, which remain the exact record
-of the installed `CORRECTION_03` state.
+correction candidate, the approved `CORRECTION_06` successor candidate, and
+(A20.7.4) its canonical installation. It does not modify A20.1 through A20.6
+above, which remain the exact record of the installed `CORRECTION_03` state
+as of that installation; the later `CORRECTION_06` installation replaces the
+`CORRECTION_03` launcher/sidecar/archive/test bytes on `main`, and the current
+installed identities are those recorded in A20.7.4.2.
 
 Two-commit distinction, controlling for every provenance sentence in this
 subsection and in `ARTIFACT_INDEX.md`:
@@ -2414,7 +2434,8 @@ later continuity documentation commit = 5cfe81e48da44741b3d229c92da0f64bbf34e9fc
   (tree fd02a506c7f3bd8f6308db6d85017342899a7f41, parent a16f1286edf72215b372bca1146d248eac55f0c4,
   2 changed documentation paths, role = records the already-completed
   CORRECTION_03 installation in this A20 section and in ARTIFACT_INDEX.md;
-  is the current CORRECTION_06 Git base)
+  was the CORRECTION_06 Git base; the CORRECTION_06 installation commit
+  01bc330ce5f94c72576150127b071398519282a5 (A20.7.4) is its direct child)
 
 These are two distinct canonical events and must never be collapsed into
 one. 5cfe81e48da44741b3d229c92da0f64bbf34e9fc did NOT install CORRECTION_03.
@@ -2611,8 +2632,8 @@ evidence above was carried forward as predecessor evidence rather than
 re-executed, per `TEST_EVIDENCE_REUSE_RULE.md` in the CORRECTION_05 dispatch
 bundle.
 
-### A20.7.3 CORRECTION_06 candidate — proposed archive-identity/provenance
-successor (not yet canonically installed)
+### A20.7.3 CORRECTION_06 candidate — approved archive-identity/provenance
+successor (canonically installed; see A20.7.4)
 
 CORRECTION_06 is a fresh candidate descending directly from canonical base
 `5cfe81e48da44741b3d229c92da0f64bbf34e9fc` (tree
@@ -2629,11 +2650,13 @@ required_base_commit  = 5cfe81e48da44741b3d229c92da0f64bbf34e9fc
 required_base_tree    = fd02a506c7f3bd8f6308db6d85017342899a7f41
 required_base_parent  = a16f1286edf72215b372bca1146d248eac55f0c4
 candidate_parent       = 5cfe81e48da44741b3d229c92da0f64bbf34e9fc (exactly
-  one fresh local commit; exact candidate commit/tree identities are
-  recorded in the CORRECTION_06 Marco review package, since this checkpoint
-  file is itself one of the seven cumulative changed paths and cannot state
-  its own final identity)
-status = PROPOSED_CANDIDATE_NOT_YET_CANONICALLY_INSTALLED
+  one fresh local commit; while under review, the exact candidate
+  commit/tree identities were recorded only in the CORRECTION_06 Marco review
+  package, since this checkpoint file was itself one of the seven cumulative
+  changed paths and could not state its own final identity; they are now
+  recorded in A20.7.4 because the exact reviewed commit object was installed)
+Marco_decision = APPROVE
+status = APPROVED_AND_CANONICALLY_INSTALLED (A20.7.4)
 ```
 
 Correction scope: exactly four direct provenance/current-state edits
@@ -2666,7 +2689,284 @@ is carried forward as predecessor evidence rather than re-executed, per
 This subsection does not itself claim a terminal V2 `PASS`, does not
 authorize another deployed-N1 read, V2 rerun, risk-config consumption,
 restricted-session append, writer release, Gate D, Stage 3G+, or production
-access, and does not advance A20's installed `CORRECTION_03` state. It
-records two BLOCKED predecessor candidates (CORRECTION_04 and CORRECTION_05)
-and a proposed, offline-implemented, not-yet-installed successor candidate
-(CORRECTION_06) awaiting independent Marco review.
+access. It records two BLOCKED predecessor candidates (CORRECTION_04 and
+CORRECTION_05) and the approved, offline-implemented successor candidate
+(CORRECTION_06), whose exact reviewed commit object is now canonically
+installed on `main` (A20.7.4). The two blocked candidates remain
+noncanonical, non-ancestry, never-installed history.
+
+### A20.7.4 CORRECTION_06 canonical installation
+
+```text
+state = APPROVED_AND_CANONICALLY_INSTALLED
+V2 correction loop = CLOSED
+```
+
+Marco approved the CORRECTION_06 candidate and the exact reviewed commit object
+was then installed on `rigolugo/ARB` `main`. Unlike the CORRECTION_03
+installation (A20.4.2), which created a fresh installation commit, the reviewed
+candidate commit and the installed commit here are the same Git object; no
+second installation-commit identity exists and none may be inferred.
+
+```text
+implementation_task =
+  R1-D07_N1_FRESH_READ_ONLY_STATE_REVALIDATION_V2_IMPLEMENTATION_CANONICALIZATION_01_CORRECTION_06
+Marco_implementation_decision = APPROVE
+
+installation_task =
+  R1-D07_N1_FRESH_READ_ONLY_STATE_REVALIDATION_V2_IMPLEMENTATION_CANONICALIZATION_01_CORRECTION_06_CANONICAL_INSTALLATION_01
+Marco_installation_decision = APPROVE
+installation_terminal       = CANONICAL_INSTALLATION_COMPLETE_RETURN_TO_MARCO
+installation_mode           = EXACT_APPROVED_COMMIT_ONE_NON_FORCE_FAST_FORWARD
+
+reviewed_candidate_commit = installed_commit =
+  01bc330ce5f94c72576150127b071398519282a5
+installed_tree   = 4ec88ac79887fe1757ef2f5989410f229c02038a
+installed_parent = 5cfe81e48da44741b3d229c92da0f64bbf34e9fc
+parent_count     = 1
+commit_count_above_base = 1
+changed_path_count      = 7 (the exact approved seven paths listed under
+  A20.7.1; all modifications, no renames)
+installed_blob_mismatches = 0
+canonical local main == origin/main == installed commit
+canonical local checkout clean after installation = true
+
+pre-installation main = 5cfe81e48da44741b3d229c92da0f64bbf34e9fc
+  (tree fd02a506c7f3bd8f6308db6d85017342899a7f41, parent
+  a16f1286edf72215b372bca1146d248eac55f0c4)
+push          = 01bc330ce5f94c72576150127b071398519282a5:refs/heads/main,
+                5cfe81e..01bc330 (fast-forward)
+push_attempts = 1
+push_retries  = 0
+push_exit_code = 0
+force / force_with_lease / merge / rebase / cherry_pick / new commit = 0
+push observed UTC = 2026-09-18T17:51:39Z .. 2026-09-18T17:51:43Z
+installation_network_activity = GITHUB_REPOSITORY_SYNC_AND_EXACT_MAIN_PUSH_ONLY
+```
+
+Exact reviewed CORRECTION_06 package identities (external/local, by identity
+only; `candidate.patch` is the diff from `5cfe81e48da44741b3d229c92da0f64bbf34e9fc`
+to the installed commit over the exact seven paths):
+
+```text
+R1-D07_N1_FRESH_READ_ONLY_STATE_REVALIDATION_V2_IMPLEMENTATION_CANONICALIZATION_01_CORRECTION_06_MARCO_REVIEW.zip
+  bytes  = 177498
+  sha256 = c9fac26f848ab60d8f9e086c5b25d748a9918b1f7a15bb5dd5e280ecc8984e19
+
+R1-D07_N1_FRESH_READ_ONLY_STATE_REVALIDATION_V2_IMPLEMENTATION_CANONICALIZATION_01_CORRECTION_06_MARCO_SUBMISSION_BUNDLE.zip
+  bytes  = 186510
+  sha256 = 5189243dae5b932aca46aae194697b0c30bd5b89dde702deff6949789520542b
+
+candidate.patch
+  bytes  = 70140
+  sha256 = 9bdacf465b1b55d82a7519c90a2999ddc4d7e1b4928ddfa8c3b0e3a28cf7f70b
+
+R1-D07_N1_FRESH_READ_ONLY_STATE_REVALIDATION_V2_IMPLEMENTATION_CANONICALIZATION_01_CORRECTION_06_CANONICAL_INSTALLATION_01_CLAUDE_DISPATCH_BUNDLE.zip
+  bytes  = 589843
+  sha256 = 0e55734e4c4ca16f1a96257eaa6597357fce8b414b8a19113323432bcba498a7
+
+MARCO_INSTALLATION_ACCEPTANCE_HANDOFF.md
+  bytes  = 3672
+  sha256 = ce0aadbab56bc02ca93338dab0771fe451f7a08d2563481decb920e7b3e2c58b
+  (Marco installation-acceptance record; decision APPROVE)
+```
+
+### A20.7.4.1 External installation evidence (external/local, by identity only)
+
+The installer generated these files locally. They are not repository-resident;
+this checkpoint is the canonical reference to their exact identities.
+
+```text
+evidence_root   = C:\b1\kals\claude-zips
+evidence_class  = LOCAL_ONLY_INSTALLATION_EVIDENCE (installer-generated;
+                  accepted by Marco through the installation-acceptance record)
+storage_class   = LOCAL_ONLY_CANONICAL_REFERENCE_REQUIRED
+
+R1-D07_N1_FRESH_READ_ONLY_STATE_REVALIDATION_V2_IMPLEMENTATION_CANONICALIZATION_01_CORRECTION_06_CANONICAL_INSTALLATION_01_RESULT.json
+  bytes  = 11641
+  sha256 = 7aae20fd1d0b37140e0ecdf49e29c9bc838b1d5e0a7e544dc88103a388348f1e
+
+R1-D07_N1_FRESH_READ_ONLY_STATE_REVALIDATION_V2_IMPLEMENTATION_CANONICALIZATION_01_CORRECTION_06_CANONICAL_INSTALLATION_01_REPORT.md
+  bytes  = 9777
+  sha256 = fac6a4659729252eeaa22ace85c6532065b902bacc0156cc8887df4b4c0156e5
+
+R1-D07_N1_FRESH_READ_ONLY_STATE_REVALIDATION_V2_IMPLEMENTATION_CANONICALIZATION_01_CORRECTION_06_CANONICAL_INSTALLATION_01_EVIDENCE_BUNDLE.zip
+  bytes  = 23140
+  sha256 = 991e192a6679da3f00322c700fd0ebbbbcb400cbed2a308141cc67d9a79368d6
+
+R1-D07_N1_FRESH_READ_ONLY_STATE_REVALIDATION_V2_IMPLEMENTATION_CANONICALIZATION_01_CORRECTION_06_CANONICAL_INSTALLATION_01_EVIDENCE_BUNDLE.zip.sha256
+  bytes  = 209
+  sha256 = cae88996d29333e2cf6b5749142f8605c57d83ca54b39e8cdf2dbb34851a777c
+  (detached sidecar for the evidence ZIP)
+```
+
+These identities were computed from the files as they exist under the evidence
+root by the continuity task, before any edit; none was copied from chat or
+from a predecessor record. The sidecar SHA-256 equals the recomputed
+evidence-ZIP SHA-256; the ZIP reopens with eleven members (`RESULT.json`,
+`REPORT.md`, seven phase transcripts, `installed_file_identity_table.tsv`,
+`approved_package_verification_record.json`); its embedded `RESULT.json` and
+`REPORT.md` are byte-identical to the standalone files; and the RESULT/REPORT
+content agrees with Git truth (installed commit/tree/parent, exact seven paths
+and blob IDs, one push, zero retries, no force, local `main` fast-forwarded and
+clean, `continuity_update_pending = true`).
+
+```text
+proves     = the exact installation facts recorded in A20.7.4 and the
+             per-phase observation transcripts behind them
+does_not_prove = any deployed-N1 state, any Kalshi/venue state, any V2
+             execution result, or any capability
+```
+
+### A20.7.4.2 Installed repository-resident identities (as installed at 01bc330ce5f94c72576150127b071398519282a5)
+
+```text
+archive path =
+  project_archive/r1_d07_2026_09_14/n1_fresh_read_only_state_revalidation_v2/
+
+RUN_R1-D07_N1_FRESH_READ_ONLY_STATE_REVALIDATION_02.ps1
+  bytes    = 93733
+  sha256   = f51d73d3efe807585daafbebf84577f99a3978c2d40674c5fc2eb4380d956f6b
+  git_blob = dededbb1719e21bdc3a456818fa1f4a0d740557b
+
+RUN_R1-D07_N1_FRESH_READ_ONLY_STATE_REVALIDATION_02.ps1.sha256
+  bytes    = 121
+  sha256   = eaa8dfb77f47ba571f91ebaeee9232493ecf57e713976a362855fdfa2921b180
+  git_blob = fb349f3e5201d70536a84f7c8caf1ec1fba2ffcf
+
+README.md
+  bytes    = 22025
+  sha256   = b165d18346b1c169ae2025652773cc7164fdc9228d39729e14c9aa512722df39
+  git_blob = 796c0946ffbb56e15447dc643ee92ab1e37a6a40
+
+MANIFEST.json
+  bytes    = 21373
+  sha256   = 5733b2db357d049f1c9b3f2f28bd17d296149c8fdbaadff3cb1a73a107ba39bb
+  git_blob = 556490c06a32b5afe6594965349ba02587181b62
+
+tests/test_r1_d07_n1_fresh_read_only_state_revalidation_v2.py
+  bytes    = 104371
+  sha256   = abe840c3e00d3428d48773a78ab94a1250e8c644e36d1d7a84c52436a135550d
+  git_blob = 3833945b4b0d9d4ad24392912957511d9405a489
+
+project_context/PROJECT_STATE_CHECKPOINT_2026_09_06_R1_B02_CORRECTION_04_D07_READ_ONLY_LIVE_ENTRYPOINT_SPECIFICATION.md
+  (this file, as reviewed and installed at 01bc330; superseded by this update)
+  bytes    = 113399
+  sha256   = cdf0d37c53cef48da0e7f26172b0c266fe796f257c7d8870040d471f091e2031
+  git_blob = 082976a0fba30fcdddcc4eabb370e1f6c8e80c51
+
+project_context/ARTIFACT_INDEX.md
+  (as reviewed and installed at 01bc330; superseded by the paired update)
+  bytes    = 187168
+  sha256   = 4f92d97df5d43cabd750c6d3a72b48d3d48f1039e915cc2f7b3e7213d0f47d17
+  git_blob = 216ceb66e91736de814c1b652d2a2dc06316a410
+```
+
+For current-state purposes these launcher, launcher-sidecar, archive
+README/MANIFEST, and V2 test identities supersede the corresponding
+CORRECTION_03 identities in A20.4.4, which remain the historical
+CORRECTION_03 installation record. The launcher, sidecar, and test bytes are
+byte-identical to the CORRECTION_04/CORRECTION_05 confirmed-good seed
+(A20.7.1, A20.7.2) and are unchanged by this continuity update.
+
+The archive `README.md` and `MANIFEST.json` are immutable installed provenance
+at the identities above and are not edited by this continuity update. Both were
+authored and reviewed before installation: the `README.md` describes
+`CORRECTION_06` as a proposed candidate and the `MANIFEST.json` records
+`candidate_status = PROPOSED_CANDIDATE_NOT_YET_CANONICALLY_INSTALLED`.
+Those are pre-installation self-descriptions, not current state; the
+CORRECTION_06 archive-member identities they carry
+(`ARCHIVE_MEMBER_IDENTITY_SELF_CHECK = PASS`, zero mismatches) are retained
+unchanged, and this A20.7.4 together with the paired `ARTIFACT_INDEX.md` entry
+controls current state.
+
+### A20.7.4.3 INSTALLATION_ENVIRONMENT_OBSERVATIONS
+
+Two installation-time Git maintenance observations were reported by the
+installer and accepted by Marco as non-invalidating environment facts. They are
+preserved here as installation evidence/provenance only.
+
+```text
+observation 1 = WORKTREE_PRUNE_PERMISSION_DENIED
+  Git auto-maintenance / `git worktree prune`, run as a side effect of the
+  authorized fetch and pull, printed "failed to delete .git/worktrees/<name>:
+  Permission denied" for approximately 44 pre-existing stale
+  `.git/worktrees/...` administrative entries. The total stale-entry count was
+  77 before and after; every command still exited 0; live worktrees were
+  unaffected.
+
+observation 2 = STALLED_GIT_MAINTENANCE_CHILDREN
+  `git pull --ff-only origin main` completed the fast-forward and then did not
+  return for approximately five minutes because idle `git worktree prune` and
+  `git maintenance` child processes persisted. The installer terminated only
+  those two idle child processes; the pull then returned exit 0. There was no
+  pull retry and no manual repository-file edit.
+
+tracked repository-byte effect = NONE
+installed Git object identity effect = NONE
+second push = NONE
+retries = NONE
+manual repository-file edit = NONE
+repair performed by the continuity task = NONE
+```
+
+The continuity task did not repair, prune, or otherwise modify stale worktree
+administrative metadata or Git maintenance behavior; any such repair requires
+its own separate authorization.
+
+### A20.7.4.4 Current state, unresolved items, and next action
+
+```text
+CORRECTION_06 = APPROVED_AND_CANONICALLY_INSTALLED
+V2 correction loop = CLOSED
+implementation_candidate_installed = true
+continuity_update_pending = true   # until the commit carrying this A20 update is
+                                   # itself canonically installed
+C04 = MARCO_BLOCK (PROVENANCE_CONFLATION_IMPLEMENTATION_INSTALL_COMMIT_VS_CONTINUITY_COMMIT);
+      noncanonical, non-ancestry, never installed (A20.7.1)
+C05 = MARCO_BLOCK (ARCHIVE_MEMBER_IDENTITY_STALE_README);
+      noncanonical, non-ancestry, never installed (A20.7.2)
+accepted halted execution finding = 6016-byte transient result,
+  RESULT_SCHEMA_INCOMPLETE, HALTED_RETURN_TO_MARCO (A20.7); preserved
+one-shot execution authorization = CONSUMED
+terminal V2 revalidation PASS = NOT_ESTABLISHED
+```
+
+`CORRECTION_06` closes the offline V2 correction loop. It does not establish a
+terminal V2 revalidation `PASS`: the one-shot authorized execution recorded in
+A20.7 remains `HALTED` / `RESULT_SCHEMA_INCOMPLETE` and consumed, and no
+terminal V2 `PASS` has been established. A new deployed-N1 V2
+revalidation requires separate explicit user authorization after this
+continuity update is canonically installed. Installation is provenance, not
+execution authorization.
+
+```text
+deployed_n1_activity_by_this_continuity_task = NONE
+v2_rerun = NOT_AUTHORIZED
+kalshi_access = NONE
+credential_use = NONE
+risk_config_consumption = NONE / NOT_AUTHORIZED
+restricted_session_append = NONE
+writer_proof_release = NONE / NOT_AUTHORIZED
+NormalWriterPermit = NOT_GRANTED
+Gate_D = NOT_AUTHORIZED
+Stage_3G_plus = NOT_AUTHORIZED
+Demo_venue_write = NOT_AUTHORIZED
+production = NOT_AUTHORIZED
+R1_D08 = NOT_AUTHORIZED
+```
+
+A16/A18/A19 risk-config and writer-proof state remain unchanged and
+controlling.
+
+After the commit carrying this update is itself canonically installed (a
+separately authorized step that is not performed here, and whose commit
+identity this file cannot state about itself):
+
+```text
+continuity_candidate_installed = true
+continuity_update_pending = false
+next_bounded_action = RETURN_TO_MARCO_FOR_POST_INSTALL_D07_PLANNING
+```
+
+This subsection authorizes and performs no D07 operational step.
