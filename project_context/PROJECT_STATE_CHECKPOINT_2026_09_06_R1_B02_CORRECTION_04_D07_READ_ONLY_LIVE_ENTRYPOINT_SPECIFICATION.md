@@ -2970,3 +2970,67 @@ next_bounded_action = RETURN_TO_MARCO_FOR_POST_INSTALL_D07_PLANNING
 ```
 
 This subsection authorizes and performs no D07 operational step.
+
+### A21 R1-D07 release-only and writer-eligibility specification CORRECTION_02
+
+This is a documentation-only continuity candidate prepared directly from
+canonical `rigolugo/ARB/main` commit
+`0d48e3251f37d41e6e4c89203670fbb6b2367d1c` (tree
+`8f48554e8be7a196b16aefc7d3c77ba9ac4a19b1`, parent
+`01bc330ce5f94c72576150127b071398519282a5`). The original SPEC_01 candidate
+and CORRECTION_01 candidate are Marco-BLOCKED, noncanonical, never installed,
+and are not this candidate's parent or source. In particular, blocked
+CORRECTION_01 candidate `06d05ac6051cc2ea24ffe124051fc217ccc063f0` is not
+ancestry of this candidate.
+
+CORRECTION_02 is proposed and pending Marco review. It preserves the accepted
+`EXECUTION_02` V2 PASS without rerunning it, the active V2 process-local token
+theorem, the proof-only Candidate-02 risk object, the
+`USER_RISK_CHOICE_REQUIRED` decision, and the implementation gates
+`PRE_RELEASE_BRIDGE_IMPLEMENTATION_REQUIRED` and
+`SAME_PROCESS_RELEASE_TO_GATE_D_IMPLEMENTATION_REQUIRED`.
+
+The corrected future topology is: pre-bridge fresh read/reconciliation;
+canonical `EMERGENCY_CONTROL_ONLY` acquisition; qualifying incident-bound
+`RECONCILIATION_RECORDED`; HELD plus release-eligible readback;
+`BOOT_HOLD -> SAFE_HELD`; live-handle SAFE_HELD readback; then
+`EmergencyControlLedgerHandle.close()`. The close call is the durable
+`RESTRICTED_SESSION_ENDED` boundary. Only after it returns may a fresh
+read-only reopen verify the end event, no active restricted session, equal
+authority/ledger tails, SAFE_HELD, and HELD-plus-eligible proof. No end-event
+readback is performed before close.
+
+The post-close bridge must then obtain a new Stage-3A–3F result with a new
+private trusted dynamic capability, a new `ADRS2_<64hex>` identity, and fresh
+market/reconciliation timestamps. The pre-bridge `ActiveReleaseEvaluationStateV1`
+is not RELEASE_ONLY authority. The later state alone may feed
+`acquire_active_release_only_v1`, the full 19-predicate evaluation, durable
+release, `CurrentProcessReleaseCompletionV2`,
+`acquire_active_normal_writer_state_v1`, Stage 3K, and any future separately
+authorized same-process bounded Gate-D action.
+
+Static analysis finds the installed live boundary supports only one
+`run_pre_release_read_phase_v2` call per invocation. Although each call would
+mint a fresh single-use capability with a separate 72-request counter, the
+installed public boundary has one externally verified read-only authorization,
+one runtime, one non-refreshable 300-second absolute deadline, and exactly one
+read-phase call. It does not define aggregate two-pass accounting or bridge
+composition. The result is
+`POST_BRIDGE_STAGE3_REFRESH_IMPLEMENTATION_REQUIRED`; no read limit or
+deadline is increased here. The minimal future correction is one explicit
+same-process bridge orchestrator/authorization envelope that counts both
+distinct passes, keeps the one absolute deadline, creates the fresh capability
+and ADRS2 lineage after close/readback, and rejects any second pass that lacks
+remaining authorized budget or deadline.
+
+The proof-only risk config remains unchanged: all four normal send maxima are
+zero. No user risk leaf is selected. Current state remains
+`BOOT_HOLD / HELD / writer_proof_release_eligible=false` until separately
+authorized execution proves otherwise. No deployed-N1 activity, credential
+use, restricted-session append, release, writer admission, Gate-D, venue
+write, production activity, source/test edit, package installation, or remote
+Git write is authorized by this continuity record.
+
+`continuity_update_pending = true` until this candidate is separately reviewed
+and canonically installed. Until then the next bounded action is
+`RETURN_TO_MARCO_FOR_REVIEW_OF_CORRECTION_02_CANDIDATE`.
