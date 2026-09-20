@@ -507,3 +507,20 @@ ART-0125/ART-0126 raw artifacts are external/local and are not repository-reside
 - accepted `EXECUTION_02` V2 PASS remains unchanged and was not rerun; current deployed state remains `BOOT_HOLD / HELD / writer_proof_release_eligible=false`
 - risk decision: Candidate-02 proof-only bytes remain unchanged (raw SHA-256 `4495ade7fed522bf17a202d6f5422f608765b65a4463121175695c862b3f904c`, semantic SHA-256 `e16c9219b495062647b82b9e8a4d5e9c1b98f3e54ce43f0044c1a85fea162bbb`); all four normal send maxima remain zero; `USER_RISK_CHOICE_REQUIRED`
 - authorization boundary: this continuity candidate authorizes no deployed-N1 access, Kalshi/API access, credentials, restricted mutation, RELEASE_ONLY, writer-proof release, NORMAL_WRITER, Gate-D, venue write, production activity, source/test edit, package installation, or remote Git write
+
+## R1-D07 N1 release-only and writer-eligibility specification CORRECTION_05
+
+- task/artifact ID: `R1-D07_N1_RELEASE_ONLY_AND_WRITER_ELIGIBILITY_SPEC_01_CORRECTION_05`
+- status: `PROPOSED_PENDING_MARCO_REVIEW`; documentation/provenance-only
+- required canonical base: `1536a13ba415371a0d8569f5e41671735c78e5e1` / tree `073d1661c8acc8439d209cbc3c8c46883612f098` / parent `0d48e3251f37d41e6e4c89203670fbb6b2367d1c`
+- blocked predecessor: CORRECTION_04 candidate `1803cc674152754b3addb5f477eaa46b93515e48`, tree `d2ae9507e152a7556051fc7b0da146ba58e9cb70`, noncanonical/never installed; not ancestry
+- controlling predecessor: CORRECTION_02 spec 13779 bytes / SHA-256 `4e5b908373628c4273c8b44284073ae27362883906e720df804ae547296f3592`
+- sole material correction: current N1 `subaccount=1`, `exchange_index=0`; complete active-contract/domain/account/market/implementation/risk/attempt/invocation binding remains required and exchange index is not a standalone uniqueness identity
+- exact active contract: `AEDC1_f2d62188997b28d2d36f4686c271cb9be43f10d1cbdf217960dda0ecf8e61c53` / SHA-256 `f2d62188997b28d2d36f4686c271cb9be43f10d1cbdf217960dda0ecf8e61c53`
+- exact domain binding: `KEDB1_f6aa344c8b573f2d436f76e5dc58601f8583af71a2555922d35f250ded123a02` / SHA-256 `f6aa344c8b573f2d436f76e5dc58601f8583af71a2555922d35f250ded123a02`
+- preserved authorization theorems: clean SAFE_HELD one-phase path; durable cross-restart one-shot/replay; Gate-D same invocation and anti-substitution; trusted external expected-hash provenance; BOOT_HOLD 2x72/144/300; narrow mutation scope; pre-mutation theorem; crash/restart; six-path future implementation envelope; `USER_RISK_CHOICE_REQUIRED = OPEN`
+- preserved evidence: accepted `EXECUTION_02` V2 PASS, 6036 bytes / SHA-256 `46cd3ffaa29e70ab006ca9271f9865b3ec6954685853c8d49cd6b18942e6131c`, tail sequence 16 / hash `76f48d88fd869df9c79ffe17d318006071e80f2048e5cde351962e2aa2d73a4e`; not rerun
+- routed checkpoint: `project_context/PROJECT_STATE_CHECKPOINT_2026_09_06_R1_B02_CORRECTION_04_D07_READ_ONLY_LIVE_ENTRYPOINT_SPECIFICATION.md` section `A22`
+- exact deliverables: CORRECTION_05 specification/handoff, corrected O/G/E/B and SAFE_HELD/Gate-D matrices, domain traceability, static exchange-index conformance proof, preserve/change map, future edit-set and risk-choice statements, and one-upload Marco review/submission bundle
+- capability effect: none; no N1/API/credential access, persistent state, release, writer, Gate-D, venue write, production, source/test/archive edit, package installation, or remote Git write
+- continuity: this entry and checkpoint A22 are the only repository paths changed by the fresh local candidate; `continuity_update_pending = true` until independent Marco review and separate canonical installation

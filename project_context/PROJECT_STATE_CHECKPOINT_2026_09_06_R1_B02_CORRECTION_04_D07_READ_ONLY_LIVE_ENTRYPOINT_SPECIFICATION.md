@@ -3034,3 +3034,52 @@ Git write is authorized by this continuity record.
 `continuity_update_pending = true` until this candidate is separately reviewed
 and canonically installed. Until then the next bounded action is
 `RETURN_TO_MARCO_FOR_REVIEW_OF_CORRECTION_02_CANDIDATE`.
+
+### A22 R1-D07 N1 release-only and writer-eligibility specification CORRECTION_05
+
+This is a documentation-only continuity candidate prepared directly from the
+required canonical `rigolugo/ARB/main` base:
+
+```text
+commit = 1536a13ba415371a0d8569f5e41671735c78e5e1
+tree   = 073d1661c8acc8439d209cbc3c8c46883612f098
+parent = 0d48e3251f37d41e6e4c89203670fbb6b2367d1c
+```
+
+CORRECTION_04 candidate `1803cc674152754b3addb5f477eaa46b93515e48` is
+Marco-BLOCKED, noncanonical, never installed, and is not this candidate's
+parent or ancestry. Its exact specification and review/submission package are
+content seed only.
+
+CORRECTION_05 is a one-defect successor. The canonical current N1 binding is:
+
+```text
+subaccount     = 1
+exchange_index = 0
+active_contract_id = AEDC1_f2d62188997b28d2d36f4686c271cb9be43f10d1cbdf217960dda0ecf8e61c53
+domain_binding_id  = KEDB1_f6aa344c8b573f2d436f76e5dc58601f8583af71a2555922d35f250ded123a02
+```
+
+Exchange index is one exact field, not a uniqueness theorem. The active domain
+continues to require the complete exact contract/domain/account/subaccount/
+exchange/market/implementation/risk/attempt/invocation binding. The corrected
+value propagates through the O/G/E.binding/B schemas, BOOT_HOLD and clean
+SAFE_HELD variants, Gate-D cross-binding, and directly dependent comparisons.
+The banned exchange-index-one route wording is absent from the normative
+successor.
+
+All CORRECTION_04 authorization theorems remain preserved: clean SAFE_HELD
+one-phase continuation; durable cross-restart authorization consumption and
+replay rejection; same-invocation Gate-D anti-substitution; trusted external
+expected-hash provenance; 2x72/144/300 accounting; narrow mutation authority;
+the pre-mutation theorem; crash/restart semantics; the six-path future
+implementation edit set; and `USER_RISK_CHOICE_REQUIRED = OPEN`. Candidate-02
+remains proof-only with all four normal send maxima zero. Accepted
+`EXECUTION_02` V2 PASS is unchanged and was not rerun.
+
+This continuity candidate authorizes no deployed-N1 or Kalshi/API access,
+credentials, state mutation, RELEASE_ONLY, writer-proof release, NORMAL_WRITER,
+Gate D, venue write, production activity, source/test/archive edit, package
+installation, or remote Git write. `continuity_update_pending = true` until
+this two-path candidate is independently reviewed and canonically installed.
+The next bounded action is `RETURN_TO_MARCO_FOR_REVIEW_OF_CORRECTION_05`.
