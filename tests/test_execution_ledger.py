@@ -1664,5 +1664,520 @@ class Revision2ActiveExecutionDomainLedgerTestCase(unittest.TestCase):
             "KALSHI|KALSHI_DEMO|ARB_KALSHI_DEMO_PRIMARY_ACCOUNT|SUBACCOUNT=0")
 
 
+# ===========================================================================
+# R1-D07 N1 CORRECTION_05 (C04-06): durable authorization-set consumption event
+# vocabulary, closed payload, replay projection, no-repair open, sessionless
+# narrow append, and the pre-acquisition guard hook (offline synthetic stores).
+# ===========================================================================
+
+import arb.venues.kalshi.ledger_binding as lb_module
+from dataclasses import dataclass as _dataclass, replace as replace_dataclass
+
+
+@_dataclass
+class SimpleNamespaceLegacy:
+    binding: object
+    repository_root: object
+    ledger_path: object
+    inputs: object
+
+
+class AuthorizationConsumptionLedgerTests(unittest.TestCase):
+    ACCOUNT = "ARB_KALSHI_DEMO_PRIMARY_ACCOUNT"
+    CLASS_BOOT = "PRE_RELEASE_BRIDGE_RELEASE_ORCHESTRATION_V1"
+
+    def setUp(self) -> None:
+        self.temp = tempfile.TemporaryDirectory()
+        self.root = Path(self.temp.name)
+        self.repository_root = Path(__file__).resolve().parents[1]
+        self.authority_root = self.root / "authority"
+        self.authority_root.mkdir()
+        self.ledger_path = self.root / "active.sqlite3"
+        self.inputs = DeterministicInputs()
+        self.binding = AuthorityNamespaceBinding.bind(
+            authority_namespace_id="consumption-ns", authority_namespace_root=self.authority_root,
+            canonical_repository_root=self.repository_root)
+        initialize_authority_namespace(self.binding, clock=self.inputs.clock, uuid_factory=self.inputs.uuid)
+        domain = lb_module.ExecutionDomainBindingV1(
+            venue="KALSHI", environment="KALSHI_DEMO", account_scope_ref=self.ACCOUNT, subaccount=1, exchange_index=0)
+        bootstrap = lb_module.DomainBootstrapContractV1(
+            binding=domain, bootstrap_class="KNOWN_NONEMPTY_PRESTACK",
+            bootstrap_cutoff_at_utc="2026-09-01T00:00:00.000000Z",
+            prestack_activity_completeness="COMPLETE_KNOWN_NONEMPTY_PRESTACK",
+            unresolved_write_count=0, unresolved_cancel_count=0, working_order_truth="COMPLETE_ZERO",
+            fill_truth="COMPLETE_KNOWN_NONZERO", position_truth="COMPLETE_KNOWN_NONZERO",
+            retained_position_ticker="KXAAAGASD-26SEP02-4.1200",
+            retained_position_floor_contracts=Decimal("1.00"))
+        _, self.contract = lb_module.initialize_active_execution_domain_ledger(
+            self.binding, canonical_repository_root=str(self.repository_root), domain_binding=domain,
+            bootstrap_contract=bootstrap, ledger_path=str(self.ledger_path),
+            clock=self.inputs.clock, uuid_factory=self.inputs.uuid)
+
+    def tearDown(self) -> None:
+        self.temp.cleanup()
+
+    # -- helpers ----------------------------------------------------------------
+    def _binding_object(self, **overrides):
+        value = {
+            "authorization_set_id": "set_1", "task_id": "task_1", "execution_attempt_id": "attempt_1",
+            "invocation_id": "inv_1", "orchestration_authorization_id": "orch_1",
+            "orchestration_authorization_class": self.CLASS_BOOT, "repository": "rigolugo/ARB",
+            "required_implementation_commit": "1" * 40, "required_implementation_tree": "2" * 40,
+            "required_implementation_parent": "3" * 40, "active_contract_id": self.contract.contract_id,
+            "active_contract_sha256": self.contract.contract_sha256,
+            "domain_binding_id": self.contract.domain_binding_id,
+            "domain_binding_sha256": self.contract.domain_binding_sha256, "environment": "KALSHI_DEMO",
+            "account_scope_ref": self.ACCOUNT, "subaccount": 1, "exchange_index": 0,
+            "conflict_domain_ref": self.contract.conflict_domain_ref,
+            "market_scope": {"scope_kind": "SINGLE_MARKET_TICKER", "ticker": "KXTEST-26SEP12-A"},
+            "risk_config_raw_sha256": "a" * 64, "risk_config_semantic_sha256": "c" * 64,
+            "process_continuity_mode": "ONE_PROCESS_ONE_INVOCATION_NO_RESTART", "absolute_deadline_seconds": 300,
+            "deadline_policy": "ONE_INVOCATION_START_ABSOLUTE_DEADLINE_NO_RESET",
+        }
+        value.update(overrides)
+        return value
+
+    def _open(self, **kwargs):
+        return ledger._acquire_consumption_state(
+            self.binding, conflict_domain_ref=self.contract.conflict_domain_ref, expected_environment="KALSHI_DEMO",
+            canonical_repository_root=str(self.repository_root), expected_ledger_path=str(self.ledger_path),
+            history_validator=lambda events: lb_module._validate_active_contract_against_events(events, self.contract),
+            clock=self.inputs.clock, uuid_factory=self.inputs.uuid, **kwargs)
+
+    def _payload(self, locked, **overrides):
+        binding_object = self._binding_object()
+        tail = locked.events[-1]
+        value = {
+            "consumption_schema_revision": 1, "execution_package_id": "pkg_1", "expectation_carrier_sha256": "e" * 64,
+            "authorization_set_id": "set_1", "authorization_binding_sha256": "b" * 64,
+            "orchestration_authorization_id": "orch_1", "orchestration_authorization_class": self.CLASS_BOOT,
+            "orchestration_authorization_sha256": "4" * 64, "d07_read_authorization_id": "d07_1",
+            "d07_read_authorization_sha256": "5" * 64, "gate_d_authorization_id": "gate_1",
+            "gate_d_authorization_sha256": "6" * 64, "task_id": "task_1", "execution_attempt_id": "attempt_1",
+            "invocation_id": "inv_1", "process_instance_id": "proc_" + "7" * 32, "binding": binding_object,
+            "authority_instance_id": locked.authority_meta.authority_instance_id,
+            "authority_namespace_id": locked.authority_meta.authority_namespace_id,
+            "authority_store_path_identity_sha256": locked.authority_meta.authority_store_path_identity_sha256,
+            "ledger_instance_id": locked.ledger_meta.ledger_instance_id,
+            "ledger_path_identity_sha256": locked.ledger_meta.ledger_path_identity_sha256,
+            "pre_consumption_sequence": tail.sequence, "pre_consumption_event_hash": tail.event_hash,
+            "invocation_started_monotonic_ns": 10, "invocation_absolute_deadline_monotonic_ns": 10 + 300_000_000_000,
+            "consumption_policy": "DURABLE_ARB_AUTHORIZATION_SET_CONSUMED_V1",
+        }
+        value.update(overrides)
+        return value
+
+    def _event_types(self):
+        connection = sqlite3.connect(str(self.ledger_path))
+        try:
+            return [row[0] for row in connection.execute("SELECT event_type FROM ledger_events ORDER BY sequence")]
+        finally:
+            connection.close()
+
+    def _authority_tail(self):
+        connection = sqlite3.connect(str(self.authority_root / ledger.AUTHORITY_STORE_FILENAME))
+        try:
+            return connection.execute("SELECT trusted_sequence,trusted_event_hash FROM conflict_domain_authority").fetchone()
+        finally:
+            connection.close()
+
+    # -- vocabulary / identity / payload ------------------------------------------------
+    def test_event_vocabulary_domain_and_deterministic_event_id(self) -> None:
+        self.assertEqual(EventType.EXECUTION_AUTHORIZATION_SET_CONSUMED.value, "EXECUTION_AUTHORIZATION_SET_CONSUMED")
+        opened = self._open()
+        try:
+            payload = self._payload(opened.locked)
+        finally:
+            opened.locked.close()
+        self.assertEqual(len(ledger._NEW_EVENT_PAYLOAD_KEYS[EventType.EXECUTION_AUTHORIZATION_SET_CONSUMED]), 27)
+        self.assertEqual(set(payload), set(ledger._NEW_EVENT_PAYLOAD_KEYS[EventType.EXECUTION_AUTHORIZATION_SET_CONSUMED]))
+        expected = "evt_" + sha256_hex(
+            b"ARB_EXECUTION_AUTHORIZATION_SET_CONSUMED_V1\x00"
+            + canonical_json_bytes({"conflict_domain_ref": self.contract.conflict_domain_ref, "orchestration_authorization_id": "orch_1"})
+        )[:32]
+        self.assertEqual(deterministic_event_id(EventType.EXECUTION_AUTHORIZATION_SET_CONSUMED, payload), expected)
+        # The identity is only (conflict domain, O id): unrelated payload fields do not move it.
+        other = dict(payload, invocation_id="inv_9", process_instance_id="proc_" + "8" * 32)
+        self.assertEqual(deterministic_event_id(EventType.EXECUTION_AUTHORIZATION_SET_CONSUMED, other), expected)
+        for malformed in ({"binding": "x", "orchestration_authorization_id": "o"}, {"binding": {}, "orchestration_authorization_id": "o"},
+                          {"binding": {"conflict_domain_ref": "c"}}):
+            with self.assertRaises(LedgerError):
+                deterministic_event_id(EventType.EXECUTION_AUTHORIZATION_SET_CONSUMED, malformed)
+
+    def test_closed_payload_validation_rejects_every_malformation(self) -> None:
+        opened = self._open()
+        try:
+            good = self._payload(opened.locked)
+        finally:
+            opened.locked.close()
+        ledger.validate_authorization_consumption_payload(good)
+        binding_object = good["binding"]
+        cases = {
+            "missing key": {k: v for k, v in good.items() if k != "process_instance_id"},
+            "extra key": dict(good, surprise=1),
+            "schema revision": dict(good, consumption_schema_revision=2),
+            "schema revision bool": dict(good, consumption_schema_revision=True),
+            "policy": dict(good, consumption_policy="OTHER"),
+            "deadline not exactly 300s": dict(good, invocation_absolute_deadline_monotonic_ns=10 + 299_000_000_000),
+            "float ns": dict(good, invocation_started_monotonic_ns=10.0),
+            "negative ns": dict(good, invocation_started_monotonic_ns=-1),
+            "bad sha": dict(good, expectation_carrier_sha256="E" * 64),
+            "bad process id": dict(good, process_instance_id="proc_zz"),
+            "bad class": dict(good, orchestration_authorization_class="OTHER"),
+            "pre sequence zero": dict(good, pre_consumption_sequence=0),
+            "ids not distinct": dict(good, gate_d_authorization_id="orch_1"),
+            "identifier grammar": dict(good, task_id="bad id"),
+            "set id disagrees with B": dict(good, authorization_set_id="set_other"),
+            "attempt disagrees with B": dict(good, execution_attempt_id="attempt_other"),
+            "B extra key": dict(good, binding=dict(binding_object, extra=1)),
+            "B bool subaccount": dict(good, binding=dict(binding_object, subaccount=True)),
+            "B float exchange index": dict(good, binding=dict(binding_object, exchange_index=0.0)),
+            "B wrong environment": dict(good, binding=dict(binding_object, environment="KALSHI_PROD")),
+            "B deadline": dict(good, binding=dict(binding_object, absolute_deadline_seconds=299)),
+            "B market scope": dict(good, binding=dict(binding_object, market_scope={"scope_kind": "ALL", "ticker": "T"})),
+        }
+        for label, payload in cases.items():
+            with self.subTest(label):
+                with self.assertRaises(LedgerError):
+                    ledger.validate_authorization_consumption_payload(payload)
+
+    # -- narrow append vs every generic path -------------------------------------------------
+    def test_generic_append_paths_reject_the_consumption_event(self) -> None:
+        opened = self._open()
+        try:
+            payload = self._payload(opened.locked)
+            with self.assertRaises(LedgerError) as context:
+                opened.locked.append_batch((EventInput(EventType.EXECUTION_AUTHORIZATION_SET_CONSUMED, payload),))
+            self.assertEqual(context.exception.code, FailureCode.AUTHORIZATION_CONSUMPTION_EVENT_PATH_REQUIRED)
+        finally:
+            opened.locked.close()
+        self.assertNotIn("EXECUTION_AUTHORIZATION_SET_CONSUMED", self._event_types())
+        emergency = lb_module.acquire_active_emergency_control_only_v1(
+            self.binding, canonical_repository_root=str(self.repository_root), active_contract=self.contract,
+            expected_ledger_path=str(self.ledger_path), clock=self.inputs.clock, uuid_factory=self.inputs.uuid)
+        handle = emergency.handle
+        try:
+            self.assertFalse(hasattr(handle, "append_batch"))
+            self.assertFalse(hasattr(handle, "consume_authorization_set"))
+        finally:
+            handle.close()
+
+    def test_narrow_append_is_anchored_read_back_and_never_changes_safety_state(self) -> None:
+        before = self._open()
+        try:
+            projection_before = before.projection
+            payload = self._payload(before.locked)
+            record = ledger._append_authorization_consumption(before.locked, payload)
+            self.assertEqual(record.sequence, payload["pre_consumption_sequence"] + 1)
+            self.assertEqual(before.locked.authority_row.trusted_sequence, record.sequence)
+        finally:
+            before.locked.close()
+        self.assertEqual(self._event_types()[-1], "EXECUTION_AUTHORIZATION_SET_CONSUMED")
+        after = self._open()
+        try:
+            self.assertEqual(len(after.consumption.records), 1)
+            self.assertEqual(after.consumption.records[0].event_id, record.event_id)
+            for name in ("risk_control_state", "risk_state_epoch", "active_risk_config_sha256",
+                         "writer_proof_state_by_proof_id", "writer_proof_release_eligible_by_proof_id",
+                         "restricted_sessions", "active_restricted_session_id", "active_writer_session_id",
+                         "unresolved_write_request_ids", "incident_ids", "execution_attempt_ids"):
+                self.assertEqual(getattr(after.projection, name), getattr(projection_before, name), name)
+        finally:
+            after.locked.close()
+
+    def test_narrow_append_rejects_stale_tail_foreign_store_identity_and_open_sessions(self) -> None:
+        opened = self._open()
+        try:
+            for label, overrides in (
+                ("stale tail hash", {"pre_consumption_event_hash": "0" * 64}),
+                ("stale tail sequence", {"pre_consumption_sequence": 1}),
+                ("foreign authority instance", {"authority_instance_id": "other"}),
+                ("foreign ledger path identity", {"ledger_path_identity_sha256": "0" * 64}),
+                ("foreign namespace", {"authority_namespace_id": "other-ns"}),
+            ):
+                with self.subTest(label):
+                    with self.assertRaises(LedgerError):
+                        ledger._append_authorization_consumption(opened.locked, self._payload(opened.locked, **overrides))
+        finally:
+            opened.locked.close()
+        self.assertNotIn("EXECUTION_AUTHORIZATION_SET_CONSUMED", self._event_types())
+        emergency = lb_module.acquire_active_emergency_control_only_v1(
+            self.binding, canonical_repository_root=str(self.repository_root), active_contract=self.contract,
+            expected_ledger_path=str(self.ledger_path), clock=self.inputs.clock, uuid_factory=self.inputs.uuid)
+        emergency.handle._EmergencyControlLedgerHandle__locked.close()  # leave the session open
+        no_repair = self._open()
+        try:
+            with self.assertRaises(LedgerError) as context:
+                ledger._append_authorization_consumption(no_repair.locked, self._payload(no_repair.locked))
+            self.assertEqual(context.exception.code, FailureCode.RESTRICTED_SESSION_EVENT_NOT_PERMITTED)
+        finally:
+            no_repair.locked.close()
+
+    # -- replay projection ----------------------------------------------------------------------------
+    def test_projection_classification_uniqueness_and_replay_conflict(self) -> None:
+        opened = self._open()
+        try:
+            self.assertEqual(opened.consumption.records, ())
+            candidate = {
+                "authorization_set_id": "set_1", "orchestration_authorization_id": "orch_1",
+                "gate_d_authorization_id": "gate_1", "execution_attempt_id": "attempt_1", "invocation_id": "inv_1",
+                "orchestration_authorization_sha256": "4" * 64, "gate_d_authorization_sha256": "6" * 64,
+            }
+            self.assertEqual(opened.consumption.classify(candidate), ("UNUSED", None))
+            ledger._append_authorization_consumption(opened.locked, self._payload(opened.locked))
+        finally:
+            opened.locked.close()
+        again = self._open()
+        try:
+            state, record = again.consumption.classify(candidate)
+            self.assertEqual(state, "CONSUMED")
+            self.assertIsNotNone(record)
+            self.assertEqual(again.consumption.classify(dict(candidate, gate_d_authorization_sha256="9" * 64))[0], "CONFLICT")
+            self.assertEqual(again.consumption.classify(dict(candidate, invocation_id="inv_2"))[0], "CONFLICT")
+            relabeled = dict(
+                candidate, authorization_set_id="set_2", orchestration_authorization_id="orch_2",
+                gate_d_authorization_id="gate_2", execution_attempt_id="attempt_2", invocation_id="inv_2",
+                gate_d_authorization_sha256="9" * 64)
+            self.assertEqual(again.consumption.classify(relabeled)[0], "CONSUMED")  # same raw O under new labels
+            self.assertEqual(again.consumption.classify(
+                dict(relabeled, orchestration_authorization_sha256="8" * 64))[0], "UNUSED")
+            with self.assertRaises(LedgerError):
+                again.consumption.classify({"authorization_set_id": "set_1"})
+            # A second event reusing any uniqueness key is rejected by replay validation itself.
+            duplicate_attempt = self._payload(
+                again.locked, orchestration_authorization_id="orch_2", gate_d_authorization_id="gate_2",
+                d07_read_authorization_id="d07_2", authorization_set_id="set_2",
+                binding=self._binding_object(orchestration_authorization_id="orch_2", authorization_set_id="set_2"),
+                orchestration_authorization_sha256="7" * 64, gate_d_authorization_sha256="8" * 64)
+            with self.assertRaises(LedgerError):
+                ledger._append_authorization_consumption(again.locked, duplicate_attempt)
+        finally:
+            again.locked.close()
+
+    def test_replay_rejects_authority_identity_drift_in_a_consumption_event(self) -> None:
+        opened = self._open()
+        try:
+            ledger._append_authorization_consumption(opened.locked, self._payload(opened.locked))
+            events = opened.locked.events
+            authority_meta = opened.locked.authority_meta
+            ledger_meta = opened.locked.ledger_meta
+        finally:
+            opened.locked.close()
+        ledger.derive_authorization_consumption_projection(authority_meta, ledger_meta, events)
+        drifted = replace_dataclass(authority_meta, authority_instance_id="a-different-authority")
+        with self.assertRaises(LedgerError):
+            ledger.derive_authorization_consumption_projection(drifted, ledger_meta, events)
+
+    # -- legacy ledger / compatibility --------------------------------------------------------------------------
+    def test_legacy_revision_one_ledger_rejects_the_event_and_old_reader_fails_closed(self) -> None:
+        legacy_root = self.root / "legacy"
+        legacy_root.mkdir()
+        legacy_authority = legacy_root / "authority"
+        legacy_authority.mkdir()
+        legacy_ledger_path = legacy_root / "execution.sqlite3"
+        legacy = SimpleNamespaceLegacy(
+            binding=AuthorityNamespaceBinding.bind(
+                authority_namespace_id="legacy-ns", authority_namespace_root=legacy_authority,
+                canonical_repository_root=self.repository_root),
+            repository_root=self.repository_root, ledger_path=legacy_ledger_path, inputs=DeterministicInputs())
+        try:
+            initialize_authority_namespace(legacy.binding, clock=legacy.inputs.clock, uuid_factory=legacy.inputs.uuid)
+            initialize_ledger_binding(
+                legacy.binding, conflict_domain_ref="test-conflict-domain", environment_classification="KALSHI_DEMO",
+                ledger_path=legacy.ledger_path, canonical_repository_root=legacy.repository_root,
+                clock=legacy.inputs.clock, uuid_factory=legacy.inputs.uuid)
+            locked = ledger._open_locked(
+                legacy.binding, conflict_domain_ref="test-conflict-domain", expected_environment="KALSHI_DEMO",
+                canonical_repository_root=legacy.repository_root, expected_ledger_path=legacy.ledger_path,
+                clock=legacy.inputs.clock, uuid_factory=legacy.inputs.uuid)
+            try:
+                event = ledger._construct_event(
+                    meta=locked.ledger_meta, sequence=locked.events[-1].sequence + 1,
+                    previous_hash=locked.events[-1].event_hash,
+                    event_input=EventInput(EventType.EXECUTION_AUTHORIZATION_SET_CONSUMED, {
+                        "binding": {"conflict_domain_ref": "test-conflict-domain"},
+                        "orchestration_authorization_id": "orch_1"}),
+                    clock=legacy.inputs.clock, uuid_factory=legacy.inputs.uuid)
+                ledger_connection = locked.ledger
+                ledger_connection.execute("BEGIN IMMEDIATE")
+                ledger._insert_event(ledger_connection, event)
+                ledger_connection.commit()
+            finally:
+                locked.close()
+            opened = acquire_local_state(
+                legacy.binding, conflict_domain_ref="test-conflict-domain", expected_environment="KALSHI_DEMO",
+                canonical_repository_root=legacy.repository_root, acquisition_mode=AcquisitionMode.NORMAL_WRITER,
+                expected_ledger_path=legacy.ledger_path)
+            self.assertEqual(opened.failure_code, FailureCode.LEDGER_SCHEMA_UNSUPPORTED_EVENT_TYPE)
+            self.assertIs(opened.restart_classification, RestartClassification.SCHEMA_UNSUPPORTED)
+        finally:
+            pass
+        # An unknown event type in an otherwise valid history is never skipped (old-reader model).
+        with self.assertRaises(LedgerError) as context:
+            ledger._row_to_event((2, "evt_" + "0" * 32, "l", "EXECUTION_AUTHORIZATION_SET_CONSUMED_FUTURE", 1, None, None, None,
+                                  "2026-09-01T00:00:00.000000Z", "{}", "0" * 64, "0" * 64, "0" * 64))
+        self.assertEqual(context.exception.code, FailureCode.LEDGER_SCHEMA_UNSUPPORTED_EVENT_TYPE)
+
+    # -- no-repair open / pre-acquisition guard ---------------------------------------------------------------------------
+    def test_no_repair_open_never_catches_up_but_the_default_open_still_does(self) -> None:
+        opened = self._open(fault_hook=lambda stage: (_ for _ in ()).throw(RuntimeError("crash")) if stage == "after_ledger_commit" else None)
+        anchored = (opened.locked.authority_row.trusted_sequence, opened.locked.authority_row.trusted_event_hash)
+        try:
+            with self.assertRaises(RuntimeError):
+                ledger._append_authorization_consumption(opened.locked, self._payload(opened.locked))
+        finally:
+            opened.locked.close()
+        self.assertEqual(self._authority_tail(), anchored)
+        self.assertIn("EXECUTION_AUTHORIZATION_SET_CONSUMED", self._event_types())
+        refused = self._open()
+        self.assertIsNone(refused.locked)
+        self.assertEqual(refused.failure_code, FailureCode.NO_REPAIR_AUTHORITY_LEDGER_TAIL_MISMATCH)
+        self.assertEqual(self._authority_tail(), anchored)  # zero repair, zero append
+        result = lb_module._acquire_normal_writer_candidate(
+            self.binding, conflict_domain_ref=self.contract.conflict_domain_ref, expected_environment="KALSHI_DEMO",
+            canonical_repository_root=str(self.repository_root), expected_ledger_path=str(self.ledger_path),
+            ledger_revision=ledger.ACTIVE_LEDGER_SCHEMA_REVISION, authority_repair=False)
+        self.assertEqual(result.failure_code, FailureCode.NO_REPAIR_AUTHORITY_LEDGER_TAIL_MISMATCH)
+        repaired = lb_module._acquire_normal_writer_candidate(
+            self.binding, conflict_domain_ref=self.contract.conflict_domain_ref, expected_environment="KALSHI_DEMO",
+            canonical_repository_root=str(self.repository_root), expected_ledger_path=str(self.ledger_path),
+            ledger_revision=ledger.ACTIVE_LEDGER_SCHEMA_REVISION)
+        self.assertIs(repaired.authority_ledger_relation, ledger.AuthorityLedgerRelation.LEDGER_AHEAD)
+        self.assertNotEqual(self._authority_tail(), anchored)
+
+    def test_pre_acquisition_guard_runs_before_any_session_append(self) -> None:
+        seen = []
+
+        def reject(locked, projection):
+            seen.append((len(locked.events), projection.active_restricted_session_id))
+            raise LedgerError(FailureCode.ACQUISITION_ENTRY_GUARD_FAILED)
+
+        types, tail = self._event_types(), self._authority_tail()
+        common = dict(
+            conflict_domain_ref=self.contract.conflict_domain_ref, expected_environment="KALSHI_DEMO",
+            canonical_repository_root=str(self.repository_root), expected_ledger_path=str(self.ledger_path),
+            ledger_revision=ledger.ACTIVE_LEDGER_SCHEMA_REVISION, clock=self.inputs.clock, uuid_factory=self.inputs.uuid)
+        for mode in (AcquisitionMode.EMERGENCY_CONTROL_ONLY, AcquisitionMode.RELEASE_ONLY):
+            with self.subTest(mode=mode):
+                result = ledger._acquire_restricted_state(
+                    self.binding, acquisition_mode=mode, pre_acquisition_guard=reject, **common)
+                self.assertIsNone(result.locked)
+                self.assertEqual(result.failure_code, FailureCode.ACQUISITION_ENTRY_GUARD_FAILED)
+                self.assertEqual((self._event_types(), self._authority_tail()), (types, tail))
+        self.assertEqual(len(seen), 2)
+        crashed = ledger._acquire_restricted_state(
+            self.binding, acquisition_mode=AcquisitionMode.EMERGENCY_CONTROL_ONLY,
+            pre_acquisition_guard=lambda locked, projection: 1 / 0, **common)
+        self.assertEqual(crashed.failure_code, FailureCode.ACQUISITION_ENTRY_GUARD_FAILED)
+        self.assertEqual(self._event_types(), types)
+        # No guard -> the unchanged legacy behaviour (session start appended).
+        legacy = ledger._acquire_restricted_state(
+            self.binding, acquisition_mode=AcquisitionMode.EMERGENCY_CONTROL_ONLY, **common)
+        self.assertIsNotNone(legacy.locked)
+        legacy.locked.close()
+
+    # -- CORRECTION_02 closure: C04-T23 store integrity -----------------------
+    _TRG_LEDGER_EVENTS_NO_DELETE = (
+        "CREATE TRIGGER trg_ledger_events_no_delete BEFORE DELETE ON ledger_events "
+        "BEGIN SELECT RAISE(ABORT, 'IMMUTABLE_LEDGER_EVENTS'); END")
+    _TRG_AUTHORITY_META_NO_UPDATE = (
+        "CREATE TRIGGER trg_authority_meta_no_update BEFORE UPDATE ON authority_meta "
+        "BEGIN SELECT RAISE(ABORT, 'IMMUTABLE_AUTHORITY_META'); END")
+    _TRG_CONFLICT_AUTHORITY_IMMUTABLE = (
+        "CREATE TRIGGER trg_conflict_authority_immutable_fields BEFORE UPDATE ON conflict_domain_authority "
+        "WHEN NEW.conflict_domain_ref != OLD.conflict_domain_ref "
+        "OR NEW.environment_classification != OLD.environment_classification "
+        "OR NEW.ledger_instance_id != OLD.ledger_instance_id "
+        "OR NEW.ledger_resolved_path != OLD.ledger_resolved_path "
+        "OR NEW.ledger_path_identity_sha256 != OLD.ledger_path_identity_sha256 "
+        "BEGIN SELECT RAISE(ABORT, 'IMMUTABLE_CONFLICT_DOMAIN_BINDING'); END")
+    _TRG_CONFLICT_AUTHORITY_MONOTONIC = (
+        "CREATE TRIGGER trg_conflict_authority_monotonic_tail BEFORE UPDATE ON conflict_domain_authority "
+        "WHEN NEW.trusted_sequence <= OLD.trusted_sequence "
+        "BEGIN SELECT RAISE(ABORT, 'NON_MONOTONIC_AUTHORITY_TAIL'); END")
+
+    def _authority_store(self):
+        return self.authority_root / ledger.AUTHORITY_STORE_FILENAME
+
+    @staticmethod
+    def _rewrite(path, script) -> None:
+        """Simulate out-of-band damage.  The stores defend themselves with
+        immutability triggers, so the damage is applied with the trigger
+        dropped and then EXACTLY restored -- the schema identity the opener
+        checks is unchanged, so what is under test is the integrity check and
+        not an incidental schema drift."""
+        connection = sqlite3.connect(str(path))
+        try:
+            connection.executescript(script)
+            connection.commit()
+        finally:
+            connection.close()
+
+    def _assert_fails_closed_with_no_default_state(self, code) -> None:
+        opened = self._open()
+        if opened.locked is not None:
+            opened.locked.close()
+        self.assertIsNone(opened.locked, "a damaged store must never open")
+        self.assertEqual(opened.failure_code, code)
+        # No empty-map / default authorization state may result.
+        self.assertIsNone(getattr(opened, "projection", None))
+
+    def test_c04_t23_truncated_active_ledger_fails_closed(self) -> None:
+        """C04-T23: a truncated active ledger (the trailing durable event is
+        gone) is never silently accepted and never yields a default state."""
+        self.assertIn("WRITER_PROOF_HELD", self._event_types())
+        authority = self._authority_tail()
+        self._rewrite(self.ledger_path,
+                      "DROP TRIGGER trg_ledger_events_no_delete;"
+                      "DELETE FROM ledger_events WHERE sequence=(SELECT MAX(sequence) FROM ledger_events);"
+                      + self._TRG_LEDGER_EVENTS_NO_DELETE + ";")
+        self.assertNotIn("WRITER_PROOF_HELD", self._event_types())
+        self._assert_fails_closed_with_no_default_state(FailureCode.DOMAIN_BOOTSTRAP_HISTORY_INCOMPLETE)
+        self.assertEqual(self._authority_tail(), authority)  # no repair, no anchor movement
+
+    def test_c04_t23_restored_older_store_against_a_newer_anchor_fails_closed(self) -> None:
+        """C04-T23: an older store restored under a newer approved
+        checkpoint/anchor is a rollback or replacement, not a recoverable
+        state: it fails closed with no catch-up and no default state."""
+        older = self.ledger_path.read_bytes()
+        opened = self._open()
+        self.assertIsNotNone(opened.locked, opened.failure_code)
+        try:
+            ledger._append_authorization_consumption(opened.locked, self._payload(opened.locked))
+        finally:
+            opened.locked.close()
+        advanced = self._authority_tail()
+        self.assertIn("EXECUTION_AUTHORIZATION_SET_CONSUMED", self._event_types())
+
+        self.ledger_path.write_bytes(older)  # restore the OLDER store
+        self.assertNotIn("EXECUTION_AUTHORIZATION_SET_CONSUMED", self._event_types())
+        self._assert_fails_closed_with_no_default_state(
+            FailureCode.AUTHORITY_AHEAD_OF_LEDGER_ROLLBACK_OR_REPLACEMENT)
+        self.assertEqual(self._authority_tail(), advanced)  # the anchor never rolls back
+
+    def test_c04_t23_corrupt_authority_anchor_and_identity_fail_closed(self) -> None:
+        """C04-T23: a corrupt authority anchor hash and a corrupt authority
+        identity each fail closed with their own exact classification."""
+        events = self._event_types()
+        self._rewrite(self._authority_store(),
+                      "DROP TRIGGER trg_conflict_authority_immutable_fields;"
+                      "DROP TRIGGER trg_conflict_authority_monotonic_tail;"
+                      "UPDATE conflict_domain_authority SET trusted_event_hash='" + "0" * 64 + "';"
+                      + self._TRG_CONFLICT_AUTHORITY_IMMUTABLE + ";"
+                      + self._TRG_CONFLICT_AUTHORITY_MONOTONIC + ";")
+        self._assert_fails_closed_with_no_default_state(FailureCode.AUTHORITY_LEDGER_ANCHOR_HASH_MISMATCH)
+        self.assertEqual(self._event_types(), events)  # nothing appended, nothing repaired
+
+        self.tearDown()
+        self.setUp()
+        events = self._event_types()
+        self._rewrite(self._authority_store(),
+                      "DROP TRIGGER trg_authority_meta_no_update;"
+                      "UPDATE authority_meta SET authority_instance_id='auth_" + "9" * 32 + "';"
+                      + self._TRG_AUTHORITY_META_NO_UPDATE + ";")
+        self._assert_fails_closed_with_no_default_state(FailureCode.AUTHORITY_IDENTITY_MISMATCH)
+        self.assertEqual(self._event_types(), events)
+
+
 if __name__ == "__main__":
     unittest.main()

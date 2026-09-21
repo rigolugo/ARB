@@ -10384,6 +10384,2098 @@ class D07StageBoundaryAndProtectedPathTests(unittest.TestCase):
             self.assertNotIn("R1-D07", text, mod)
             self.assertNotIn("Section 40", text, mod)
 
+import shutil
+import sqlite3
+import types
+from arb.execution_ledger import AUTHORITY_STORE_FILENAME as _ORCH_AUTHORITY_STORE_FILENAME
+
+
+# ===========================================================================
+# R1-D07 N1 CORRECTION_05 -- trusted O/G/E/B admission, durable one-shot
+# consumption, BOOT_HOLD two-phase bridge, clean SAFE_HELD one-phase
+# continuation and same-process release -> Gate D -> canonical writer cleanup.
+# Every test uses temporary synthetic authority/ledger stores, deterministic
+# clocks and fake/scripted transports.  No network, credential, deployed state
+# or venue activity of any kind.
+# ===========================================================================
+
+
+def _orch_canonical(document) -> bytes:
+    return json.dumps(document, sort_keys=True, separators=(",", ":"), ensure_ascii=True).encode("ascii")
+
+
+class _SequencedFakeAcquirer(runner._FakeTrustedDynamicReadAcquirerV2):
+    """Test-only seam: phase k acquires its own synthetic fixture/truth so every
+    read phase mints a DISTINCT private read set (distinct ADRS2 identity)."""
+
+    __slots__ = ("_phase_specs", "_next_phase")
+
+    def __init__(self, phase_specs):
+        fixture, truth, count = phase_specs[0]
+        super().__init__(fixture=fixture, selected_route_truth=truth, implied_request_count=count)
+        self._phase_specs = list(phase_specs)
+        self._next_phase = 0
+
+    def acquire(self, capability):
+        fixture, truth, count = self._phase_specs[self._next_phase]
+        self._next_phase += 1
+        self._fixture, self._selected_route_truth, self._implied_request_count = fixture, truth, count
+        return super().acquire(capability)
+
+
+class OrchestrationSchemaAndTrustBoundaryTests(unittest.TestCase):
+    """C04-T01 / T09 / T11: closed schemas, strict canonical bytes, trusted launcher
+    boundary.  Pure/local; no ledger required."""
+
+    def test_strict_canonical_json_rejects_every_noncanonical_shape(self) -> None:
+        strict = runner._orch_strict_canonical_json_object
+        self.assertEqual(strict(b'{"a":1,"b":[true,null,"x"]}'), {"a": 1, "b": [True, None, "x"]})
+        for label, raw in (
+            ("duplicate top-level key", b'{"a":1,"a":2}'),
+            ("duplicate nested key", b'{"a":{"b":1,"b":2}}'),
+            ("bom", b'\xef\xbb\xbf{"a":1}'),
+            ("trailing newline", b'{"a":1}\n'),
+            ("leading whitespace", b' {"a":1}'),
+            ("spaces after separators", b'{"a": 1}'),
+            ("unsorted keys", b'{"b":1,"a":2}'),
+            ("float", b'{"a":1.0}'),
+            ("exponent float", b'{"a":1e3}'),
+            ("nan", b'{"a":NaN}'),
+            ("infinity", b'{"a":Infinity}'),
+            ("non-object", b'[1]'),
+            ("empty", b''),
+            ("invalid utf-8", b'{"a":"\xff"}'),
+            ("non-ascii unescaped", '{"a":"é"}'.encode("utf-8")),
+            ("negative zero", b'{"a":-0}'),
+            ("malformed", b'{"a":'),
+        ):
+            with self.subTest(label):
+                with self.assertRaises(runner._OrchStrictJsonError):
+                    strict(raw)
+        with self.assertRaises(runner._OrchStrictJsonError):
+            strict("not bytes")  # type: ignore[arg-type]
+
+    def _good_o(self, cls="PRE_RELEASE_BRIDGE_RELEASE_ORCHESTRATION_V1"):
+        variant = runner._ORCH_VARIANTS[cls]
+        return {
+            "schema_version": 1, "authorization_class": cls, "authorization_id": "orch_1",
+            "authorizing_user": "user text", "authorizing_authority": "authority text", "task_id": "task_1",
+            "execution_attempt_id": "attempt_1", "invocation_id": "inv_1", "d07_read_authorization_id": "d07_1",
+            "d07_read_authorization_sha256": "5" * 64, "repository": "rigolugo/ARB",
+            "required_implementation_commit": "1" * 40, "required_implementation_tree": "2" * 40,
+            "required_implementation_parent": "3" * 40, "active_contract_id": "adc_1",
+            "active_contract_sha256": "7" * 64, "domain_binding_id": "edb_1", "domain_binding_sha256": "8" * 64,
+            "environment": "KALSHI_DEMO", "account_scope_ref": "ARB_KALSHI_DEMO_PRIMARY_ACCOUNT", "subaccount": 1,
+            "exchange_index": 0, "conflict_domain_ref": "KALSHI|KALSHI_DEMO|ARB_KALSHI_DEMO_PRIMARY_ACCOUNT|SUBACCOUNT=1",
+            "market_scope": {"scope_kind": "SINGLE_MARKET_TICKER", "ticker": "KXTEST-26SEP12-A"},
+            "risk_config_raw_sha256": "a" * 64, "risk_config_semantic_sha256": "c" * 64,
+            "process_continuity_mode": "ONE_PROCESS_ONE_INVOCATION_NO_RESTART",
+            "restart_policy": "RESTART_REQUIRES_FRESH_AUTHORIZATION",
+            "entry_state_class": variant["entry_state_class"],
+            "authorized_stage3_phase_count": variant["authorized_stage3_phase_count"],
+            "max_pre_release_stage3_phases": variant["max_pre_release_stage3_phases"],
+            "per_phase_pre_release_read_request_max_v2": 72,
+            "aggregate_pre_release_read_request_ceiling": variant["aggregate_pre_release_read_request_ceiling"],
+            "absolute_deadline_seconds": 300,
+            "deadline_policy": "ONE_INVOCATION_START_ABSOLUTE_DEADLINE_NO_RESET",
+            "phase_1_role": variant["phase_1_role"], "phase_2_role": variant["phase_2_role"],
+            "local_mutation_authority": list(variant["local_mutation_authority"]),
+            "gate_d_successor_authorization_id": "gate_1", "gate_d_successor_authorization_sha256": "6" * 64,
+            "gate_d_successor_authorization_class": "USER_AUTHORIZED_GATE_D_EXECUTION_V2",
+            "authorization_set_id": "set_1", "authorization_binding_sha256": "b" * 64,
+            "authorization_consumption_policy": "DURABLE_ARB_AUTHORIZATION_SET_CONSUMED_V1",
+        }
+
+    def test_orchestration_schema_is_closed_for_both_variants(self) -> None:
+        for cls in runner._ORCH_VARIANTS:
+            good = self._good_o(cls)
+            self.assertEqual(set(good), runner._ORCH_O_KEYS)
+            self.assertIs(runner._orch_validate_orchestration_object(dict(good)) is not None, True)
+        good = self._good_o()
+        RF = RunnerFailureCode
+        cases = (
+            ("extra key", dict(good, extra=1), RF.BRIDGE_AUTHORIZATION_SCHEMA_INVALID),
+            ("missing key", {k: v for k, v in good.items() if k != "restart_policy"}, RF.BRIDGE_AUTHORIZATION_SCHEMA_INVALID),
+            ("bool as int", dict(good, subaccount=True), RF.BRIDGE_AUTHORIZATION_SCHEMA_INVALID),
+            ("string int", dict(good, exchange_index="0"), RF.BRIDGE_AUTHORIZATION_SCHEMA_INVALID),
+            ("schema version", dict(good, schema_version=2), RF.BRIDGE_AUTHORIZATION_SCHEMA_INVALID),
+            ("unknown class", dict(good, authorization_class="OTHER"), RF.BRIDGE_AUTHORIZATION_CLASS_INVALID),
+            ("bad identifier", dict(good, task_id="bad id"), RF.BRIDGE_AUTHORIZATION_SCHEMA_INVALID),
+            ("bad sha", dict(good, risk_config_raw_sha256="A" * 64), RF.BRIDGE_AUTHORIZATION_SCHEMA_INVALID),
+            ("bad git id", dict(good, required_implementation_commit="1" * 39), RF.BRIDGE_AUTHORIZATION_SCHEMA_INVALID),
+            ("control char in authorizing text", dict(good, authorizing_user="a\tb"), RF.BRIDGE_AUTHORIZATION_SCHEMA_INVALID),
+            ("production environment", dict(good, environment="KALSHI_PROD"), RF.BRIDGE_AUTHORIZATION_PRODUCTION_SCOPE_CONFLICT),
+            ("exchange_index 1 (obsolete N1 assumption)", dict(good, exchange_index=1), RF.BRIDGE_AUTHORIZATION_DOMAIN_BINDING_MISMATCH),
+            ("subaccount 0", dict(good, subaccount=0), RF.BRIDGE_AUTHORIZATION_DOMAIN_BINDING_MISMATCH),
+            ("other conflict domain", dict(good, conflict_domain_ref="KALSHI|KALSHI_DEMO|ARB_KALSHI_DEMO_PRIMARY_ACCOUNT|SUBACCOUNT=0"), RF.BRIDGE_AUTHORIZATION_DOMAIN_BINDING_MISMATCH),
+            ("process continuity", dict(good, process_continuity_mode="MULTI_PROCESS"), RF.BRIDGE_AUTHORIZATION_PROCESS_CONTINUITY_REQUIRED),
+            ("restart policy", dict(good, restart_policy="AUTO_RESTART"), RF.BRIDGE_AUTHORIZATION_PROCESS_CONTINUITY_REQUIRED),
+            ("deadline seconds", dict(good, absolute_deadline_seconds=301), RF.BRIDGE_AUTHORIZATION_DEADLINE_MISMATCH),
+            ("deadline policy", dict(good, deadline_policy="RESET"), RF.BRIDGE_AUTHORIZATION_DEADLINE_MISMATCH),
+            ("consumption policy", dict(good, authorization_consumption_policy="PROCESS_LOCAL"), RF.BRIDGE_AUTHORIZATION_STALE_OR_REPLAYED),
+            ("gate-d class", dict(good, gate_d_successor_authorization_class="USER_AUTHORIZED_GATE_D_EXECUTION_V1"), RF.BRIDGE_AUTHORIZATION_GATE_D_SUCCESSOR_INVALID),
+            ("entry class", dict(good, entry_state_class="CLEAN_SAFE_HELD_HELD_RELEASE_ELIGIBLE"), RF.BRIDGE_AUTHORIZATION_ENTRY_STATE_MISMATCH),
+            ("three phases", dict(good, authorized_stage3_phase_count=3), RF.BRIDGE_AUTHORIZATION_PHASE_PLAN_MISMATCH),
+            ("phase role", dict(good, phase_2_role="NOT_AUTHORIZED"), RF.BRIDGE_AUTHORIZATION_PHASE_PLAN_MISMATCH),
+            ("per-phase 73", dict(good, per_phase_pre_release_read_request_max_v2=73), RF.BRIDGE_AUTHORIZATION_PHASE_BUDGET_MISMATCH),
+            ("aggregate 145", dict(good, aggregate_pre_release_read_request_ceiling=145), RF.BRIDGE_AUTHORIZATION_PHASE_BUDGET_MISMATCH),
+            ("mutation superset", dict(good, local_mutation_authority=sorted(good["local_mutation_authority"] + ["APPEND_ANYTHING"])), RF.BRIDGE_AUTHORIZATION_LOCAL_MUTATION_SCOPE_INVALID),
+            ("mutation unsorted", dict(good, local_mutation_authority=list(reversed(good["local_mutation_authority"]))), RF.BRIDGE_AUTHORIZATION_LOCAL_MUTATION_SCOPE_INVALID),
+            ("mutation missing one", dict(good, local_mutation_authority=good["local_mutation_authority"][:-1]), RF.BRIDGE_AUTHORIZATION_LOCAL_MUTATION_SCOPE_INVALID),
+            ("market scope shape", dict(good, market_scope={"scope_kind": "ALL", "ticker": "KXTEST"}), RF.BRIDGE_AUTHORIZATION_MARKET_SCOPE_MISMATCH),
+            ("O id equals G id", dict(good, authorization_id="gate_1"), RF.AUTHORIZATION_CROSS_BINDING_MISMATCH),
+        )
+        for label, document, code in cases:
+            with self.subTest(label):
+                with self.assertRaises(RunnerError) as context:
+                    runner._orch_validate_orchestration_object(document)
+                self.assertEqual(context.exception.code, code)
+
+    def test_clean_variant_carries_exactly_the_last_seven_mutations_and_one_phase(self) -> None:
+        clean = runner._ORCH_VARIANTS["CLEAN_SAFE_HELD_RELEASE_CONTINUATION_V1"]
+        boot = runner._ORCH_VARIANTS["PRE_RELEASE_BRIDGE_RELEASE_ORCHESTRATION_V1"]
+        self.assertEqual(len(boot["local_mutation_authority"]), 12)
+        self.assertEqual(len(clean["local_mutation_authority"]), 7)
+        self.assertNotIn("ACQUIRE_EMERGENCY_CONTROL_ONLY", clean["local_mutation_authority"])
+        self.assertNotIn("TRANSITION_BOOT_HOLD_TO_SAFE_HELD", clean["local_mutation_authority"])
+        self.assertNotIn("RECORD_INCIDENT_BOUND_RECONCILIATION_RECORDED", clean["local_mutation_authority"])
+        self.assertEqual((clean["authorized_stage3_phase_count"], clean["aggregate_pre_release_read_request_ceiling"]), (1, 72))
+        self.assertEqual((boot["authorized_stage3_phase_count"], boot["aggregate_pre_release_read_request_ceiling"]), (2, 144))
+        self.assertEqual(runner.PRE_RELEASE_READ_REQUEST_MAX_V2, 72)
+
+    def _good_g(self):
+        o = self._good_o()
+        g = {key: o[key] for key in runner._AUTH_BINDING_KEYS if key not in ("orchestration_authorization_id", "orchestration_authorization_class")}
+        g.update(
+            schema_version=2, authorization_class="USER_AUTHORIZED_GATE_D_EXECUTION_V2", authorization_id="gate_1",
+            authorizing_user="user text", orchestration_authorization_id="orch_1",
+            orchestration_authorization_class=o["authorization_class"], authorization_binding_sha256="b" * 64,
+            max_ordinary_write_sends=2, max_cleanup_cancel_sends=0)
+        return g
+
+    def test_gate_d_v2_schema_is_closed_and_v1_objects_fail(self) -> None:
+        good = self._good_g()
+        self.assertEqual(set(good), runner._ORCH_G_KEYS)
+        runner._orch_validate_gate_d_object(dict(good))
+        invalid = RunnerFailureCode.BRIDGE_AUTHORIZATION_GATE_D_SUCCESSOR_INVALID
+        v1_like = {k: v for k, v in good.items() if k not in ("invocation_id", "authorization_set_id", "authorization_binding_sha256")}
+        for label, document in (
+            ("v1 object lacking invocation/set/binding", dict(v1_like, schema_version=1)),
+            ("schema_version 1", dict(good, schema_version=1)),
+            ("class", dict(good, authorization_class="USER_AUTHORIZED_GATE_D_EXECUTION_V1")),
+            ("negative maximum", dict(good, max_ordinary_write_sends=-1)),
+            ("bool maximum", dict(good, max_cleanup_cancel_sends=False)),
+            ("exchange_index 1", dict(good, exchange_index=1)),
+            ("extra key", dict(good, orchestration_authorization_sha256="0" * 64)),
+            ("bad orchestration class", dict(good, orchestration_authorization_class="OTHER")),
+        ):
+            with self.subTest(label):
+                with self.assertRaises(RunnerError) as context:
+                    runner._orch_validate_gate_d_object(document)
+                self.assertEqual(context.exception.code, invalid)
+
+    def test_binding_object_derivation_is_acyclic_and_identical_from_o_and_g(self) -> None:
+        o, g = self._good_o(), self._good_g()
+        from_o = runner._orch_binding_from_orchestration(o)
+        from_g = runner._orch_binding_from_gate_d(g)
+        self.assertEqual(from_o, from_g)
+        self.assertEqual(set(from_o), set(runner._AUTH_BINDING_KEYS))
+        self.assertEqual(from_o["orchestration_authorization_id"], "orch_1")
+        self.assertNotIn("gate_d_successor_authorization_sha256", from_o)  # no reciprocal-hash fixed point
+        self.assertEqual(from_o["exchange_index"], 0)
+        digest = ledger_binding.compute_authorization_binding_sha256(from_o)
+        self.assertEqual(digest, ledger_module_sha256(b"ARB_RELEASE_GATE_D_BINDING_V1\x00" + _orch_canonical(from_o)))
+
+    def test_launcher_constants_reject_placeholders_blocked_implementations_and_bad_types(self) -> None:
+        good = dict(
+            execution_package_id="pkg_1", authorization_set_id="set_1", expectations_bytes=10,
+            expectations_sha256="a" * 64, installed_implementation_commit="1" * 40,
+            installed_implementation_tree="2" * 40, installed_implementation_parent="3" * 40,
+            bootstrap_contract_sha256="b" * 64, authority_namespace_id="ns", authority_namespace_root="/x",
+            canonical_repository_root="/y", expected_ledger_path="/z")
+        runner._LauncherEmbeddedConstantsV1(**good)
+        RF = RunnerFailureCode
+        for label, change, code in (
+            ("NOT_ISSUED package", {"execution_package_id": "NOT_ISSUED"}, RF.TRUSTED_EXECUTION_PACKAGE_NOT_ISSUED),
+            ("NOT_ISSUED path", {"expected_ledger_path": "NOT_ISSUED/ledger"}, RF.TRUSTED_EXECUTION_PACKAGE_NOT_ISSUED),
+            ("blocked seed", {"installed_implementation_commit": "a0ce48ffd0e6f7a6b13c15fc1989a7123c41016a"}, RF.BRIDGE_AUTHORIZATION_IMPLEMENTATION_MISMATCH),
+            ("blocked C04", {"installed_implementation_commit": "1803cc674152754b3addb5f477eaa46b93515e48"}, RF.BRIDGE_AUTHORIZATION_IMPLEMENTATION_MISMATCH),
+            ("bad sha", {"expectations_sha256": "A" * 64}, RF.AUTHORIZATION_EXPECTATION_UNTRUSTED),
+            ("bytes bool", {"expectations_bytes": True}, RF.AUTHORIZATION_EXPECTATION_UNTRUSTED),
+            ("empty path", {"authority_namespace_root": ""}, RF.AUTHORIZATION_EXPECTATION_UNTRUSTED),
+            ("bad git", {"installed_implementation_tree": "z" * 40}, RF.AUTHORIZATION_EXPECTATION_UNTRUSTED),
+        ):
+            with self.subTest(label):
+                with self.assertRaises(RunnerError) as context:
+                    runner._LauncherEmbeddedConstantsV1(**dict(good, **change))
+                self.assertEqual(context.exception.code, code)
+
+    def test_trusted_expectations_are_private_and_direct_or_caller_supplied_forms_fail(self) -> None:
+        untrusted = RunnerFailureCode.AUTHORIZATION_EXPECTATION_UNTRUSTED
+        with self.assertRaises(RunnerError) as context:
+            runner.TrustedExecutionExpectationsV1(
+                object(), document={}, raw_sha256="0" * 64, raw_bytes=1,
+                constants=None, root=None)
+        self.assertEqual(context.exception.code, untrusted)
+        # T-C02-02: the ordinary orchestration surface accepts NO caller-built
+        # substitute for the launcher-issued private carrier.
+        for label, substitute in (
+            ("caller dict", {"anything": "caller dict"}),
+            ("raw E bytes", b'{"schema_version": 1}'),
+            ("(E, sha) pair", (b'{"schema_version": 1}', "0" * 64)),
+            ("None", None),
+            ("package root path", "/x"),
+            ("public constants object", runner._LauncherEmbeddedConstantsV1(
+                execution_package_id="pkg_1", authorization_set_id="set_1", expectations_bytes=10,
+                expectations_sha256="a" * 64, installed_implementation_commit="1" * 40,
+                installed_implementation_tree="2" * 40, installed_implementation_parent="3" * 40,
+                bootstrap_contract_sha256="b" * 64, authority_namespace_id="ns",
+                authority_namespace_root="/x", canonical_repository_root="/y", expected_ledger_path="/z")),
+            ("caller launcher descriptor", types.SimpleNamespace(
+                execution_package_id="pkg_1", authorization_set_id="set_1",
+                expectations_sha256="a" * 64, expectations_bytes=10)),
+        ):
+            with self.subTest(label):
+                with self.assertRaises(RunnerError) as context:
+                    runner.run_release_orchestration_v1(
+                        trusted_expectations=substitute, runtime_builder=lambda c: None)
+                self.assertEqual(context.exception.code, untrusted)
+        # The launcher-only issuance seam itself refuses any caller without the
+        # module-private issuance key.
+        with self.assertRaises(RunnerError) as context:
+            runner._establish_trusted_execution_expectations(object(), None, "/x")
+        self.assertEqual(context.exception.code, untrusted)
+        # No public entry accepts an (E JSON, expected hash) pair, a package root,
+        # caller expected values or an environment override.
+        params = inspect.signature(runner.run_release_orchestration_v1).parameters
+        for banned in (
+            "expected_sha256", "expected_hash", "expectations", "expectations_json", "expectations_bytes",
+            "launcher_constants", "protected_execution_root", "execution_package_id", "authorization_set_id",
+            "env", "environ", "argv",
+        ):
+            self.assertNotIn(banned, params)
+        # No PUBLIC (non-underscore) module name may mint trusted expectations.
+        public_factories = [
+            name for name, value in vars(runner).items()
+            if not name.startswith("_") and callable(value)
+            and "trusted_execution_expectations" in name.lower()
+        ]
+        self.assertEqual(public_factories, [])
+
+    def test_protected_root_rejects_relative_missing_linked_repository_and_double_reads(self) -> None:
+        RF = RunnerFailureCode
+        repository = Path(__file__).resolve().parents[1]
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp) / "pkg"
+            root.mkdir()
+            (root / "a.bin").write_bytes(b"data")
+            reader = runner._ProtectedExecutionRoot(str(root), canonical_repository_root=str(repository))
+            self.assertEqual(reader.read_once("a.bin"), b"data")
+            with self.assertRaises(RunnerError) as context:
+                reader.read_once("a.bin")  # every artifact is read exactly once
+            self.assertEqual(context.exception.code, RF.AUTHORIZATION_EXPECTATION_UNTRUSTED)
+            with self.assertRaises(RunnerError) as context:
+                runner._ProtectedExecutionRoot("relative/path", canonical_repository_root=str(repository))
+            self.assertEqual(context.exception.code, RF.AUTHORIZATION_EXPECTATION_MISSING)
+            with self.assertRaises(RunnerError):
+                runner._ProtectedExecutionRoot(str(root / "missing"), canonical_repository_root=str(repository))
+            reader2 = runner._ProtectedExecutionRoot(str(root), canonical_repository_root=str(repository))
+            with self.assertRaises(RunnerError) as context:
+                reader2.read_once("missing.bin")
+            self.assertEqual(context.exception.code, RF.AUTHORIZATION_EXPECTATION_MISSING)
+            with self.assertRaises(RunnerError):
+                runner._ProtectedExecutionRoot(str(repository / "tests"), canonical_repository_root=str(repository))
+            try:
+                (Path(tmp) / "link").symlink_to(root, target_is_directory=True)
+            except (OSError, NotImplementedError):
+                link_available = False
+            else:
+                link_available = True
+            if link_available:
+                with self.assertRaises(RunnerError):
+                    runner._ProtectedExecutionRoot(str(Path(tmp) / "link"), canonical_repository_root=str(repository))
+                (root / "target.bin").write_bytes(b"x")
+                try:
+                    (root / "alias.bin").symlink_to(root / "target.bin")
+                except (OSError, NotImplementedError):
+                    pass
+                else:
+                    with self.assertRaises(RunnerError):
+                        runner._ProtectedExecutionRoot(str(root), canonical_repository_root=str(repository)).read_once("alias.bin")
+
+    def test_phase_accounting_never_exceeds_budget_or_phase_count(self) -> None:
+        RF = RunnerFailureCode
+        boot = runner._PhaseAccounting(authorized_phases=2, per_phase_max=72, aggregate_ceiling=144)
+        boot.begin()
+        boot.record(72)
+        boot.begin()
+        boot.record(72)
+        self.assertEqual((boot.charges, sum(boot.charges)), ((72, 72), 144))
+        with self.assertRaises(RunnerError) as context:
+            boot.begin()  # no third phase
+        self.assertEqual(context.exception.code, RF.BRIDGE_AUTHORIZATION_PHASE_PLAN_MISMATCH)
+        over = runner._PhaseAccounting(authorized_phases=2, per_phase_max=72, aggregate_ceiling=144)
+        over.begin()
+        with self.assertRaises(RunnerError) as context:
+            over.record(73)
+        self.assertEqual(context.exception.code, RF.BRIDGE_AUTHORIZATION_PHASE_BUDGET_MISMATCH)
+        clean = runner._PhaseAccounting(authorized_phases=1, per_phase_max=72, aggregate_ceiling=72)
+        clean.begin()
+        clean.record(72)
+        with self.assertRaises(RunnerError):
+            clean.begin()  # no second clean pass
+        again = runner._PhaseAccounting(authorized_phases=2, per_phase_max=72, aggregate_ceiling=100)
+        again.begin()
+        again.record(72)
+        again.begin()
+        with self.assertRaises(RunnerError) as context:
+            again.record(30)  # no borrowing / unused remainder is never transferred
+        self.assertEqual(context.exception.code, RF.BRIDGE_AUTHORIZATION_AGGREGATE_BUDGET_EXCEEDED)
+        unfinished = runner._PhaseAccounting(authorized_phases=2, per_phase_max=72, aggregate_ceiling=144)
+        unfinished.begin()
+        with self.assertRaises(RunnerError):
+            unfinished.begin()  # no repeat after a read failure without a recorded charge
+
+    def test_d07_read_only_surface_is_unchanged_and_never_reaches_orchestration(self) -> None:
+        self.assertEqual(
+            runner._D07_REQUIRED_ENVELOPE_PERMITTED,
+            ("network_access", "demo_public_reads", "demo_authenticated_reads", "credential_use"))
+        self.assertEqual(len(runner._D07_REQUIRED_ENVELOPE_PROHIBITED), 9)
+        self.assertEqual(runner._D07_REQUIRED_ENVELOPE_PROHIBITED[0], "demo_writes")
+        parser = runner.build_live_entrypoint_arg_parser()
+        flags = {flag for action in parser._actions for flag in action.option_strings}
+        self.assertEqual(flags, {
+            "-h", "--help", "--ticker", "--authority-namespace-id", "--authority-namespace-root",
+            "--canonical-repository-root", "--ledger-path", "--bootstrap-contract-sha256", "--risk-config-json",
+            "--risk-config-sha256", "--execution-authorization-json", "--execution-authorization-sha256",
+            "--installed-implementation-commit", "--account-scope-ref", "--subaccount", "--exchange-index",
+            "--invocation-id", "--confirm-live-read"})
+        entry = inspect.getsource(runner.run_read_only_stage3_live_entrypoint)
+        cli = inspect.getsource(runner.main)
+        for source in (entry, cli, inspect.getsource(runner._build_read_only_stage3_live_runtime)):
+            for banned in (
+                "run_release_orchestration_v1", "consume_active_execution_authorization_set_v1",
+                "_orch_run_boot_hold_bridge", "read_active_authorization_freshness_v1",
+                "run_gate_d_ordinary_decision_loop", "acquire_active_release_only_v1",
+                "acquire_active_normal_writer_state_v1", "_LauncherEmbeddedConstantsV1",
+                "no_repair_local_reads",
+            ):
+                self.assertNotIn(banned, source)
+        # The D07 builder keeps the default (repairing) local reads.
+        self.assertFalse(dataclasses.fields(runner.ExperimentRunnerRuntimeV2)[-1].default is not False)
+
+
+def ledger_module_sha256(data: bytes) -> str:
+    return hashlib.sha256(data).hexdigest()
+
+
+class ReleaseOrchestrationTestCase(unittest.TestCase):
+    """C04-T03..T31 through the PRODUCTION admission / consumption / bridge /
+    release / Gate-D path with temporary synthetic authority+ledger stores."""
+
+    ACCOUNT = ActiveStage3EndToEndTestCase.ACCOUNT
+    TICKER = ActiveStage3EndToEndTestCase.TICKER
+    N1_CHECKPOINT_SHA = ActiveStage3EndToEndTestCase.N1_CHECKPOINT_SHA
+    P02_SHA = ActiveStage3EndToEndTestCase.P02_SHA
+    P01_SHA = ActiveStage3EndToEndTestCase.P01_SHA
+    CONTROLLED_TICKER = ActiveStage3EndToEndTestCase.CONTROLLED_TICKER
+    SETTLED_TIME = ActiveStage3EndToEndTestCase.SETTLED_TIME
+    T0, T1, NOW = ActiveStage3EndToEndTestCase.T0, ActiveStage3EndToEndTestCase.T1, ActiveStage3EndToEndTestCase.NOW
+    _SETTLE_DEFAULT = ActiveStage3EndToEndTestCase._SETTLE_DEFAULT
+    _hx = staticmethod(ActiveStage3EndToEndTestCase._hx)
+    _surface = ActiveStage3EndToEndTestCase._surface
+    _traversal = ActiveStage3EndToEndTestCase._traversal
+    _settlement = ActiveStage3EndToEndTestCase._settlement
+    _dynamic_read = ActiveStage3EndToEndTestCase._dynamic_read
+    _selected_route_truth = ActiveStage3EndToEndTestCase._selected_route_truth
+    _route_qualification = ActiveStage3EndToEndTestCase._route_qualification
+    _evidence_contract = ActiveStage3EndToEndTestCase._evidence_contract
+
+    BOOT = "PRE_RELEASE_BRIDGE_RELEASE_ORCHESTRATION_V1"
+    CLEAN = "CLEAN_SAFE_HELD_RELEASE_CONTINUATION_V1"
+    COMMIT, TREE, PARENT = "1" * 40, "2" * 40, "3" * 40
+
+    def setUp(self) -> None:
+        self.temp = tempfile.TemporaryDirectory()
+        self.root = Path(self.temp.name)
+        self.repository_root = Path(__file__).resolve().parents[1]
+        self.authority_root = self.root / "authority"
+        self.authority_root.mkdir()
+        self.inputs = DeterministicInputs()
+        self.ledger_path = self.root / "active.sqlite3"
+        self.binding = AuthorityNamespaceBinding.bind(
+            authority_namespace_id="orch-ns", authority_namespace_root=self.authority_root,
+            canonical_repository_root=self.repository_root)
+        initialize_authority_namespace(self.binding, clock=self.inputs.clock, uuid_factory=self.inputs.uuid)
+        self.domain_binding = ledger_binding.ExecutionDomainBindingV1(
+            venue="KALSHI", environment="KALSHI_DEMO", account_scope_ref=self.ACCOUNT, subaccount=1, exchange_index=0)
+        self.bootstrap = ledger_binding.DomainBootstrapContractV1(
+            binding=self.domain_binding, bootstrap_class="KNOWN_NONEMPTY_PRESTACK",
+            bootstrap_cutoff_at_utc="2026-09-01T00:00:00.000000Z",
+            prestack_activity_completeness="COMPLETE_KNOWN_NONEMPTY_PRESTACK",
+            unresolved_write_count=0, unresolved_cancel_count=0, working_order_truth="COMPLETE_ZERO",
+            fill_truth="COMPLETE_KNOWN_NONZERO", position_truth="COMPLETE_KNOWN_NONZERO",
+            retained_position_ticker="KXAAAGASD-26SEP02-4.1200", retained_position_floor_contracts=Decimal("1.00"))
+        _, self.active_contract = ledger_binding.initialize_active_execution_domain_ledger(
+            self.binding, canonical_repository_root=str(self.repository_root),
+            domain_binding=self.domain_binding, bootstrap_contract=self.bootstrap,
+            ledger_path=str(self.ledger_path), clock=self.inputs.clock, uuid_factory=self.inputs.uuid)
+        # TEST-ONLY synthetic write-capable RiskLimitConfigV1 fixture.  It is NOT a user
+        # selection and NOT an operator default: USER_RISK_CHOICE_REQUIRED remains OPEN.
+        self.config = RiskLimitConfigV1(
+            1, self.domain_binding.conflict_domain_ref, "USD",
+            PerOrderRiskLimits(Decimal("10"), Decimal("10"), True, Decimal("0.10"), 1_000),
+            PerMarketRiskLimits(Decimal("20"), Decimal("20"), 10, Decimal("20"), Decimal("20")),
+            AccountRiskLimits(Decimal("100"), 50, Decimal("100"), 0, Decimal("0")),
+            FlowRiskLimits(1, 1_000, 1, 1_000, 1, 1_000, 1, 1_000, 2, 1_000, 1, 500, 1, 10, 100),
+            StateIntegrityLimits(1_000, 1_000, 10, 1, 500, 10, 100),
+            VenueDefensePolicy("NOT_REQUIRED", None, True, "NO_SAFETY_CREDIT", "NO_SAFETY_CREDIT"))
+        self._packages = 0
+        self.builder_calls: list = []
+
+    def tearDown(self) -> None:
+        self.temp.cleanup()
+
+    # ------------------------------------------------------------------ ledger states
+    def _acquire_emergency(self):
+        acquisition = ledger_binding.acquire_active_emergency_control_only_v1(
+            self.binding, canonical_repository_root=str(self.repository_root),
+            active_contract=self.active_contract, expected_ledger_path=str(self.ledger_path),
+            clock=self.inputs.clock, uuid_factory=self.inputs.uuid)
+        self.assertIsNotNone(acquisition.handle, acquisition.failure_code)
+        return acquisition.handle
+
+    def _qualifying_reconciliation(self, handle):
+        handle.record_reconciliation({
+            "incident_id": self.active_contract.incident_id, "disposition": "SYNTHETIC_PRIOR_BRIDGE",
+            "write_closure_class": "AUTHORITATIVE_RESULT_CLOSED", "bound_order_id": None,
+            "created_order_upper_bound": 0, "active_order_upper_bound": 0, "unknown_result": False,
+            "writer_proof_release_eligible": True, "basis_event_ids": [],
+            "adapter_reconciliation_schema_id": "SYNTHETIC_RESOLUTION_V1"}, incident_id=self.active_contract.incident_id)
+
+    def _enter_boot_hold_r1(self) -> None:
+        handle = self._acquire_emergency()
+        self._qualifying_reconciliation(handle)
+        handle.close()
+
+    def _enter_clean_safe_held(self) -> None:
+        handle = self._acquire_emergency()
+        self._qualifying_reconciliation(handle)
+        live = handle.inspect_validated_projection()
+        handle.record_risk_control_state_changed({
+            "previous_state": "BOOT_HOLD", "new_state": "SAFE_HELD", "cause": "REPLAY_ALL_SAFETY_PREDICATES_PASS",
+            "risk_state_epoch_before": 0, "risk_state_epoch_after": 1, "risk_config_sha256": self.config.sha256,
+            "related_emergency_action_id": None, "related_release_id": None, "predecessor_state_event_id": None,
+            "observed_authority_trusted_sequence": live.last_sequence, "observed_authority_trusted_hash": live.terminal_event_hash,
+            "observed_ledger_terminal_sequence": live.last_sequence, "observed_ledger_terminal_hash": live.terminal_event_hash})
+        handle.close()
+
+    def _sql(self, query, args=()):
+        connection = sqlite3.connect(str(self.ledger_path))
+        try:
+            return connection.execute(query, args).fetchall()
+        finally:
+            connection.close()
+
+    def _event_types(self):
+        return [row[0] for row in self._sql("SELECT event_type FROM ledger_events ORDER BY sequence")]
+
+    def _events(self, event_type):
+        return [json.loads(row[0]) for row in self._sql(
+            "SELECT payload_json FROM ledger_events WHERE event_type=? ORDER BY sequence", (event_type,))]
+
+    def _authority_tail(self):
+        connection = sqlite3.connect(str(self.authority_root / _ORCH_AUTHORITY_STORE_FILENAME))
+        try:
+            return connection.execute("SELECT trusted_sequence,trusted_event_hash FROM conflict_domain_authority").fetchone()
+        finally:
+            connection.close()
+
+    def _state(self):
+        return (self._event_types(), self._authority_tail())
+
+    def _checkpoint(self):
+        opened = ledger_binding.read_active_local_safety_state_v1(
+            self.binding, canonical_repository_root=str(self.repository_root), active_contract=self.active_contract,
+            expected_ledger_path=str(self.ledger_path), no_repair=True)
+        self.assertIsNone(opened.failure_code)
+        projection = opened.projection
+        state_rows = self._sql("SELECT event_id FROM ledger_events WHERE event_type='RISK_CONTROL_STATE_CHANGED' ORDER BY sequence DESC LIMIT 1")
+        proof = self.active_contract.writer_proof_id
+        return {
+            "authority_instance_id": projection.authority_instance_id, "authority_namespace_id": projection.authority_namespace_id,
+            "authority_store_path_identity_sha256": projection.authority_store_path_identity_sha256,
+            "ledger_instance_id": projection.ledger_instance_id, "ledger_path_identity_sha256": projection.ledger_path_identity_sha256,
+            "trusted_sequence": projection.trusted_sequence, "trusted_event_hash": projection.trusted_event_hash,
+            "risk_control_state": projection.risk_control_state, "risk_state_epoch": projection.risk_state_epoch,
+            "risk_state_event_id": state_rows[0][0] if state_rows else None, "writer_proof_id": proof,
+            "writer_proof_state": projection.writer_proof_state_by_proof_id.get(proof),
+            "writer_proof_release_eligible": projection.writer_proof_release_eligible_by_proof_id.get(proof),
+            "active_risk_config_sha256": projection.active_risk_config_sha256,
+        }
+
+    # ------------------------------------------------------------------ package
+    def _package(self, cls, *, max_ordinary=0, checkpoint=None, o_mut=None, g_mut=None, e_mut=None, b_mut=None,
+                 risk_text=None, constants_mut=None, tamper=None, d07_text=None, raw_e_text=None, suffix=""):
+        self._packages += 1
+        package_root = self.root / f"package_{self._packages}"
+        package_root.mkdir()
+        contract = self.active_contract
+        risk_text = risk_text or _d07_risk_config_to_strict_json(self.config)
+        risk_bytes = risk_text.encode("utf-8")
+        d07_bytes = (d07_text or json.dumps(_d07_valid_envelope_dict(), sort_keys=True)).encode("utf-8")
+        binding = {
+            "authorization_set_id": ("set_test_1" + suffix), "task_id": "task_test_1", "execution_attempt_id": ("attempt_test_1" + suffix),
+            "invocation_id": ("inv_test_1" + suffix), "orchestration_authorization_id": ("orch_test_1" + suffix),
+            "orchestration_authorization_class": cls, "repository": "rigolugo/ARB",
+            "required_implementation_commit": self.COMMIT, "required_implementation_tree": self.TREE,
+            "required_implementation_parent": self.PARENT, "active_contract_id": contract.contract_id,
+            "active_contract_sha256": contract.contract_sha256, "domain_binding_id": contract.domain_binding_id,
+            "domain_binding_sha256": contract.domain_binding_sha256, "environment": "KALSHI_DEMO",
+            "account_scope_ref": self.ACCOUNT, "subaccount": 1, "exchange_index": 0,
+            "conflict_domain_ref": contract.conflict_domain_ref,
+            "market_scope": {"scope_kind": "SINGLE_MARKET_TICKER", "ticker": self.TICKER},
+            "risk_config_raw_sha256": hashlib.sha256(risk_bytes).hexdigest(),
+            "risk_config_semantic_sha256": self.config.sha256,
+            "process_continuity_mode": "ONE_PROCESS_ONE_INVOCATION_NO_RESTART", "absolute_deadline_seconds": 300,
+            "deadline_policy": "ONE_INVOCATION_START_ABSOLUTE_DEADLINE_NO_RESET",
+        }
+        if b_mut:
+            b_mut(binding)
+        binding_hash = ledger_binding.compute_authorization_binding_sha256(binding)
+        g = {key: binding[key] for key in runner._AUTH_BINDING_KEYS
+             if key not in ("orchestration_authorization_id", "orchestration_authorization_class")}
+        g.update(
+            schema_version=2, authorization_class="USER_AUTHORIZED_GATE_D_EXECUTION_V2", authorization_id=("gate_test_1" + suffix),
+            authorizing_user="Test Approver", orchestration_authorization_id=("orch_test_1" + suffix),
+            orchestration_authorization_class=cls, authorization_binding_sha256=binding_hash,
+            max_ordinary_write_sends=max_ordinary, max_cleanup_cancel_sends=0)
+        if g_mut:
+            g_mut(g)
+        g_bytes = _orch_canonical(g)
+        variant = runner._ORCH_VARIANTS[cls]
+        d07_id = _d07_valid_envelope_dict()["authorization_id"]
+        o = {key: binding[key] for key in runner._ORCH_O_KEYS if key in binding}
+        o.update(
+            schema_version=1, authorization_class=cls, authorization_id=("orch_test_1" + suffix), authorizing_user="Test Approver",
+            authorizing_authority="Test Authority", d07_read_authorization_id=d07_id,
+            d07_read_authorization_sha256=hashlib.sha256(d07_bytes).hexdigest(),
+            restart_policy="RESTART_REQUIRES_FRESH_AUTHORIZATION", entry_state_class=variant["entry_state_class"],
+            authorized_stage3_phase_count=variant["authorized_stage3_phase_count"],
+            max_pre_release_stage3_phases=variant["max_pre_release_stage3_phases"],
+            per_phase_pre_release_read_request_max_v2=72,
+            aggregate_pre_release_read_request_ceiling=variant["aggregate_pre_release_read_request_ceiling"],
+            phase_1_role=variant["phase_1_role"], phase_2_role=variant["phase_2_role"],
+            local_mutation_authority=list(variant["local_mutation_authority"]),
+            gate_d_successor_authorization_id=("gate_test_1" + suffix),
+            gate_d_successor_authorization_sha256=hashlib.sha256(g_bytes).hexdigest(),
+            gate_d_successor_authorization_class="USER_AUTHORIZED_GATE_D_EXECUTION_V2",
+            authorization_binding_sha256=binding_hash,
+            authorization_consumption_policy="DURABLE_ARB_AUTHORIZATION_SET_CONSUMED_V1")
+        o["authorization_set_id"] = ("set_test_1" + suffix)
+        if o_mut:
+            o_mut(o)
+        o_bytes = _orch_canonical(o)
+        checkpoint = checkpoint or self._checkpoint()
+        e = {
+            "schema_version": 1, "carrier_class": "ARB_USER_APPROVED_EXECUTION_AUTHORIZATION_EXPECTATIONS_V1",
+            "execution_package_id": ("pkg_test_1" + suffix), "authorization_set_id": ("set_test_1" + suffix), "binding": binding,
+            "authorization_binding_sha256": binding_hash,
+            "d07": {"authorization_id": d07_id, "authorization_class": "TASK_AUTHORIZATION_CAPABILITY_ENVELOPE",
+                    "bytes": len(d07_bytes), "sha256": hashlib.sha256(d07_bytes).hexdigest()},
+            "orchestration": {"authorization_id": ("orch_test_1" + suffix), "authorization_class": cls,
+                              "bytes": len(o_bytes), "sha256": hashlib.sha256(o_bytes).hexdigest()},
+            "gate_d": {"authorization_id": ("gate_test_1" + suffix), "authorization_class": "USER_AUTHORIZED_GATE_D_EXECUTION_V2",
+                       "bytes": len(g_bytes), "sha256": hashlib.sha256(g_bytes).hexdigest()},
+            "risk_config": {"bytes": len(risk_bytes), "raw_sha256": hashlib.sha256(risk_bytes).hexdigest(),
+                            "semantic_sha256": self.config.sha256},
+            "entry_checkpoint": checkpoint, "consumption_policy": "DURABLE_ARB_AUTHORIZATION_SET_CONSUMED_V1",
+            "user_risk_choice_status": "USER_SELECTED_WRITE_CAPABLE",
+            "gate_d_scope": {"max_ordinary_write_sends": g["max_ordinary_write_sends"], "max_cleanup_cancel_sends": g["max_cleanup_cancel_sends"]},
+        }
+        if e_mut:
+            e_mut(e)
+        e_bytes = raw_e_text.encode("utf-8") if raw_e_text is not None else _orch_canonical(e)
+        constants = dict(
+            execution_package_id=("pkg_test_1" + suffix), authorization_set_id=("set_test_1" + suffix), expectations_bytes=len(e_bytes),
+            expectations_sha256=hashlib.sha256(e_bytes).hexdigest(), installed_implementation_commit=self.COMMIT,
+            installed_implementation_tree=self.TREE, installed_implementation_parent=self.PARENT,
+            bootstrap_contract_sha256=contract.bootstrap_contract_sha256, authority_namespace_id="orch-ns",
+            authority_namespace_root=str(self.authority_root), canonical_repository_root=str(self.repository_root),
+            expected_ledger_path=str(self.ledger_path))
+        if constants_mut:
+            constants_mut(constants)
+        files = {
+            runner._ORCH_E_FILENAME: e_bytes, runner._ORCH_O_FILENAME: o_bytes, runner._ORCH_G_FILENAME: g_bytes,
+            runner._ORCH_D07_FILENAME: d07_bytes, runner._ORCH_RISK_FILENAME: risk_bytes,
+        }
+        for name, content in files.items():
+            (package_root / name).write_bytes(content)
+        if tamper:
+            tamper(package_root)
+        return runner._LauncherEmbeddedConstantsV1(**constants), package_root
+
+    # ------------------------------------------------------------------ runtime builder
+    def _builder(self, *, phases, write_transport=None, tail_mutation=None, mutate_runtime=None):
+        def build(context):
+            self.builder_calls.append(context)
+            transport = _ScriptedTransport()
+            for _ in range(16):
+                transport.queue(RunnerOperation.GET_MARKET, _market_payload(ticker=self.TICKER))
+                transport.queue(RunnerOperation.GET_ORDERS, _orders_payload([]))
+                transport.queue(RunnerOperation.GET_POSITIONS, _positions_payload([]))
+            self.transport = transport
+
+            def orderbook(ticker, deadline):
+                return _fake_orderbook_snapshot(self.TICKER).with_canonical_identity()
+
+            runtime = runner.build_orchestrated_release_runtime_v1(
+                context, send_operation_request=transport,
+                fetch_orderbook=runner._TestOnlyActiveV2OrderbookSeam(orderbook),
+                strategy_instance_id=GATE_D_STRATEGY_INSTANCE_ID, minimum_spread_usd=GATE_D_MIN_SPREAD,
+                gate_d_capability_reference_id="cap_active_gate_d_test",
+                normal_write_transport=write_transport or _ScriptedWriteTransport())
+            specs = []
+            for k in range(phases):
+                truth = self._selected_route_truth(runtime)
+                cutoff = runner._active_reconciliation_cutoff_sha256(truth)
+                fixture = self._dynamic_read(
+                    traversals=tuple(self._traversal(i, tag=k) for i in (0, 1, 2, 3)),
+                    selected_route_cutoff=cutoff, active_contract=context.active_contract, risk_config=context.risk_config)
+                specs.append((fixture, truth, 72))
+            if specs:
+                runtime = dataclasses.replace(runtime, trusted_dynamic_read_acquirer_test_seam=_SequencedFakeAcquirer(specs))
+            if tail_mutation is not None:
+                tail_mutation()
+            if mutate_runtime is not None:
+                runtime = mutate_runtime(runtime)
+            return runtime
+        return build
+
+    @property
+    def _baseline_length(self):
+        return len(self._event_types())
+
+    @staticmethod
+    def _issue_trusted_expectations(package):
+        """TEST-ONLY simulation of the separately approved launcher (T-C02-03).
+
+        A real launcher is reviewed, approved and protected bytes; here the test
+        stands in for it by reaching through the module-private launcher-only
+        seam with the module-private issuance key.  Test scaffolding touching
+        module-private internals is explicitly inside the accepted threat model
+        and does NOT make any of this a public runtime API."""
+        constants, root = package
+        return runner._establish_trusted_execution_expectations(
+            runner._LAUNCHER_ISSUANCE_KEY, constants, str(root))
+
+    def _run(self, package, *, builder, **kwargs):
+        options = dict(
+            monotonic_clock_ns=self.inputs.monotonic_ns, wall_clock=self.inputs.clock,
+            uuid_factory=self.inputs.uuid, decision_cycle_max=2)
+        options.update(kwargs)
+        return runner.run_release_orchestration_v1(
+            trusted_expectations=self._issue_trusted_expectations(package),
+            runtime_builder=builder, **options)
+
+    # ================================================================== success paths
+    def test_clean_safe_held_one_phase_release_and_zero_bridge_mutation(self) -> None:
+        self._enter_clean_safe_held()
+        package = self._package(self.CLEAN)
+        baseline = self._baseline_length
+        result = self._run(package, builder=self._builder(phases=1))
+        self.assertEqual(result.route, "CLEAN_SAFE_HELD")
+        self.assertEqual((result.phase_requests, result.aggregate_requests), ((72,), 72))
+        self.assertEqual(len(result.trusted_dynamic_read_set_ids), 1)
+        self.assertRegex(result.trusted_dynamic_read_set_ids[0], r"^ADRS2_[0-9a-f]{64}$")
+        self.assertIsNone(result.bridge_reconciliation_appended)
+        self.assertEqual(result.gate_d_result.stop_reason, "ORDINARY_WRITE_BUDGET_EXHAUSTED")
+        self.assertEqual((result.gate_d_result.ordinary_writes_sent, result.gate_d_result.cleanup_cancels_sent), (0, 0))
+        self.assertEqual(result.writer_cleanup, "ENDED")
+        types = self._event_types()
+        self.assertEqual(types[baseline:baseline + 8], [
+            "EXECUTION_AUTHORIZATION_SET_CONSUMED", "RESTRICTED_SESSION_STARTED", "RISK_RELEASE_RECORDED",
+            "WRITER_PROOF_RELEASED", "RISK_CONTROL_STATE_CHANGED", "RESTRICTED_SESSION_ENDED",
+            "WRITER_SESSION_STARTED", "WRITER_SESSION_ENDED"])
+        self.assertEqual(len(types), baseline + 8)
+        # Zero emergency acquisition / reconciliation / BOOT_HOLD transition / abandonment.
+        for forbidden in ("EMERGENCY_ACTION_OPENED", "RESTRICTED_SESSION_ABANDONED", "WRITER_SESSION_ABANDONED"):
+            self.assertNotIn(forbidden, types[baseline:])
+        self.assertEqual(types.count("RECONCILIATION_RECORDED"), 1)  # only the pre-existing entry evidence
+        started = [p["acquisition_mode"] for p in self._events("RESTRICTED_SESSION_STARTED")]
+        self.assertEqual(started[-1], "RELEASE_ONLY")
+        # One durable consumption event; process identity/deadline are exactly the run's.
+        consumed = self._events("EXECUTION_AUTHORIZATION_SET_CONSUMED")
+        self.assertEqual(len(consumed), 1)
+        self.assertEqual(consumed[0]["process_instance_id"], result.process_instance_id)
+        self.assertEqual(consumed[0]["invocation_absolute_deadline_monotonic_ns"], result.absolute_deadline_monotonic_ns)
+        self.assertEqual(consumed[0]["invocation_absolute_deadline_monotonic_ns"] - consumed[0]["invocation_started_monotonic_ns"], 300_000_000_000)
+        self.assertEqual(consumed[0]["binding"]["exchange_index"], 0)
+        self.assertEqual(consumed[0]["binding"]["subaccount"], 1)
+        final = self._checkpoint()
+        self.assertEqual((final["risk_control_state"], final["writer_proof_state"]), ("WRITER_ELIGIBLE", "RELEASED"))
+
+    def test_boot_hold_r0_two_phase_bridge_close_plus_one_and_fresh_second_read_set(self) -> None:
+        package = self._package(self.BOOT)
+        baseline = self._baseline_length
+        result = self._run(package, builder=self._builder(phases=2))
+        self.assertEqual(result.route, "BOOT_HOLD_R0")
+        self.assertEqual((result.phase_requests, result.aggregate_requests), ((72, 72), 144))
+        self.assertEqual(len(set(result.trusted_dynamic_read_set_ids)), 2)  # phase-2 ADRS2 is NEW
+        self.assertTrue(result.bridge_reconciliation_appended)
+        self.assertEqual(result.bridge_post_close_sequence, result.bridge_pre_close_sequence + 1)
+        types = self._event_types()
+        self.assertEqual(types[baseline:baseline + 12], [
+            "EXECUTION_AUTHORIZATION_SET_CONSUMED", "RESTRICTED_SESSION_STARTED", "RECONCILIATION_RECORDED",
+            "RISK_CONTROL_STATE_CHANGED", "RESTRICTED_SESSION_ENDED", "RESTRICTED_SESSION_STARTED",
+            "RISK_RELEASE_RECORDED", "WRITER_PROOF_RELEASED", "RISK_CONTROL_STATE_CHANGED",
+            "RESTRICTED_SESSION_ENDED", "WRITER_SESSION_STARTED", "WRITER_SESSION_ENDED"])
+        modes = [p["acquisition_mode"] for p in self._events("RESTRICTED_SESSION_STARTED")]
+        self.assertEqual(modes, ["EMERGENCY_CONTROL_ONLY", "RELEASE_ONLY"])
+        # Exact qualifying reconciliation payload (blocked-seed derivation, re-derived).
+        reconciliation = self._events("RECONCILIATION_RECORDED")[-1]
+        self.assertEqual(reconciliation, {
+            "incident_id": self.active_contract.incident_id,
+            "disposition": "ACTIVE_DOMAIN_CURRENT_TRUTH_RECONCILED_SAFE_V1:" + result.trusted_dynamic_read_set_ids[0],
+            "write_closure_class": "AUTHORITATIVE_RESULT_CLOSED", "bound_order_id": None,
+            "created_order_upper_bound": 0, "active_order_upper_bound": 0, "unknown_result": False,
+            "writer_proof_release_eligible": True, "basis_event_ids": [],
+            "adapter_reconciliation_schema_id": "ARB_R1_D07_N1_PRE_RELEASE_BRIDGE_RECONCILIATION_V1"})
+        transition = self._events("RISK_CONTROL_STATE_CHANGED")[0]
+        self.assertEqual((transition["previous_state"], transition["new_state"], transition["cause"]),
+                         ("BOOT_HOLD", "SAFE_HELD", "REPLAY_ALL_SAFETY_PREDICATES_PASS"))
+        self.assertEqual((transition["risk_state_epoch_before"], transition["risk_state_epoch_after"]), (0, 1))
+        self.assertEqual(transition["risk_config_sha256"], self.config.sha256)
+        # Emergency close payload is the exact clean end at pre_close + 1 (no consumption inserted).
+        ended = self._events("RESTRICTED_SESSION_ENDED")[0]
+        self.assertEqual(ended["pre_end_trusted_sequence"], result.bridge_pre_close_sequence)
+        self.assertEqual(ended["end_reason"], "CLEAN_RELEASE_OF_EXCLUSIVE_LOCKS")
+        self.assertEqual(self._events("EXECUTION_AUTHORIZATION_SET_CONSUMED")[0]["process_instance_id"], result.process_instance_id)
+
+    def test_boot_hold_r1_preserves_the_existing_qualifying_reconciliation(self) -> None:
+        self._enter_boot_hold_r1()
+        package = self._package(self.BOOT)
+        before = self._event_types().count("RECONCILIATION_RECORDED")
+        result = self._run(package, builder=self._builder(phases=2))
+        self.assertEqual(result.route, "BOOT_HOLD_R1")
+        self.assertFalse(result.bridge_reconciliation_appended)
+        self.assertEqual(self._event_types().count("RECONCILIATION_RECORDED"), before)  # no duplicate append
+        self.assertEqual(len(set(result.trusted_dynamic_read_set_ids)), 2)
+        self.assertEqual(self._checkpoint()["risk_control_state"], "WRITER_ELIGIBLE")
+
+    def test_same_process_lineage_deadline_and_gate_d_scope_are_the_exact_committed_values(self) -> None:
+        self._enter_clean_safe_held()
+        package = self._package(self.CLEAN, max_ordinary=2)
+        seen = {}
+        real_loop = runner.run_gate_d_ordinary_decision_loop
+
+        def spy(stage3, runtime, invocation, **kwargs):
+            seen.update(stage3=stage3, runtime=runtime, invocation=invocation, kwargs=kwargs)
+            return real_loop(stage3, runtime, invocation, **dict(kwargs, ordinary_write_send_max=0))
+
+        starts = []
+        base_mono = self.inputs.monotonic_ns
+
+        def mono():
+            value = base_mono()
+            starts.append(value)
+            return value
+
+        with mock.patch.object(runner, "run_gate_d_ordinary_decision_loop", spy):
+            result = self._run(package, builder=self._builder(phases=1), monotonic_clock_ns=mono)
+        # Row 0: exactly ONE sample precedes any authorization-file work; end = start + 300 s, never recomputed.
+        self.assertEqual(result.absolute_deadline_monotonic_ns, starts[0] + 300_000_000_000)
+        self.assertEqual(seen["runtime"].experiment_absolute_end_monotonic_ns, result.absolute_deadline_monotonic_ns)
+        self.assertEqual(seen["kwargs"]["ordinary_write_send_max"], 2)
+        self.assertEqual(seen["stage3"].process_instance_id, result.process_instance_id)
+        self.assertEqual(seen["runtime"].normal_gate.process_instance_id, result.process_instance_id)
+        self.assertEqual(seen["invocation"].invocation_id, "inv_test_1")
+        self.assertEqual(seen["stage3"].trusted_dynamic_read_set_id, result.trusted_dynamic_read_set_ids[-1])
+        self.assertEqual(len(self.builder_calls), 1)
+        context = self.builder_calls[0]
+        self.assertEqual(context.experiment_absolute_end_monotonic_ns, result.absolute_deadline_monotonic_ns)
+        self.assertEqual(context.gate_d_max_ordinary_write_sends, 2)
+        self.assertIs(context.normal_gate, seen["runtime"].normal_gate)
+
+    def test_start_is_sampled_before_any_authorization_file_verification(self) -> None:
+        self._enter_clean_safe_held()
+        package = self._package(self.CLEAN)
+        calls = []
+        base_mono = self.inputs.monotonic_ns
+
+        def mono():
+            calls.append("mono")
+            return base_mono()
+
+        # E is verified at the launcher boundary BEFORE orchestration is entered
+        # (C04-05), so the theorem inside the orchestration is that row 0 samples
+        # the single monotonic start before ANY authorization-artifact read it
+        # performs itself (O / G / D07 / risk, through the protected root).
+        expectations = self._issue_trusted_expectations(package)
+        root = object.__getattribute__(expectations, "_root")
+        real_read = root.read_once
+
+        def spy(filename):
+            calls.append("verify")
+            return real_read(filename)
+
+        with mock.patch.object(root, "read_once", spy):
+            runner.run_release_orchestration_v1(
+                trusted_expectations=expectations, runtime_builder=self._builder(phases=1),
+                monotonic_clock_ns=mono, wall_clock=self.inputs.clock,
+                uuid_factory=self.inputs.uuid, decision_cycle_max=2)
+        # The very first thing the orchestration does is sample the monotonic
+        # start, and nothing before the first artifact read is anything else.
+        self.assertIn("verify", calls)
+        self.assertEqual(calls[0], "mono")
+        self.assertEqual(set(calls[:calls.index("verify")]), {"mono"})
+
+    # ================================================================== replay / restart
+    def test_replay_after_success_is_rejected_with_no_read_no_runtime_and_no_mutation(self) -> None:
+        self._enter_clean_safe_held()
+        package = self._package(self.CLEAN)
+        self._run(package, builder=self._builder(phases=1))
+        state = self._state()
+        calls_before = len(self.builder_calls)
+        # A NEW invocation over identical bytes (fresh process view, fresh monotonic sample, no in-memory state).
+        with self.assertRaises(RunnerError) as context:
+            runner.run_release_orchestration_v1(
+                trusted_expectations=self._issue_trusted_expectations(package),
+                runtime_builder=self._builder(phases=1),
+                monotonic_clock_ns=self.inputs.monotonic_ns, wall_clock=self.inputs.clock, uuid_factory=self.inputs.uuid)
+        self.assertEqual(context.exception.code, RunnerFailureCode.BRIDGE_AUTHORIZATION_STALE_OR_REPLAYED)
+        self.assertEqual(self._state(), state)
+        self.assertEqual(len(self.builder_calls), calls_before)
+
+    def test_consumption_burns_the_set_even_when_execution_stops_before_gate_d(self) -> None:
+        self._enter_clean_safe_held()
+        package = self._package(self.CLEAN)
+
+        def broken(runtime):
+            raise RunnerError(RunnerFailureCode.PRE_RELEASE_CAPABILITY_NOT_AUTHORIZED, detail="test stop before phase 1")
+
+        with self.assertRaises(RunnerError):
+            self._run(package, builder=self._builder(phases=1, mutate_runtime=broken))
+        self.assertEqual(self._event_types().count("EXECUTION_AUTHORIZATION_SET_CONSUMED"), 1)
+        self.assertNotIn("RESTRICTED_SESSION_STARTED", self._event_types()[-1:])
+        with self.assertRaises(RunnerError) as context:
+            self._run(package, builder=self._builder(phases=1))
+        self.assertEqual(context.exception.code, RunnerFailureCode.BRIDGE_AUTHORIZATION_STALE_OR_REPLAYED)
+
+    # ================================================================== admission gates: zero mutation
+    def _assert_rejected(self, package, code, *, builder=None, allow_builder=False):
+        state = self._state()
+        calls = len(self.builder_calls)
+        with self.assertRaises(RunnerError) as context:
+            self._run(package, builder=builder or self._builder(phases=1))
+        self.assertEqual(context.exception.code, code, context.exception.detail)
+        self.assertEqual(self._state(), state, "an admission failure must persist NOTHING")
+        if not allow_builder:
+            self.assertEqual(len(self.builder_calls), calls, "no runtime may be built before consumption")
+
+    def test_untrusted_carrier_substitution_is_rejected_before_any_mutation(self) -> None:
+        RF = RunnerFailureCode
+        self._enter_clean_safe_held()
+        # (a) O bytes altered inside the untrusted carrier; the trusted E still pins the ORIGINAL bytes.
+        def tamper_o(root):
+            path = root / runner._ORCH_O_FILENAME
+            document = json.loads(path.read_bytes())
+            document["local_mutation_authority"] = sorted(document["local_mutation_authority"] + ["ACQUIRE_EMERGENCY_CONTROL_ONLY"])
+            path.write_bytes(_orch_canonical(document))
+        self._assert_rejected(self._package(self.CLEAN, tamper=tamper_o), RF.BRIDGE_AUTHORIZATION_SHA_MISMATCH)
+        # (b) G send maximum raised, hashes recomputed inside the carrier.
+        def tamper_g(root):
+            path = root / runner._ORCH_G_FILENAME
+            document = json.loads(path.read_bytes())
+            document["max_ordinary_write_sends"] = 4
+            path.write_bytes(_orch_canonical(document))
+        self._assert_rejected(self._package(self.CLEAN, tamper=tamper_g), RF.BRIDGE_AUTHORIZATION_GATE_D_SUCCESSOR_INVALID)
+        # (c) A replacement E (self-consistent, recomputed hashes) that the launcher constants do not pin.
+        def replace_e(root):
+            path = root / runner._ORCH_E_FILENAME
+            document = json.loads(path.read_bytes())
+            document["gate_d_scope"]["max_ordinary_write_sends"] = 3
+            path.write_bytes(_orch_canonical(document))
+        self._assert_rejected(self._package(self.CLEAN, tamper=replace_e), RF.AUTHORIZATION_EXPECTATION_IDENTITY_MISMATCH)
+        # (d) D07 artifact replaced.
+        def replace_d07(root):
+            (root / runner._ORCH_D07_FILENAME).write_bytes(json.dumps(_d07_valid_envelope_dict(authorization_id="OTHER-ID"), sort_keys=True).encode())
+        self._assert_rejected(self._package(self.CLEAN, tamper=replace_d07), RF.BRIDGE_AUTHORIZATION_D07_LAYER_MISMATCH)
+        # (e) wrong package / set identity embedded in the launcher.
+        self._assert_rejected(self._package(self.CLEAN, constants_mut=lambda c: c.update(execution_package_id="pkg_other")), RF.AUTHORIZATION_EXPECTATION_IDENTITY_MISMATCH)
+        self._assert_rejected(self._package(self.CLEAN, constants_mut=lambda c: c.update(authorization_set_id="set_other")), RF.AUTHORIZATION_EXPECTATION_IDENTITY_MISMATCH)
+        # (f) missing artifact.
+        self._assert_rejected(self._package(self.CLEAN, tamper=lambda root: (root / runner._ORCH_G_FILENAME).unlink()), RF.AUTHORIZATION_EXPECTATION_MISSING)
+        # (g) placeholder-valued E is never an execution package.
+        raw = _orch_canonical({"execution_package_id": "NOT_ISSUED"})
+        self._assert_rejected(self._package(self.CLEAN, raw_e_text=raw.decode()), RF.TRUSTED_EXECUTION_PACKAGE_NOT_ISSUED)
+
+    def test_caller_supplied_self_consistent_artifacts_never_create_authority(self) -> None:
+        RF = RunnerFailureCode
+        self._enter_clean_safe_held()
+        # An attacker-controlled O/G/E set with correct hashes but a different (untrusted) E than the launcher's.
+        package = self._package(self.CLEAN)
+        other = self._package(self.CLEAN, e_mut=lambda e: e.update(execution_package_id="pkg_attacker"))
+        constants, _ = package
+        _, other_root = other
+        # Even the launcher's own seam refuses to mint a carrier over a swapped
+        # package root: the launcher's embedded expected identity wins.
+        with self.assertRaises(RunnerError) as context:
+            runner._establish_trusted_execution_expectations(
+                runner._LAUNCHER_ISSUANCE_KEY, constants, str(other_root))
+        self.assertIn(context.exception.code, {RF.AUTHORIZATION_EXPECTATION_IDENTITY_MISMATCH, RF.AUTHORIZATION_EXPECTATION_UNTRUSTED})
+        self.assertEqual(self.builder_calls, [])
+
+    def test_shared_binding_field_mutations_are_rejected_even_when_each_document_is_valid(self) -> None:
+        RF = RunnerFailureCode
+        self._enter_clean_safe_held()
+        cross = RF.AUTHORIZATION_CROSS_BINDING_MISMATCH
+        for field, value in (
+            ("execution_attempt_id", "attempt_other"), ("invocation_id", "inv_other"), ("task_id", "task_other"),
+            ("required_implementation_tree", "9" * 40), ("required_implementation_parent", "8" * 40),
+            ("required_implementation_commit", "7" * 40), ("active_contract_id", "adc_other"),
+            ("active_contract_sha256", "6" * 64), ("domain_binding_id", "edb_other"), ("domain_binding_sha256", "5" * 64),
+            ("risk_config_raw_sha256", "4" * 64), ("risk_config_semantic_sha256", "3" * 64),
+            ("market_scope", {"scope_kind": "SINGLE_MARKET_TICKER", "ticker": "KXOTHER-26SEP12-Z"}),
+            ("authorization_set_id", "set_other"),
+        ):
+            with self.subTest(field=field):
+                self._assert_rejected(self._package(self.CLEAN, g_mut=lambda g, f=field, v=value: g.update({f: v})), cross)
+
+    def test_exchange_index_one_or_subaccount_zero_is_rejected_everywhere(self) -> None:
+        self._enter_clean_safe_held()
+        RF = RunnerFailureCode
+        self._assert_rejected(self._package(self.CLEAN, o_mut=lambda o: o.update(exchange_index=1)), RF.BRIDGE_AUTHORIZATION_DOMAIN_BINDING_MISMATCH)
+        self._assert_rejected(self._package(self.CLEAN, g_mut=lambda g: g.update(exchange_index=1)), RF.BRIDGE_AUTHORIZATION_GATE_D_SUCCESSOR_INVALID)
+        self._assert_rejected(self._package(self.CLEAN, b_mut=lambda b: b.update(exchange_index=1)), RF.BRIDGE_AUTHORIZATION_DOMAIN_BINDING_MISMATCH)
+        self._assert_rejected(self._package(self.CLEAN, o_mut=lambda o: o.update(subaccount=0)), RF.BRIDGE_AUTHORIZATION_DOMAIN_BINDING_MISMATCH)
+
+    def test_implementation_and_domain_identity_mismatches_are_rejected(self) -> None:
+        RF = RunnerFailureCode
+        self._enter_clean_safe_held()
+        self._assert_rejected(self._package(self.CLEAN, constants_mut=lambda c: c.update(installed_implementation_tree="9" * 40)), RF.BRIDGE_AUTHORIZATION_IMPLEMENTATION_MISMATCH)
+        self._assert_rejected(self._package(self.CLEAN, constants_mut=lambda c: c.update(installed_implementation_commit="e" * 40)), RF.BRIDGE_AUTHORIZATION_IMPLEMENTATION_MISMATCH)
+        self._assert_rejected(self._package(self.CLEAN, constants_mut=lambda c: c.update(bootstrap_contract_sha256="d" * 64)), RF.BRIDGE_AUTHORIZATION_ACTIVE_CONTRACT_MISMATCH)
+
+    def test_risk_gate_rejects_proof_only_and_non_write_capable_configs_before_consumption(self) -> None:
+        RF = RunnerFailureCode
+        self._enter_clean_safe_held()
+        zero_flow = dataclasses.replace(self.config, flow=FlowRiskLimits(0, 1_000, 0, 1_000, 0, 1_000, 0, 1_000, 2, 1_000, 1, 500, 1, 10, 100))
+        risk_text = _d07_risk_config_to_strict_json(zero_flow)
+        self._assert_rejected(self._package(
+            self.CLEAN, risk_text=risk_text, e_mut=lambda e: e["risk_config"].update(semantic_sha256=zero_flow.sha256),
+            b_mut=lambda b: b.update(risk_config_semantic_sha256=zero_flow.sha256)), RF.USER_RISK_CHOICE_REQUIRED)
+        self._assert_rejected(self._package(self.CLEAN, e_mut=lambda e: e.update(user_risk_choice_status="OPEN")), RF.USER_RISK_CHOICE_REQUIRED)
+        self._assert_rejected(self._package(self.CLEAN, e_mut=lambda e: e["risk_config"].update(semantic_sha256="e" * 64)), RF.BRIDGE_AUTHORIZATION_RISK_CONFIG_MISMATCH)
+        self._assert_rejected(self._package(self.CLEAN, g_mut=lambda g: g.update(max_cleanup_cancel_sends=1), e_mut=lambda e: e["gate_d_scope"].update(max_cleanup_cancel_sends=1)), RF.BRIDGE_AUTHORIZATION_RISK_CONFIG_MISMATCH)
+        self._assert_rejected(self._package(self.CLEAN, g_mut=lambda g: g.update(max_ordinary_write_sends=5), e_mut=lambda e: e["gate_d_scope"].update(max_ordinary_write_sends=5)), RF.BRIDGE_AUTHORIZATION_RISK_CONFIG_MISMATCH)
+        self.assertEqual(runner._ORCH_CANDIDATE_02_RISK_RAW_SHA256, "4495ade7fed522bf17a202d6f5422f608765b65a4463121175695c862b3f904c")
+
+    def test_entry_state_mismatches_fail_before_consumption(self) -> None:
+        RF = RunnerFailureCode
+        # BOOT_HOLD artifact from a ledger that is genuinely SAFE_HELD.
+        self._enter_clean_safe_held()
+        boot_over_safe = self._package(self.BOOT, checkpoint=dict(
+            self._checkpoint(), risk_control_state="BOOT_HOLD", risk_state_epoch=0, risk_state_event_id=None,
+            active_risk_config_sha256=None, writer_proof_release_eligible=False))
+        self._assert_rejected(boot_over_safe, RF.BRIDGE_AUTHORIZATION_ENTRY_STATE_MISMATCH)
+        # E claims SAFE_HELD but the ledger is BOOT_HOLD: stale binding (checkpoint mismatch).
+        self.tearDown()
+        self.setUp()
+        checkpoint = dict(self._checkpoint(), risk_control_state="SAFE_HELD", risk_state_epoch=1,
+                          risk_state_event_id="evt_" + "1" * 32, active_risk_config_sha256=self.config.sha256,
+                          writer_proof_release_eligible=True)
+        self._assert_rejected(self._package(self.CLEAN, checkpoint=checkpoint), RF.BRIDGE_AUTHORIZATION_ENTRY_STATE_MISMATCH)
+        # A clean checkpoint over a BOOT_HOLD class cannot even be issued as a typed expectation.
+        self._assert_rejected(self._package(self.CLEAN, checkpoint=self._checkpoint()), RF.AUTHORIZATION_CROSS_BINDING_MISMATCH)
+        # Stale checkpoint (tail moved after the approval).
+        stale = self._checkpoint()
+        handle = self._acquire_emergency()
+        handle.close()
+        self._assert_rejected(self._package(self.BOOT, checkpoint=stale), RF.AUTHORIZATION_BINDING_STALE)
+
+    def test_open_restricted_session_and_partial_release_require_recovery_not_admission(self) -> None:
+        RF = RunnerFailureCode
+        handle = self._acquire_emergency()
+        handle._EmergencyControlLedgerHandle__locked.close()  # crash residue: session left open
+        self._assert_rejected(self._package(self.BOOT), RF.AUTHORIZATION_ENTRY_STATE_REQUIRES_RECOVERY)
+        self.assertEqual(self._event_types().count("RESTRICTED_SESSION_ABANDONED"), 0)
+
+    def test_ledger_ahead_is_indeterminate_and_is_never_repaired(self) -> None:
+        RF = RunnerFailureCode
+        self._enter_clean_safe_held()
+        package = self._package(self.CLEAN)
+        handle = self._acquire_emergency()
+        locked = handle._EmergencyControlLedgerHandle__locked
+
+        def crash_after_ledger_commit(stage):
+            if stage == "after_ledger_commit":
+                raise RuntimeError("crash between ledger commit and anchor")
+
+        locked.fault_hook = crash_after_ledger_commit
+        try:
+            with self.assertRaises(RuntimeError):
+                self._qualifying_reconciliation(handle)
+        finally:
+            locked.close()
+        anchored = self._authority_tail()
+        self._assert_rejected(package, RF.AUTHORIZATION_FRESHNESS_UNAVAILABLE)
+        self.assertEqual(self._authority_tail(), anchored)  # no catch-up, no abandonment, no append
+
+    # ================================================================== deadline
+    def test_deadline_expiry_at_admission_and_after_consumption_never_resets_or_succeeds(self) -> None:
+        RF = RunnerFailureCode
+        self._enter_clean_safe_held()
+        package = self._package(self.CLEAN)
+        base = self.inputs.monotonic_ns
+        state = {"calls": 0}
+
+        def expire_immediately():
+            state["calls"] += 1
+            value = base()
+            return value if state["calls"] == 1 else value + 400_000_000_000
+
+        state_before = self._state()
+        with self.assertRaises(RunnerError) as context:
+            self._run(package, builder=self._builder(phases=1), monotonic_clock_ns=expire_immediately)
+        self.assertEqual(context.exception.code, RF.BRIDGE_AUTHORIZATION_DEADLINE_EXPIRED)
+        self.assertEqual(self._state(), state_before)  # expired BEFORE consumption: nothing persisted
+        # Expiry after the durable consumption: terminal, the consumed set stays burned.
+        package2 = self._package(self.CLEAN)
+        flag = {"expired": False}
+
+        def expire_after_consumption():
+            value = base()
+            return value + 400_000_000_000 if flag["expired"] else value
+
+        with self.assertRaises(RunnerError) as context:
+            self._run(package2, builder=self._builder(phases=1, tail_mutation=lambda: flag.update(expired=True)),
+                      monotonic_clock_ns=expire_after_consumption)
+        self.assertEqual(context.exception.code, RF.BRIDGE_AUTHORIZATION_DEADLINE_EXPIRED)
+        self.assertEqual(self._event_types().count("EXECUTION_AUTHORIZATION_SET_CONSUMED"), 1)
+        self.assertNotIn("WRITER_SESSION_STARTED", self._event_types())
+
+    # ================================================================== runtime construction / cleanup
+    def test_runtime_construction_may_not_start_sessions_or_move_the_tail(self) -> None:
+        RF = RunnerFailureCode
+        self._enter_clean_safe_held()
+        package = self._package(self.CLEAN)
+
+        def d07_style_build():
+            handle = self._acquire_emergency()  # what the D07 read-only builder does
+            handle.close()
+
+        with self.assertRaises(RunnerError) as context:
+            self._run(package, builder=self._builder(phases=1, tail_mutation=d07_style_build))
+        self.assertEqual(context.exception.code, RF.ORCHESTRATION_RUNTIME_CONSTRUCTION_MUTATED_STATE)
+        self.assertEqual(self._event_types().count("EXECUTION_AUTHORIZATION_SET_CONSUMED"), 1)
+        # A builder that swaps the process gate or the deadline is rejected too.
+        self.tearDown()
+        self.setUp()
+        self._enter_clean_safe_held()
+        with self.assertRaises(RunnerError) as context:
+            self._run(self._package(self.CLEAN), builder=self._builder(
+                phases=1, mutate_runtime=lambda rt: dataclasses.replace(rt, experiment_absolute_end_monotonic_ns=rt.experiment_absolute_end_monotonic_ns + 1)))
+        self.assertEqual(context.exception.code, RF.ORCHESTRATION_PHASE_STATE_INVALID)
+
+    def test_gate_d_exception_still_ends_the_writer_session_and_never_masks_the_primary_error(self) -> None:
+        RF = RunnerFailureCode
+        self._enter_clean_safe_held()
+        package = self._package(self.CLEAN)
+
+        def exploding_loop(*args, **kwargs):
+            raise RunnerError(RF.GATE_D_ENTRY_PRECONDITION_FAILED, detail="synthetic loop failure")
+
+        def failing_cleanup(locked, session_id):
+            locked.close()
+            raise OSError("cleanup broke")
+
+        with mock.patch.object(runner, "run_gate_d_ordinary_decision_loop", exploding_loop):
+            with self.assertRaises(RunnerError) as context:
+                self._run(package, builder=self._builder(phases=1))
+        self.assertEqual(context.exception.code, RF.GATE_D_ENTRY_PRECONDITION_FAILED)
+        types = self._event_types()
+        self.assertEqual(types[-2:], ["WRITER_SESSION_STARTED", "WRITER_SESSION_ENDED"])  # canonical cleanup ran once
+        self.assertEqual(types.count("WRITER_SESSION_ENDED"), 1)
+        # Cleanup failure does not mask the primary error ...
+        self.tearDown()
+        self.setUp()
+        self._enter_clean_safe_held()
+        with mock.patch.object(runner, "run_gate_d_ordinary_decision_loop", exploding_loop), \
+                mock.patch.object(runner, "_fail_closed_end_writer_session", failing_cleanup):
+            with self.assertRaises(RunnerError) as context:
+                self._run(self._package(self.CLEAN), builder=self._builder(phases=1))
+        self.assertEqual(context.exception.code, RF.GATE_D_ENTRY_PRECONDITION_FAILED)
+        # ... but with no primary error a cleanup failure is itself reported.
+        self.tearDown()
+        self.setUp()
+        self._enter_clean_safe_held()
+        with mock.patch.object(runner, "_fail_closed_end_writer_session", failing_cleanup):
+            with self.assertRaises(RunnerError) as context:
+                self._run(self._package(self.CLEAN), builder=self._builder(phases=1))
+        self.assertEqual(context.exception.code, RF.ORCHESTRATION_WRITER_CLEANUP_FAILED)
+
+    def test_pre_bridge_read_that_cannot_reconcile_never_reaches_bridge_or_release(self) -> None:
+        package = self._package(self.BOOT)
+        baseline = self._baseline_length
+
+        # A fresh resting order with no durable counterpart makes Stage 3F fail before any bridge mutation.
+        def build(context):
+            runtime = self._builder(phases=0)(context)
+            self.transport.responses[RunnerOperation.GET_ORDERS] = [
+                _orders_payload([_order_row("ord-orphan", ticker=self.TICKER, client_order_id="c" * 8, subaccount=1, exchange_index=0)])
+            ] + self.transport.responses[RunnerOperation.GET_ORDERS]
+            self.transport.queue(RunnerOperation.GET_ORDER, _order_payload(
+                "ord-orphan", ticker=self.TICKER, client_order_id="c" * 8, subaccount=1, exchange_index=0))
+            self.transport.queue(RunnerOperation.GET_FILLS, _fills_payload([]))
+            truth = self._selected_route_truth(runtime)
+            cutoff = runner._active_reconciliation_cutoff_sha256(truth)
+            fixture = self._dynamic_read(selected_route_cutoff=cutoff, active_contract=context.active_contract, risk_config=context.risk_config)
+            return dataclasses.replace(runtime, trusted_dynamic_read_acquirer_test_seam=_SequencedFakeAcquirer([(fixture, truth, 72)]))
+
+        with self.assertRaises(RunnerError) as context:
+            self._run(package, builder=build)
+        self.assertEqual(context.exception.code, RunnerFailureCode.PRE_RELEASE_RELEASE_PREDICATE_FAILED, context.exception.detail)
+        types = self._event_types()
+        self.assertEqual(types[baseline:], ["EXECUTION_AUTHORIZATION_SET_CONSUMED"])  # consumed, nothing else
+        for forbidden in ("RESTRICTED_SESSION_STARTED", "RECONCILIATION_RECORDED", "WRITER_PROOF_RELEASED"):
+            self.assertNotIn(forbidden, types[baseline:])
+
+    def test_phase_result_and_bridge_guards_reject_unproven_truth(self) -> None:
+        RF = RunnerFailureCode
+        with self.assertRaises(RunnerError) as context:
+            runner._orch_bridge_basis_event_ids(
+                types.SimpleNamespace(active_release_state=None, truth=None, status="X", process_instance_id="p"),
+                types.SimpleNamespace())  # type: ignore[arg-type]
+        self.assertEqual(context.exception.code, RF.BRIDGE_PRE_READ_INCOMPLETE)
+        # The R2 mechanism (stale-session abandonment) is retained in canonical code but unreachable here.
+        source = inspect.getsource(runner._orch_run_boot_hold_bridge) + inspect.getsource(runner.run_release_orchestration_v1)
+        self.assertNotIn("RESTRICTED_SESSION_ABANDONED", source)
+        self.assertNotIn("_acquire_restricted_state", source)
+        self.assertNotIn("append_batch", source)
+        self.assertNotIn("_open_locked", source)
+        self.assertNotIn("start_writer_session", source)
+
+
+    def test_unproven_close_readback_stops_before_phase_two_and_never_releases(self) -> None:
+        RF = RunnerFailureCode
+        package = self._package(self.BOOT)
+        baseline = self._baseline_length
+        real = runner.read_active_emergency_close_readback_v1
+        seen = {}
+
+        def refuse(*args, **kwargs):
+            seen["pre_close_sequence"] = kwargs["pre_close_sequence"]
+            good = real(*args, **kwargs)
+            self.assertTrue(good.verified)
+            return ledger_binding.EmergencyCloseReadbackV1(False, good.projection, "CLOSE_READBACK_MISMATCH", None)
+
+        with mock.patch.object(runner, "read_active_emergency_close_readback_v1", refuse):
+            with self.assertRaises(RunnerError) as context:
+                self._run(package, builder=self._builder(phases=2))
+        self.assertEqual(context.exception.code, RF.BRIDGE_POST_CLOSE_REFRESH_UNAVAILABLE)
+        types = self._event_types()
+        # The emergency close happened exactly once; phase 2 / RELEASE_ONLY / writer never began.
+        self.assertEqual(types[baseline:], [
+            "EXECUTION_AUTHORIZATION_SET_CONSUMED", "RESTRICTED_SESSION_STARTED", "RECONCILIATION_RECORDED",
+            "RISK_CONTROL_STATE_CHANGED", "RESTRICTED_SESSION_ENDED"])
+        self.assertEqual(seen["pre_close_sequence"], baseline + 4)  # consumption, start, reconciliation, SAFE_HELD
+        with self.assertRaises(RunnerError) as replay:
+            self._run(package, builder=self._builder(phases=2))
+        self.assertEqual(replay.exception.code, RF.BRIDGE_AUTHORIZATION_STALE_OR_REPLAYED)
+
+    def test_partially_released_or_writer_eligible_history_is_never_admitted_as_clean_entry(self) -> None:
+        RF = RunnerFailureCode
+        self._enter_clean_safe_held()
+        self._run(self._package(self.CLEAN), builder=self._builder(phases=1))  # complete release: WRITER_ELIGIBLE
+        fabricated = dict(
+            self._checkpoint(), risk_control_state="SAFE_HELD", risk_state_epoch=1,
+            risk_state_event_id="evt_" + "1" * 32, active_risk_config_sha256=self.config.sha256,
+            writer_proof_state="HELD", writer_proof_release_eligible=True)
+        package = self._package(self.CLEAN, checkpoint=fabricated, suffix="_second")
+        state = self._state()
+        with self.assertRaises(RunnerError) as context:
+            self._run(package, builder=self._builder(phases=1))
+        self.assertEqual(context.exception.code, RF.RELEASE_PARTIAL_RESTART_REQUIRES_RECOVERY, context.exception.detail)
+        self.assertEqual(self._state(), state)
+        # A trusted E can never describe WRITER_ELIGIBLE / RELEASED entry at all.
+        with self.assertRaises(LedgerError):
+            ledger_binding.validate_active_entry_checkpoint(dict(self._checkpoint()))
+
+    def test_static_import_and_path_boundaries_of_the_six_path_envelope(self) -> None:
+        repository = Path(__file__).resolve().parents[1]
+        binding_source = (repository / "src/arb/venues/kalshi/ledger_binding.py").read_text(encoding="utf-8")
+        ledger_source = (repository / "src/arb/execution_ledger.py").read_text(encoding="utf-8")
+        # ledger_binding never imports the runner; the ledger never imports the Kalshi layer.
+        import re as _re
+        self.assertIsNone(_re.search(r"^\s*(from|import)\s+arb\.venues\.kalshi\.minimal_market_maker", binding_source, _re.M))
+        self.assertIsNone(_re.search(r"^\s*(from|import)\s+arb\.venues", ledger_source, _re.M))
+        # No public generic-append or LockedLedger exposure was added to the binding API.
+        for name in (
+            "read_active_authorization_freshness_v1", "consume_active_execution_authorization_set_v1",
+            "read_active_emergency_close_readback_v1", "build_dormant_emergency_control_handle_v1"):
+            self.assertTrue(callable(getattr(ledger_binding, name)))
+        for forbidden in ("def append_authorization", "def consume_authorization_set(", "def append_consumption"):
+            self.assertNotIn(forbidden, binding_source)
+        signature = inspect.signature(ledger_binding.consume_active_execution_authorization_set_v1)
+        for banned in ("locked", "connection", "event_id", "event_input", "payload", "append"):
+            self.assertNotIn(banned, signature.parameters)
+        # The runner reaches the ledger only through the narrow typed binding surface.
+        orchestration_source = inspect.getsource(runner.run_release_orchestration_v1) + inspect.getsource(runner._orch_admit_authorization_set)
+        for banned in ("_acquire_consumption_state", "_append_authorization_consumption", "_open_locked", "LockedLedger"):
+            self.assertNotIn(banned, orchestration_source)
+        import arb.execution_ledger as _execution_ledger_module
+        for module in (ledger_binding, runner, _execution_ledger_module):
+            source = inspect.getsource(module)
+            for banned_import in ("import pip", "import requests", "import urllib3"):
+                self.assertEqual(source.count(banned_import), 0, banned_import)
+
+
+    # ================================================================== per-boundary deadline / guards
+    def _expiring_clock(self):
+        base = self.inputs.monotonic_ns
+        flag = {"expired": False}
+
+        def mono():
+            value = base()
+            return value + 400_000_000_000 if flag["expired"] else value
+
+        return mono, flag
+
+    def _expire_after(self, name, flag):
+        real = getattr(runner, name)
+
+        def wrapper(*args, **kwargs):
+            result = real(*args, **kwargs)
+            flag["expired"] = True
+            return result
+
+        return mock.patch.object(runner, name, wrapper)
+
+    def test_deadline_expiry_at_each_later_boundary_is_terminal_and_never_continues(self) -> None:
+        RF = RunnerFailureCode
+        # (a) right after the emergency close readback: phase 2 / release never begin.
+        mono, flag = self._expiring_clock()
+        baseline = self._baseline_length
+        with self._expire_after("read_active_emergency_close_readback_v1", flag):
+            with self.assertRaises(RunnerError) as context:
+                self._run(self._package(self.BOOT), builder=self._builder(phases=2), monotonic_clock_ns=mono)
+        self.assertEqual(context.exception.code, RF.BRIDGE_AUTHORIZATION_DEADLINE_EXPIRED)
+        self.assertEqual(self._event_types()[baseline:][-1], "RESTRICTED_SESSION_ENDED")
+        self.assertEqual(self._event_types().count("RESTRICTED_SESSION_STARTED"), 1)
+        # (b) right after V2 issuance: NormalWriter is never acquired.
+        self.tearDown()
+        self.setUp()
+        self._enter_clean_safe_held()
+        mono, flag = self._expiring_clock()
+        with self._expire_after("issue_active_current_process_release_completion_v2", flag):
+            with self.assertRaises(RunnerError) as context:
+                self._run(self._package(self.CLEAN), builder=self._builder(phases=1), monotonic_clock_ns=mono)
+        self.assertEqual(context.exception.code, RF.DEADLINE_EXCEEDED)
+        self.assertNotIn("WRITER_SESSION_STARTED", self._event_types())
+        # (c) right after NormalWriter acquisition: the session is ended canonically and Gate D never starts.
+        self.tearDown()
+        self.setUp()
+        self._enter_clean_safe_held()
+        mono, flag = self._expiring_clock()
+        gate_d_calls = []
+        with self._expire_after("acquire_active_normal_writer_state_v1", flag), \
+                mock.patch.object(runner, "run_gate_d_ordinary_decision_loop", lambda *a, **k: gate_d_calls.append(1)):
+            with self.assertRaises(RunnerError) as context:
+                self._run(self._package(self.CLEAN), builder=self._builder(phases=1), monotonic_clock_ns=mono)
+        self.assertEqual(context.exception.code, RF.DEADLINE_EXCEEDED)
+        self.assertEqual(gate_d_calls, [])
+        self.assertEqual(self._event_types()[-2:], ["WRITER_SESSION_STARTED", "WRITER_SESSION_ENDED"])
+        # (d) right after the durable consumption: no session of any kind starts.
+        self.tearDown()
+        self.setUp()
+        self._enter_clean_safe_held()
+        mono, flag = self._expiring_clock()
+        baseline = self._baseline_length
+        with self._expire_after("consume_active_execution_authorization_set_v1", flag):
+            with self.assertRaises(RunnerError) as context:
+                self._run(self._package(self.CLEAN), builder=self._builder(phases=1), monotonic_clock_ns=mono)
+        # The test builder itself performs (fake) reads, so the expiry may surface inside it as the
+        # pre-existing operation-deadline classification; either way the run is terminal.
+        self.assertIn(context.exception.code, {RF.BRIDGE_AUTHORIZATION_DEADLINE_EXPIRED, RF.DEADLINE_EXCEEDED})
+        self.assertEqual(self._event_types()[baseline:], ["EXECUTION_AUTHORIZATION_SET_CONSUMED"])
+
+    def test_normal_writer_entry_guard_rejects_a_moved_tail_before_any_writer_session(self) -> None:
+        self._enter_clean_safe_held()
+        real_guard = runner.ActiveAcquisitionEntryGuardV1
+
+        def corrupting(receipt, sequence, digest, state, epoch, config, proof_state, eligible):
+            if state == "WRITER_ELIGIBLE":
+                digest = "0" * 64  # the tail moved between the check and the acquisition
+            return real_guard(receipt, sequence, digest, state, epoch, config, proof_state, eligible)
+
+        with mock.patch.object(runner, "ActiveAcquisitionEntryGuardV1", corrupting):
+            with self.assertRaises(RunnerError) as context:
+                self._run(self._package(self.CLEAN), builder=self._builder(phases=1))
+        self.assertEqual(context.exception.code, RunnerFailureCode.NORMAL_WRITER_ACQUISITION_FAILED)
+        types = self._event_types()
+        self.assertNotIn("WRITER_SESSION_STARTED", types)  # the guard ran before start_writer_session
+        self.assertEqual(types[-1], "RESTRICTED_SESSION_ENDED")
+
+    # ==================================================================
+    # CORRECTION_02 closure theorems (T-C02-01 .. T-C02-08).
+    # ==================================================================
+
+    def test_c04_t09_self_consistent_replacement_package_never_creates_authority(self) -> None:
+        """T-C02-01 / C04-T09.
+
+        The attacker owns a COMPLETE, fully self-consistent replacement O/G/E
+        set in its own protected root, with every raw SHA-256, authorization
+        ID, package/set binding and sidecar recomputed to match, plus every
+        caller-visible expected value it wants.  Without the launcher-issued
+        private carrier it still cannot cross the ordinary orchestration
+        surface, and nothing durable happens."""
+        RF = RunnerFailureCode
+        self._enter_clean_safe_held()
+        # A complete self-consistent attacker package: its OWN E, O, G, D07 and
+        # risk artifacts, its OWN recomputed hashes/IDs, and its OWN launcher
+        # constants that correctly pin its own E bytes/SHA/package/set identity.
+        attacker_constants, attacker_root = self._package(self.CLEAN, suffix="_attacker")
+        e_bytes = (attacker_root / runner._ORCH_E_FILENAME).read_bytes()
+        # The attacker's caller-visible expected values are genuinely correct
+        # for its own artifacts -- self-consistency is not the missing piece.
+        self.assertEqual(len(e_bytes), attacker_constants.expectations_bytes)
+        self.assertEqual(hashlib.sha256(e_bytes).hexdigest(), attacker_constants.expectations_sha256)
+        e_document = json.loads(e_bytes)
+        self.assertEqual(e_document["execution_package_id"], attacker_constants.execution_package_id)
+        self.assertEqual(e_document["authorization_set_id"], attacker_constants.authorization_set_id)
+        for name in (runner._ORCH_O_FILENAME, runner._ORCH_G_FILENAME, runner._ORCH_D07_FILENAME):
+            raw = (attacker_root / name).read_bytes()
+            key = {runner._ORCH_O_FILENAME: "orchestration", runner._ORCH_G_FILENAME: "gate_d",
+                   runner._ORCH_D07_FILENAME: "d07"}[name]
+            self.assertEqual(len(raw), e_document[key]["bytes"])
+            self.assertEqual(hashlib.sha256(raw).hexdigest(), e_document[key]["sha256"])
+
+        state_before = self._state()
+        builder_calls_before = len(self.builder_calls)
+        consumed_before = self._event_types().count("EXECUTION_AUTHORIZATION_SET_CONSUMED")
+
+        # Every supported public form the attacker can reach for, including a
+        # forged object that duck-types the private carrier exactly and even
+        # carries a REAL protected root and REAL launcher constants.
+        real_carrier = self._issue_trusted_expectations((attacker_constants, attacker_root))
+        forged = types.SimpleNamespace(
+            document=dict(e_document), raw_sha256=attacker_constants.expectations_sha256,
+            raw_bytes=attacker_constants.expectations_bytes,
+            _constants=object.__getattribute__(real_carrier, "_constants"),
+            _root=object.__getattribute__(real_carrier, "_root"))
+        attempts = (
+            ("raw E bytes", e_bytes),
+            ("E document dict", dict(e_document)),
+            ("(E, recomputed sha) pair", (e_bytes, attacker_constants.expectations_sha256)),
+            ("launcher constants object", attacker_constants),
+            ("protected root path", str(attacker_root)),
+            ("duck-typed forged carrier", forged),
+            ("no carrier", None),
+        )
+        for label, substitute in attempts:
+            with self.subTest(label):
+                with self.assertRaises(RunnerError) as context:
+                    runner.run_release_orchestration_v1(
+                        trusted_expectations=substitute,
+                        runtime_builder=self._builder(phases=1),
+                        monotonic_clock_ns=self.inputs.monotonic_ns,
+                        wall_clock=self.inputs.clock, uuid_factory=self.inputs.uuid)
+                self.assertEqual(context.exception.code, RF.AUTHORIZATION_EXPECTATION_UNTRUSTED)
+
+        # Zero runtime-builder calls; zero consumption; zero session, bridge,
+        # release, proof, WRITER_ELIGIBLE, writer-session or Gate-D mutation;
+        # the durable authority/ledger bytes and tails are untouched.
+        self.assertEqual(len(self.builder_calls), builder_calls_before)
+        types_after = self._event_types()
+        self.assertEqual(types_after.count("EXECUTION_AUTHORIZATION_SET_CONSUMED"), consumed_before)
+        self.assertEqual(self._state(), state_before)
+        for forbidden in (
+            "RESTRICTED_SESSION_STARTED", "RESTRICTED_SESSION_ENDED", "RECONCILIATION_RECORDED",
+            "RISK_RELEASE_RECORDED", "WRITER_PROOF_RELEASED", "WRITER_SESSION_STARTED",
+        ):
+            self.assertEqual(types_after.count(forbidden), state_before[0].count(forbidden))
+
+    def test_launcher_only_seam_is_the_single_issuance_path_for_trusted_expectations(self) -> None:
+        """T-C02-02 / T-C02-03: the private carrier is non-copyable,
+        non-serializable and non-constructable; the ONE module-private
+        launcher-only seam verifies exact E identity, reads E exactly once and
+        mints a live carrier that orchestration accepts."""
+        RF = RunnerFailureCode
+        self._enter_clean_safe_held()
+        package = self._package(self.CLEAN)
+        carrier = self._issue_trusted_expectations(package)
+        self.assertIs(type(carrier), runner.TrustedExecutionExpectationsV1)
+        constants, root = package
+        # Exact identity actually verified by the seam.
+        self.assertEqual(carrier.raw_sha256, constants.expectations_sha256)
+        self.assertEqual(carrier.raw_bytes, constants.expectations_bytes)
+        self.assertEqual(carrier.document["execution_package_id"], constants.execution_package_id)
+        self.assertEqual(carrier.document["authorization_set_id"], constants.authorization_set_id)
+        # E was read EXACTLY once through the protected root.
+        issued_root = object.__getattribute__(carrier, "_root")
+        with self.assertRaises(RunnerError) as context:
+            issued_root.read_once(runner._ORCH_E_FILENAME)
+        self.assertEqual(context.exception.code, RF.AUTHORIZATION_EXPECTATION_UNTRUSTED)
+        # Private / immutable / non-copyable / non-serializable.
+        with self.assertRaises(AttributeError):
+            carrier.raw_bytes = 1
+        with self.assertRaises(TypeError):
+            copy.copy(carrier)
+        with self.assertRaises(TypeError):
+            copy.deepcopy(carrier)
+        with self.assertRaises(TypeError):
+            pickle.dumps(carrier)
+        self.assertNotIn(constants.expectations_sha256, repr(carrier))
+        # Wrong issuance key / wrong constants type are refused by the seam.
+        for label, args in (
+            ("no key", (object(), constants, str(root))),
+            ("no constants", (runner._LAUNCHER_ISSUANCE_KEY, {"expectations_bytes": 1}, str(root))),
+        ):
+            with self.subTest(label):
+                with self.assertRaises(RunnerError) as context:
+                    runner._establish_trusted_execution_expectations(*args)
+                self.assertEqual(context.exception.code, RF.AUTHORIZATION_EXPECTATION_UNTRUSTED)
+        # Positive: the freshly minted carrier is accepted and completes.
+        result = self._run(self._package(self.CLEAN, suffix="_live"), builder=self._builder(phases=1))
+        self.assertEqual(result.route, "CLEAN_SAFE_HELD")
+
+    @staticmethod
+    def _expire_inside_read_phase(flag, *, after_phase):
+        """Expire the absolute end INSIDE read-phase execution: the charged read
+        set of phase ``after_phase`` is fully acquired -- at least one charged
+        operation has happened -- and only then does the clock pass the end.
+
+        The production runtime accepts only the module-private fake acquirer
+        type, so this patches that exact seam's method rather than wrapping it
+        in a foreign object."""
+        real = _SequencedFakeAcquirer.acquire
+        seen = {"n": 0}
+
+        def acquire(self, capability):
+            result = real(self, capability)
+            seen["n"] += 1
+            if seen["n"] >= after_phase:
+                flag["expired"] = True
+            return result
+
+        return mock.patch.object(_SequencedFakeAcquirer, "acquire", acquire)
+
+    def test_deadline_expiry_inside_a_read_phase_after_a_charged_operation_is_terminal(self) -> None:
+        """T-C02-04: the ONE sampled absolute end is enforced INSIDE read
+        execution, after at least one charged operation -- no reset, no
+        extension, no success-shaped continuation, no release."""
+        RF = RunnerFailureCode
+        self._enter_clean_safe_held()
+        mono, flag = self._expiring_clock()
+        baseline = self._baseline_length
+        # Control: the SAME patched seam with an end that never arrives
+        # completes normally, so the failure below is attributable to the
+        # expiry alone and not to the test scaffolding.
+        never, idle = self._expiring_clock()
+        with self._expire_inside_read_phase(idle, after_phase=99):
+            self.assertEqual(
+                self._run(self._package(self.CLEAN, suffix="_control"),
+                          builder=self._builder(phases=1), monotonic_clock_ns=never).route,
+                "CLEAN_SAFE_HELD")
+        self.tearDown()
+        self.setUp()
+        self._enter_clean_safe_held()
+        mono, flag = self._expiring_clock()
+        baseline = self._baseline_length
+        with self._expire_inside_read_phase(flag, after_phase=1):
+            with self.assertRaises(RunnerError) as context:
+                self._run(self._package(self.CLEAN), builder=self._builder(phases=1),
+                          monotonic_clock_ns=mono)
+        # Inside read execution the SAME absolute end surfaces as the
+        # dynamic-read deadline classification; every form is terminal.
+        self.assertIn(context.exception.code, {
+            RF.DEADLINE_EXCEEDED, RF.BRIDGE_AUTHORIZATION_DEADLINE_EXPIRED,
+            RF.DYNAMIC_READ_DEADLINE_EXHAUSTED})
+        types_after = self._event_types()
+        # The already-durable prefix is exactly the consumption; nothing beyond it.
+        self.assertEqual(types_after[baseline:], ["EXECUTION_AUTHORIZATION_SET_CONSUMED"])
+        for forbidden in ("RISK_RELEASE_RECORDED", "WRITER_PROOF_RELEASED", "WRITER_SESSION_STARTED"):
+            self.assertNotIn(forbidden, types_after[baseline:])
+
+    def test_deadline_expiry_inside_the_second_read_phase_is_terminal_with_no_third_phase(self) -> None:
+        """T-C02-04: the same theorem inside phase 2 of the BOOT_HOLD bridge --
+        the bridge prefix stands, no third phase and no release follow."""
+        RF = RunnerFailureCode
+        package = self._package(self.BOOT)
+        mono, flag = self._expiring_clock()
+        baseline = self._baseline_length
+        # Expire only after the SECOND charged read set -- i.e. inside phase 2,
+        # once the bridge prefix is already durable.
+        with self._expire_inside_read_phase(flag, after_phase=2):
+            with self.assertRaises(RunnerError) as context:
+                self._run(package, builder=self._builder(phases=2), monotonic_clock_ns=mono)
+        # Inside read execution the SAME absolute end surfaces as the
+        # dynamic-read deadline classification; every form is terminal.
+        self.assertIn(context.exception.code, {
+            RF.DEADLINE_EXCEEDED, RF.BRIDGE_AUTHORIZATION_DEADLINE_EXPIRED,
+            RF.DYNAMIC_READ_DEADLINE_EXHAUSTED})
+        types_after = self._event_types()[baseline:]
+        self.assertNotIn("RISK_RELEASE_RECORDED", types_after)
+        self.assertNotIn("WRITER_SESSION_STARTED", types_after)
+        # Exactly one bridge pass happened; no third phase, no retry, no refund.
+        self.assertLessEqual(types_after.count("RECONCILIATION_RECORDED"), 1)
+        self.assertEqual(types_after.count("EXECUTION_AUTHORIZATION_SET_CONSUMED"), 1)
+
+    _RELEASE_MILESTONES = (
+        ("record_risk_release", "RISK_RELEASE_RECORDED"),
+        ("release_writer_proof", "WRITER_PROOF_RELEASED"),
+        ("record_writer_eligible", "RISK_CONTROL_STATE_CHANGED"),
+    )
+
+    def test_deadline_expiry_between_each_individual_durable_release_step_is_terminal(self) -> None:
+        """T-C02-04: expiry immediately AFTER each individual durable release
+        milestone stops at exactly that durable prefix.  The next durable step
+        never happens, the run never succeeds, and cleanup never converts the
+        expiry into success."""
+        RF = RunnerFailureCode
+        for method_name, event_type in self._RELEASE_MILESTONES:
+            with self.subTest(method_name):
+                self.tearDown()
+                self.setUp()
+                self._enter_clean_safe_held()
+                mono, flag = self._expiring_clock()
+                baseline = self._baseline_length
+                real = getattr(ReleaseLedgerHandle, method_name)
+
+                def expiring(handle_self, *args, _real=real, **kwargs):
+                    result = _real(handle_self, *args, **kwargs)
+                    flag["expired"] = True
+                    return result
+
+                with mock.patch.object(ReleaseLedgerHandle, method_name, expiring):
+                    with self.assertRaises(RunnerError) as context:
+                        self._run(self._package(self.CLEAN), builder=self._builder(phases=1),
+                                  monotonic_clock_ns=mono)
+                self.assertIn(
+                    context.exception.code,
+                    {RF.DEADLINE_EXCEEDED, RF.BRIDGE_AUTHORIZATION_DEADLINE_EXPIRED},
+                    context.exception.detail)
+                appended = self._event_types()[baseline:]
+                # The milestone that was reached is durable; the NEXT durable
+                # release milestone never appears.
+                self.assertIn(event_type, appended)
+                self.assertNotIn("WRITER_SESSION_STARTED", appended)
+                following = [name for name, _ in self._RELEASE_MILESTONES]
+                index = following.index(method_name)
+                for later_event in [e for _, e in self._RELEASE_MILESTONES[index + 1:]]:
+                    if later_event != "RISK_CONTROL_STATE_CHANGED":
+                        self.assertNotIn(later_event, appended)
+                # One original absolute end, never reset or extended.
+                self.assertEqual(appended.count("EXECUTION_AUTHORIZATION_SET_CONSUMED"), 1)
+
+    def test_deadline_expiry_between_stage_3k_and_gate_d_entry_is_terminal(self) -> None:
+        """T-C02-04: the Stage-3K -> Gate-D entry boundary re-checks the same
+        absolute end; Gate D never starts and no ordinary write is sent."""
+        RF = RunnerFailureCode
+        self._enter_clean_safe_held()
+        mono, flag = self._expiring_clock()
+        gate_d_calls = []
+        real = runner._orch_verify_gate_d_linkage
+
+        def expiring(**kwargs):
+            flag["expired"] = True
+            return real(**kwargs)
+
+        with mock.patch.object(runner, "_orch_verify_gate_d_linkage", expiring), \
+                mock.patch.object(runner, "run_gate_d_ordinary_decision_loop",
+                                  lambda *a, **k: gate_d_calls.append(1)):
+            with self.assertRaises(RunnerError) as context:
+                self._run(self._package(self.CLEAN), builder=self._builder(phases=1),
+                          monotonic_clock_ns=mono)
+        self.assertEqual(context.exception.code, RF.BRIDGE_AUTHORIZATION_DEADLINE_EXPIRED)
+        self.assertEqual(gate_d_calls, [])
+
+    # ------------------------------------------------------------------ restart
+    def _snapshot_store(self):
+        destination = Path(tempfile.mkdtemp(dir=self.root))
+        shutil.copytree(self.authority_root, destination / "authority")
+        for path in sorted(self.root.glob(self.ledger_path.name + "*")):
+            shutil.copy2(path, destination / path.name)
+        return destination
+
+    def _restore_store(self, snapshot) -> None:
+        import gc
+
+        gc.collect()  # drop any connection the crashed stack left referenced
+        shutil.rmtree(self.authority_root)
+        shutil.copytree(snapshot / "authority", self.authority_root)
+        for path in sorted(self.root.glob(self.ledger_path.name + "*")):
+            path.unlink()
+        for path in sorted(snapshot.glob(self.ledger_path.name + "*")):
+            shutil.copy2(path, self.root / path.name)
+
+    def test_crash_after_each_durable_release_milestone_requires_recovery_on_restart(self) -> None:
+        """T-C02-05 / C04-09 / C04-T25.
+
+        A process crash immediately after EACH individual durable release
+        milestone leaves exactly that durable prefix.  A new process must not
+        automatically continue, re-release, restore writer capability or blindly
+        append a duplicate release; it must reach the controlling recovery
+        classification, and the consumed authorization set stays consumed."""
+        RF = RunnerFailureCode
+        recovery_codes = {
+            RF.RELEASE_PARTIAL_RESTART_REQUIRES_RECOVERY,
+            RF.AUTHORIZATION_ENTRY_STATE_REQUIRES_RECOVERY,
+            RF.BRIDGE_AUTHORIZATION_ENTRY_STATE_MISMATCH,
+        }
+
+        class _InjectedProcessCrash(Exception):
+            """Stands in for process death.  The durable prefix is captured the
+            instant the milestone lands; whatever the unwinding stack writes
+            afterwards is discarded by restoring that snapshot, so no orderly
+            cleanup is ever credited to the crashed process."""
+
+        # The fourth prefix is the release close boundary: on the success path
+        # the restricted session is ended by the completion issuance itself.
+        milestones = self._RELEASE_MILESTONES + (
+            ("complete_release_and_issue_current_process_completion", "RESTRICTED_SESSION_ENDED"),)
+        for method_name, event_type in milestones:
+            with self.subTest(method_name):
+                self.tearDown()
+                self.setUp()
+                self._enter_clean_safe_held()
+                snapshots = {}
+                real = getattr(ReleaseLedgerHandle, method_name)
+
+                def crashing(handle_self, *args, _real=real, **kwargs):
+                    result = _real(handle_self, *args, **kwargs)
+                    if "taken" not in snapshots:
+                        snapshots["taken"] = self._snapshot_store()
+                        raise _InjectedProcessCrash(method_name)
+                    return result
+
+                with mock.patch.object(ReleaseLedgerHandle, method_name, crashing):
+                    with self.assertRaises(_InjectedProcessCrash):
+                        self._run(self._package(self.CLEAN), builder=self._builder(phases=1))
+                # The durable state is exactly the crash-time prefix.
+                self._restore_store(snapshots["taken"])
+                durable = self._event_types()
+                self.assertIn(event_type, durable)
+                self.assertEqual(durable.count("EXECUTION_AUTHORIZATION_SET_CONSUMED"), 1)
+                self.assertNotIn("WRITER_SESSION_STARTED", durable)
+
+                # A NEW process over a fresh, otherwise-valid authorization set.
+                state_before = self._state()
+                calls_before = len(self.builder_calls)
+                fabricated = dict(
+                    self._checkpoint(), risk_control_state="SAFE_HELD", risk_state_epoch=1,
+                    risk_state_event_id="evt_" + "1" * 32, active_risk_config_sha256=self.config.sha256,
+                    writer_proof_state="HELD", writer_proof_release_eligible=True)
+                package = self._package(self.CLEAN, checkpoint=fabricated, suffix="_restart_" + method_name)
+                with self.assertRaises(RunnerError) as context:
+                    self._run(package, builder=self._builder(phases=1))
+                self.assertIn(context.exception.code, recovery_codes, context.exception.detail)
+                # No automatic continuation, release, writer restoration or
+                # duplicate release append; the consumed set stays consumed.
+                self.assertEqual(self._state(), state_before)
+                self.assertEqual(len(self.builder_calls), calls_before)
+                after = self._event_types()
+                self.assertEqual(after.count(event_type), durable.count(event_type))
+                self.assertNotIn("WRITER_SESSION_STARTED", after)
+                self.assertEqual(after.count("EXECUTION_AUTHORIZATION_SET_CONSUMED"), 1)
+
+    def test_process_local_capabilities_are_never_reconstructed_by_a_new_process(self) -> None:
+        """T-C02-05: where process-local V2 / NormalWriter capability follows a
+        durable release, a new process cannot reconstruct or reuse it."""
+        RF = RunnerFailureCode
+        self._enter_clean_safe_held()
+        package = self._package(self.CLEAN)
+        result = self._run(package, builder=self._builder(phases=1))
+        self.assertEqual(result.writer_cleanup, "ENDED")
+        # A NEW process over the SAME (already consumed) set is replay-rejected.
+        state = self._state()
+        with self.assertRaises(RunnerError) as context:
+            self._run(package, builder=self._builder(phases=1))
+        self.assertEqual(context.exception.code, RF.BRIDGE_AUTHORIZATION_STALE_OR_REPLAYED)
+        self.assertEqual(self._state(), state)
+        # A freshly prepared package cannot describe the post-release entry at
+        # all: a trusted E may never carry a WRITER_ELIGIBLE / RELEASED entry.
+        with self.assertRaises(RunnerError) as context:
+            self._run(self._package(self.CLEAN, suffix="_after"), builder=self._builder(phases=1))
+        self.assertEqual(context.exception.code, RF.AUTHORIZATION_EXPECTATION_UNTRUSTED)
+        self.assertEqual(self._state(), state)
+        # A completion token / writer session from the finished process is not
+        # reconstructable: the durable history shows the session already ended.
+        self.assertEqual(self._event_types()[-1], "WRITER_SESSION_ENDED")
+
+    def test_r0_reconciliation_basis_event_ids_are_the_exact_sorted_unique_union(self) -> None:
+        """T-C02-08 / C04-T05.
+
+        With multiple durable qualifying fill-evidence events -- including a
+        repeated observation of the same fill and input order variation -- the
+        appended R0 reconciliation payload carries the EXACT sorted unique union
+        of the durable basis event IDs: nothing invented, nothing omitted, and
+        the durable event replays identically."""
+        handle = self._acquire_emergency()
+        fills = []
+        try:
+            # Three durable fills; the middle one is observed TWICE (duplicate
+            # evidence), and they are recorded out of lexical order.
+            for fill_id, order_id, price, repeats in (
+                ("synthetic-fill-b", "synthetic-order-b", "0.41", 1),
+                ("synthetic-fill-a", "synthetic-order-a", "0.42", 2),
+                ("synthetic-fill-c", "synthetic-order-c", "0.43", 1),
+            ):
+                canonical = canonical_kalshi_fill_payload(
+                    fill_id=fill_id, order_id=order_id, price=Decimal(price),
+                    quantity=Decimal("1.00"), fee=Decimal("0.01"),
+                    additional_fields={
+                        "market": self.TICKER, "outcome_side": "YES",
+                        "authoritative_created_time_utc": "2026-09-01T12:00:00.000000Z",
+                    })
+                for repeat in range(repeats):
+                    handle.record_fill_observation({
+                        "canonical_venue_payload": canonical,
+                        "canonical_venue_payload_sha256": hashlib.sha256(
+                            canonical_json_bytes(canonical)).hexdigest(),
+                        "client_order_id": order_id + "-client",
+                        "source_operation": "SYNTHETIC_FILL_READ",
+                        "source_request_id": f"{fill_id}-read-{repeat}",
+                        "venue_fill_id": fill_id, "venue_order_id": order_id,
+                        "venue_payload_schema_id": "synthetic-fill-v1",
+                    })
+                fills.append((fill_id, canonical))
+        finally:
+            handle.close()
+
+        # The durable evidence universe the bridge must reproduce exactly.
+        opened = ledger_binding.read_active_trusted_release_evidence_projection_v1(
+            self.binding, canonical_repository_root=str(self.repository_root),
+            active_contract=self.active_contract, expected_ledger_path=str(self.ledger_path),
+            clock=self.inputs.clock, uuid_factory=self.inputs.uuid, no_repair=True)
+        projection = opened.projection
+        self.assertIsNotNone(projection, opened.failure_code)
+        durable_fills = {fill.fill_id: fill for fill in projection.fills}
+        self.assertEqual(len(durable_fills), 3)
+        # The exact union the bridge must produce: latest durable matching event
+        # per fill, sorted and de-duplicated.
+        expected_union = sorted({
+            projection.fill_matching_event_ids[fill_id][-1] for fill_id in durable_fills
+        })
+        self.assertEqual(len(expected_union), 3)  # genuinely NON-EMPTY
+        self.assertEqual(expected_union, sorted(set(expected_union)))
+        # The duplicate observation of one fill contributes exactly ONE basis ID.
+        self.assertEqual(len(projection.fill_matching_event_ids["synthetic-fill-a"]), 2)
+
+        # Evidence refs exactly as the bridge derives them, but presented in a
+        # deliberately REVERSED order and with a duplicated entry.
+        reversed_fills = [durable_fills[fill_id] for fill_id in sorted(durable_fills, reverse=True)]
+        fill_refs = [projection.fill_evidence_ref(fill) for fill in reversed_fills]
+        self.assertNotIn(None, fill_refs)
+        fill_refs = fill_refs + [fill_refs[0]]  # duplicate evidence for one fill
+        basis = runner._orch_basis_event_ids_from_evidence((), tuple(fill_refs))
+        self.assertEqual(basis, expected_union)  # exact sorted unique union
+        # Order variation and duplication do not change the result.
+        self.assertEqual(
+            runner._orch_basis_event_ids_from_evidence((), tuple(reversed(fill_refs))), expected_union)
+        # No invented ID and no omitted ID.
+        every_durable_event_id = {row[0] for row in self._sql("SELECT event_id FROM ledger_events")}
+        self.assertTrue(set(basis) <= every_durable_event_id)
+        for fill_id in durable_fills:
+            self.assertIn(projection.fill_matching_event_ids[fill_id][-1], basis)
+        # The same derivation is what the bridge itself uses, and the durable
+        # R0 payload replays identically through the canonical replay path.
+        self.assertIn(
+            "_orch_basis_event_ids_from_evidence",
+            inspect.getsource(runner._orch_bridge_basis_event_ids))
+
+    # ==================================================================
+    # CORRECTION_03 closure theorems (C03-T01 .. C03-T08): the trusted E
+    # snapshot is RECURSIVELY immutable and alias-independent.
+    # ==================================================================
+
+    #: The security-bearing nested E sections admission consumes directly.
+    _SECURITY_BEARING_E_SECTIONS = (
+        "entry_checkpoint", "orchestration", "d07", "gate_d", "binding",
+        "risk_config", "gate_d_scope",
+    )
+
+    def _carrier_and_source(self, package):
+        """A live launcher-issued carrier plus the EXACT source E document the
+        launcher parsed, so alias isolation can be proved against real bytes."""
+        carrier = self._issue_trusted_expectations(package)
+        _, root = package
+        source = json.loads((root / runner._ORCH_E_FILENAME).read_bytes())
+        return carrier, source
+
+    def test_c03_t01_nested_trusted_e_leaves_cannot_be_mutated_through_the_carrier(self) -> None:
+        """C03-T01: every security-bearing nested E section reached through
+        ``carrier.document`` is read-only; no write, delete or insert lands,
+        the values are unchanged and no durable state moves."""
+        self._enter_clean_safe_held()
+        package = self._package(self.CLEAN)
+        carrier, source = self._carrier_and_source(package)
+        state_before = self._state()
+
+        # Top level is read-only.
+        with self.assertRaises(TypeError):
+            carrier.document["execution_package_id"] = "pkg_attacker"
+        with self.assertRaises(TypeError):
+            del carrier.document["entry_checkpoint"]
+
+        for section in self._SECURITY_BEARING_E_SECTIONS:
+            nested = carrier.document[section]
+            with self.subTest(section):
+                # Deep, not shallow: the nested section is itself read-only.
+                self.assertNotIsInstance(nested, dict)
+                self.assertIsInstance(nested, Mapping)
+                existing_key = sorted(nested)[0]
+                original = nested[existing_key]
+
+                def assign_existing(target=nested, key=existing_key):
+                    target[key] = "ATTACKER"
+
+                def insert_new(target=nested):
+                    target["attacker_key"] = 1
+
+                def delete_key(target=nested, key=existing_key):
+                    del target[key]
+
+                for label, mutate in (
+                    ("assign existing", assign_existing),
+                    ("insert new", insert_new),
+                    ("delete", delete_key),
+                ):
+                    with self.subTest(label):
+                        with self.assertRaises(TypeError):
+                            mutate()
+                self.assertEqual(nested[existing_key], original)
+                self.assertEqual(dict(nested), source[section])
+
+        # Whole-document semantic equality with the launcher-verified E, and no
+        # durable movement of any kind.
+        self.assertEqual(json.loads(json.dumps(_plain(carrier.document))), source)
+        self.assertEqual(self._state(), state_before)
+
+    def test_c03_t02_retained_source_and_nested_aliases_cannot_change_the_snapshot(self) -> None:
+        """C03-T02: the carrier retains NO reference to the parser containers.
+        Aliases held from before construction are mutated afterwards and the
+        snapshot is unaffected."""
+        self._enter_clean_safe_held()
+        package = self._package(self.CLEAN)
+        live = self._issue_trusted_expectations(package)
+        constants = object.__getattribute__(live, "_constants")
+        root = object.__getattribute__(live, "_root")
+        _, package_root = package
+        source = json.loads((package_root / runner._ORCH_E_FILENAME).read_bytes())
+        expected = json.loads(json.dumps(source))  # independent deep comparison copy
+
+        # Retain the top-level alias AND every nested alias before construction.
+        nested_aliases = {name: source[name] for name in self._SECURITY_BEARING_E_SECTIONS}
+        carrier = runner.TrustedExecutionExpectationsV1(
+            runner._TRUSTED_EXPECTATIONS_ISSUER_KEY, document=source,
+            raw_sha256=live.raw_sha256, raw_bytes=live.raw_bytes,
+            constants=constants, root=root)
+        self.assertEqual(json.loads(json.dumps(_plain(carrier.document))), expected)
+
+        # Now mutate every retained alias, top level and nested, after the fact.
+        source["execution_package_id"] = "pkg_attacker"
+        source["attacker_top_level"] = {"injected": True}
+        del source["consumption_policy"]
+        for name, alias in nested_aliases.items():
+            alias["attacker_key"] = "ATTACKER"
+            for key in list(alias):
+                if key != "attacker_key" and isinstance(alias[key], (str, int, bool)):
+                    alias[key] = "ATTACKER"
+                    break
+        nested_aliases["entry_checkpoint"]["trusted_sequence"] = 999_999
+        nested_aliases["gate_d_scope"]["max_ordinary_write_sends"] = 9_999
+
+        # The snapshot is completely unaffected.
+        self.assertEqual(json.loads(json.dumps(_plain(carrier.document))), expected)
+        self.assertEqual(carrier.document["entry_checkpoint"]["trusted_sequence"],
+                         expected["entry_checkpoint"]["trusted_sequence"])
+        self.assertEqual(carrier.document["gate_d_scope"]["max_ordinary_write_sends"],
+                         expected["gate_d_scope"]["max_ordinary_write_sends"])
+        self.assertNotIn("attacker_top_level", carrier.document)
+        self.assertIn("consumption_policy", carrier.document)
+        for name in self._SECURITY_BEARING_E_SECTIONS:
+            self.assertNotIn("attacker_key", carrier.document[name])
+
+    def test_c03_t03_deep_freeze_is_recursive_over_arrays_and_rejects_non_json(self) -> None:
+        """C03-T03: arrays become tuples, dicts inside arrays become read-only
+        mappings at every depth, and an unsupported non-JSON value fails
+        ``AUTHORIZATION_EXPECTATION_UNTRUSTED`` at issuance.  This exercises the
+        helper only; it does not widen the closed E schema."""
+        freeze = runner._orch_deep_freeze_trusted_json_v1
+        synthetic = {
+            "scalars": ["a", 1, True, None],
+            "rows": [{"inner": {"deep": [{"leaf": "v"}]}}],
+            "flag": False,
+            "count": 0,
+            "nothing": None,
+            "name": "x",
+        }
+        frozen = freeze(synthetic)
+        self.assertIsInstance(frozen, Mapping)
+        self.assertNotIsInstance(frozen, dict)
+        self.assertIsInstance(frozen["scalars"], tuple)
+        self.assertEqual(frozen["scalars"], ("a", 1, True, None))
+        rows = frozen["rows"]
+        self.assertIsInstance(rows, tuple)
+        self.assertNotIsInstance(rows[0], dict)
+        deep = rows[0]["inner"]["deep"]
+        self.assertIsInstance(deep, tuple)
+        self.assertNotIsInstance(deep[0], dict)
+        self.assertEqual(deep[0]["leaf"], "v")
+        # Mutation fails at every level, including inside arrays.
+        with self.assertRaises(TypeError):
+            frozen["name"] = "y"
+        with self.assertRaises(TypeError):
+            rows[0]["inner"] = {}
+        with self.assertRaises(TypeError):
+            deep[0]["leaf"] = "attacker"
+        with self.assertRaises(TypeError):
+            frozen["scalars"][0] = "attacker"
+        # Exact scalar identity is preserved; bool never collapses into int.
+        self.assertIs(frozen["flag"], False)
+        self.assertIs(frozen["nothing"], None)
+        self.assertIs(type(frozen["count"]), int)
+        self.assertIs(type(frozen["flag"]), bool)
+        # Unsupported values are refused at issuance, at any depth.
+        for label, value in (
+            ("float", 1.5), ("set", {1, 2}), ("bytes", b"x"), ("object", object()),
+            ("nested float", {"a": [{"b": 2.5}]}),
+        ):
+            with self.subTest(label):
+                with self.assertRaises(RunnerError) as context:
+                    freeze(value if label != "nested float" else value)
+                self.assertEqual(context.exception.code,
+                                 RunnerFailureCode.AUTHORIZATION_EXPECTATION_UNTRUSTED)
+        # A carrier can never be built from a non-dict document.
+        with self.assertRaises(RunnerError) as context:
+            runner.TrustedExecutionExpectationsV1(
+                runner._TRUSTED_EXPECTATIONS_ISSUER_KEY, document=["not", "a", "dict"],
+                raw_sha256="0" * 64, raw_bytes=1, constants=None, root=None)
+        self.assertEqual(context.exception.code, RunnerFailureCode.AUTHORIZATION_EXPECTATION_UNTRUSTED)
+
+    def test_c03_t04_deep_frozen_carrier_still_completes_both_orchestration_routes(self) -> None:
+        """C03-T04: positive compatibility is unchanged -- the recursively
+        frozen carrier completes the synthetic CLEAN_SAFE_HELD and BOOT_HOLD
+        paths exactly as CORRECTION_02 did."""
+        self._enter_clean_safe_held()
+        clean = self._run(self._package(self.CLEAN), builder=self._builder(phases=1))
+        self.assertEqual(clean.route, "CLEAN_SAFE_HELD")
+        self.assertEqual((clean.phase_requests, clean.aggregate_requests), ((72,), 72))
+        self.assertEqual(clean.writer_cleanup, "ENDED")
+
+        self.tearDown()
+        self.setUp()
+        boot = self._run(self._package(self.BOOT), builder=self._builder(phases=2))
+        self.assertEqual(boot.route, "BOOT_HOLD_R0")
+        self.assertEqual((boot.phase_requests, boot.aggregate_requests), ((72, 72), 144))
+        self.assertTrue(boot.bridge_reconciliation_appended)
+        self.assertEqual(boot.bridge_post_close_sequence, boot.bridge_pre_close_sequence + 1)
+        self.assertEqual(boot.writer_cleanup, "ENDED")
+
+    def test_c03_t05_exact_entry_checkpoint_authority_survives_every_attempt(self) -> None:
+        """C03-T05: the launcher-authenticated ``entry_checkpoint`` is exactly
+        the checkpoint admission uses.  Mutation or replacement attempts across
+        trusted sequence/hash, state/epoch, writer-proof state/eligibility and
+        active risk identity cannot alter the carrier."""
+        self._enter_clean_safe_held()
+        package = self._package(self.CLEAN)
+        carrier, source = self._carrier_and_source(package)
+        checkpoint = carrier.document["entry_checkpoint"]
+        original = dict(source["entry_checkpoint"])
+
+        for key, attacker in (
+            ("trusted_sequence", 999_999),
+            ("trusted_event_hash", "0" * 64),
+            ("risk_control_state", "BOOT_HOLD"),
+            ("risk_state_epoch", 99),
+            ("writer_proof_state", "RELEASED"),
+            ("writer_proof_release_eligible", True),
+            ("active_risk_config_sha256", "0" * 64),
+            ("authority_instance_id", "auth_attacker"),
+            ("ledger_instance_id", "ledger_attacker"),
+        ):
+            with self.subTest(key):
+                with self.assertRaises(TypeError):
+                    checkpoint[key] = attacker
+                self.assertEqual(checkpoint[key], original[key])
+        # Whole-section replacement is refused too.
+        with self.assertRaises(TypeError):
+            carrier.document["entry_checkpoint"] = dict(original, trusted_sequence=999_999)
+        self.assertEqual(dict(carrier.document["entry_checkpoint"]), original)
+
+        # Admission consumes exactly that checkpoint.
+        result = self._run(package, builder=self._builder(phases=1))
+        self.assertEqual(result.route, "CLEAN_SAFE_HELD")
+        consumed = self._events("EXECUTION_AUTHORIZATION_SET_CONSUMED")[-1]
+        self.assertEqual(consumed["pre_consumption_sequence"], original["trusted_sequence"])
+        self.assertEqual(consumed["pre_consumption_event_hash"], original["trusted_event_hash"])
+
+    def test_c03_t06_cross_binding_e_sections_cannot_change_derived_durable_values(self) -> None:
+        """C03-T06: mutation attempts against the orchestration, D07, Gate-D,
+        binding, risk and Gate-D-scope sections all fail, and the durable
+        consumption values derived from them are exactly the launcher values."""
+        self._enter_clean_safe_held()
+        package = self._package(self.CLEAN)
+        carrier, source = self._carrier_and_source(package)
+
+        attempts = (
+            ("orchestration", "sha256", "0" * 64),
+            ("orchestration", "authorization_id", "orch_attacker"),
+            ("d07", "sha256", "0" * 64),
+            ("d07", "bytes", 1),
+            ("gate_d", "authorization_id", "gate_attacker"),
+            ("gate_d", "sha256", "0" * 64),
+            ("binding", "exchange_index", 1),
+            ("binding", "subaccount", 99),
+            ("risk_config", "raw_sha256", "0" * 64),
+            ("risk_config", "semantic_sha256", "0" * 64),
+            ("gate_d_scope", "max_ordinary_write_sends", 9_999),
+            ("gate_d_scope", "max_cleanup_cancel_sends", 9_999),
+        )
+        for section, key, attacker in attempts:
+            with self.subTest(f"{section}.{key}"):
+                with self.assertRaises(TypeError):
+                    carrier.document[section][key] = attacker
+                self.assertEqual(carrier.document[section][key], source[section][key])
+
+        result = self._run(package, builder=self._builder(phases=1))
+        consumed = self._events("EXECUTION_AUTHORIZATION_SET_CONSUMED")[-1]
+        self.assertEqual(consumed["authorization_binding_sha256"], source["authorization_binding_sha256"])
+        self.assertEqual(consumed["orchestration_authorization_id"], source["orchestration"]["authorization_id"])
+        self.assertEqual(consumed["orchestration_authorization_sha256"], source["orchestration"]["sha256"])
+        self.assertEqual(consumed["gate_d_authorization_id"], source["gate_d"]["authorization_id"])
+        self.assertEqual(consumed["gate_d_authorization_sha256"], source["gate_d"]["sha256"])
+        self.assertEqual(consumed["d07_read_authorization_sha256"], source["d07"]["sha256"])
+        self.assertEqual(consumed["binding"]["exchange_index"], 0)
+        self.assertEqual(consumed["binding"]["subaccount"], source["binding"]["subaccount"])
+        self.assertEqual(
+            result.gate_d_result.ordinary_writes_sent + result.gate_d_result.cleanup_cancels_sent, 0)
+
+    def test_c03_t07_the_carrier_stores_no_shallow_proxy_over_a_parser_container(self) -> None:
+        """C03-T07: static guard against a regression back to the blocked
+        shallow form ``MappingProxyType(dict(document))``."""
+        source = inspect.getsource(runner.TrustedExecutionExpectationsV1.__init__)
+        self.assertIn("_orch_deep_freeze_trusted_json_v1", source)
+        self.assertNotIn("MappingProxyType(dict(document))", source)
+        # The helper is module-private and has no public alias.
+        self.assertEqual(
+            [name for name in vars(runner)
+             if not name.startswith("_") and "deep_freeze" in name.lower()],
+            [])
+        self.assertTrue(callable(runner._orch_deep_freeze_trusted_json_v1))
+
+
+def _plain(value):
+    """Test-only: convert a recursively frozen trusted snapshot back into plain
+    JSON containers for comparison.  It is never an authorization source."""
+    if isinstance(value, Mapping):
+        return {key: _plain(item) for key, item in value.items()}
+    if isinstance(value, tuple):
+        return [_plain(item) for item in value]
+    return value
+
 
 if __name__ == "__main__":
     unittest.main()

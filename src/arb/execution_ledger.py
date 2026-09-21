@@ -51,6 +51,12 @@ LOCK_MODEL = "AUTHORITY_THEN_LEDGER_SQLITE_EXCLUSIVE_V1"
 ACTIVE_LEDGER_SCHEMA_REVISION = 2
 EXECUTION_DOMAIN_BINDING_SCHEMA_REVISION = 1
 EXECUTION_DOMAIN_BOOTSTRAP_RECORDED_DOMAIN = b"ARB_EXECUTION_DOMAIN_BOOTSTRAP_RECORDED_V1\x00"
+# CORRECTION_05 C04-06: one durable, anchored, active-ledger-only consumption
+# event reserving a composed O/G authorization set.
+EXECUTION_AUTHORIZATION_SET_CONSUMED_DOMAIN = b"ARB_EXECUTION_AUTHORIZATION_SET_CONSUMED_V1\x00"
+AUTHORIZATION_CONSUMPTION_SCHEMA_REVISION = 1
+AUTHORIZATION_CONSUMPTION_POLICY = "DURABLE_ARB_AUTHORIZATION_SET_CONSUMED_V1"
+AUTHORIZATION_CONSUMPTION_DEADLINE_NS = 300_000_000_000
 ACTIVE_PRELEDGER_HISTORY_MODES = frozenset({
     "CONTROLLED_FRESH_INCEPTION",
     "KNOWN_NONEMPTY_PRESTACK",
@@ -185,6 +191,15 @@ class FailureCode(enum.StrEnum):
     # ledger-binding accepted-evidence contracts.
     STATIC_COMPLETENESS_THEOREM_NOT_ACCEPTED = "STATIC_COMPLETENESS_THEOREM_NOT_ACCEPTED"
     P02_TERMINAL_SETTLEMENT_EVIDENCE_MISMATCH = "P02_TERMINAL_SETTLEMENT_EVIDENCE_MISMATCH"
+    # R1-D07 N1 CORRECTION_05 C04-06 durable authorization-set consumption.
+    AUTHORIZATION_CONSUMPTION_EVENT_PATH_REQUIRED = "AUTHORIZATION_CONSUMPTION_EVENT_PATH_REQUIRED"
+    AUTHORIZATION_CONSUMPTION_PAYLOAD_INVALID = "AUTHORIZATION_CONSUMPTION_PAYLOAD_INVALID"
+    AUTHORIZATION_CONSUMPTION_READBACK_MISMATCH = "AUTHORIZATION_CONSUMPTION_READBACK_MISMATCH"
+    NO_REPAIR_AUTHORITY_LEDGER_TAIL_MISMATCH = "NO_REPAIR_AUTHORITY_LEDGER_TAIL_MISMATCH"
+    ACQUISITION_ENTRY_GUARD_FAILED = "ACQUISITION_ENTRY_GUARD_FAILED"
+    AUTHORIZATION_RECEIPT_INVALID = "AUTHORIZATION_RECEIPT_INVALID"
+    AUTHORIZATION_RECEIPT_PROCESS_MISMATCH = "AUTHORIZATION_RECEIPT_PROCESS_MISMATCH"
+    AUTHORIZATION_RECEIPT_STAGE_LATCH_SPENT = "AUTHORIZATION_RECEIPT_STAGE_LATCH_SPENT"
 
 
 class RestartClassification(enum.StrEnum):
@@ -237,6 +252,9 @@ class EventType(enum.StrEnum):
     RESTRICTED_SESSION_ENDED = "RESTRICTED_SESSION_ENDED"
     RESTRICTED_SESSION_ABANDONED = "RESTRICTED_SESSION_ABANDONED"
     EXECUTION_DOMAIN_BOOTSTRAP_RECORDED = "EXECUTION_DOMAIN_BOOTSTRAP_RECORDED"
+    # CORRECTION_05 C04-06.  Active revision-2 ledger only; emitted solely by the
+    # narrow consumption path below, never by a generic append.
+    EXECUTION_AUTHORIZATION_SET_CONSUMED = "EXECUTION_AUTHORIZATION_SET_CONSUMED"
 
 
 class AuthorityLedgerRelation(enum.StrEnum):
@@ -281,6 +299,7 @@ _NEW_EVENT_DOMAINS = MappingProxyType({
     EventType.RESTRICTED_SESSION_ENDED: b"ARB_RESTRICTED_SESSION_ENDED_V1\x00",
     EventType.RESTRICTED_SESSION_ABANDONED: b"ARB_RESTRICTED_SESSION_ABANDONED_V1\x00",
     EventType.EXECUTION_DOMAIN_BOOTSTRAP_RECORDED: EXECUTION_DOMAIN_BOOTSTRAP_RECORDED_DOMAIN,
+    EventType.EXECUTION_AUTHORIZATION_SET_CONSUMED: EXECUTION_AUTHORIZATION_SET_CONSUMED_DOMAIN,
 })
 
 
@@ -307,6 +326,19 @@ def _new_event_logical_identity(event_type: EventType, payload: Mapping[str, obj
         return {
             "bootstrap_contract_sha256": payload.get("bootstrap_contract_sha256"),
             "domain_binding_sha256": payload.get("domain_binding_sha256"),
+        }
+    if event_type is EventType.EXECUTION_AUTHORIZATION_SET_CONSUMED:
+        # C04-06: deterministic logical identity is exactly the orchestration
+        # authorization within its conflict domain.  The payload is not yet
+        # validated at this point, so malformed shapes fail closed here.
+        binding = payload.get("binding")
+        conflict_domain_ref = binding.get("conflict_domain_ref") if isinstance(binding, Mapping) else None
+        orchestration_authorization_id = payload.get("orchestration_authorization_id")
+        if type(conflict_domain_ref) is not str or type(orchestration_authorization_id) is not str:
+            raise LedgerError(FailureCode.AUTHORIZATION_CONSUMPTION_PAYLOAD_INVALID)
+        return {
+            "conflict_domain_ref": conflict_domain_ref,
+            "orchestration_authorization_id": orchestration_authorization_id,
         }
     raise LedgerError(FailureCode.LEDGER_SCHEMA_UNSUPPORTED_EVENT_TYPE)
 
@@ -1330,6 +1362,12 @@ def load_and_validate_events(
         previous = event.event_hash
     if not events or events[0].event_type is not EventType.LEDGER_INITIALIZED:
         raise LedgerError(FailureCode.LEDGER_SEQUENCE_INTEGRITY_FAILURE)
+    if type(meta) is not ActiveLedgerMeta and any(
+        event.event_type is EventType.EXECUTION_AUTHORIZATION_SET_CONSUMED for event in events
+    ):
+        # C04-06: the consumption vocabulary exists only in the active
+        # revision-2 ledger; a legacy N0 ledger rejects it fail-closed.
+        raise LedgerError(FailureCode.LEDGER_SCHEMA_UNSUPPORTED_EVENT_TYPE)
     if type(meta) is ActiveLedgerMeta:
         _validate_active_initialization_event(meta, events[0])
         _validate_active_bootstrap_genesis(events)
@@ -1544,6 +1582,19 @@ _NEW_EVENT_PAYLOAD_KEYS = MappingProxyType({
         "position_truth", "retained_position_ticker",
         "retained_position_floor_contracts", "automatic_flatten_authorized",
     }),
+    EventType.EXECUTION_AUTHORIZATION_SET_CONSUMED: frozenset({
+        "consumption_schema_revision", "execution_package_id", "expectation_carrier_sha256",
+        "authorization_set_id", "authorization_binding_sha256",
+        "orchestration_authorization_id", "orchestration_authorization_class",
+        "orchestration_authorization_sha256", "d07_read_authorization_id",
+        "d07_read_authorization_sha256", "gate_d_authorization_id",
+        "gate_d_authorization_sha256", "task_id", "execution_attempt_id", "invocation_id",
+        "process_instance_id", "binding", "authority_instance_id", "authority_namespace_id",
+        "authority_store_path_identity_sha256", "ledger_instance_id",
+        "ledger_path_identity_sha256", "pre_consumption_sequence",
+        "pre_consumption_event_hash", "invocation_started_monotonic_ns",
+        "invocation_absolute_deadline_monotonic_ns", "consumption_policy",
+    }),
 })
 
 _ID_PATTERNS = MappingProxyType({
@@ -1597,8 +1648,161 @@ def _require_sorted_unique_ids(value: object, *, event_ids: bool = False) -> lis
     return items
 
 
+_AUTHORIZATION_IDENTIFIER_RE = re.compile(r"^[A-Za-z0-9][A-Za-z0-9_.:/|=+-]*$")
+_GIT_IDENTITY_RE = re.compile(r"^[0-9a-f]{40}$")
+_MARKET_TICKER_RE = re.compile(r"^[A-Za-z0-9._~-]{1,200}$")
+AUTHORIZATION_ORCHESTRATION_CLASSES = frozenset({
+    "PRE_RELEASE_BRIDGE_RELEASE_ORCHESTRATION_V1",
+    "CLEAN_SAFE_HELD_RELEASE_CONTINUATION_V1",
+})
+AUTHORIZATION_BINDING_KEYS = frozenset({
+    "authorization_set_id", "task_id", "execution_attempt_id", "invocation_id",
+    "orchestration_authorization_id", "orchestration_authorization_class",
+    "repository", "required_implementation_commit", "required_implementation_tree",
+    "required_implementation_parent", "active_contract_id", "active_contract_sha256",
+    "domain_binding_id", "domain_binding_sha256", "environment", "account_scope_ref",
+    "subaccount", "exchange_index", "conflict_domain_ref", "market_scope",
+    "risk_config_raw_sha256", "risk_config_semantic_sha256", "process_continuity_mode",
+    "absolute_deadline_seconds", "deadline_policy",
+})
+_AUTHORIZATION_BINDING_FIXED_STRINGS = MappingProxyType({
+    "repository": "rigolugo/ARB",
+    "environment": "KALSHI_DEMO",
+    "process_continuity_mode": "ONE_PROCESS_ONE_INVOCATION_NO_RESTART",
+    "deadline_policy": "ONE_INVOCATION_START_ABSOLUTE_DEADLINE_NO_RESET",
+})
+_AUTHORIZATION_BINDING_IDENTIFIER_KEYS = (
+    "authorization_set_id", "task_id", "execution_attempt_id", "invocation_id",
+    "orchestration_authorization_id", "active_contract_id", "domain_binding_id",
+    "account_scope_ref",
+)
+_AUTHORIZATION_BINDING_SHA_KEYS = (
+    "active_contract_sha256", "domain_binding_sha256", "risk_config_raw_sha256",
+    "risk_config_semantic_sha256",
+)
+_AUTHORIZATION_BINDING_GIT_KEYS = (
+    "required_implementation_commit", "required_implementation_tree",
+    "required_implementation_parent",
+)
+_AUTHORIZATION_SET_UNIQUENESS_KEYS = (
+    "authorization_set_id", "orchestration_authorization_id", "gate_d_authorization_id",
+    "execution_attempt_id", "invocation_id", "orchestration_authorization_sha256",
+    "gate_d_authorization_sha256",
+)
+
+
+def is_authorization_identifier(value: object) -> bool:
+    return type(value) is str and _AUTHORIZATION_IDENTIFIER_RE.fullmatch(value) is not None
+
+
+def validate_authorization_binding_object(binding: object) -> dict:
+    """Closed, exact-typed validation of the canonical binding object ``B``
+    (C04-04).  Returns a plain-dict copy; raises on any deviation."""
+    if type(binding) is not dict and not isinstance(binding, Mapping):
+        _schema_error(FailureCode.AUTHORIZATION_CONSUMPTION_PAYLOAD_INVALID)
+    value = dict(binding)
+    if set(value) != AUTHORIZATION_BINDING_KEYS:
+        _schema_error(FailureCode.AUTHORIZATION_CONSUMPTION_PAYLOAD_INVALID)
+    for key in _AUTHORIZATION_BINDING_IDENTIFIER_KEYS:
+        if not is_authorization_identifier(value[key]):
+            _schema_error(FailureCode.AUTHORIZATION_CONSUMPTION_PAYLOAD_INVALID)
+    for key in _AUTHORIZATION_BINDING_SHA_KEYS:
+        if not _is_sha256(value[key]):
+            _schema_error(FailureCode.AUTHORIZATION_CONSUMPTION_PAYLOAD_INVALID)
+    for key in _AUTHORIZATION_BINDING_GIT_KEYS:
+        if type(value[key]) is not str or _GIT_IDENTITY_RE.fullmatch(value[key]) is None:
+            _schema_error(FailureCode.AUTHORIZATION_CONSUMPTION_PAYLOAD_INVALID)
+    for key, expected in _AUTHORIZATION_BINDING_FIXED_STRINGS.items():
+        if value[key] != expected:
+            _schema_error(FailureCode.AUTHORIZATION_CONSUMPTION_PAYLOAD_INVALID)
+    if (
+        value["orchestration_authorization_class"] not in AUTHORIZATION_ORCHESTRATION_CLASSES
+        or type(value["subaccount"]) is not int
+        or type(value["exchange_index"]) is not int
+        or value["subaccount"] < 0
+        or value["exchange_index"] < 0
+        or type(value["absolute_deadline_seconds"]) is not int
+        or value["absolute_deadline_seconds"] != 300
+        or type(value["conflict_domain_ref"]) is not str
+        or not value["conflict_domain_ref"]
+    ):
+        _schema_error(FailureCode.AUTHORIZATION_CONSUMPTION_PAYLOAD_INVALID)
+    scope = value["market_scope"]
+    if (
+        not isinstance(scope, Mapping)
+        or set(scope) != {"scope_kind", "ticker"}
+        or scope["scope_kind"] != "SINGLE_MARKET_TICKER"
+        or type(scope["ticker"]) is not str
+        or _MARKET_TICKER_RE.fullmatch(scope["ticker"]) is None
+    ):
+        _schema_error(FailureCode.AUTHORIZATION_CONSUMPTION_PAYLOAD_INVALID)
+    value["market_scope"] = dict(scope)
+    return value
+
+
+def validate_authorization_consumption_payload(payload: Mapping[str, object]) -> None:
+    """Closed revision-1 payload validation for the consumption event (C04-06).
+
+    Structural/type validation only: the identity of the anchored stores is
+    compared against the ledger/authority metadata by the replay projection,
+    and the current-N1 domain equality is enforced by the venue binding's
+    history validator."""
+    code = FailureCode.AUTHORIZATION_CONSUMPTION_PAYLOAD_INVALID
+    if set(payload) != _NEW_EVENT_PAYLOAD_KEYS[EventType.EXECUTION_AUTHORIZATION_SET_CONSUMED]:
+        _schema_error(code)
+    if type(payload["consumption_schema_revision"]) is not int or payload["consumption_schema_revision"] != AUTHORIZATION_CONSUMPTION_SCHEMA_REVISION:
+        _schema_error(code)
+    if payload["consumption_policy"] != AUTHORIZATION_CONSUMPTION_POLICY:
+        _schema_error(code)
+    for key in (
+        "execution_package_id", "authorization_set_id", "orchestration_authorization_id",
+        "d07_read_authorization_id", "gate_d_authorization_id", "task_id",
+        "execution_attempt_id", "invocation_id",
+    ):
+        if not is_authorization_identifier(payload[key]):
+            _schema_error(code)
+    for key in (
+        "expectation_carrier_sha256", "authorization_binding_sha256",
+        "orchestration_authorization_sha256", "d07_read_authorization_sha256",
+        "gate_d_authorization_sha256", "authority_store_path_identity_sha256",
+        "ledger_path_identity_sha256", "pre_consumption_event_hash",
+    ):
+        if not _is_sha256(payload[key]):
+            _schema_error(code)
+    if (
+        payload["orchestration_authorization_class"] not in AUTHORIZATION_ORCHESTRATION_CLASSES
+        or not _is_named_id("process_instance_id", payload["process_instance_id"])
+        or type(payload["authority_instance_id"]) is not str or not payload["authority_instance_id"]
+        or type(payload["authority_namespace_id"]) is not str or not payload["authority_namespace_id"]
+        or type(payload["ledger_instance_id"]) is not str or not payload["ledger_instance_id"]
+        or type(payload["pre_consumption_sequence"]) is not int
+        or payload["pre_consumption_sequence"] <= 0
+        or type(payload["invocation_started_monotonic_ns"]) is not int
+        or payload["invocation_started_monotonic_ns"] < 0
+        or type(payload["invocation_absolute_deadline_monotonic_ns"]) is not int
+        or payload["invocation_absolute_deadline_monotonic_ns"]
+        != payload["invocation_started_monotonic_ns"] + AUTHORIZATION_CONSUMPTION_DEADLINE_NS
+    ):
+        _schema_error(code)
+    binding = validate_authorization_binding_object(payload["binding"])
+    for key in (
+        "authorization_set_id", "task_id", "execution_attempt_id", "invocation_id",
+        "orchestration_authorization_id",
+    ):
+        if payload[key] != binding[key]:
+            _schema_error(code)
+    if payload["orchestration_authorization_class"] != binding["orchestration_authorization_class"]:
+        _schema_error(code)
+    if len({
+        payload["orchestration_authorization_id"], payload["d07_read_authorization_id"],
+        payload["gate_d_authorization_id"],
+    }) != 3:
+        _schema_error(code)
+
+
 def _validate_spec03_event_sequence(events: Sequence[LedgerEvent], session_modes: Mapping[str, AcquisitionMode]) -> None:
     """Validate the closed Spec-03 vocabulary without altering historical schemas."""
+    consumption_keys: dict[str, set[object]] = {key: set() for key in _AUTHORIZATION_SET_UNIQUENESS_KEYS}
     by_id: dict[str, LedgerEvent] = {}
     active_session: str | None = None
     active_mode: AcquisitionMode | None = None
@@ -1699,6 +1903,18 @@ def _validate_spec03_event_sequence(events: Sequence[LedgerEvent], session_modes
         }:
             if set(payload) != _NEW_EVENT_PAYLOAD_KEYS[event.event_type] or event.incident_id is not None or event.execution_attempt_id is not None:
                 _schema_error()
+
+        if event.event_type is EventType.EXECUTION_AUTHORIZATION_SET_CONSUMED:
+            # C04-06: sessionless envelope; the event never occurs inside a
+            # writer/restricted session and never changes risk/proof state.
+            if event.writer_session_id is not None or active_session is not None or index == 0:
+                _schema_error(FailureCode.RESTRICTED_SESSION_EVENT_NOT_PERMITTED)
+            validate_authorization_consumption_payload(payload)
+            _require_tail(payload, "pre_consumption_sequence", "pre_consumption_event_hash", previous)
+            for key in _AUTHORIZATION_SET_UNIQUENESS_KEYS:
+                if payload[key] in consumption_keys[key]:
+                    _schema_error(FailureCode.EVENT_ID_CONTENT_CONFLICT)
+                consumption_keys[key].add(payload[key])
 
         if event.event_type is EventType.WRITER_PROOF_HELD:
             proof_id = str(payload.get("writer_proof_id"))
@@ -2463,6 +2679,17 @@ class LockedLedger:
         return replay_projection(self.authority_meta, self.authority_row, self.ledger_meta, self.events)
 
     def append_batch(self, inputs: Sequence[EventInput]) -> AppendResult:
+        # C04-06: the authorization-set consumption event is emitted only by the
+        # narrow sessionless path (``_append_authorization_consumption``); the
+        # generic ordinary/restricted append surface rejects it unconditionally.
+        if inputs and any(
+            type(item) is EventInput and item.event_type is EventType.EXECUTION_AUTHORIZATION_SET_CONSUMED
+            for item in inputs
+        ):
+            raise LedgerError(FailureCode.AUTHORIZATION_CONSUMPTION_EVENT_PATH_REQUIRED)
+        return self._append_batch_locked(inputs)
+
+    def _append_batch_locked(self, inputs: Sequence[EventInput]) -> AppendResult:
         if self.closed or not inputs:
             raise LedgerError(FailureCode.LEDGER_COMMIT_FAILURE)
         if self.authority_row.trusted_sequence != self.events[-1].sequence or self.authority_row.trusted_event_hash != self.events[-1].event_hash:
@@ -2586,6 +2813,7 @@ def _open_locked(
     fault_hook: FaultHook = _noop_fault_hook,
     history_validator: HistoryValidator | None = None,
     ledger_revision: int = LEDGER_SCHEMA_REVISION,
+    authority_repair: bool = True,
 ) -> LockedLedger:
     conflict = _require_canonical_text(conflict_domain_ref)
     environment = _require_canonical_text(expected_environment)
@@ -2641,6 +2869,11 @@ def _open_locked(
         if history_validator is not None:
             history_validator(events)
         relation = AuthorityLedgerRelation.EQUAL
+        if row.trusted_sequence < tail.sequence and not authority_repair:
+            # CORRECTION_05 C04-06 no-repair policy: an unequal tail is never
+            # caught up here.  The authority row is untouched and the exclusive
+            # locks are released by the caller-visible failure below.
+            raise LedgerError(FailureCode.NO_REPAIR_AUTHORITY_LEDGER_TAIL_MISMATCH)
         if row.trusted_sequence < tail.sequence:
             relation = AuthorityLedgerRelation.LEDGER_AHEAD
             try:
@@ -3054,11 +3287,12 @@ def _acquire_local_state_internal(
     fault_hook: FaultHook = _noop_fault_hook,
     history_validator: HistoryValidator | None = None,
     ledger_revision: int = LEDGER_SCHEMA_REVISION,
+    authority_repair: bool = True,
 ) -> OpenResult:
     if type(acquisition_mode) is not AcquisitionMode:
         return OpenResult(None, RestartClassification.LEDGER_INTEGRITY_FAILURE, None, FailureCode.LEGACY_IMPORT_ONLY_ACQUISITION_REJECTED)
     try:
-        locked = _open_locked(binding, conflict_domain_ref=conflict_domain_ref, expected_environment=expected_environment, canonical_repository_root=canonical_repository_root, expected_ledger_path=expected_ledger_path, clock=clock, uuid_factory=uuid_factory, fault_hook=fault_hook, history_validator=history_validator, ledger_revision=ledger_revision)
+        locked = _open_locked(binding, conflict_domain_ref=conflict_domain_ref, expected_environment=expected_environment, canonical_repository_root=canonical_repository_root, expected_ledger_path=expected_ledger_path, clock=clock, uuid_factory=uuid_factory, fault_hook=fault_hook, history_validator=history_validator, ledger_revision=ledger_revision, authority_repair=authority_repair)
         projection = locked.projection()
         if acquisition_mode is AcquisitionMode.NORMAL_WRITER:
             # Revision 03 has no supported empty-history proof; current imported
@@ -3136,6 +3370,7 @@ def _acquire_normal_writer_candidate(
     fault_hook: FaultHook = _noop_fault_hook,
     history_validator: HistoryValidator | None = None,
     ledger_revision: int = LEDGER_SCHEMA_REVISION,
+    authority_repair: bool = True,
 ) -> OpenResult:
     """Private normal-writer candidate bridge (ER-NW-001).
 
@@ -3165,6 +3400,7 @@ def _acquire_normal_writer_candidate(
             expected_ledger_path=expected_ledger_path, clock=clock,
             uuid_factory=uuid_factory, fault_hook=fault_hook,
             history_validator=history_validator, ledger_revision=ledger_revision,
+            authority_repair=authority_repair,
         )
     except LedgerError as exc:
         return OpenResult(None, _classify_error(exc), None, exc.code)
@@ -3222,8 +3458,16 @@ def _acquire_restricted_state(
     fault_hook: FaultHook = _noop_fault_hook,
     history_validator: HistoryValidator | None = None,
     ledger_revision: int = LEDGER_SCHEMA_REVISION,
+    authority_repair: bool = True,
+    pre_acquisition_guard: "Callable[[LockedLedger, SafetyProjection], None] | None" = None,
 ) -> _RestrictedInternalResult:
-    """Private bridge for narrow emergency/release binding handles."""
+    """Private bridge for narrow emergency/release binding handles.
+
+    ``authority_repair=False`` selects the CORRECTION_05 no-repair open (an
+    unequal authority/ledger tail is never caught up).  ``pre_acquisition_guard``
+    runs against the still-held authority/ledger lock pair *before* any session
+    abandonment or start append, so a rejected guard leaves both stores
+    byte-identical (C04-08: no check-close-reopen gap)."""
     if acquisition_mode not in {AcquisitionMode.EMERGENCY_CONTROL_ONLY, AcquisitionMode.RELEASE_ONLY}:
         return _RestrictedInternalResult(
             None, RestartClassification.LEDGER_INTEGRITY_FAILURE, None,
@@ -3241,6 +3485,7 @@ def _acquire_restricted_state(
         fault_hook=fault_hook,
         history_validator=history_validator,
         ledger_revision=ledger_revision,
+        authority_repair=authority_repair,
     )
     if opened.handle is None:
         return _RestrictedInternalResult(
@@ -3256,6 +3501,13 @@ def _acquire_restricted_state(
     locked = opened.handle
     try:
         projection = locked.projection()
+        if pre_acquisition_guard is not None:
+            try:
+                pre_acquisition_guard(locked, projection)
+            except LedgerError:
+                raise
+            except Exception as exc:
+                raise LedgerError(FailureCode.ACQUISITION_ENTRY_GUARD_FAILED) from exc
         prior_state = "NONE"
         if projection.active_writer_session_id is not None:
             locked.append_batch((EventInput(EventType.WRITER_SESSION_ABANDONED, {
@@ -3309,6 +3561,212 @@ def _acquire_restricted_state(
         )
 
 
+# ---------------------------------------------------------------------------
+# CORRECTION_05 C04-06 -- durable authorization-set consumption (active ledger).
+# ---------------------------------------------------------------------------
+
+
+@dataclass(frozen=True, slots=True)
+class AuthorizationConsumptionRecordV1:
+    """One replayed ``EXECUTION_AUTHORIZATION_SET_CONSUMED`` event.  A record
+    is derived data only: it can never mint a live receipt."""
+
+    event_id: str
+    event_hash: str
+    sequence: int
+    payload: Mapping[str, object]
+
+
+@dataclass(frozen=True, slots=True)
+class AuthorizationConsumptionProjectionV1:
+    records: tuple[AuthorizationConsumptionRecordV1, ...]
+
+    def classify(self, candidate: Mapping[str, object]) -> tuple[str, AuthorizationConsumptionRecordV1 | None]:
+        """Decide ``UNUSED`` / ``CONSUMED`` / ``CONFLICT`` for one candidate
+        authorization set against the replayed consumed keys.
+
+        * exact identity on every uniqueness key                -> CONSUMED
+        * an ID key (set / O / G / attempt / invocation) equal
+          while other content differs                          -> CONFLICT
+        * only a raw O/G artifact hash equal under different
+          IDs                                                   -> CONSUMED
+          (the same raw artifact can never be replayed under a new label)
+        * otherwise                                             -> UNUSED
+        """
+        if set(candidate) != set(_AUTHORIZATION_SET_UNIQUENESS_KEYS):
+            raise LedgerError(FailureCode.AUTHORIZATION_CONSUMPTION_PAYLOAD_INVALID)
+        id_keys = (
+            "authorization_set_id", "orchestration_authorization_id",
+            "gate_d_authorization_id", "execution_attempt_id", "invocation_id",
+        )
+        sha_keys = ("orchestration_authorization_sha256", "gate_d_authorization_sha256")
+        conflict: AuthorizationConsumptionRecordV1 | None = None
+        sha_only: AuthorizationConsumptionRecordV1 | None = None
+        for record in self.records:
+            payload = record.payload
+            if all(payload[key] == candidate[key] for key in _AUTHORIZATION_SET_UNIQUENESS_KEYS):
+                return "CONSUMED", record
+            if any(payload[key] == candidate[key] for key in id_keys):
+                conflict = conflict or record
+            elif any(payload[key] == candidate[key] for key in sha_keys):
+                sha_only = sha_only or record
+        if conflict is not None:
+            return "CONFLICT", conflict
+        if sha_only is not None:
+            return "CONSUMED", sha_only
+        return "UNUSED", None
+
+
+def derive_authorization_consumption_projection(
+    authority_meta: AuthorityMeta,
+    ledger_meta: "LedgerMeta | ActiveLedgerMeta",
+    events: Sequence[LedgerEvent],
+) -> AuthorizationConsumptionProjectionV1:
+    """Derive the consumed-set projection from complete canonical replay.
+
+    Absence of any consumption event is a proof of ``UNUSED`` only when the
+    caller obtained ``events`` from a fully validated equal-tail active ledger;
+    this function never reads a store and never defaults an empty map for an
+    unvalidated history.  A consumption event whose anchored-store identity
+    differs from the actual metadata is an integrity failure."""
+    records: list[AuthorizationConsumptionRecordV1] = []
+    for event in events:
+        if event.event_type is not EventType.EXECUTION_AUTHORIZATION_SET_CONSUMED:
+            continue
+        if type(ledger_meta) is not ActiveLedgerMeta:
+            raise LedgerError(FailureCode.LEDGER_SCHEMA_UNSUPPORTED_EVENT_TYPE)
+        payload = event.payload
+        validate_authorization_consumption_payload(payload)
+        if (
+            payload["authority_instance_id"] != authority_meta.authority_instance_id
+            or payload["authority_namespace_id"] != authority_meta.authority_namespace_id
+            or payload["authority_store_path_identity_sha256"] != authority_meta.authority_store_path_identity_sha256
+            or payload["ledger_instance_id"] != ledger_meta.ledger_instance_id
+            or payload["ledger_path_identity_sha256"] != ledger_meta.ledger_path_identity_sha256
+            or payload["binding"]["conflict_domain_ref"] != ledger_meta.conflict_domain_ref
+        ):
+            raise LedgerError(FailureCode.LEDGER_AUTHORITY_BINDING_MISMATCH)
+        records.append(AuthorizationConsumptionRecordV1(event.event_id, event.event_hash, event.sequence, payload))
+    return AuthorizationConsumptionProjectionV1(tuple(records))
+
+
+@dataclass(frozen=True, slots=True)
+class _ConsumptionInternalResult:
+    """Module-private carrier for the sessionless, no-repair consumption open."""
+
+    projection: SafetyProjection | None
+    locked: LockedLedger | None
+    consumption: AuthorizationConsumptionProjectionV1 | None
+    failure_code: FailureCode | None = None
+    restart_classification: RestartClassification = RestartClassification.LEDGER_INTEGRITY_FAILURE
+
+
+def _acquire_consumption_state(
+    binding: AuthorityNamespaceBinding,
+    *,
+    conflict_domain_ref: str,
+    expected_environment: str,
+    canonical_repository_root: str | os.PathLike[str],
+    expected_ledger_path: str | os.PathLike[str] | None = None,
+    clock: Clock = _utc_now,
+    uuid_factory: UuidFactory = uuid.uuid4,
+    fault_hook: FaultHook = _noop_fault_hook,
+    history_validator: HistoryValidator | None = None,
+) -> _ConsumptionInternalResult:
+    """Private sessionless acquisition for authorization-set consumption.
+
+    Authority-first / ledger-second exclusive locks, full schema/integrity/
+    active-contract replay, and *no* authority catch-up, bootstrap, stale
+    session abandonment, initialization or append.  An unequal tail, an
+    unproven history or any integrity/availability failure returns a failure
+    (never a handle) after both locks are released."""
+    try:
+        locked = _open_locked(
+            binding, conflict_domain_ref=conflict_domain_ref,
+            expected_environment=expected_environment,
+            canonical_repository_root=canonical_repository_root,
+            expected_ledger_path=expected_ledger_path, clock=clock,
+            uuid_factory=uuid_factory, fault_hook=fault_hook,
+            history_validator=history_validator,
+            ledger_revision=ACTIVE_LEDGER_SCHEMA_REVISION, authority_repair=False,
+        )
+    except LedgerError as exc:
+        return _ConsumptionInternalResult(None, None, None, exc.code, _classify_error(exc))
+    try:
+        if type(locked.ledger_meta) is not ActiveLedgerMeta or locked.relation is not AuthorityLedgerRelation.EQUAL:
+            raise LedgerError(FailureCode.NO_REPAIR_AUTHORITY_LEDGER_TAIL_MISMATCH)
+        tail = locked.events[-1]
+        if (locked.authority_row.trusted_sequence, locked.authority_row.trusted_event_hash) != (tail.sequence, tail.event_hash):
+            raise LedgerError(FailureCode.NO_REPAIR_AUTHORITY_LEDGER_TAIL_MISMATCH)
+        projection = locked.projection()
+        consumption = derive_authorization_consumption_projection(
+            locked.authority_meta, locked.ledger_meta, locked.events,
+        )
+    except LedgerError as exc:
+        locked.close()
+        return _ConsumptionInternalResult(None, None, None, exc.code, _classify_error(exc))
+    return _ConsumptionInternalResult(projection, locked, consumption, None, projection.restart_classification)
+
+
+def _append_authorization_consumption(
+    locked: LockedLedger, payload: Mapping[str, object],
+) -> AuthorizationConsumptionRecordV1:
+    """Append exactly one consumption event, then prove append -> anchor ->
+    equal-tail readback of that exact event.
+
+    Only ``APPENDED_AND_ANCHORED`` with sequence ``pre + 1``, the exact event
+    hash/payload identity and an equal authority/ledger tail returns a record.
+    ``IDEMPOTENT_DUPLICATE`` is a replay rejection, never a new record.  Any
+    exception once the append is attempted leaves the caller with an
+    uncertain result; the caller must treat it as terminal (no retry)."""
+    if type(locked) is not LockedLedger or locked.closed:
+        raise LedgerError(FailureCode.LEDGER_COMMIT_FAILURE)
+    if type(locked.ledger_meta) is not ActiveLedgerMeta:
+        raise LedgerError(FailureCode.ACTIVE_DOMAIN_LEDGER_SCHEMA_REQUIRED)
+    if locked.relation is not AuthorityLedgerRelation.EQUAL:
+        raise LedgerError(FailureCode.NO_REPAIR_AUTHORITY_LEDGER_TAIL_MISMATCH)
+    payload = dict(payload)
+    validate_authorization_consumption_payload(payload)
+    tail = locked.events[-1]
+    if (
+        payload["pre_consumption_sequence"] != tail.sequence
+        or payload["pre_consumption_event_hash"] != tail.event_hash
+        or (locked.authority_row.trusted_sequence, locked.authority_row.trusted_event_hash) != (tail.sequence, tail.event_hash)
+        or payload["authority_instance_id"] != locked.authority_meta.authority_instance_id
+        or payload["authority_namespace_id"] != locked.authority_meta.authority_namespace_id
+        or payload["authority_store_path_identity_sha256"] != locked.authority_meta.authority_store_path_identity_sha256
+        or payload["ledger_instance_id"] != locked.ledger_meta.ledger_instance_id
+        or payload["ledger_path_identity_sha256"] != locked.ledger_meta.ledger_path_identity_sha256
+        or payload["binding"]["conflict_domain_ref"] != locked.ledger_meta.conflict_domain_ref
+    ):
+        raise LedgerError(FailureCode.AUTHORIZATION_CONSUMPTION_PAYLOAD_INVALID)
+    projection = locked.projection()
+    if projection.active_writer_session_id is not None or projection.active_restricted_session_id is not None:
+        raise LedgerError(FailureCode.RESTRICTED_SESSION_EVENT_NOT_PERMITTED)
+    pre_sequence = tail.sequence
+    result = locked._append_batch_locked((EventInput(EventType.EXECUTION_AUTHORIZATION_SET_CONSUMED, payload),))
+    if result.status is not AppendStatus.APPENDED_AND_ANCHORED:
+        raise LedgerError(FailureCode.AUTHORIZATION_CONSUMPTION_READBACK_MISMATCH)
+    if len(result.events) != 1 or result.first_sequence != pre_sequence + 1 or result.last_sequence != pre_sequence + 1:
+        raise LedgerError(FailureCode.AUTHORIZATION_CONSUMPTION_READBACK_MISMATCH)
+    appended = result.events[0]
+    # Equal-tail readback of the exact new event from both durable stores.
+    reread = load_and_validate_events(locked.ledger, locked.ledger_meta)
+    row = _authority_row(locked.authority, locked.conflict_domain_ref)
+    if (
+        len(reread) != pre_sequence + 1
+        or reread[-1].event_hash != appended.event_hash
+        or reread[-1].event_id != appended.event_id
+        or reread[-1].event_type is not EventType.EXECUTION_AUTHORIZATION_SET_CONSUMED
+        or reread[-1].previous_event_hash != tail.event_hash
+        or dict(reread[-1].payload) != payload
+        or (row.trusted_sequence, row.trusted_event_hash) != (appended.sequence, appended.event_hash)
+    ):
+        raise LedgerError(FailureCode.AUTHORIZATION_CONSUMPTION_READBACK_MISMATCH)
+    locked.fault_hook("after_consumption_readback")
+    return AuthorizationConsumptionRecordV1(appended.event_id, appended.event_hash, appended.sequence, MappingProxyType(dict(appended.payload)))
+
+
 def sqlite_posture(connection: sqlite3.Connection) -> Mapping[str, object]:
     """Return exact non-secret SQLite readback evidence for tests/review."""
     return MappingProxyType({
@@ -3335,4 +3793,10 @@ __all__ = [
     "ACTIVE_LEDGER_SCHEMA_REVISION", "EXECUTION_DOMAIN_BINDING_SCHEMA_REVISION",
     "ACTIVE_PRELEDGER_HISTORY_MODES", "BOOTSTRAP_CLASS_TO_COMPLETENESS",
     "ActiveLedgerMeta", "initialize_execution_domain_ledger_v2",
+    "AUTHORIZATION_BINDING_KEYS", "AUTHORIZATION_CONSUMPTION_DEADLINE_NS",
+    "AUTHORIZATION_CONSUMPTION_POLICY", "AUTHORIZATION_CONSUMPTION_SCHEMA_REVISION",
+    "AUTHORIZATION_ORCHESTRATION_CLASSES", "AuthorizationConsumptionProjectionV1",
+    "AuthorizationConsumptionRecordV1", "derive_authorization_consumption_projection",
+    "is_authorization_identifier", "validate_authorization_binding_object",
+    "validate_authorization_consumption_payload",
 ]

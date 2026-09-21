@@ -102,6 +102,12 @@ from arb.venues.kalshi.ledger_binding import (
     CurrentProcessReleaseCompletionV2,
     ExecutionDomainBindingV1,
     active_domain_commitment,
+    ActiveAcquisitionEntryGuardV1,
+    ActiveAuthorizationConsumptionV1,
+    ActiveAuthorizationExpectationV1,
+    AuthorizationConsumptionResultV1,
+    AuthorizationFreshnessState,
+    EmergencyControlLedgerHandle,
     LegacyIncidentContract,
     NormalWriterAcquisition,
     ReleaseEvaluationStateV1,
@@ -115,11 +121,24 @@ from arb.venues.kalshi.ledger_binding import (
     acquire_active_release_only_v1,
     acquire_normal_writer_state,
     acquire_release_only,
+    build_dormant_emergency_control_handle_v1,
+    compute_authorization_binding_sha256,
+    consume_active_execution_authorization_set_v1,
     issue_active_current_process_release_completion_v2,
     n1_accepted_terminal_settlement_evidence,
+    read_active_authorization_freshness_v1,
+    read_active_emergency_close_readback_v1,
     read_active_local_safety_state_v1,
     read_active_trusted_release_evidence_projection_v1,
     reconcile_retained_bootstrap_floor_v1,
+)
+from arb.venues.kalshi.ledger_binding import (
+    ACTIVE_ENTRY_CLASS_BOOT_HOLD as _ACTIVE_ENTRY_CLASS_BOOT_HOLD,
+    ACTIVE_ENTRY_CLASS_CLEAN_SAFE_HELD as _ACTIVE_ENTRY_CLASS_CLEAN_SAFE_HELD,
+    ACTIVE_ORCHESTRATION_CLASS_BOOT_HOLD as _ACTIVE_ORCHESTRATION_CLASS_BOOT_HOLD,
+    ACTIVE_ORCHESTRATION_CLASS_CLEAN_SAFE_HELD as _ACTIVE_ORCHESTRATION_CLASS_CLEAN_SAFE_HELD,
+    _AUTHORIZATION_EXPECTATION_ISSUER_KEY as _BINDING_EXPECTATION_ISSUER_KEY,
+    _issue_active_authorization_expectation,
 )
 from arb.venues.kalshi.risk_control import (
     AccountRiskLimits,
@@ -512,6 +531,64 @@ class RunnerFailureCode(enum.StrEnum):
     LIVE_READ_TRANSPORT_HEADER_INVALID = "LIVE_READ_TRANSPORT_HEADER_INVALID"
     LIVE_READ_TRANSPORT_NON_2XX = "LIVE_READ_TRANSPORT_NON_2XX"
     LIVE_READ_TRANSPORT_REDIRECT_NOT_FOLLOWED = "LIVE_READ_TRANSPORT_REDIRECT_NOT_FOLLOWED"
+
+    # R1-D07 N1 CORRECTION_05 failure taxonomy (preserved CORRECTION_03 codes +
+    # C04-10 authorization/recovery classes).  Codes only -- detail strings are
+    # bounded classifications and never carry secrets, raw exception text or
+    # authorization file contents.
+    BRIDGE_AUTHORIZATION_UNAVAILABLE = "BRIDGE_AUTHORIZATION_UNAVAILABLE"
+    BRIDGE_AUTHORIZATION_SHA_MISMATCH = "BRIDGE_AUTHORIZATION_SHA_MISMATCH"
+    BRIDGE_AUTHORIZATION_SCHEMA_INVALID = "BRIDGE_AUTHORIZATION_SCHEMA_INVALID"
+    BRIDGE_AUTHORIZATION_CLASS_INVALID = "BRIDGE_AUTHORIZATION_CLASS_INVALID"
+    BRIDGE_AUTHORIZATION_D07_LAYER_MISMATCH = "BRIDGE_AUTHORIZATION_D07_LAYER_MISMATCH"
+    BRIDGE_AUTHORIZATION_GATE_D_SUCCESSOR_MISSING = "BRIDGE_AUTHORIZATION_GATE_D_SUCCESSOR_MISSING"
+    BRIDGE_AUTHORIZATION_GATE_D_SUCCESSOR_INVALID = "BRIDGE_AUTHORIZATION_GATE_D_SUCCESSOR_INVALID"
+    BRIDGE_AUTHORIZATION_IMPLEMENTATION_MISMATCH = "BRIDGE_AUTHORIZATION_IMPLEMENTATION_MISMATCH"
+    BRIDGE_AUTHORIZATION_TASK_MISMATCH = "BRIDGE_AUTHORIZATION_TASK_MISMATCH"
+    BRIDGE_AUTHORIZATION_INVOCATION_MISMATCH = "BRIDGE_AUTHORIZATION_INVOCATION_MISMATCH"
+    BRIDGE_AUTHORIZATION_ACTIVE_CONTRACT_MISMATCH = "BRIDGE_AUTHORIZATION_ACTIVE_CONTRACT_MISMATCH"
+    BRIDGE_AUTHORIZATION_DOMAIN_BINDING_MISMATCH = "BRIDGE_AUTHORIZATION_DOMAIN_BINDING_MISMATCH"
+    BRIDGE_AUTHORIZATION_MARKET_SCOPE_MISMATCH = "BRIDGE_AUTHORIZATION_MARKET_SCOPE_MISMATCH"
+    BRIDGE_AUTHORIZATION_RISK_CONFIG_MISMATCH = "BRIDGE_AUTHORIZATION_RISK_CONFIG_MISMATCH"
+    BRIDGE_AUTHORIZATION_ENTRY_STATE_MISMATCH = "BRIDGE_AUTHORIZATION_ENTRY_STATE_MISMATCH"
+    BRIDGE_AUTHORIZATION_PHASE_PLAN_MISMATCH = "BRIDGE_AUTHORIZATION_PHASE_PLAN_MISMATCH"
+    BRIDGE_AUTHORIZATION_PHASE_BUDGET_MISMATCH = "BRIDGE_AUTHORIZATION_PHASE_BUDGET_MISMATCH"
+    BRIDGE_AUTHORIZATION_AGGREGATE_BUDGET_EXCEEDED = "BRIDGE_AUTHORIZATION_AGGREGATE_BUDGET_EXCEEDED"
+    BRIDGE_AUTHORIZATION_DEADLINE_MISMATCH = "BRIDGE_AUTHORIZATION_DEADLINE_MISMATCH"
+    BRIDGE_AUTHORIZATION_DEADLINE_EXPIRED = "BRIDGE_AUTHORIZATION_DEADLINE_EXPIRED"
+    BRIDGE_AUTHORIZATION_PROCESS_CONTINUITY_REQUIRED = "BRIDGE_AUTHORIZATION_PROCESS_CONTINUITY_REQUIRED"
+    BRIDGE_AUTHORIZATION_PRODUCTION_SCOPE_CONFLICT = "BRIDGE_AUTHORIZATION_PRODUCTION_SCOPE_CONFLICT"
+    BRIDGE_AUTHORIZATION_LOCAL_MUTATION_SCOPE_INVALID = "BRIDGE_AUTHORIZATION_LOCAL_MUTATION_SCOPE_INVALID"
+    BRIDGE_AUTHORIZATION_STALE_OR_REPLAYED = "BRIDGE_AUTHORIZATION_STALE_OR_REPLAYED"
+    BRIDGE_PRE_READ_INCOMPLETE = "BRIDGE_PRE_READ_INCOMPLETE"
+    BRIDGE_MUTATION_RESULT_UNKNOWN = "BRIDGE_MUTATION_RESULT_UNKNOWN"
+    BRIDGE_RECONCILIATION_DURABLE_SAFE_HELD_NOT_COMMITTED = "BRIDGE_RECONCILIATION_DURABLE_SAFE_HELD_NOT_COMMITTED"
+    BRIDGE_SAFE_HELD_OPEN_SESSION_RESTART = "BRIDGE_SAFE_HELD_OPEN_SESSION_RESTART"
+    BRIDGE_CLOSED_SAFE_HELD_RESTART = "BRIDGE_CLOSED_SAFE_HELD_RESTART"
+    BRIDGE_POST_CLOSE_REFRESH_UNAVAILABLE = "BRIDGE_POST_CLOSE_REFRESH_UNAVAILABLE"
+    BRIDGE_RELEASE_RESULT_UNKNOWN = "BRIDGE_RELEASE_RESULT_UNKNOWN"
+    GATE_D_SUCCESSOR_AUTHORIZATION_INVALID = "GATE_D_SUCCESSOR_AUTHORIZATION_INVALID"
+    USER_RISK_CHOICE_REQUIRED = "USER_RISK_CHOICE_REQUIRED"
+    IMPLEMENTATION_EDIT_SET_INSUFFICIENT = "IMPLEMENTATION_EDIT_SET_INSUFFICIENT"
+    CONTROLLING_RECONCILIATION_PAYLOAD_GAP = "CONTROLLING_RECONCILIATION_PAYLOAD_GAP"
+    AUTHORIZATION_EXPECTATION_MISSING = "AUTHORIZATION_EXPECTATION_MISSING"
+    AUTHORIZATION_EXPECTATION_UNTRUSTED = "AUTHORIZATION_EXPECTATION_UNTRUSTED"
+    AUTHORIZATION_EXPECTATION_IDENTITY_MISMATCH = "AUTHORIZATION_EXPECTATION_IDENTITY_MISMATCH"
+    AUTHORIZATION_CROSS_BINDING_MISMATCH = "AUTHORIZATION_CROSS_BINDING_MISMATCH"
+    AUTHORIZATION_FRESHNESS_UNAVAILABLE = "AUTHORIZATION_FRESHNESS_UNAVAILABLE"
+    AUTHORIZATION_CONSUMPTION_INDETERMINATE = "AUTHORIZATION_CONSUMPTION_INDETERMINATE"
+    AUTHORIZATION_CONSUMPTION_FAILED = "AUTHORIZATION_CONSUMPTION_FAILED"
+    AUTHORIZATION_CONSUMPTION_SCHEMA_UNSUPPORTED = "AUTHORIZATION_CONSUMPTION_SCHEMA_UNSUPPORTED"
+    AUTHORIZATION_SET_ID_CONFLICT = "AUTHORIZATION_SET_ID_CONFLICT"
+    AUTHORIZATION_BINDING_STALE = "AUTHORIZATION_BINDING_STALE"
+    AUTHORIZATION_RECEIPT_PROCESS_MISMATCH = "AUTHORIZATION_RECEIPT_PROCESS_MISMATCH"
+    AUTHORIZATION_ENTRY_STATE_REQUIRES_RECOVERY = "AUTHORIZATION_ENTRY_STATE_REQUIRES_RECOVERY"
+    RELEASE_PARTIAL_RESTART_REQUIRES_RECOVERY = "RELEASE_PARTIAL_RESTART_REQUIRES_RECOVERY"
+    DURABLE_AUTHORIZATION_CONSUMPTION_IMPLEMENTATION_REQUIRED = "DURABLE_AUTHORIZATION_CONSUMPTION_IMPLEMENTATION_REQUIRED"
+    TRUSTED_EXECUTION_PACKAGE_NOT_ISSUED = "TRUSTED_EXECUTION_PACKAGE_NOT_ISSUED"
+    ORCHESTRATION_RUNTIME_CONSTRUCTION_MUTATED_STATE = "ORCHESTRATION_RUNTIME_CONSTRUCTION_MUTATED_STATE"
+    ORCHESTRATION_PHASE_STATE_INVALID = "ORCHESTRATION_PHASE_STATE_INVALID"
+    ORCHESTRATION_WRITER_CLEANUP_FAILED = "ORCHESTRATION_WRITER_CLEANUP_FAILED"
 
 
 class RunnerError(RuntimeError):
@@ -2009,6 +2086,11 @@ class ExperimentRunnerRuntimeV2:
     # thing that may set it, and only to a ``_FakeTrustedDynamicReadAcquirerV2``.
     # It is not an arbitrary acquirer/callback slot.
     trusted_dynamic_read_acquirer_test_seam: object | None = None
+    # CORRECTION_05: when True, ``read_local_safety_state`` /
+    # ``read_trusted_release_evidence`` are bound to the no-repair active reads
+    # (no authority catch-up).  ``False`` (the default) is the unchanged D07 /
+    # legacy behaviour.
+    no_repair_local_reads: bool = False
 
     def __post_init__(self) -> None:
         if type(self.normal_gate) is not WriterEligibilityGate:
@@ -2152,6 +2234,7 @@ def build_active_experiment_runner_runtime_v2(
     minimum_spread_usd: Decimal | None = None,
     gate_d_capability_reference_id: str | None = None,
     normal_write_transport=None,
+    no_repair_local_reads: bool = False,
 ) -> ExperimentRunnerRuntimeV2:
     """Build an active runtime whose Gate-B local/trusted reads are bound to
     the active revision-2 helpers with the exact same ``active_contract``
@@ -2181,6 +2264,7 @@ def build_active_experiment_runner_runtime_v2(
             canonical_repository_root=canonical_repository_root,
             active_contract=active_contract,
             expected_ledger_path=expected_ledger_path,
+            no_repair=no_repair_local_reads,
         )
 
     def _read_trusted_release_evidence() -> "TrustedReleaseEvidenceReadResultV1":
@@ -2189,6 +2273,7 @@ def build_active_experiment_runner_runtime_v2(
             canonical_repository_root=canonical_repository_root,
             active_contract=active_contract,
             expected_ledger_path=expected_ledger_path,
+            no_repair=no_repair_local_reads,
         )
 
     return ExperimentRunnerRuntimeV2(
@@ -2214,6 +2299,7 @@ def build_active_experiment_runner_runtime_v2(
         minimum_spread_usd=minimum_spread_usd,
         gate_d_capability_reference_id=gate_d_capability_reference_id,
         normal_write_transport=normal_write_transport,
+        no_repair_local_reads=no_repair_local_reads,
     )
 
 
@@ -4932,6 +5018,7 @@ def run_gate_d_ordinary_decision_loop(
     invocation: "ExperimentRunnerInvocationV1 | ExperimentRunnerInvocationV2",
     *,
     decision_cycle_max: int = GATE_D_DECISION_CYCLE_MAX,
+    ordinary_write_send_max: int | None = None,
 ) -> GateDLoopResultV1:
     """Gate D entrypoint: the bounded Stage-4+ ordinary strategy write
     decision loop. Begins only from a genuine, still-open Stage-3K
@@ -5003,6 +5090,16 @@ def run_gate_d_ordinary_decision_loop(
             raise RunnerError(RunnerFailureCode.GATE_D_ENTRY_PRECONDITION_FAILED, detail="active stage-3 trusted read-set identity")
     if type(decision_cycle_max) is not int or not (0 < decision_cycle_max <= GATE_D_DECISION_CYCLE_MAX):
         raise RunnerError(RunnerFailureCode.GATE_D_ENTRY_PRECONDITION_FAILED, detail="decision_cycle_max")
+    # CORRECTION_05 C04-04: an approved Gate-D scope (G.max_ordinary_write_sends)
+    # may only NARROW the installed ordinary write budget; the default is the
+    # unchanged installed maximum and a larger bound is rejected.
+    if ordinary_write_send_max is None:
+        ordinary_write_send_max = GATE_D_ORDINARY_WRITE_SEND_MAX
+    if (
+        type(ordinary_write_send_max) is not int
+        or not (0 <= ordinary_write_send_max <= GATE_D_ORDINARY_WRITE_SEND_MAX)
+    ):
+        raise RunnerError(RunnerFailureCode.GATE_D_ENTRY_PRECONDITION_FAILED, detail="ordinary_write_send_max")
 
     capability = _issue_gate_d_read_capability(
         process_instance_id=runtime.normal_gate.process_instance_id, ticker=invocation.market_ticker, runtime=runtime,
@@ -5097,7 +5194,7 @@ def run_gate_d_ordinary_decision_loop(
             # MM07-CLAR-001: CANCEL_EXISTING, CANCEL_THEN_RECONCILE_BEFORE_
             # NEW, and CREATE_NEW are ALL ordinary strategy writes -- there
             # is no cleanup lane in this loop at all.
-            if ordinary_writes_sent >= GATE_D_ORDINARY_WRITE_SEND_MAX:
+            if ordinary_writes_sent >= ordinary_write_send_max:
                 stop_reason = "ORDINARY_WRITE_BUDGET_EXHAUSTED"
                 budget_stop = True
             elif selected.action == "CANCEL":
@@ -8846,6 +8943,8 @@ class _Stage3ActiveReleaseAndNormalWriterResultV1:
 def _complete_stage3_active_release_and_normal_writer_v2(
     read_phase_result: PreReleaseReadPhaseResultV2,
     runtime: ExperimentRunnerRuntimeV2,
+    *,
+    orchestration_receipt: "ActiveAuthorizationConsumptionV1 | None" = None,
 ) -> _Stage3ActiveReleaseAndNormalWriterResultV1:
     """Active Stages 3G-3K.  3G acquire_active_release_only_v1 -> 3H durable
     release (evaluate_release / record_risk_release / release_writer_proof /
@@ -8876,6 +8975,10 @@ def _complete_stage3_active_release_and_normal_writer_v2(
 
     active_contract = runtime.active_contract
 
+    release_guard = None
+    if orchestration_receipt is not None:
+        release_guard = _orchestration_release_entry_guard(orchestration_receipt, runtime)
+
     acquisition = acquire_active_release_only_v1(
         runtime.authority_binding,
         canonical_repository_root=runtime.canonical_repository_root,
@@ -8885,6 +8988,7 @@ def _complete_stage3_active_release_and_normal_writer_v2(
         uuid_factory=runtime.uuid_factory,
         monotonic_clock_ns=runtime.monotonic_clock_ns,
         release_wall_clock=runtime.wall_clock,
+        entry_guard=release_guard,
     )
     if (
         acquisition.failure_code is not None
@@ -8911,6 +9015,14 @@ def _complete_stage3_active_release_and_normal_writer_v2(
         except LedgerError as exc:
             handle.close()
             raise RunnerError(RunnerFailureCode.DURABLE_RELEASE_SEQUENCE_FAILED, detail=step_name) from exc
+        # C04-T08: the ONE sampled absolute end is re-checked between each
+        # INDIVIDUAL durable release milestone, so an expiry after
+        # RISK_RELEASE_RECORDED or WRITER_PROOF_RELEASED is terminal at that
+        # exact prefix and never continues into the next durable step.  The
+        # already-durable prefix stands; nothing beyond it is written.
+        if runtime.monotonic_clock_ns() >= runtime.experiment_absolute_end_monotonic_ns:
+            handle.close()
+            raise RunnerError(RunnerFailureCode.DEADLINE_EXCEEDED, detail="after " + step_name)
 
     if runtime.monotonic_clock_ns() >= runtime.experiment_absolute_end_monotonic_ns:
         handle.close()
@@ -8930,6 +9042,22 @@ def _complete_stage3_active_release_and_normal_writer_v2(
     if runtime.monotonic_clock_ns() >= runtime.experiment_absolute_end_monotonic_ns:
         raise RunnerError(RunnerFailureCode.DEADLINE_EXCEEDED, detail="before active NORMAL_WRITER")
 
+    normal_guard = None
+    if orchestration_receipt is not None:
+        orchestration_receipt.assert_live(process_instance_id=runtime.normal_gate.process_instance_id)
+        orchestration_receipt.claim_stage("V2_ISSUANCE")
+        orchestration_receipt.claim_stage("NORMAL_WRITER_ACQUISITION")
+        normal_guard = ActiveAcquisitionEntryGuardV1(
+            orchestration_receipt,
+            token.v1.ledger_terminal_sequence,
+            token.v1.ledger_terminal_event_hash,
+            "WRITER_ELIGIBLE",
+            token.v1.resulting_risk_state_epoch,
+            runtime.risk_config.sha256,
+            "RELEASED",
+            True,
+        )
+
     normal = acquire_active_normal_writer_state_v1(
         runtime.authority_binding,
         canonical_repository_root=runtime.canonical_repository_root,
@@ -8940,6 +9068,7 @@ def _complete_stage3_active_release_and_normal_writer_v2(
         expected_ledger_path=runtime.expected_ledger_path,
         clock=runtime.wall_clock,
         uuid_factory=runtime.uuid_factory,
+        entry_guard=normal_guard,
     )
     if normal.handle is None:
         raise RunnerError(RunnerFailureCode.NORMAL_WRITER_ACQUISITION_FAILED)
@@ -8984,6 +9113,8 @@ def _complete_stage3_active_release_and_normal_writer_v2(
             raise RunnerError(RunnerFailureCode.STAGE_3K_REVALIDATION_FAILED)
         if runtime.monotonic_clock_ns() >= runtime.experiment_absolute_end_monotonic_ns:
             raise RunnerError(RunnerFailureCode.DEADLINE_EXCEEDED, detail="active Stage-3K success boundary")
+        if orchestration_receipt is not None:
+            orchestration_receipt.claim_stage("STAGE_3K")
     except Exception:
         _fail_closed_end_writer_session(locked, session_id)
         raise
@@ -9022,6 +9153,1774 @@ def run_active_experiment_stage3_and_gate_d(
     return run_gate_d_ordinary_decision_loop(
         stage3, runtime, invocation, decision_cycle_max=decision_cycle_max,
     )
+
+
+# ===========================================================================
+# Section 41 -- R1-D07 N1 CORRECTION_05 trusted execution-authorization set
+# (O / G / E / B), durable one-shot admission, BOOT_HOLD two-phase bridge /
+# clean SAFE_HELD one-phase continuation, and same-process release -> Gate D.
+#
+# LIBRARY / SUBSTRATE CODE ONLY.  Nothing here is reachable from the D07
+# read-only CLI (``run_read_only_stage3_live_entrypoint`` / ``main``), which
+# keeps its exact four-PERMITTED / nine-PROHIBITED envelope and one Stage-3A-3F
+# read phase.  No launcher, no E/O/G artifact, no risk selection and no
+# execution authorization is issued or implied here: the approved launcher,
+# its embedded constants and the user-approved external execution package are
+# a later, separately reviewed deliverable.  USER_RISK_CHOICE_REQUIRED = OPEN.
+# ===========================================================================
+
+import stat as _stat_module
+
+from arb.execution_ledger import (
+    AUTHORIZATION_BINDING_KEYS as _AUTH_BINDING_KEYS,
+    AUTHORIZATION_CONSUMPTION_DEADLINE_NS as _AUTH_DEADLINE_NS,
+    AUTHORIZATION_CONSUMPTION_POLICY as _AUTH_CONSUMPTION_POLICY,
+    is_authorization_identifier as _is_auth_identifier,
+    validate_authorization_binding_object as _validate_authorization_binding_object,
+)
+from arb.venues.kalshi import ledger_binding as _ledger_binding_module
+
+
+_ORCH_E_FILENAME = "EXECUTION_AUTHORIZATION_EXPECTATIONS_V1.json"
+_ORCH_O_FILENAME = "ORCHESTRATION_AUTHORIZATION_O.json"
+_ORCH_G_FILENAME = "GATE_D_AUTHORIZATION_G.json"
+_ORCH_D07_FILENAME = "D07_READ_AUTHORIZATION.json"
+_ORCH_RISK_FILENAME = "RISK_CONFIG.json"
+
+_ORCH_E_CARRIER_CLASS = "ARB_USER_APPROVED_EXECUTION_AUTHORIZATION_EXPECTATIONS_V1"
+_ORCH_D07_CLASS = "TASK_AUTHORIZATION_CAPABILITY_ENVELOPE"
+_ORCH_G_CLASS = "USER_AUTHORIZED_GATE_D_EXECUTION_V2"
+_ORCH_NOT_ISSUED = "NOT_ISSUED"
+_ORCH_RISK_STATUS_WRITE_CAPABLE = "USER_SELECTED_WRITE_CAPABLE"
+_ORCH_PROCESS_CONTINUITY_MODE = "ONE_PROCESS_ONE_INVOCATION_NO_RESTART"
+_ORCH_RESTART_POLICY = "RESTART_REQUIRES_FRESH_AUTHORIZATION"
+_ORCH_DEADLINE_POLICY = "ONE_INVOCATION_START_ABSOLUTE_DEADLINE_NO_RESET"
+_ORCH_REPOSITORY = "rigolugo/ARB"
+_ORCH_CONFLICT_DOMAIN_REF = "KALSHI|KALSHI_DEMO|ARB_KALSHI_DEMO_PRIMARY_ACCOUNT|SUBACCOUNT=1"
+_ORCH_ABSOLUTE_DEADLINE_SECONDS = 300
+_ORCH_BRIDGE_RECONCILIATION_SCHEMA_ID = "ARB_R1_D07_N1_PRE_RELEASE_BRIDGE_RECONCILIATION_V1"
+_ORCH_BRIDGE_DISPOSITION_PREFIX = "ACTIVE_DOMAIN_CURRENT_TRUTH_RECONCILED_SAFE_V1:"
+
+# The proof-only Candidate-02 risk artifact is byte-identical proof material and
+# can never satisfy the write-capable admission gate (C04-11).
+_ORCH_CANDIDATE_02_RISK_RAW_SHA256 = "4495ade7fed522bf17a202d6f5422f608765b65a4463121175695c862b3f904c"
+_ORCH_CANDIDATE_02_RISK_SEMANTIC_SHA256 = "e16c9219b495062647b82b9e8a4d5e9c1b98f3e54ce43f0044c1a85fea162bbb"
+
+# Blocked / noncanonical implementation candidates that can never be the
+# accepted installed implementation of an execution package.
+_ORCH_BLOCKED_IMPLEMENTATION_COMMITS = frozenset({
+    "a0ce48ffd0e6f7a6b13c15fc1989a7123c41016a",
+    "1803cc674152754b3addb5f477eaa46b93515e48",
+    "c8112a4e37cc8906ae9251d26a2e8e4a9beb376c",
+    "f0e5b19bb4635393fdcaf45ece56dca250b06537",
+    "cd538f8733729424c548a811a41585c16cf60d5e",
+    "d1b57763cfac00bd0f765e3fba8af9154ca84307",
+    "c7833e8d63c84540951356931d4c3af80a1d02ec",
+})
+
+_ORCH_O_KEYS = frozenset({
+    "schema_version", "authorization_class", "authorization_id", "authorizing_user",
+    "authorizing_authority", "task_id", "execution_attempt_id", "invocation_id",
+    "d07_read_authorization_id", "d07_read_authorization_sha256", "repository",
+    "required_implementation_commit", "required_implementation_tree",
+    "required_implementation_parent", "active_contract_id", "active_contract_sha256",
+    "domain_binding_id", "domain_binding_sha256", "environment", "account_scope_ref",
+    "subaccount", "exchange_index", "conflict_domain_ref", "market_scope",
+    "risk_config_raw_sha256", "risk_config_semantic_sha256", "process_continuity_mode",
+    "restart_policy", "entry_state_class", "authorized_stage3_phase_count",
+    "max_pre_release_stage3_phases", "per_phase_pre_release_read_request_max_v2",
+    "aggregate_pre_release_read_request_ceiling", "absolute_deadline_seconds",
+    "deadline_policy", "phase_1_role", "phase_2_role", "local_mutation_authority",
+    "gate_d_successor_authorization_id", "gate_d_successor_authorization_sha256",
+    "gate_d_successor_authorization_class", "authorization_set_id",
+    "authorization_binding_sha256", "authorization_consumption_policy",
+})
+_ORCH_O_INT_KEYS = frozenset({
+    "schema_version", "subaccount", "exchange_index", "authorized_stage3_phase_count",
+    "max_pre_release_stage3_phases", "per_phase_pre_release_read_request_max_v2",
+    "aggregate_pre_release_read_request_ceiling", "absolute_deadline_seconds",
+})
+_ORCH_O_IDENTIFIER_KEYS = (
+    "authorization_id", "task_id", "execution_attempt_id", "invocation_id",
+    "d07_read_authorization_id", "active_contract_id", "domain_binding_id",
+    "account_scope_ref", "conflict_domain_ref", "gate_d_successor_authorization_id",
+    "authorization_set_id",
+)
+_ORCH_O_SHA_KEYS = (
+    "d07_read_authorization_sha256", "active_contract_sha256", "domain_binding_sha256",
+    "risk_config_raw_sha256", "risk_config_semantic_sha256",
+    "gate_d_successor_authorization_sha256", "authorization_binding_sha256",
+)
+_ORCH_GIT_KEYS = (
+    "required_implementation_commit", "required_implementation_tree",
+    "required_implementation_parent",
+)
+
+_ORCH_BOOT_HOLD_MUTATIONS = (
+    "ACQUIRE_EMERGENCY_CONTROL_ONLY", "RECORD_INCIDENT_BOUND_RECONCILIATION_RECORDED",
+    "TRANSITION_BOOT_HOLD_TO_SAFE_HELD", "CLOSE_EMERGENCY_CONTROL_HANDLE_CLEANLY",
+    "READ_POST_CLOSE_STATE", "ACQUIRE_RELEASE_ONLY", "RECORD_RISK_RELEASE_RECORDED",
+    "RELEASE_WRITER_PROOF", "TRANSITION_SAFE_HELD_TO_WRITER_ELIGIBLE",
+    "ISSUE_CURRENT_PROCESS_RELEASE_COMPLETION_V2", "ACQUIRE_ACTIVE_NORMAL_WRITER_STATE_V1",
+    "REVALIDATE_STAGE_3K",
+)
+_ORCH_CLEAN_MUTATIONS = _ORCH_BOOT_HOLD_MUTATIONS[5:]
+
+_ORCH_VARIANTS = MappingProxyType({
+    _ACTIVE_ORCHESTRATION_CLASS_BOOT_HOLD: MappingProxyType({
+        "entry_state_class": _ACTIVE_ENTRY_CLASS_BOOT_HOLD,
+        "authorized_stage3_phase_count": 2,
+        "max_pre_release_stage3_phases": 2,
+        "per_phase_pre_release_read_request_max_v2": 72,
+        "aggregate_pre_release_read_request_ceiling": 144,
+        "absolute_deadline_seconds": _ORCH_ABSOLUTE_DEADLINE_SECONDS,
+        "phase_1_role": "PRE_BRIDGE_FRESH_RECONCILIATION",
+        "phase_2_role": "POST_CLOSE_FRESH_RELEASE_EVALUATION",
+        "local_mutation_authority": tuple(sorted(_ORCH_BOOT_HOLD_MUTATIONS)),
+    }),
+    _ACTIVE_ORCHESTRATION_CLASS_CLEAN_SAFE_HELD: MappingProxyType({
+        "entry_state_class": _ACTIVE_ENTRY_CLASS_CLEAN_SAFE_HELD,
+        "authorized_stage3_phase_count": 1,
+        "max_pre_release_stage3_phases": 1,
+        "per_phase_pre_release_read_request_max_v2": 72,
+        "aggregate_pre_release_read_request_ceiling": 72,
+        "absolute_deadline_seconds": _ORCH_ABSOLUTE_DEADLINE_SECONDS,
+        "phase_1_role": "CLEAN_SAFE_HELD_FRESH_RELEASE_EVALUATION",
+        "phase_2_role": "NOT_AUTHORIZED",
+        "local_mutation_authority": tuple(sorted(_ORCH_CLEAN_MUTATIONS)),
+    }),
+})
+
+_ORCH_G_KEYS = frozenset({
+    "schema_version", "authorization_class", "authorization_id", "authorizing_user",
+    "task_id", "execution_attempt_id", "invocation_id", "authorization_set_id",
+    "authorization_binding_sha256", "orchestration_authorization_id",
+    "orchestration_authorization_class", "repository", "required_implementation_commit",
+    "required_implementation_tree", "required_implementation_parent", "active_contract_id",
+    "active_contract_sha256", "domain_binding_id", "domain_binding_sha256", "environment",
+    "account_scope_ref", "subaccount", "exchange_index", "conflict_domain_ref",
+    "market_scope", "risk_config_raw_sha256", "risk_config_semantic_sha256",
+    "process_continuity_mode", "absolute_deadline_seconds", "deadline_policy",
+    "max_ordinary_write_sends", "max_cleanup_cancel_sends",
+})
+_ORCH_G_INT_KEYS = frozenset({
+    "schema_version", "subaccount", "exchange_index", "absolute_deadline_seconds",
+    "max_ordinary_write_sends", "max_cleanup_cancel_sends",
+})
+_ORCH_E_KEYS = frozenset({
+    "schema_version", "carrier_class", "execution_package_id", "authorization_set_id",
+    "binding", "authorization_binding_sha256", "d07", "orchestration", "gate_d",
+    "risk_config", "entry_checkpoint", "consumption_policy", "user_risk_choice_status",
+    "gate_d_scope",
+})
+_ORCH_B_FROM_O_RENAMES = (("authorization_id", "orchestration_authorization_id"),
+                          ("authorization_class", "orchestration_authorization_class"))
+
+
+def _orch_fail(code: "RunnerFailureCode", detail: str | None = None) -> "RunnerError":
+    return RunnerError(code, detail=detail)
+
+
+class _OrchStrictJsonError(ValueError):
+    pass
+
+
+def _orch_strict_canonical_json_object(raw: bytes) -> dict:
+    """Strict canonical JSON (C04-02): UTF-8 without BOM or trailing newline,
+    sorted keys, compact separators, ``ensure_ascii`` escaping, no duplicate
+    keys at any depth, no non-finite constants, no floats, and a re-encoding
+    that equals the ORIGINAL bytes.  Returns the parsed top-level object."""
+    if type(raw) is not bytes or not raw:
+        raise _OrchStrictJsonError("bytes")
+    if raw.startswith(b"\xef\xbb\xbf"):
+        raise _OrchStrictJsonError("bom")
+    try:
+        text = raw.decode("utf-8")
+    except UnicodeDecodeError:
+        raise _OrchStrictJsonError("utf8") from None
+
+    def _pairs(pairs):
+        seen: dict = {}
+        for key, value in pairs:
+            if key in seen:
+                raise _OrchStrictJsonError("duplicate")
+            seen[key] = value
+        return seen
+
+    def _reject(_token):
+        raise _OrchStrictJsonError("non-finite-or-float")
+
+    try:
+        document = json.loads(text, object_pairs_hook=_pairs, parse_constant=_reject, parse_float=_reject)
+    except _OrchStrictJsonError:
+        raise
+    except ValueError:
+        raise _OrchStrictJsonError("malformed") from None
+    if type(document) is not dict:
+        raise _OrchStrictJsonError("not-object")
+    reencoded = json.dumps(document, sort_keys=True, separators=(",", ":"), ensure_ascii=True).encode("ascii")
+    if reencoded != raw:
+        raise _OrchStrictJsonError("noncanonical")
+    return document
+
+
+def _orch_contains_not_issued(value: object) -> bool:
+    if isinstance(value, str):
+        return _ORCH_NOT_ISSUED in value
+    if isinstance(value, dict):
+        return any(_orch_contains_not_issued(k) or _orch_contains_not_issued(v) for k, v in value.items())
+    if isinstance(value, list):
+        return any(_orch_contains_not_issued(v) for v in value)
+    return False
+
+
+def _orch_is_sha(value: object) -> bool:
+    return _d07_is_sha256_hex(value)
+
+
+def _orch_is_git(value: object) -> bool:
+    return type(value) is str and len(value) == 40 and all(ch in "0123456789abcdef" for ch in value)
+
+
+def _orch_is_ascii_text(value: object) -> bool:
+    return type(value) is str and value != "" and all(32 <= ord(ch) < 127 for ch in value)
+
+
+def _orch_market_scope_ok(scope: object) -> bool:
+    return (
+        type(scope) is dict
+        and set(scope) == {"scope_kind", "ticker"}
+        and scope["scope_kind"] == "SINGLE_MARKET_TICKER"
+        and type(scope["ticker"]) is str
+        and _TICKER_PATTERN.fullmatch(scope["ticker"]) is not None
+    )
+
+
+def _orch_validate_shared_binding_fields(doc: dict, *, invalid: "RunnerFailureCode") -> None:
+    """Fixed / exact values shared by O and G (C04-03 / C04-04)."""
+    if doc["repository"] != _ORCH_REPOSITORY:
+        raise _orch_fail(invalid, "repository")
+    if doc["environment"] != _D07_N1_ENVIRONMENT:
+        raise _orch_fail(RunnerFailureCode.BRIDGE_AUTHORIZATION_PRODUCTION_SCOPE_CONFLICT, "environment")
+    if (
+        doc["account_scope_ref"] != _D07_N1_ACCOUNT_SCOPE_REF
+        or doc["conflict_domain_ref"] != _ORCH_CONFLICT_DOMAIN_REF
+    ):
+        raise _orch_fail(RunnerFailureCode.BRIDGE_AUTHORIZATION_DOMAIN_BINDING_MISMATCH, "account/conflict domain")
+    # Corrected current-N1 binding: subaccount 1, exchange_index 0 (exact ints).
+    # The exchange index is one required field, never a uniqueness theorem.
+    if (
+        type(doc["subaccount"]) is not int or doc["subaccount"] != _D07_N1_SUBACCOUNT
+        or type(doc["exchange_index"]) is not int or doc["exchange_index"] != _D07_N1_SELECTED_EXCHANGE_INDEX
+    ):
+        raise _orch_fail(RunnerFailureCode.BRIDGE_AUTHORIZATION_DOMAIN_BINDING_MISMATCH, "subaccount/exchange_index")
+    if doc["process_continuity_mode"] != _ORCH_PROCESS_CONTINUITY_MODE:
+        raise _orch_fail(RunnerFailureCode.BRIDGE_AUTHORIZATION_PROCESS_CONTINUITY_REQUIRED, "process_continuity_mode")
+    if doc["deadline_policy"] != _ORCH_DEADLINE_POLICY or doc["absolute_deadline_seconds"] != _ORCH_ABSOLUTE_DEADLINE_SECONDS:
+        raise _orch_fail(RunnerFailureCode.BRIDGE_AUTHORIZATION_DEADLINE_MISMATCH, "deadline")
+    if not _orch_market_scope_ok(doc["market_scope"]):
+        raise _orch_fail(RunnerFailureCode.BRIDGE_AUTHORIZATION_MARKET_SCOPE_MISMATCH, "market_scope")
+    for key in _ORCH_GIT_KEYS:
+        if not _orch_is_git(doc[key]):
+            raise _orch_fail(invalid, key)
+    for key in ("active_contract_sha256", "domain_binding_sha256", "risk_config_raw_sha256", "risk_config_semantic_sha256", "authorization_binding_sha256"):
+        if not _orch_is_sha(doc[key]):
+            raise _orch_fail(invalid, key)
+    for key in ("task_id", "execution_attempt_id", "invocation_id", "authorization_set_id", "active_contract_id", "domain_binding_id"):
+        if not _is_auth_identifier(doc[key]):
+            raise _orch_fail(invalid, key)
+
+
+def _orch_validate_orchestration_object(o: object) -> dict:
+    """Closed CORRECTION_05 ``O`` schema for both variants (C04-03)."""
+    invalid = RunnerFailureCode.BRIDGE_AUTHORIZATION_SCHEMA_INVALID
+    if type(o) is not dict or set(o) != _ORCH_O_KEYS:
+        raise _orch_fail(invalid, "orchestration keys")
+    for key, value in o.items():
+        if key in _ORCH_O_INT_KEYS:
+            if type(value) is not int:
+                raise _orch_fail(invalid, key)
+        elif key == "local_mutation_authority":
+            if type(value) is not list or any(type(item) is not str for item in value):
+                raise _orch_fail(invalid, key)
+        elif key == "market_scope":
+            if type(value) is not dict:
+                raise _orch_fail(invalid, key)
+        elif type(value) is not str:
+            raise _orch_fail(invalid, key)
+    if o["schema_version"] != 1:
+        raise _orch_fail(invalid, "schema_version")
+    variant = _ORCH_VARIANTS.get(o["authorization_class"])
+    if variant is None:
+        raise _orch_fail(RunnerFailureCode.BRIDGE_AUTHORIZATION_CLASS_INVALID, "authorization_class")
+    for key in _ORCH_O_IDENTIFIER_KEYS:
+        if not _is_auth_identifier(o[key]):
+            raise _orch_fail(invalid, key)
+    for key in _ORCH_O_SHA_KEYS:
+        if not _orch_is_sha(o[key]):
+            raise _orch_fail(invalid, key)
+    for key in _ORCH_GIT_KEYS:
+        if not _orch_is_git(o[key]):
+            raise _orch_fail(invalid, key)
+    if not _orch_is_ascii_text(o["authorizing_user"]) or not _orch_is_ascii_text(o["authorizing_authority"]):
+        raise _orch_fail(invalid, "authorizing_text")
+    _orch_validate_shared_binding_fields(o, invalid=invalid)
+    if o["restart_policy"] != _ORCH_RESTART_POLICY:
+        raise _orch_fail(RunnerFailureCode.BRIDGE_AUTHORIZATION_PROCESS_CONTINUITY_REQUIRED, "restart_policy")
+    if o["authorization_consumption_policy"] != _AUTH_CONSUMPTION_POLICY:
+        raise _orch_fail(RunnerFailureCode.BRIDGE_AUTHORIZATION_STALE_OR_REPLAYED, "authorization_consumption_policy")
+    if o["gate_d_successor_authorization_class"] != _ORCH_G_CLASS:
+        raise _orch_fail(RunnerFailureCode.BRIDGE_AUTHORIZATION_GATE_D_SUCCESSOR_INVALID, "gate_d_successor_authorization_class")
+    if o["entry_state_class"] != variant["entry_state_class"]:
+        raise _orch_fail(RunnerFailureCode.BRIDGE_AUTHORIZATION_ENTRY_STATE_MISMATCH, "entry_state_class")
+    if (
+        o["authorized_stage3_phase_count"] != variant["authorized_stage3_phase_count"]
+        or o["max_pre_release_stage3_phases"] != variant["max_pre_release_stage3_phases"]
+        or o["phase_1_role"] != variant["phase_1_role"]
+        or o["phase_2_role"] != variant["phase_2_role"]
+    ):
+        raise _orch_fail(RunnerFailureCode.BRIDGE_AUTHORIZATION_PHASE_PLAN_MISMATCH, "phase plan")
+    if (
+        o["per_phase_pre_release_read_request_max_v2"] != variant["per_phase_pre_release_read_request_max_v2"]
+        or o["per_phase_pre_release_read_request_max_v2"] != PRE_RELEASE_READ_REQUEST_MAX_V2
+        or o["aggregate_pre_release_read_request_ceiling"] != variant["aggregate_pre_release_read_request_ceiling"]
+    ):
+        raise _orch_fail(RunnerFailureCode.BRIDGE_AUTHORIZATION_PHASE_BUDGET_MISMATCH, "phase budget")
+    mutation = o["local_mutation_authority"]
+    if mutation != list(variant["local_mutation_authority"]) or mutation != sorted(set(mutation)):
+        raise _orch_fail(RunnerFailureCode.BRIDGE_AUTHORIZATION_LOCAL_MUTATION_SCOPE_INVALID, "local_mutation_authority")
+    if o["authorization_id"] == o["gate_d_successor_authorization_id"] or o["authorization_id"] == o["d07_read_authorization_id"]:
+        raise _orch_fail(RunnerFailureCode.AUTHORIZATION_CROSS_BINDING_MISMATCH, "authorization ids not distinct")
+    return o
+
+
+def _orch_validate_gate_d_object(g: object) -> dict:
+    """Closed ``GateDAuthorizationV2`` schema (C04-04).  A Gate-D V1 object
+    (lacking invocation/attempt/set fields) fails here."""
+    invalid = RunnerFailureCode.BRIDGE_AUTHORIZATION_GATE_D_SUCCESSOR_INVALID
+    if type(g) is not dict or set(g) != _ORCH_G_KEYS:
+        raise _orch_fail(invalid, "gate-d keys")
+    for key, value in g.items():
+        if key in _ORCH_G_INT_KEYS:
+            if type(value) is not int:
+                raise _orch_fail(invalid, key)
+        elif key == "market_scope":
+            if type(value) is not dict:
+                raise _orch_fail(invalid, key)
+        elif type(value) is not str:
+            raise _orch_fail(invalid, key)
+    if g["schema_version"] != 2:
+        raise _orch_fail(invalid, "schema_version")
+    if g["authorization_class"] != _ORCH_G_CLASS:
+        raise _orch_fail(invalid, "authorization_class")
+    for key in ("authorization_id", "orchestration_authorization_id", "task_id", "execution_attempt_id",
+                "invocation_id", "authorization_set_id", "active_contract_id", "domain_binding_id",
+                "account_scope_ref", "conflict_domain_ref"):
+        if not _is_auth_identifier(g[key]):
+            raise _orch_fail(invalid, key)
+    if g["orchestration_authorization_class"] not in _ORCH_VARIANTS:
+        raise _orch_fail(invalid, "orchestration_authorization_class")
+    if not _orch_is_ascii_text(g["authorizing_user"]):
+        raise _orch_fail(invalid, "authorizing_user")
+    if g["max_ordinary_write_sends"] < 0 or g["max_cleanup_cancel_sends"] < 0:
+        raise _orch_fail(invalid, "send maxima")
+    try:
+        _orch_validate_shared_binding_fields(g, invalid=invalid)
+    except RunnerError as exc:
+        raise _orch_fail(invalid, exc.detail) from None
+    return g
+
+
+def _orch_binding_from_orchestration(o: dict) -> dict:
+    result: dict = {}
+    for key in _AUTH_BINDING_KEYS:
+        if key == "orchestration_authorization_id":
+            result[key] = o["authorization_id"]
+        elif key == "orchestration_authorization_class":
+            result[key] = o["authorization_class"]
+        else:
+            result[key] = o[key]
+    return result
+
+
+def _orch_binding_from_gate_d(g: dict) -> dict:
+    return {key: g[key] for key in _AUTH_BINDING_KEYS}
+
+
+def _orch_validate_expectations_object(e: object) -> dict:
+    """Closed ``EXECUTION_AUTHORIZATION_EXPECTATIONS_V1`` schema (C04-05)."""
+    bad = RunnerFailureCode.AUTHORIZATION_EXPECTATION_UNTRUSTED
+    if _orch_contains_not_issued(e):
+        raise _orch_fail(RunnerFailureCode.TRUSTED_EXECUTION_PACKAGE_NOT_ISSUED, "placeholder value")
+    if type(e) is not dict or set(e) != _ORCH_E_KEYS:
+        raise _orch_fail(bad, "expectations keys")
+    if type(e["schema_version"]) is not int or e["schema_version"] != 1:
+        raise _orch_fail(bad, "schema_version")
+    if e["carrier_class"] != _ORCH_E_CARRIER_CLASS:
+        raise _orch_fail(bad, "carrier_class")
+    for key in ("execution_package_id", "authorization_set_id"):
+        if not _is_auth_identifier(e[key]):
+            raise _orch_fail(bad, key)
+    if not _orch_is_sha(e["authorization_binding_sha256"]):
+        raise _orch_fail(bad, "authorization_binding_sha256")
+    try:
+        binding = _validate_authorization_binding_object(e["binding"])
+    except LedgerError:
+        raise _orch_fail(bad, "binding") from None
+    for name, class_check in (
+        ("d07", lambda value: value == _ORCH_D07_CLASS),
+        ("orchestration", lambda value: value in _ORCH_VARIANTS),
+        ("gate_d", lambda value: value == _ORCH_G_CLASS),
+    ):
+        entry = e[name]
+        if type(entry) is not dict or set(entry) != {"authorization_id", "authorization_class", "bytes", "sha256"}:
+            raise _orch_fail(bad, name)
+        if (
+            not _is_auth_identifier(entry["authorization_id"])
+            or not class_check(entry["authorization_class"])
+            or type(entry["bytes"]) is not int or entry["bytes"] <= 0
+            or not _orch_is_sha(entry["sha256"])
+        ):
+            raise _orch_fail(bad, name)
+    risk = e["risk_config"]
+    if (
+        type(risk) is not dict or set(risk) != {"bytes", "raw_sha256", "semantic_sha256"}
+        or type(risk["bytes"]) is not int or risk["bytes"] <= 0
+        or not _orch_is_sha(risk["raw_sha256"]) or not _orch_is_sha(risk["semantic_sha256"])
+    ):
+        raise _orch_fail(bad, "risk_config")
+    try:
+        _ledger_binding_module.validate_active_entry_checkpoint(e["entry_checkpoint"])
+    except LedgerError:
+        raise _orch_fail(bad, "entry_checkpoint") from None
+    if e["consumption_policy"] != _AUTH_CONSUMPTION_POLICY:
+        raise _orch_fail(bad, "consumption_policy")
+    if e["user_risk_choice_status"] != _ORCH_RISK_STATUS_WRITE_CAPABLE:
+        raise _orch_fail(RunnerFailureCode.USER_RISK_CHOICE_REQUIRED, "user_risk_choice_status")
+    scope = e["gate_d_scope"]
+    if (
+        type(scope) is not dict or set(scope) != {"max_ordinary_write_sends", "max_cleanup_cancel_sends"}
+        or type(scope["max_ordinary_write_sends"]) is not int or scope["max_ordinary_write_sends"] < 0
+        or type(scope["max_cleanup_cancel_sends"]) is not int or scope["max_cleanup_cancel_sends"] < 0
+    ):
+        raise _orch_fail(bad, "gate_d_scope")
+    if len({e["d07"]["authorization_id"], e["orchestration"]["authorization_id"], e["gate_d"]["authorization_id"]}) != 3:
+        raise _orch_fail(RunnerFailureCode.AUTHORIZATION_CROSS_BINDING_MISMATCH, "authorization ids not distinct")
+    if e["binding"] != binding or e["authorization_binding_sha256"] != compute_authorization_binding_sha256(binding):
+        raise _orch_fail(RunnerFailureCode.AUTHORIZATION_CROSS_BINDING_MISMATCH, "E binding hash")
+    return e
+
+
+# ---------------------------------------------------------------------------
+# 41.2 -- protected execution root, embedded launcher constants, trusted E.
+# ---------------------------------------------------------------------------
+
+
+@dataclass(frozen=True, slots=True)
+class _LauncherEmbeddedConstantsV1:
+    """The constants an APPROVED launcher embeds in its own reviewed bytes
+    (C04-05).  There is no CLI / environment / working-directory / caller-object
+    override: this type is MODULE-PRIVATE, is never exported, and is accepted
+    only by the launcher-only issuance seam
+    :func:`_establish_trusted_execution_expectations` under the module-private
+    ``_LAUNCHER_ISSUANCE_KEY``.  Constructing it does not by itself create any
+    execution authority -- only a carrier minted through that seam does, and the
+    ordinary orchestration surface accepts nothing else.  Values equal to the
+    ``NOT_ISSUED`` placeholder are rejected."""
+
+    execution_package_id: str
+    authorization_set_id: str
+    expectations_bytes: int
+    expectations_sha256: str
+    installed_implementation_commit: str
+    installed_implementation_tree: str
+    installed_implementation_parent: str
+    bootstrap_contract_sha256: str
+    authority_namespace_id: str
+    authority_namespace_root: str
+    canonical_repository_root: str
+    expected_ledger_path: str
+
+    def __post_init__(self) -> None:
+        for name in (
+            "execution_package_id", "authorization_set_id", "authority_namespace_id",
+            "authority_namespace_root", "canonical_repository_root", "expected_ledger_path",
+        ):
+            value = getattr(self, name)
+            if type(value) is not str or value == "":
+                raise _orch_fail(RunnerFailureCode.AUTHORIZATION_EXPECTATION_UNTRUSTED, f"launcher {name}")
+            if _ORCH_NOT_ISSUED in value:
+                raise _orch_fail(RunnerFailureCode.TRUSTED_EXECUTION_PACKAGE_NOT_ISSUED, name)
+        if not _is_auth_identifier(self.execution_package_id) or not _is_auth_identifier(self.authorization_set_id):
+            raise _orch_fail(RunnerFailureCode.AUTHORIZATION_EXPECTATION_UNTRUSTED, "launcher identifiers")
+        if type(self.expectations_bytes) is not int or self.expectations_bytes <= 0:
+            raise _orch_fail(RunnerFailureCode.AUTHORIZATION_EXPECTATION_UNTRUSTED, "launcher expectations_bytes")
+        for name in ("expectations_sha256", "bootstrap_contract_sha256"):
+            if not _orch_is_sha(getattr(self, name)):
+                raise _orch_fail(RunnerFailureCode.AUTHORIZATION_EXPECTATION_UNTRUSTED, f"launcher {name}")
+        for name in ("installed_implementation_commit", "installed_implementation_tree", "installed_implementation_parent"):
+            if not _orch_is_git(getattr(self, name)):
+                raise _orch_fail(RunnerFailureCode.AUTHORIZATION_EXPECTATION_UNTRUSTED, f"launcher {name}")
+        if self.installed_implementation_commit in _ORCH_BLOCKED_IMPLEMENTATION_COMMITS:
+            raise _orch_fail(RunnerFailureCode.BRIDGE_AUTHORIZATION_IMPLEMENTATION_MISMATCH, "blocked implementation")
+
+
+def _orch_is_link_or_reparse(path: Path) -> bool:
+    try:
+        info = os.lstat(path)
+    except OSError:
+        return True
+    if _stat_module.S_ISLNK(info.st_mode):
+        return True
+    attributes = getattr(info, "st_file_attributes", 0)
+    return bool(attributes & getattr(_stat_module, "FILE_ATTRIBUTE_REPARSE_POINT", 0x400))
+
+
+class _ProtectedExecutionRoot:
+    """Fixed-name, read-once access to the approved package directory.  Every
+    fixed path resolves inside this root; symlinks / junctions / reparse points
+    or any path redirection fail closed."""
+
+    def __init__(self, root: object, *, canonical_repository_root: str) -> None:
+        missing = RunnerFailureCode.AUTHORIZATION_EXPECTATION_MISSING
+        if not isinstance(root, (str, os.PathLike)) or not Path(root).is_absolute():
+            raise _orch_fail(missing, "protected root")
+        candidate = Path(root)
+        if _orch_is_link_or_reparse(candidate) or not candidate.is_dir():
+            raise _orch_fail(RunnerFailureCode.AUTHORIZATION_EXPECTATION_UNTRUSTED, "protected root link or not a directory")
+        resolved = candidate.resolve(strict=True)
+        # No component of the fixed root path may be a symlink / junction /
+        # reparse point (path redirection fails closed).  Windows 8.3 short
+        # names are not links and remain acceptable.
+        for component in (candidate, *candidate.parents):
+            if _orch_is_link_or_reparse(component):
+                raise _orch_fail(RunnerFailureCode.AUTHORIZATION_EXPECTATION_UNTRUSTED, "protected root redirected")
+        repository = Path(canonical_repository_root).resolve(strict=True)
+        if resolved == repository or repository in resolved.parents:
+            raise _orch_fail(RunnerFailureCode.AUTHORIZATION_EXPECTATION_UNTRUSTED, "protected root inside repository")
+        self._root = resolved
+        self._read_names: set[str] = set()
+
+    def read_once(self, filename: str) -> bytes:
+        missing = RunnerFailureCode.AUTHORIZATION_EXPECTATION_MISSING
+        if filename in self._read_names:
+            raise _orch_fail(RunnerFailureCode.AUTHORIZATION_EXPECTATION_UNTRUSTED, "artifact read more than once")
+        self._read_names.add(filename)
+        path = self._root / filename
+        if _orch_is_link_or_reparse(path) or not path.is_file():
+            raise _orch_fail(missing, filename)
+        resolved = path.resolve(strict=True)
+        if resolved.parent != self._root:
+            raise _orch_fail(RunnerFailureCode.AUTHORIZATION_EXPECTATION_UNTRUSTED, "artifact path redirected")
+        try:
+            return resolved.read_bytes()
+        except OSError:
+            raise _orch_fail(missing, filename) from None
+
+
+_TRUSTED_EXPECTATIONS_ISSUER_KEY = object()
+
+# The module-private capability token that marks the LAUNCHER-ONLY issuance
+# seam.  It is deliberately an unexported sentinel object: there is no public
+# name, constructor, factory, environment variable, CLI flag or caller object
+# that can produce trusted expectations without it (C04-05).  A separately
+# approved launcher -- whose exact bytes the user compared against the direct
+# approval -- is the only supported holder; test-only launcher simulations
+# reach for module-private internals as scaffolding, which the accepted threat
+# model already places outside the untrusted-input surface.
+_LAUNCHER_ISSUANCE_KEY = object()
+
+
+def _orch_deep_freeze_trusted_json_v1(value: object) -> object:
+    """Return a FRESH, recursively immutable, alias-independent snapshot of an
+    already strictly validated trusted JSON value (C04-05).
+
+    This is module-private and authorization-supporting -- it is not a general
+    serializer and it does not broaden the ``E`` schema, which
+    :func:`_orch_validate_expectations_object` has already closed.
+
+    A shallow ``MappingProxyType(dict(document))`` is NOT sufficient: the nested
+    security-bearing sections of ``E`` that admission consumes directly --
+    ``entry_checkpoint``, ``orchestration``, ``d07``, ``gate_d``, ``binding``,
+    ``risk_config`` and ``gate_d_scope`` -- would stay mutable, so the
+    launcher-authenticated ``E`` bytes would not be guaranteed to remain the
+    semantic ``E`` values used during admission.
+
+    The transform allocates new containers at EVERY level and retains no
+    reference to the original parser containers, so a later mutation of any
+    source or nested alias cannot change the snapshot:
+
+    * ``dict``  -> new dict of recursively frozen values, wrapped read-only;
+    * ``list``  -> tuple of recursively frozen values;
+    * ``str`` / ``bool`` / ``int`` / ``None`` -> the immutable scalar itself;
+    * anything else -> ``AUTHORIZATION_EXPECTATION_UNTRUSTED`` at issuance.
+    """
+    kind = type(value)
+    if kind is dict:
+        return MappingProxyType({
+            key: _orch_deep_freeze_trusted_json_v1(item) for key, item in value.items()
+        })
+    if kind is list:
+        return tuple(_orch_deep_freeze_trusted_json_v1(item) for item in value)
+    # ``bool`` is checked by exact type, so it never collapses into ``int``.
+    if kind is str or kind is bool or kind is int or value is None:
+        return value
+    raise _orch_fail(
+        RunnerFailureCode.AUTHORIZATION_EXPECTATION_UNTRUSTED,
+        "unsupported trusted expectation value type",
+    )
+
+
+class TrustedExecutionExpectationsV1:
+    """Private immutable carrier of the VERIFIED expectation document ``E``
+    (C04-05).  It is issued only by :func:`_establish_trusted_execution_expectations`
+    from the launcher boundary -- never accepted as a public dict, a
+    ``(JSON, expected_hash)`` pair, an environment/CLI value or a copy.
+
+    The carrier also privately holds the launcher-embedded constants and the
+    already-opened :class:`_ProtectedExecutionRoot` that the launcher verified
+    ``E`` through, so the ordinary orchestration surface never accepts a
+    caller-supplied expected identity, expected hash or package root at all."""
+
+    __slots__ = ("document", "raw_sha256", "raw_bytes", "_constants", "_root")
+
+    def __init__(
+        self, key: object, *, document: dict, raw_sha256: str, raw_bytes: int,
+        constants: "_LauncherEmbeddedConstantsV1", root: "_ProtectedExecutionRoot",
+    ) -> None:
+        if key is not _TRUSTED_EXPECTATIONS_ISSUER_KEY:
+            raise _orch_fail(RunnerFailureCode.AUTHORIZATION_EXPECTATION_UNTRUSTED, "direct construction")
+        if type(document) is not dict:
+            raise _orch_fail(RunnerFailureCode.AUTHORIZATION_EXPECTATION_UNTRUSTED, "expectations document type")
+        # RECURSIVELY frozen, alias-independent snapshot of the launcher-verified
+        # E.  The carrier stores ONLY this snapshot, so no nested E field can be
+        # mutated after launcher verification and the exact launcher-authenticated
+        # entry_checkpoint remains the checkpoint admission uses.
+        object.__setattr__(self, "document", _orch_deep_freeze_trusted_json_v1(document))
+        object.__setattr__(self, "raw_sha256", raw_sha256)
+        object.__setattr__(self, "raw_bytes", raw_bytes)
+        object.__setattr__(self, "_constants", constants)
+        object.__setattr__(self, "_root", root)
+
+    def __setattr__(self, name: str, value: object) -> None:
+        raise AttributeError("TrustedExecutionExpectationsV1 is immutable")
+
+    def __copy__(self):
+        raise TypeError("TrustedExecutionExpectationsV1 cannot be copied")
+
+    __deepcopy__ = __copy__
+
+    def __reduce_ex__(self, protocol):
+        del protocol
+        raise TypeError("TrustedExecutionExpectationsV1 cannot be serialized")
+
+    def __repr__(self) -> str:
+        return "TrustedExecutionExpectationsV1(<redacted>)"
+
+
+def _establish_trusted_execution_expectations(
+    issuance_key: object, constants: "_LauncherEmbeddedConstantsV1",
+    protected_execution_root: "str | os.PathLike[str]",
+) -> TrustedExecutionExpectationsV1:
+    """The ONE launcher-only issuance seam (C04-05).
+
+    It is module-private and gated by the module-private ``_LAUNCHER_ISSUANCE_KEY``
+    sentinel, so no public exported constructor or factory can turn
+    caller-supplied expected byte counts, SHA values or package/set identities
+    into trusted expectations.  The seam opens the protected fixed-name
+    execution root, reads ``E`` exactly once through it, compares ``E`` against
+    the launcher's own embedded expected byte count / SHA-256 / package ID /
+    set ID, validates the strict ``E`` schema, and only then mints the private
+    carrier with the existing module-private issuer convention."""
+    if issuance_key is not _LAUNCHER_ISSUANCE_KEY:
+        raise _orch_fail(RunnerFailureCode.AUTHORIZATION_EXPECTATION_UNTRUSTED, "launcher issuance key")
+    if type(constants) is not _LauncherEmbeddedConstantsV1:
+        raise _orch_fail(RunnerFailureCode.AUTHORIZATION_EXPECTATION_UNTRUSTED, "launcher constants")
+    root = _ProtectedExecutionRoot(
+        protected_execution_root, canonical_repository_root=constants.canonical_repository_root)
+    raw = root.read_once(_ORCH_E_FILENAME)
+    if len(raw) != constants.expectations_bytes or hashlib.sha256(raw).hexdigest() != constants.expectations_sha256:
+        raise _orch_fail(RunnerFailureCode.AUTHORIZATION_EXPECTATION_IDENTITY_MISMATCH, "E bytes/sha")
+    try:
+        document = _orch_strict_canonical_json_object(raw)
+    except _OrchStrictJsonError:
+        raise _orch_fail(RunnerFailureCode.AUTHORIZATION_EXPECTATION_UNTRUSTED, "E not strict canonical JSON") from None
+    _orch_validate_expectations_object(document)
+    if (
+        document["execution_package_id"] != constants.execution_package_id
+        or document["authorization_set_id"] != constants.authorization_set_id
+    ):
+        raise _orch_fail(RunnerFailureCode.AUTHORIZATION_EXPECTATION_IDENTITY_MISMATCH, "E package/set identity")
+    return TrustedExecutionExpectationsV1(
+        _TRUSTED_EXPECTATIONS_ISSUER_KEY, document=document,
+        raw_sha256=constants.expectations_sha256, raw_bytes=len(raw),
+        constants=constants, root=root,
+    )
+
+
+# ---------------------------------------------------------------------------
+# 41.3 -- admission: C04-07 rows 2-8 (all before the first persistent mutation).
+# ---------------------------------------------------------------------------
+
+
+@dataclass(frozen=True, slots=True)
+class _AdmittedAuthorizationSetV1:
+    """Verified, immutable, module-private admission product.  Never exported,
+    serialized or accepted from a caller."""
+
+    expectations: TrustedExecutionExpectationsV1
+    orchestration: Mapping[str, object]
+    gate_d: Mapping[str, object]
+    binding: Mapping[str, object]
+    typed_expectation: ActiveAuthorizationExpectationV1
+    d07_envelope: object
+    risk_config: RiskLimitConfigV1
+    domain_binding: ExecutionDomainBindingV1
+    active_contract: ActiveExecutionDomainContractV1
+    authority_binding: AuthorityNamespaceBinding
+    constants: "_LauncherEmbeddedConstantsV1"
+
+    @property
+    def entry_state_class(self) -> str:
+        return self.orchestration["entry_state_class"]
+
+    @property
+    def market_ticker(self) -> str:
+        return self.binding["market_scope"]["ticker"]
+
+
+def _orch_cross_check_authorization_set(
+    o: dict, g: dict, e: Mapping[str, object], *, o_sha: str, g_sha: str,
+) -> dict:
+    """C04-04 exact comparisons (before consumption and again before Gate D).
+    Returns the single agreed binding object ``B``."""
+    cross = RunnerFailureCode.AUTHORIZATION_CROSS_BINDING_MISMATCH
+    successor = RunnerFailureCode.BRIDGE_AUTHORIZATION_GATE_D_SUCCESSOR_INVALID
+    # 1. O -> G reference.
+    if (
+        o["gate_d_successor_authorization_id"] != g["authorization_id"]
+        or o["gate_d_successor_authorization_class"] != g["authorization_class"]
+        or o["gate_d_successor_authorization_sha256"] != g_sha
+        or e["gate_d"]["sha256"] != g_sha
+        or e["gate_d"]["authorization_id"] != g["authorization_id"]
+        or e["gate_d"]["authorization_class"] != g["authorization_class"]
+    ):
+        raise _orch_fail(successor, "O->G reference")
+    # 2. G -> O back-reference by ID/class (never by raw hash: no fixed point) and
+    #    E pins both complete raw artifacts.
+    if (
+        g["orchestration_authorization_id"] != o["authorization_id"]
+        or g["orchestration_authorization_class"] != o["authorization_class"]
+        or e["orchestration"]["authorization_id"] != o["authorization_id"]
+        or e["orchestration"]["authorization_class"] != o["authorization_class"]
+        or e["orchestration"]["sha256"] != o_sha
+        or "orchestration_authorization_sha256" in g
+    ):
+        raise _orch_fail(cross, "G->O back-reference / E pin")
+    # 3. Every shared B field agrees in O, G, E.binding (exact typed equality).
+    binding_o = _orch_binding_from_orchestration(o)
+    binding_g = _orch_binding_from_gate_d(g)
+    binding_e = dict(e["binding"])
+    if binding_o != binding_g or binding_o != binding_e:
+        raise _orch_fail(cross, "shared binding fields")
+    stored_hash = compute_authorization_binding_sha256(binding_o)
+    if not (
+        o["authorization_binding_sha256"] == g["authorization_binding_sha256"]
+        == e["authorization_binding_sha256"] == stored_hash
+    ):
+        raise _orch_fail(cross, "authorization_binding_sha256")
+    if e["authorization_set_id"] != binding_o["authorization_set_id"]:
+        raise _orch_fail(cross, "authorization_set_id")
+    if len({o["authorization_id"], g["authorization_id"], o["d07_read_authorization_id"]}) != 3:
+        raise _orch_fail(cross, "authorization ids not distinct")
+    scope = e["gate_d_scope"]
+    if (
+        scope["max_ordinary_write_sends"] != g["max_ordinary_write_sends"]
+        or scope["max_cleanup_cancel_sends"] != g["max_cleanup_cancel_sends"]
+    ):
+        raise _orch_fail(cross, "gate_d_scope")
+    return binding_o
+
+
+def _orch_require_write_capable_risk(config: RiskLimitConfigV1, g: dict, *, raw_sha256: str) -> None:
+    """Row 6: a USER-SELECTED, write-capable risk object is required BEFORE any
+    consumption, reconciliation or SAFE_HELD mutation.  Candidate-02 (four zero
+    normal send maxima, proof-only) can never pass; no numerical value is chosen
+    or defaulted here."""
+    risk_gate = RunnerFailureCode.USER_RISK_CHOICE_REQUIRED
+    if raw_sha256 == _ORCH_CANDIDATE_02_RISK_RAW_SHA256 or config.sha256 == _ORCH_CANDIDATE_02_RISK_SEMANTIC_SHA256:
+        raise _orch_fail(risk_gate, "candidate-02 proof-only risk configuration")
+    flow = config.flow
+    if flow.create_max_sends < 1 or flow.automated_execution_max_sends < 1 or flow.ordinary_cancel_max_sends < 1:
+        raise _orch_fail(risk_gate, "risk configuration is not write-capable")
+    if g["max_ordinary_write_sends"] > GATE_D_ORDINARY_WRITE_SEND_MAX:
+        raise _orch_fail(RunnerFailureCode.BRIDGE_AUTHORIZATION_RISK_CONFIG_MISMATCH, "G ordinary maximum exceeds installed Gate-D contract")
+    # The installed ordinary loop never consumes a cleanup lane (MM07-CLAR-001):
+    # unsupported cleanup capability must be exactly 0; an emergency reserve is
+    # never an ordinary cleanup grant.
+    if g["max_cleanup_cancel_sends"] != 0:
+        raise _orch_fail(RunnerFailureCode.BRIDGE_AUTHORIZATION_RISK_CONFIG_MISMATCH, "unsupported cleanup capability must be 0")
+
+
+def _orch_raise_for_freshness(state: "AuthorizationFreshnessState", reason: "str | None", underlying: object) -> None:
+    detail = (reason or "") + (f"|{underlying.value}" if underlying is not None else "")
+    if state is AuthorizationFreshnessState.CONSUMED:
+        raise _orch_fail(RunnerFailureCode.BRIDGE_AUTHORIZATION_STALE_OR_REPLAYED, detail)
+    if state is AuthorizationFreshnessState.CONFLICT:
+        raise _orch_fail(RunnerFailureCode.AUTHORIZATION_SET_ID_CONFLICT, detail)
+    if state is AuthorizationFreshnessState.INDETERMINATE:
+        raise _orch_fail(RunnerFailureCode.AUTHORIZATION_FRESHNESS_UNAVAILABLE, detail)
+    if state is AuthorizationFreshnessState.STALE_BINDING:
+        if reason == "ENTRY_STATE_MISMATCH":
+            raise _orch_fail(RunnerFailureCode.BRIDGE_AUTHORIZATION_ENTRY_STATE_MISMATCH, detail)
+        if reason == "ENTRY_STATE_REQUIRES_RECOVERY":
+            raise _orch_fail(RunnerFailureCode.AUTHORIZATION_ENTRY_STATE_REQUIRES_RECOVERY, detail)
+        if reason == "RELEASE_PARTIAL_RESTART_REQUIRES_RECOVERY":
+            raise _orch_fail(RunnerFailureCode.RELEASE_PARTIAL_RESTART_REQUIRES_RECOVERY, detail)
+        raise _orch_fail(RunnerFailureCode.AUTHORIZATION_BINDING_STALE, detail)
+    raise _orch_fail(RunnerFailureCode.AUTHORIZATION_FRESHNESS_UNAVAILABLE, detail or "unexpected freshness state")
+
+
+def _orch_require_before_deadline(mono: "Callable[[], int]", end_ns: int, stage: str) -> None:
+    if mono() >= end_ns:
+        raise _orch_fail(RunnerFailureCode.BRIDGE_AUTHORIZATION_DEADLINE_EXPIRED, stage)
+
+
+def _orch_admit_authorization_set(
+    expectations: TrustedExecutionExpectationsV1,
+    *,
+    mono: "Callable[[], int]",
+    end_ns: int,
+    wall_clock: "Callable[[], datetime]",
+    uuid_factory: "Callable[[], uuid.UUID]",
+) -> _AdmittedAuthorizationSetV1:
+    """C04-07 rows 1-8, in order.  No persistent mutation of any kind occurs here
+    (the only local store access is the no-repair freshness read at row 7)."""
+    # Row 1: the trusted E document, the launcher-embedded constants and the
+    # protected root all arrive ONLY inside the launcher-issued private carrier.
+    # Nothing here is caller-supplied, so there is no expected-value override.
+    if type(expectations) is not TrustedExecutionExpectationsV1:
+        raise _orch_fail(RunnerFailureCode.AUTHORIZATION_EXPECTATION_UNTRUSTED, "trusted expectations carrier")
+    constants = object.__getattribute__(expectations, "_constants")
+    root = object.__getattribute__(expectations, "_root")
+    if type(constants) is not _LauncherEmbeddedConstantsV1 or type(root) is not _ProtectedExecutionRoot:
+        raise _orch_fail(RunnerFailureCode.AUTHORIZATION_EXPECTATION_UNTRUSTED, "trusted expectations carrier contents")
+    e = expectations.document
+    _orch_require_before_deadline(mono, end_ns, "row 1")
+
+    # Row 2: O bytes / ID / SHA / class / variant / consumption policy.
+    o_raw = root.read_once(_ORCH_O_FILENAME)
+    if len(o_raw) != e["orchestration"]["bytes"] or hashlib.sha256(o_raw).hexdigest() != e["orchestration"]["sha256"]:
+        raise _orch_fail(RunnerFailureCode.BRIDGE_AUTHORIZATION_SHA_MISMATCH, "O bytes/sha")
+    try:
+        o = _orch_validate_orchestration_object(_orch_strict_canonical_json_object(o_raw))
+    except _OrchStrictJsonError:
+        raise _orch_fail(RunnerFailureCode.BRIDGE_AUTHORIZATION_SCHEMA_INVALID, "O not strict canonical JSON") from None
+    if (
+        e["orchestration"]["authorization_id"] != o["authorization_id"]
+        or e["orchestration"]["authorization_class"] != o["authorization_class"]
+    ):
+        raise _orch_fail(RunnerFailureCode.AUTHORIZATION_EXPECTATION_IDENTITY_MISMATCH, "E.orchestration identity")
+    o_sha = e["orchestration"]["sha256"]
+    _orch_require_before_deadline(mono, end_ns, "row 2")
+
+    # Row 3: D07 layer (installed parser, exact four/nine set).  No secret reads.
+    d_raw = root.read_once(_ORCH_D07_FILENAME)
+    if len(d_raw) != e["d07"]["bytes"] or hashlib.sha256(d_raw).hexdigest() != e["d07"]["sha256"]:
+        raise _orch_fail(RunnerFailureCode.BRIDGE_AUTHORIZATION_D07_LAYER_MISMATCH, "D07 bytes/sha")
+    try:
+        envelope = _d07_verify_external_execution_authorization_bytes(d_raw, expected_sha256=e["d07"]["sha256"])
+    except RunnerError as exc:
+        raise _orch_fail(RunnerFailureCode.BRIDGE_AUTHORIZATION_D07_LAYER_MISMATCH, exc.code.value) from None
+    if (
+        envelope.authorization_id != e["d07"]["authorization_id"]
+        or envelope.authorization_id != o["d07_read_authorization_id"]
+        or e["d07"]["sha256"] != o["d07_read_authorization_sha256"]
+    ):
+        raise _orch_fail(RunnerFailureCode.BRIDGE_AUTHORIZATION_D07_LAYER_MISMATCH, "D07 identity")
+    _orch_require_before_deadline(mono, end_ns, "row 3")
+
+    # Row 4: G artifact + every bidirectional O/G/E/B comparison.
+    g_raw = root.read_once(_ORCH_G_FILENAME)
+    if len(g_raw) != e["gate_d"]["bytes"] or hashlib.sha256(g_raw).hexdigest() != e["gate_d"]["sha256"]:
+        raise _orch_fail(RunnerFailureCode.BRIDGE_AUTHORIZATION_GATE_D_SUCCESSOR_INVALID, "G bytes/sha")
+    try:
+        g = _orch_validate_gate_d_object(_orch_strict_canonical_json_object(g_raw))
+    except _OrchStrictJsonError:
+        raise _orch_fail(RunnerFailureCode.BRIDGE_AUTHORIZATION_GATE_D_SUCCESSOR_INVALID, "G not strict canonical JSON") from None
+    binding = _orch_cross_check_authorization_set(o, g, e, o_sha=o_sha, g_sha=e["gate_d"]["sha256"])
+    _orch_require_before_deadline(mono, end_ns, "row 4")
+
+    # Row 5: accepted installed implementation + active contract/domain/market.
+    if (
+        binding["required_implementation_commit"] in _ORCH_BLOCKED_IMPLEMENTATION_COMMITS
+        or binding["required_implementation_commit"] != constants.installed_implementation_commit
+        or binding["required_implementation_tree"] != constants.installed_implementation_tree
+        or binding["required_implementation_parent"] != constants.installed_implementation_parent
+    ):
+        raise _orch_fail(RunnerFailureCode.BRIDGE_AUTHORIZATION_IMPLEMENTATION_MISMATCH, "implementation identity")
+    try:
+        domain_binding, active_contract = _reconstruct_n1_read_only_active_domain(
+            account_scope_ref=binding["account_scope_ref"], subaccount=binding["subaccount"],
+            exchange_index=binding["exchange_index"], bootstrap_contract_sha256=constants.bootstrap_contract_sha256,
+        )
+    except RunnerError:
+        raise _orch_fail(RunnerFailureCode.BRIDGE_AUTHORIZATION_DOMAIN_BINDING_MISMATCH, "active domain reconstruction") from None
+    if binding["active_contract_id"] != active_contract.contract_id or binding["active_contract_sha256"] != active_contract.contract_sha256:
+        raise _orch_fail(RunnerFailureCode.BRIDGE_AUTHORIZATION_ACTIVE_CONTRACT_MISMATCH, "active contract identity")
+    if (
+        binding["domain_binding_id"] != active_contract.domain_binding_id
+        or binding["domain_binding_sha256"] != active_contract.domain_binding_sha256
+        or binding["conflict_domain_ref"] != active_contract.conflict_domain_ref
+    ):
+        raise _orch_fail(RunnerFailureCode.BRIDGE_AUTHORIZATION_DOMAIN_BINDING_MISMATCH, "domain binding identity")
+    _orch_require_before_deadline(mono, end_ns, "row 5")
+
+    # Row 6: exact selected risk bytes + semantic hash + write-capable gate.
+    risk_raw = root.read_once(_ORCH_RISK_FILENAME)
+    e_risk = e["risk_config"]
+    if len(risk_raw) != e_risk["bytes"] or hashlib.sha256(risk_raw).hexdigest() != e_risk["raw_sha256"]:
+        raise _orch_fail(RunnerFailureCode.BRIDGE_AUTHORIZATION_RISK_CONFIG_MISMATCH, "risk bytes/sha")
+    try:
+        risk_config = _build_sha_bound_risk_config_from_bytes(risk_raw, expected_sha256=e_risk["raw_sha256"])
+    except RunnerError as exc:
+        raise _orch_fail(RunnerFailureCode.BRIDGE_AUTHORIZATION_RISK_CONFIG_MISMATCH, exc.code.value) from None
+    if (
+        risk_config.sha256 != e_risk["semantic_sha256"]
+        or binding["risk_config_raw_sha256"] != e_risk["raw_sha256"]
+        or binding["risk_config_semantic_sha256"] != e_risk["semantic_sha256"]
+        or risk_config.conflict_domain != binding["conflict_domain_ref"]
+    ):
+        raise _orch_fail(RunnerFailureCode.BRIDGE_AUTHORIZATION_RISK_CONFIG_MISMATCH, "risk identity")
+    _orch_require_write_capable_risk(risk_config, g, raw_sha256=e_risk["raw_sha256"])
+    _orch_require_before_deadline(mono, end_ns, "row 6")
+
+    # Typed trusted expectation for the durable freshness/consumption APIs.
+    try:
+        authority_binding = AuthorityNamespaceBinding.bind(
+            authority_namespace_id=constants.authority_namespace_id,
+            authority_namespace_root=constants.authority_namespace_root,
+            canonical_repository_root=constants.canonical_repository_root,
+        )
+    except LedgerError as exc:
+        raise _orch_fail(RunnerFailureCode.BRIDGE_AUTHORIZATION_UNAVAILABLE, "authority namespace binding|" + exc.code.value) from None
+    try:
+        typed = _issue_active_authorization_expectation(
+            _BINDING_EXPECTATION_ISSUER_KEY,
+            execution_package_id=e["execution_package_id"],
+            expectation_carrier_sha256=expectations.raw_sha256,
+            authorization_set_id=e["authorization_set_id"],
+            binding=binding,
+            authorization_binding_sha256=e["authorization_binding_sha256"],
+            orchestration_authorization_id=o["authorization_id"],
+            orchestration_authorization_class=o["authorization_class"],
+            orchestration_authorization_sha256=o_sha,
+            d07_read_authorization_id=e["d07"]["authorization_id"],
+            d07_read_authorization_sha256=e["d07"]["sha256"],
+            gate_d_authorization_id=g["authorization_id"],
+            gate_d_authorization_sha256=e["gate_d"]["sha256"],
+            entry_checkpoint=e["entry_checkpoint"],
+        )
+    except LedgerError as exc:
+        raise _orch_fail(RunnerFailureCode.AUTHORIZATION_CROSS_BINDING_MISMATCH, exc.code.value) from None
+
+    # Row 7: narrow NO-REPAIR local open; full anchored replay derives UNUSED.
+    freshness = read_active_authorization_freshness_v1(
+        authority_binding,
+        canonical_repository_root=constants.canonical_repository_root,
+        active_contract=active_contract,
+        expectation=typed,
+        expected_ledger_path=constants.expected_ledger_path,
+        clock=wall_clock,
+        uuid_factory=uuid_factory,
+    )
+    if freshness.state is not AuthorizationFreshnessState.UNUSED:
+        _orch_raise_for_freshness(freshness.state, freshness.reason, freshness.underlying_failure_code)
+    # Row 8: phase roles/count/maxima were fixed by the closed O variant table;
+    # the current deadline still holds and no phase/capability has been issued.
+    _orch_require_before_deadline(mono, end_ns, "row 8")
+    return _AdmittedAuthorizationSetV1(
+        expectations=expectations, orchestration=MappingProxyType(dict(o)),
+        gate_d=MappingProxyType(dict(g)), binding=MappingProxyType(dict(binding)),
+        typed_expectation=typed, d07_envelope=envelope, risk_config=risk_config,
+        domain_binding=domain_binding, active_contract=active_contract,
+        authority_binding=authority_binding, constants=constants,
+    )
+
+
+# ---------------------------------------------------------------------------
+# 41.4 -- runtime construction context (no constructor-induced session).
+# ---------------------------------------------------------------------------
+
+
+@dataclass(frozen=True, slots=True)
+class OrchestrationRuntimeContextV1:
+    """Verified inputs handed to the launcher-supplied ``runtime_builder`` AFTER
+    the durable consumption (C04-07 row 10).  The builder must use the given
+    ``normal_gate`` (its ``process_instance_id`` is the one already committed by
+    the consumption event), the given absolute end (never re-sampled), the
+    verified risk object and the no-repair local reads; it must not append,
+    start a session or repair an anchor."""
+
+    normal_gate: WriterEligibilityGate
+    experiment_absolute_end_monotonic_ns: int
+    risk_config: RiskLimitConfigV1
+    authority_binding: AuthorityNamespaceBinding
+    canonical_repository_root: str
+    expected_ledger_path: str
+    domain_binding: ExecutionDomainBindingV1
+    active_contract: ActiveExecutionDomainContractV1
+    market_ticker: str
+    d07_authorization_envelope: object
+    monotonic_clock_ns: "Callable[[], int]"
+    wall_clock: "Callable[[], datetime]"
+    uuid_factory: "Callable[[], uuid.UUID]"
+    gate_d_max_ordinary_write_sends: int
+
+
+def build_orchestrated_release_runtime_v1(
+    context: OrchestrationRuntimeContextV1,
+    *,
+    send_operation_request,
+    fetch_orderbook,
+    strategy_instance_id: str | None = None,
+    minimum_spread_usd: Decimal | None = None,
+    gate_d_capability_reference_id: str | None = None,
+    normal_write_transport=None,
+) -> "ExperimentRunnerRuntimeV2":
+    """The sanctioned production runtime construction for the orchestration.
+
+    The emergency gate is built around a DORMANT handle
+    (:func:`build_dormant_emergency_control_handle_v1`): no restricted session is
+    started or ended, no anchor is repaired and no event is appended (the D07
+    read-only builder's ``RESTRICTED_SESSION_STARTED``/``ENDED`` pair is an
+    accepted effect of THAT entrypoint only, never of this one)."""
+    if type(context) is not OrchestrationRuntimeContextV1:
+        raise _orch_fail(RunnerFailureCode.ORCHESTRATION_PHASE_STATE_INVALID, "runtime context type")
+    flow = context.risk_config.flow
+    rate_lane = EmergencyRateLane(EmergencyRateConfigV1(
+        flow.emergency_cancel_max_sends,
+        flow.emergency_cancel_window_ms,
+        flow.emergency_cancel_max_in_flight,
+        flow.emergency_cancel_request_deadline_ms,
+        flow.emergency_retry_max_attempts_per_target_per_action,
+        flow.emergency_backoff_base_ms,
+        flow.emergency_backoff_max_ms,
+    ))
+    emergency_gate = EmergencyCancelGate(
+        handle=build_dormant_emergency_control_handle_v1(),
+        rate_lane=rate_lane,
+        process_instance_id=context.normal_gate.process_instance_id,
+        monotonic_clock_ns=context.monotonic_clock_ns,
+        wall_clock=context.wall_clock,
+        uuid_factory=context.uuid_factory,
+        active_contract=context.active_contract,
+    )
+    return build_active_experiment_runner_runtime_v2(
+        normal_gate=context.normal_gate,
+        emergency_gate=emergency_gate,
+        send_operation_request=send_operation_request,
+        fetch_orderbook=fetch_orderbook,
+        monotonic_clock_ns=context.monotonic_clock_ns,
+        wall_clock=context.wall_clock,
+        uuid_factory=context.uuid_factory,
+        risk_config=context.risk_config,
+        experiment_absolute_end_monotonic_ns=context.experiment_absolute_end_monotonic_ns,
+        authority_binding=context.authority_binding,
+        canonical_repository_root=context.canonical_repository_root,
+        expected_ledger_path=context.expected_ledger_path,
+        domain_binding=context.domain_binding,
+        active_contract=context.active_contract,
+        route_qualification=_n1_read_only_route_qualification(context.domain_binding),
+        accepted_evidence_contract=n1_accepted_evidence_contract(context.domain_binding),
+        strategy_instance_id=strategy_instance_id,
+        minimum_spread_usd=minimum_spread_usd,
+        gate_d_capability_reference_id=gate_d_capability_reference_id,
+        normal_write_transport=normal_write_transport,
+        no_repair_local_reads=True,
+    )
+
+
+def _orch_local_tail(runtime: "ExperimentRunnerRuntimeV2") -> "SafetyProjection":
+    """No-repair equal-tail local read through the runtime's own active helper."""
+    opened = runtime.read_local_safety_state()
+    if (
+        type(opened) is not OpenResult
+        or opened.failure_code is not None
+        or opened.projection is None
+        or opened.authority_ledger_relation is not AuthorityLedgerRelation.EQUAL
+    ):
+        raise _orch_fail(
+            RunnerFailureCode.BRIDGE_POST_CLOSE_REFRESH_UNAVAILABLE,
+            "local state read failed" + (f"|{opened.failure_code.value}" if getattr(opened, "failure_code", None) is not None else ""),
+        )
+    projection = opened.projection
+    if (
+        (projection.trusted_sequence, projection.trusted_event_hash)
+        != (projection.last_sequence, projection.terminal_event_hash)
+    ):
+        raise _orch_fail(RunnerFailureCode.BRIDGE_POST_CLOSE_REFRESH_UNAVAILABLE, "unequal tail")
+    return projection
+
+
+def _orch_tail_key(projection: "SafetyProjection") -> "Tuple[int, str]":
+    return (projection.last_sequence, projection.terminal_event_hash)
+
+
+def _orchestration_release_entry_guard(
+    receipt: "ActiveAuthorizationConsumptionV1", runtime: "ExperimentRunnerRuntimeV2",
+) -> "ActiveAcquisitionEntryGuardV1":
+    """Row 10 guard for RELEASE_ONLY: claims the receipt latch, reads the current
+    no-repair tail, and returns the under-lock guard that re-verifies the tail /
+    state / config / receipt against the retained lock pair before any session
+    start is appended."""
+    receipt.assert_live(process_instance_id=runtime.normal_gate.process_instance_id)
+    if runtime.no_repair_local_reads is not True:
+        raise _orch_fail(RunnerFailureCode.ORCHESTRATION_PHASE_STATE_INVALID, "runtime does not use no-repair local reads")
+    receipt.claim_stage("RELEASE_ONLY_ACQUISITION")
+    projection = _orch_local_tail(runtime)
+    proof = runtime.active_contract.writer_proof_id
+    if (
+        projection.risk_control_state != "SAFE_HELD"
+        or projection.writer_proof_state_by_proof_id.get(proof) != "HELD"
+        or projection.writer_proof_release_eligible_by_proof_id.get(proof) is not True
+        or projection.active_risk_config_sha256 != runtime.risk_config.sha256
+    ):
+        raise _orch_fail(RunnerFailureCode.BRIDGE_AUTHORIZATION_ENTRY_STATE_MISMATCH, "before RELEASE_ONLY")
+    return ActiveAcquisitionEntryGuardV1(
+        receipt, projection.last_sequence, projection.terminal_event_hash, "SAFE_HELD",
+        projection.risk_state_epoch, projection.active_risk_config_sha256, "HELD", True,
+    )
+
+
+# ---------------------------------------------------------------------------
+# 41.5 -- phase accounting and the two orchestrated pre-release read phases.
+# ---------------------------------------------------------------------------
+
+
+class _PhaseAccounting:
+    """Explicit private same-process accounting (C04-07 row 8): the exact phase
+    count, each phase's actual charge, and the aggregate.  No refund, no
+    borrowing, no third phase and no repeat after a read failure."""
+
+    def __init__(self, *, authorized_phases: int, per_phase_max: int, aggregate_ceiling: int) -> None:
+        self._authorized = authorized_phases
+        self._per_phase_max = per_phase_max
+        self._aggregate_ceiling = aggregate_ceiling
+        self._started = 0
+        self._charges: list[int] = []
+
+    def begin(self) -> None:
+        if self._started >= self._authorized or self._started != len(self._charges):
+            raise _orch_fail(RunnerFailureCode.BRIDGE_AUTHORIZATION_PHASE_PLAN_MISMATCH, "phase count")
+        self._started += 1
+
+    def record(self, charge: int) -> None:
+        if type(charge) is not int or charge < 0 or charge > self._per_phase_max:
+            raise _orch_fail(RunnerFailureCode.BRIDGE_AUTHORIZATION_PHASE_BUDGET_MISMATCH, "phase charge")
+        self._charges.append(charge)
+        if sum(self._charges) > self._aggregate_ceiling:
+            raise _orch_fail(RunnerFailureCode.BRIDGE_AUTHORIZATION_AGGREGATE_BUDGET_EXCEEDED, "aggregate")
+
+    @property
+    def charges(self) -> "Tuple[int, ...]":
+        return tuple(self._charges)
+
+
+def _orch_run_read_phase(
+    *, stage: str, invocation: "ExperimentRunnerInvocationV2", runtime: "ExperimentRunnerRuntimeV2",
+    receipt: "ActiveAuthorizationConsumptionV1", accounting: _PhaseAccounting, bridge,
+) -> "PreReleaseReadPhaseResultV2":
+    """One fresh Stage 3A-3F pass: fresh private capability, <=72 charged
+    requests, zero persistent appends (proved by the unchanged no-repair tail)."""
+    receipt.assert_live(process_instance_id=runtime.normal_gate.process_instance_id)
+    _orch_require_before_deadline(runtime.monotonic_clock_ns, receipt.absolute_deadline_monotonic_ns, stage)
+    receipt.claim_stage(stage)
+    accounting.begin()
+    before = _orch_tail_key(_orch_local_tail(runtime))
+    with bridge():
+        result = run_pre_release_read_phase_v2(invocation, runtime)
+    if type(result) is not PreReleaseReadPhaseResultV2:
+        raise _orch_fail(RunnerFailureCode.BRIDGE_PRE_READ_INCOMPLETE, "phase result type")
+    if result.status != "READ_PHASE_COMPLETE":
+        raise _orch_fail(RunnerFailureCode.BRIDGE_PRE_READ_INCOMPLETE, "locally blocked: " + ",".join(result.local_block_reasons))
+    accounting.record(result.requests_consumed)
+    after = _orch_tail_key(_orch_local_tail(runtime))
+    if after != before:
+        raise _orch_fail(RunnerFailureCode.BRIDGE_MUTATION_RESULT_UNKNOWN, "Stage 3D-3F moved the durable tail")
+    if (
+        result.process_instance_id != runtime.normal_gate.process_instance_id
+        or type(result.active_release_state) is not ActiveReleaseEvaluationStateV1
+        or result.active_release_state.active_contract.contract_sha256 != runtime.active_contract.contract_sha256
+        or result.active_release_state.trusted_dynamic_read_set_id != result.trusted_dynamic_read_set_id
+        or result.trusted_dynamic_read_set_id[:6] != "ADRS2_"
+        or len(result.trusted_dynamic_read_set_id) != 70
+        or type(result.truth) is not AuthoritativeReadTruthV1
+    ):
+        raise _orch_fail(RunnerFailureCode.BRIDGE_PRE_READ_INCOMPLETE, "phase result identity")
+    return result
+
+
+# ---------------------------------------------------------------------------
+# 41.6 -- BOOT_HOLD bridge (R0 / R1): reconciliation -> SAFE_HELD -> clean close.
+# ---------------------------------------------------------------------------
+
+
+@dataclass(frozen=True, slots=True)
+class _BridgeOutcomeV1:
+    route: str  # BOOT_HOLD_R0 | BOOT_HOLD_R1
+    reconciliation_appended: bool
+    pre_close_sequence: int
+    pre_close_event_hash: str
+    post_close_sequence: int
+    post_close_event_hash: str
+    restricted_session_id: str
+
+
+def _orch_bridge_basis_event_ids(phase1: "PreReleaseReadPhaseResultV2", runtime: "ExperimentRunnerRuntimeV2") -> "list[str]":
+    """Bridge guards on the fresh phase-1 truth (blocked-seed payload derivation,
+    re-derived from canonical source).  Returns the sorted unique union of the
+    first pass's exact durable order/fill evidence IDs, or raises without
+    inventing evidence."""
+    state = phase1.active_release_state
+    truth = phase1.truth
+    if (
+        type(state) is not ActiveReleaseEvaluationStateV1
+        or type(truth) is not AuthoritativeReadTruthV1
+        or phase1.status != "READ_PHASE_COMPLETE"
+        or phase1.process_instance_id != runtime.normal_gate.process_instance_id
+        or state.active_contract.contract_sha256 != runtime.active_contract.contract_sha256
+    ):
+        raise _orch_fail(RunnerFailureCode.BRIDGE_PRE_READ_INCOMPLETE, "phase-1 identity")
+    snapshot = state.inner._snapshot()
+    risk_snapshot, reconciliation = snapshot[6], snapshot[7]
+    if (
+        truth.orders_complete is not True
+        or truth.fills_complete is not True
+        or truth.position_corroboration != "CORROBORATED"
+        or truth.working_orders != ()
+        or reconciliation.authoritative_known_active_order_ids != ()
+        or reconciliation.reconciled_order_ids != ()
+        or reconciliation.identity_conflict_ids != ()
+        or reconciliation.unresolved_emergency_cancel_attempt_ids != ()
+        or risk_snapshot.working_orders != ()
+        or risk_snapshot.unresolved_write_count != 0
+    ):
+        raise _orch_fail(RunnerFailureCode.BRIDGE_PRE_READ_INCOMPLETE, "traversal/working-order/conflict guard")
+    exposure = risk_snapshot.unresolved_write_exposure_usd
+    if type(exposure) is not Decimal or not exposure.is_finite() or exposure != 0:
+        raise _orch_fail(RunnerFailureCode.BRIDGE_PRE_READ_INCOMPLETE, "exposure guard")
+    fill_ids = {fill.fill_id for fill in truth.fills}
+    if (
+        set(reconciliation.reconciled_fill_ids) != fill_ids
+        or {pair[0] for pair in reconciliation.fill_evidence_event_ids} != fill_ids
+        or {pair[0] for pair in reconciliation.order_evidence_event_ids} != set()
+    ):
+        raise _orch_fail(RunnerFailureCode.CONTROLLING_RECONCILIATION_PAYLOAD_GAP, "durable fill evidence")
+    return _orch_basis_event_ids_from_evidence(
+        reconciliation.order_evidence_event_ids, reconciliation.fill_evidence_event_ids)
+
+
+def _orch_basis_event_ids_from_evidence(
+    order_evidence_event_ids: "Sequence[Tuple[str, str]]",
+    fill_evidence_event_ids: "Sequence[Tuple[str, str]]",
+) -> "list[str]":
+    """The exact deterministic sorted UNIQUE union of the durable order/fill
+    evidence event IDs (C04-T05).  Duplicate evidence for the same subject and
+    any input ordering collapse to the same exact list; nothing is invented and
+    nothing that appears in the inputs is omitted."""
+    return sorted(
+        {pair[1] for pair in order_evidence_event_ids}
+        | {pair[1] for pair in fill_evidence_event_ids}
+    )
+
+
+def _orch_run_boot_hold_bridge(
+    *, admitted: _AdmittedAuthorizationSetV1, runtime: "ExperimentRunnerRuntimeV2",
+    receipt: "ActiveAuthorizationConsumptionV1", phase1: "PreReleaseReadPhaseResultV2",
+    entry_eligible: bool,
+) -> _BridgeOutcomeV1:
+    """C04-08 BOOT_HOLD R0/R1.  Fresh emergency acquisition (guarded under the
+    same lock pair) -> [R0: exactly one qualifying incident-bound
+    RECONCILIATION_RECORDED] -> BOOT_HOLD -> SAFE_HELD -> live equal-tail proof
+    -> ``close()`` exactly once -> no-repair readback of the exact clean end at
+    ``pre + 1``.  R2/stale-session recovery is unreachable from here."""
+    contract = runtime.active_contract
+    basis = _orch_bridge_basis_event_ids(phase1, runtime)
+    _orch_require_before_deadline(runtime.monotonic_clock_ns, receipt.absolute_deadline_monotonic_ns, "bridge acquisition")
+    tail_projection = _orch_local_tail(runtime)
+    proof = contract.writer_proof_id
+    if (
+        tail_projection.risk_control_state != "BOOT_HOLD"
+        or tail_projection.risk_state_epoch != 0
+        or tail_projection.writer_proof_state_by_proof_id.get(proof) != "HELD"
+        or tail_projection.writer_proof_release_eligible_by_proof_id.get(proof) is not entry_eligible
+        or tail_projection.active_risk_config_sha256 is not None
+    ):
+        raise _orch_fail(RunnerFailureCode.BRIDGE_AUTHORIZATION_ENTRY_STATE_MISMATCH, "before emergency acquisition")
+    receipt.assert_live(process_instance_id=runtime.normal_gate.process_instance_id)
+    receipt.claim_stage("BRIDGE_EMERGENCY_ACQUISITION")
+    guard = ActiveAcquisitionEntryGuardV1(
+        receipt, tail_projection.last_sequence, tail_projection.terminal_event_hash, "BOOT_HOLD", 0,
+        None, "HELD", entry_eligible,
+    )
+    acquisition = acquire_active_emergency_control_only_v1(
+        runtime.authority_binding,
+        canonical_repository_root=runtime.canonical_repository_root,
+        active_contract=contract,
+        expected_ledger_path=runtime.expected_ledger_path,
+        clock=runtime.wall_clock,
+        uuid_factory=runtime.uuid_factory,
+        entry_guard=guard,
+    )
+    handle = acquisition.handle
+    if (
+        acquisition.failure_code is not None
+        or type(handle) is not EmergencyControlLedgerHandle
+        or acquisition.authority_ledger_relation is not AuthorityLedgerRelation.EQUAL
+    ):
+        if handle is not None:
+            handle.close()
+        raise _orch_fail(
+            RunnerFailureCode.AUTHORIZATION_ENTRY_STATE_REQUIRES_RECOVERY
+            if acquisition.failure_code is FailureCode.ACQUISITION_ENTRY_GUARD_FAILED
+            else RunnerFailureCode.BRIDGE_MUTATION_RESULT_UNKNOWN,
+            "emergency acquisition"
+            + (f"|{acquisition.failure_code.value}" if acquisition.failure_code is not None else ""),
+        )
+    close_started = False
+    try:
+        live = handle.inspect_validated_projection()
+        appended = False
+        if not entry_eligible:
+            payload = {
+                "incident_id": contract.incident_id,
+                "disposition": _ORCH_BRIDGE_DISPOSITION_PREFIX + phase1.trusted_dynamic_read_set_id,
+                "write_closure_class": "AUTHORITATIVE_RESULT_CLOSED",
+                "bound_order_id": None,
+                "created_order_upper_bound": 0,
+                "active_order_upper_bound": 0,
+                "unknown_result": False,
+                "writer_proof_release_eligible": True,
+                "basis_event_ids": basis,
+                "adapter_reconciliation_schema_id": _ORCH_BRIDGE_RECONCILIATION_SCHEMA_ID,
+            }
+            handle.record_reconciliation(payload, incident_id=contract.incident_id)
+            appended = True
+            live = handle.inspect_validated_projection()
+        if (
+            live.writer_proof_state_by_proof_id.get(proof) != "HELD"
+            or live.writer_proof_release_eligible_by_proof_id.get(proof) is not True
+            or live.risk_control_state != "BOOT_HOLD"
+            or live.risk_state_epoch != 0
+        ):
+            raise _orch_fail(RunnerFailureCode.BRIDGE_RECONCILIATION_DURABLE_SAFE_HELD_NOT_COMMITTED, "HELD+eligible readback")
+        _orch_require_before_deadline(runtime.monotonic_clock_ns, receipt.absolute_deadline_monotonic_ns, "BOOT_HOLD->SAFE_HELD")
+        handle.record_risk_control_state_changed({
+            "previous_state": "BOOT_HOLD", "new_state": "SAFE_HELD",
+            "cause": "REPLAY_ALL_SAFETY_PREDICATES_PASS",
+            "risk_state_epoch_before": 0, "risk_state_epoch_after": 1,
+            "risk_config_sha256": runtime.risk_config.sha256,
+            "related_emergency_action_id": None, "related_release_id": None,
+            "predecessor_state_event_id": None,
+            "observed_authority_trusted_sequence": live.last_sequence,
+            "observed_authority_trusted_hash": live.terminal_event_hash,
+            "observed_ledger_terminal_sequence": live.last_sequence,
+            "observed_ledger_terminal_hash": live.terminal_event_hash,
+        })
+        safe = handle.inspect_validated_projection()
+        if (
+            safe.risk_control_state != "SAFE_HELD"
+            or safe.risk_state_epoch != 1
+            or safe.active_risk_config_sha256 != runtime.risk_config.sha256
+            or safe.writer_proof_state_by_proof_id.get(proof) != "HELD"
+            or safe.writer_proof_release_eligible_by_proof_id.get(proof) is not True
+            or safe.unresolved_write_request_ids
+            or safe.protected_unresolved_legacy_write_count != 0
+            or (safe.trusted_sequence, safe.trusted_event_hash) != (safe.last_sequence, safe.terminal_event_hash)
+        ):
+            raise _orch_fail(RunnerFailureCode.BRIDGE_RECONCILIATION_DURABLE_SAFE_HELD_NOT_COMMITTED, "live SAFE_HELD proof")
+        pre_close_sequence, pre_close_hash = safe.last_sequence, safe.terminal_event_hash
+        session_id = handle.restricted_session_id
+        _orch_require_before_deadline(runtime.monotonic_clock_ns, receipt.absolute_deadline_monotonic_ns, "bridge close")
+        receipt.claim_stage("BRIDGE_EMERGENCY_CLOSE")
+        # ``close()`` is called EXACTLY once; a raising/ambiguous close is never
+        # retried and no readback is attempted after an unproven close.
+        close_started = True
+        handle.close()
+    except BaseException:
+        if not close_started:
+            # Canonical finalization owed by an acquired handle: end the session
+            # cleanly once, never continue the bridge, never mask the primary error.
+            try:
+                handle.close()
+            except BaseException:
+                pass
+        raise
+    readback = read_active_emergency_close_readback_v1(
+        runtime.authority_binding,
+        canonical_repository_root=runtime.canonical_repository_root,
+        active_contract=contract,
+        restricted_session_id=session_id,
+        pre_close_sequence=pre_close_sequence,
+        pre_close_event_hash=pre_close_hash,
+        expected_ledger_path=runtime.expected_ledger_path,
+        clock=runtime.wall_clock,
+        uuid_factory=runtime.uuid_factory,
+    )
+    if not readback.verified or readback.projection is None:
+        raise _orch_fail(
+            RunnerFailureCode.BRIDGE_POST_CLOSE_REFRESH_UNAVAILABLE,
+            (readback.reason or "unverified") + (f"|{readback.failure_code.value}" if readback.failure_code is not None else ""),
+        )
+    post = readback.projection
+    if (
+        post.risk_control_state != "SAFE_HELD"
+        or post.risk_state_epoch != 1
+        or post.active_risk_config_sha256 != runtime.risk_config.sha256
+        or post.writer_proof_state_by_proof_id.get(proof) != "HELD"
+        or post.writer_proof_release_eligible_by_proof_id.get(proof) is not True
+        or post.last_sequence != pre_close_sequence + 1
+        or post.terminal_event_hash == pre_close_hash
+        or post.abnormal_restricted_session_ids != safe.abnormal_restricted_session_ids
+    ):
+        raise _orch_fail(RunnerFailureCode.BRIDGE_POST_CLOSE_REFRESH_UNAVAILABLE, "post-close projection")
+    return _BridgeOutcomeV1(
+        "BOOT_HOLD_R0" if not entry_eligible else "BOOT_HOLD_R1", appended,
+        pre_close_sequence, pre_close_hash, post.last_sequence, post.terminal_event_hash, session_id,
+    )
+
+
+# ---------------------------------------------------------------------------
+# 41.7 -- the composed orchestration: admission -> consumption -> phases ->
+# [bridge] -> release -> Gate D -> canonical writer cleanup, in ONE process.
+# ---------------------------------------------------------------------------
+
+
+@dataclass(frozen=True, slots=True)
+class ReleaseOrchestrationResultV1:
+    """Secret-free classification of a completed composed run."""
+
+    entry_state_class: str
+    route: str  # BOOT_HOLD_R0 | BOOT_HOLD_R1 | CLEAN_SAFE_HELD
+    process_instance_id: str
+    consumption_event_id: str
+    consumption_sequence: int
+    absolute_deadline_monotonic_ns: int
+    phase_requests: "Tuple[int, ...]"
+    aggregate_requests: int
+    trusted_dynamic_read_set_ids: "Tuple[str, ...]"
+    bridge_reconciliation_appended: "bool | None"
+    bridge_pre_close_sequence: "int | None"
+    bridge_post_close_sequence: "int | None"
+    release_id: str
+    normal_writer_session_id: str
+    gate_d_result: "GateDLoopResultV1"
+    writer_cleanup: str
+
+
+def _orch_verify_gate_d_linkage(
+    *, admitted: _AdmittedAuthorizationSetV1, stage3: "_Stage3ActiveReleaseAndNormalWriterResultV1",
+    runtime: "ExperimentRunnerRuntimeV2", receipt: "ActiveAuthorizationConsumptionV1",
+    last_read_set_id: str, invocation: "ExperimentRunnerInvocationV2",
+) -> None:
+    """C04-04 item 5 and C04-06 step 6: Gate D uses the same live process, the
+    same anchored consumption receipt, the exact V2-to-live-writer lineage, the
+    exact deadline object and an unspent Gate-D entry latch; the O/G/E/B
+    comparisons are repeated immediately before entry."""
+    cross = RunnerFailureCode.AUTHORIZATION_CROSS_BINDING_MISMATCH
+    receipt.assert_live(process_instance_id=runtime.normal_gate.process_instance_id)
+    if type(stage3) is not _Stage3ActiveReleaseAndNormalWriterResultV1:
+        raise _orch_fail(cross, "stage-3 result type")
+    acquisition = stage3.normal_writer_acquisition
+    if (
+        stage3.process_instance_id != receipt.process_instance_id
+        or stage3.trusted_dynamic_read_set_id != last_read_set_id
+        or stage3.active_contract.contract_sha256 != admitted.active_contract.contract_sha256
+        or type(acquisition) is not NormalWriterAcquisition
+        or acquisition.handle is None
+        or acquisition.handle.closed
+        or acquisition.normal_writer_session_id != stage3.normal_writer_session_id
+    ):
+        raise _orch_fail(cross, "stage-3 lineage")
+    if (
+        runtime.experiment_absolute_end_monotonic_ns != receipt.absolute_deadline_monotonic_ns
+        or invocation.invocation_id != admitted.binding["invocation_id"]
+        or invocation.market_ticker != admitted.market_ticker
+        or runtime.risk_config.sha256 != admitted.binding["risk_config_semantic_sha256"]
+    ):
+        raise _orch_fail(cross, "deadline / invocation / market / risk identity")
+    # Repeat the complete bidirectional O/G/E/B comparison on the admitted bytes.
+    _orch_cross_check_authorization_set(
+        dict(admitted.orchestration), dict(admitted.gate_d), admitted.expectations.document,
+        o_sha=admitted.typed_expectation.orchestration_authorization_sha256,
+        g_sha=admitted.typed_expectation.gate_d_authorization_sha256,
+    )
+    # C04-T08: the Stage-3K -> Gate-D entry boundary re-checks the SAME sampled
+    # absolute end before the Gate-D entry latch is ever claimed.
+    _orch_require_before_deadline(
+        runtime.monotonic_clock_ns, receipt.absolute_deadline_monotonic_ns, "gate D entry")
+    receipt.claim_stage("GATE_D_ENTRY")
+
+
+def run_release_orchestration_v1(
+    *,
+    trusted_expectations: TrustedExecutionExpectationsV1,
+    runtime_builder: "Callable[[OrchestrationRuntimeContextV1], ExperimentRunnerRuntimeV2]",
+    monotonic_clock_ns: "Callable[[], int] | None" = None,
+    wall_clock: "Callable[[], datetime] | None" = None,
+    uuid_factory: "Callable[[], uuid.UUID] | None" = None,
+    credential_bridge: object = None,
+    decision_cycle_max: int = GATE_D_DECISION_CYCLE_MAX,
+    fault_hook: "Callable[[str], None] | None" = None,
+) -> ReleaseOrchestrationResultV1:
+    """The ONE composed CORRECTION_05 orchestration (substrate; never reachable
+    from the D07 read-only CLI).
+
+    Exact order (C04-07): row 0 samples ONE monotonic invocation start BEFORE any
+    authorization-file verification (absolute end = start + 300 s, never reset);
+    rows 1-8 verify E / O / D07 / G / implementation / risk / no-repair freshness
+    with zero persistent mutation; row 9 durably consumes the whole authorization
+    set exactly once; row 10 builds the runtime (no constructor-induced session)
+    and runs the closed variant:
+
+      BOOT_HOLD   : phase 1 -> bridge (emergency acquire -> [R0 reconcile] ->
+                    SAFE_HELD -> close -> +1 readback) -> phase 2 (new ADRS2) ->
+                    release -> V2 -> NormalWriter -> 3K -> Gate D -> cleanup
+      CLEAN SAFE_HELD : phase 1 -> release -> V2 -> NormalWriter -> 3K -> Gate D
+                    -> cleanup
+
+    ``credential_bridge`` (a context-manager factory) is entered only around each
+    read phase; ``None`` means no credential activity.
+
+    ``trusted_expectations`` must be the private immutable carrier issued by the
+    separately approved launcher through the module-private launcher-only seam
+    (C04-05).  This surface accepts NOTHING else -- not raw ``E`` bytes, not a
+    caller-supplied expected SHA-256 or byte count, not a dict, tuple, public
+    constants object, public launcher descriptor or package-root path.  A caller
+    that builds a fully self-consistent replacement O/G/E set, recomputes every
+    hash and identifier and supplies any caller-visible expected values still
+    fails ``AUTHORIZATION_EXPECTATION_UNTRUSTED`` here -- before the durable
+    consumption of row 9 and before any restricted session, bridge append,
+    release mutation or writer mutation."""
+    if type(trusted_expectations) is not TrustedExecutionExpectationsV1:
+        raise _orch_fail(RunnerFailureCode.AUTHORIZATION_EXPECTATION_UNTRUSTED, "trusted expectations carrier")
+    launcher_constants = object.__getattribute__(trusted_expectations, "_constants")
+    if type(launcher_constants) is not _LauncherEmbeddedConstantsV1:
+        raise _orch_fail(RunnerFailureCode.AUTHORIZATION_EXPECTATION_UNTRUSTED, "trusted expectations carrier contents")
+    mono = time.monotonic_ns if monotonic_clock_ns is None else monotonic_clock_ns
+    # Row 0: ONE monotonic sample, before any authorization-file work.
+    start_ns = mono()
+    if type(start_ns) is not int or type(start_ns) is bool or start_ns < 0:
+        raise _orch_fail(RunnerFailureCode.BRIDGE_AUTHORIZATION_DEADLINE_MISMATCH, "monotonic start")
+    end_ns = start_ns + _ORCH_ABSOLUTE_DEADLINE_SECONDS * 1_000_000_000
+    if end_ns - start_ns != _AUTH_DEADLINE_NS:
+        raise _orch_fail(RunnerFailureCode.BRIDGE_AUTHORIZATION_DEADLINE_MISMATCH, "deadline arithmetic")
+    wall = (lambda: datetime.now(timezone.utc)) if wall_clock is None else wall_clock
+    make_uuid = uuid.uuid4 if uuid_factory is None else uuid_factory
+
+    # Rows 1-8 (no persistent mutation).  The protected root travels inside the
+    # launcher-issued carrier, so no caller path can redirect it.
+    admitted = _orch_admit_authorization_set(
+        trusted_expectations, mono=mono, end_ns=end_ns, wall_clock=wall, uuid_factory=make_uuid,
+    )
+    entry_class = admitted.entry_state_class
+    orchestration = admitted.orchestration
+    binding = admitted.binding
+
+    # The process identity is minted ONCE here (never supplied by O/G) and is the
+    # exact identity committed by the consumption event and carried by the runtime.
+    normal_gate = WriterEligibilityGate(monotonic_clock_ns=mono, wall_clock=wall, uuid_factory=make_uuid)
+    _orch_require_before_deadline(mono, end_ns, "row 9")
+
+    # Row 9: durable consumption of the whole O+G set (linearization point).
+    outcome = consume_active_execution_authorization_set_v1(
+        admitted.authority_binding,
+        canonical_repository_root=launcher_constants.canonical_repository_root,
+        active_contract=admitted.active_contract,
+        expectation=admitted.typed_expectation,
+        process_instance_id=normal_gate.process_instance_id,
+        invocation_started_monotonic_ns=start_ns,
+        absolute_deadline_monotonic_ns=end_ns,
+        monotonic_clock_ns=mono,
+        expected_ledger_path=launcher_constants.expected_ledger_path,
+        clock=wall,
+        uuid_factory=make_uuid,
+        fault_hook=fault_hook,
+    )
+    if outcome.outcome != "CONSUMED" or outcome.receipt is None:
+        _orch_raise_for_consumption(outcome)
+    receipt = outcome.receipt
+    try:
+        # Row 10: runtime construction with NO constructor-induced session, anchor
+        # repair or append (the durable tail is proved unchanged across the build).
+        context = OrchestrationRuntimeContextV1(
+            normal_gate=normal_gate, experiment_absolute_end_monotonic_ns=end_ns,
+            risk_config=admitted.risk_config, authority_binding=admitted.authority_binding,
+            canonical_repository_root=launcher_constants.canonical_repository_root,
+            expected_ledger_path=launcher_constants.expected_ledger_path,
+            domain_binding=admitted.domain_binding, active_contract=admitted.active_contract,
+            market_ticker=admitted.market_ticker, d07_authorization_envelope=admitted.d07_envelope,
+            monotonic_clock_ns=mono, wall_clock=wall, uuid_factory=make_uuid,
+            gate_d_max_ordinary_write_sends=admitted.gate_d["max_ordinary_write_sends"],
+        )
+        before_build = _orch_read_tail_no_repair(admitted, wall, make_uuid)
+        runtime = runtime_builder(context)
+        after_build = _orch_read_tail_no_repair(admitted, wall, make_uuid)
+        if before_build != after_build:
+            raise _orch_fail(RunnerFailureCode.ORCHESTRATION_RUNTIME_CONSTRUCTION_MUTATED_STATE, "runtime builder moved the durable tail")
+        if (
+            type(runtime) is not ExperimentRunnerRuntimeV2
+            or runtime.normal_gate is not normal_gate
+            or runtime.experiment_absolute_end_monotonic_ns != end_ns
+            or runtime.no_repair_local_reads is not True
+            or runtime.risk_config is not admitted.risk_config
+            or runtime.active_contract.contract_sha256 != admitted.active_contract.contract_sha256
+            or runtime.domain_binding.binding_sha256 != admitted.domain_binding.binding_sha256
+            or runtime.canonical_repository_root != launcher_constants.canonical_repository_root
+            or runtime.expected_ledger_path != launcher_constants.expected_ledger_path
+            or runtime.authority_binding != admitted.authority_binding
+        ):
+            raise _orch_fail(RunnerFailureCode.ORCHESTRATION_PHASE_STATE_INVALID, "runtime does not match the verified context")
+        invocation = ExperimentRunnerInvocationV2(
+            invocation_id=binding["invocation_id"], market_ticker=admitted.market_ticker,
+        )
+        accounting = _PhaseAccounting(
+            authorized_phases=orchestration["authorized_stage3_phase_count"],
+            per_phase_max=orchestration["per_phase_pre_release_read_request_max_v2"],
+            aggregate_ceiling=orchestration["aggregate_pre_release_read_request_ceiling"],
+        )
+        bridge = _nullcontext_factory if credential_bridge is None else credential_bridge
+        entry_eligible = admitted.typed_expectation.entry_checkpoint["writer_proof_release_eligible"]
+
+        phase1 = _orch_run_read_phase(
+            stage="PHASE_1_READ", invocation=invocation, runtime=runtime, receipt=receipt,
+            accounting=accounting, bridge=bridge,
+        )
+        read_set_ids = [phase1.trusted_dynamic_read_set_id]
+        bridge_outcome: "_BridgeOutcomeV1 | None" = None
+        if entry_class == _ACTIVE_ENTRY_CLASS_BOOT_HOLD:
+            bridge_outcome = _orch_run_boot_hold_bridge(
+                admitted=admitted, runtime=runtime, receipt=receipt, phase1=phase1,
+                entry_eligible=entry_eligible,
+            )
+            release_phase = _orch_run_read_phase(
+                stage="PHASE_2_READ", invocation=invocation, runtime=runtime, receipt=receipt,
+                accounting=accounting, bridge=bridge,
+            )
+            # The phase-1 release state is bridge evidence only: phase 2 must mint a
+            # NEW private capability / ADRS2 identity after the successful close.
+            if release_phase.trusted_dynamic_read_set_id == phase1.trusted_dynamic_read_set_id:
+                raise _orch_fail(RunnerFailureCode.BRIDGE_POST_CLOSE_REFRESH_UNAVAILABLE, "phase 2 reused the phase-1 read set")
+            read_set_ids.append(release_phase.trusted_dynamic_read_set_id)
+        else:
+            release_phase = phase1
+
+        stage3 = _complete_stage3_active_release_and_normal_writer_v2(
+            release_phase, runtime, orchestration_receipt=receipt,
+        )
+        gate_d_result: "GateDLoopResultV1 | None" = None
+        primary_error: "BaseException | None" = None
+        try:
+            _orch_verify_gate_d_linkage(
+                admitted=admitted, stage3=stage3, runtime=runtime, receipt=receipt,
+                last_read_set_id=release_phase.trusted_dynamic_read_set_id, invocation=invocation,
+            )
+            gate_d_result = run_gate_d_ordinary_decision_loop(
+                stage3, runtime, invocation, decision_cycle_max=decision_cycle_max,
+                ordinary_write_send_max=admitted.gate_d["max_ordinary_write_sends"],
+            )
+        except BaseException as exc:
+            primary_error = exc
+            raise
+        finally:
+            # ``finally``-equivalent canonical writer cleanup after Gate D returns OR
+            # raises: performed exactly once; a cleanup failure never masks the
+            # primary error, and is itself raised when there is none.
+            cleanup_error: "BaseException | None" = None
+            try:
+                _fail_closed_end_writer_session(
+                    stage3.normal_writer_acquisition.handle, stage3.normal_writer_session_id,
+                )
+            except BaseException as exc:  # noqa: BLE001 - classified below
+                cleanup_error = exc
+            if cleanup_error is not None and primary_error is None:
+                raise _orch_fail(RunnerFailureCode.ORCHESTRATION_WRITER_CLEANUP_FAILED, "canonical writer cleanup") from cleanup_error
+        return ReleaseOrchestrationResultV1(
+            entry_state_class=entry_class,
+            route=(bridge_outcome.route if bridge_outcome is not None else "CLEAN_SAFE_HELD"),
+            process_instance_id=normal_gate.process_instance_id,
+            consumption_event_id=receipt.consumption_event_id,
+            consumption_sequence=receipt.consumption_sequence,
+            absolute_deadline_monotonic_ns=end_ns,
+            phase_requests=accounting.charges,
+            aggregate_requests=sum(accounting.charges),
+            trusted_dynamic_read_set_ids=tuple(read_set_ids),
+            bridge_reconciliation_appended=(bridge_outcome.reconciliation_appended if bridge_outcome is not None else None),
+            bridge_pre_close_sequence=(bridge_outcome.pre_close_sequence if bridge_outcome is not None else None),
+            bridge_post_close_sequence=(bridge_outcome.post_close_sequence if bridge_outcome is not None else None),
+            release_id=stage3.release_id,
+            normal_writer_session_id=stage3.normal_writer_session_id,
+            gate_d_result=gate_d_result,
+            writer_cleanup="ENDED",
+        )
+    finally:
+        # Terminal state of the invocation: the live receipt is retired.  The
+        # DURABLE consumed event is permanent regardless.
+        receipt.revoke()
+
+
+@contextmanager
+def _nullcontext_factory() -> "Iterator[None]":
+    yield
+
+
+def _orch_read_tail_no_repair(
+    admitted: _AdmittedAuthorizationSetV1, wall: "Callable[[], datetime]", make_uuid: "Callable[[], uuid.UUID]",
+) -> "Tuple[int, str]":
+    opened = read_active_local_safety_state_v1(
+        admitted.authority_binding,
+        canonical_repository_root=admitted.constants.canonical_repository_root,
+        active_contract=admitted.active_contract,
+        expected_ledger_path=admitted.constants.expected_ledger_path,
+        clock=wall, uuid_factory=make_uuid, no_repair=True,
+    )
+    if (
+        opened.failure_code is not None
+        or opened.projection is None
+        or opened.authority_ledger_relation is not AuthorityLedgerRelation.EQUAL
+    ):
+        raise _orch_fail(RunnerFailureCode.BRIDGE_POST_CLOSE_REFRESH_UNAVAILABLE, "no-repair local read failed")
+    return (opened.projection.last_sequence, opened.projection.terminal_event_hash)
+
+
+def _orch_raise_for_consumption(outcome: AuthorizationConsumptionResultV1) -> None:
+    detail = (outcome.reason or "") + (
+        f"|{outcome.underlying_failure_code.value}" if outcome.underlying_failure_code is not None else ""
+    )
+    kind = outcome.outcome
+    if kind == "REPLAYED":
+        raise _orch_fail(RunnerFailureCode.BRIDGE_AUTHORIZATION_STALE_OR_REPLAYED, detail)
+    if kind == "CONFLICT":
+        raise _orch_fail(RunnerFailureCode.AUTHORIZATION_SET_ID_CONFLICT, detail)
+    if kind == "STALE_BINDING":
+        state_reason = outcome.reason
+        if state_reason == "ENTRY_STATE_MISMATCH":
+            raise _orch_fail(RunnerFailureCode.BRIDGE_AUTHORIZATION_ENTRY_STATE_MISMATCH, detail)
+        if state_reason == "ENTRY_STATE_REQUIRES_RECOVERY":
+            raise _orch_fail(RunnerFailureCode.AUTHORIZATION_ENTRY_STATE_REQUIRES_RECOVERY, detail)
+        if state_reason == "RELEASE_PARTIAL_RESTART_REQUIRES_RECOVERY":
+            raise _orch_fail(RunnerFailureCode.RELEASE_PARTIAL_RESTART_REQUIRES_RECOVERY, detail)
+        raise _orch_fail(RunnerFailureCode.AUTHORIZATION_BINDING_STALE, detail)
+    if kind == "FAILED":
+        raise _orch_fail(RunnerFailureCode.AUTHORIZATION_CONSUMPTION_FAILED, detail)
+    if kind == "INDETERMINATE":
+        raise _orch_fail(RunnerFailureCode.AUTHORIZATION_CONSUMPTION_INDETERMINATE, detail)
+    if kind == "UNAVAILABLE":
+        raise _orch_fail(RunnerFailureCode.AUTHORIZATION_FRESHNESS_UNAVAILABLE, detail)
+    if kind == "DEADLINE_EXPIRED":
+        raise _orch_fail(RunnerFailureCode.BRIDGE_AUTHORIZATION_DEADLINE_EXPIRED, detail)
+    raise _orch_fail(RunnerFailureCode.AUTHORIZATION_CONSUMPTION_FAILED, detail or "unexpected consumption outcome")
 
 
 # ===========================================================================
@@ -10151,6 +12050,15 @@ def _load_sha_bound_risk_config(*, path: str, expected_sha256: str) -> "RiskLimi
         raw = Path(path).read_bytes()
     except OSError:
         raise _d07_risk_error("risk_config JSON file is unreadable") from None
+    return _build_sha_bound_risk_config_from_bytes(raw, expected_sha256=expected_sha256)
+
+
+def _build_sha_bound_risk_config_from_bytes(raw: bytes, *, expected_sha256: str) -> "RiskLimitConfigV1":
+    """Bytes-level body of :func:`_load_sha_bound_risk_config` (identical
+    verification and construction; also used by the CORRECTION_05 orchestration,
+    which reads each artifact exactly once)."""
+    if not _d07_is_sha256_hex(expected_sha256):
+        raise _d07_risk_error("risk_config expected sha256 must be exactly 64 lowercase hex")
     actual_sha256 = hashlib.sha256(raw).hexdigest()
     if actual_sha256 != expected_sha256:
         raise _d07_risk_error("risk_config JSON sha256 does not match the expected accepted identity")
@@ -10282,7 +12190,7 @@ _D07_REQUIRED_ENVELOPE_PROHIBITED = (
 
 
 def _d07_load_external_execution_authorization(
-    *, path: str, expected_sha256: str,
+    *, path: str, expected_sha256: str, raw_bytes: "bytes | None" = None,
 ) -> "_TaskAuthorizationCapabilityEnvelope":
     """DSB-LIVE-AUTH-002/003/004 (Correction 03 + Correction 04).
 
@@ -10314,13 +12222,19 @@ def _d07_load_external_execution_authorization(
             RunnerFailureCode.LIVE_EXECUTION_AUTHORIZATION_UNVERIFIED,
             detail="expected authorization sha256 must be exactly 64 lowercase hex",
         )
-    try:
-        raw = Path(path).read_bytes()
-    except OSError:
-        raise RunnerError(
-            RunnerFailureCode.LIVE_EXECUTION_AUTHORIZATION_UNVERIFIED,
-            detail="external execution-authorization JSON is unreadable",
-        ) from None
+    if raw_bytes is not None:
+        # CORRECTION_05 orchestration: the approved package bytes were already read
+        # exactly once by the protected launcher root; the verification below is the
+        # unchanged D07 SHA -> canonical parse -> usability -> exact 4/9 set.
+        raw = raw_bytes
+    else:
+        try:
+            raw = Path(path).read_bytes()
+        except OSError:
+            raise RunnerError(
+                RunnerFailureCode.LIVE_EXECUTION_AUTHORIZATION_UNVERIFIED,
+                detail="external execution-authorization JSON is unreadable",
+            ) from None
     if hashlib.sha256(raw).hexdigest() != expected_sha256:
         raise RunnerError(
             RunnerFailureCode.LIVE_EXECUTION_AUTHORIZATION_UNVERIFIED,
@@ -10362,6 +12276,19 @@ def _d07_load_external_execution_authorization(
                 detail="external execution-authorization envelope is not exactly the D07 read-only capability set",
             )
     return envelope
+
+
+def _d07_verify_external_execution_authorization_bytes(
+    raw: bytes, *, expected_sha256: str,
+) -> "_TaskAuthorizationCapabilityEnvelope":
+    """Bytes-level entry to the UNCHANGED D07 verification (used by the
+    CORRECTION_05 orchestration for the already-read approved package bytes)."""
+    if type(raw) is not bytes:
+        raise RunnerError(
+            RunnerFailureCode.LIVE_EXECUTION_AUTHORIZATION_UNVERIFIED,
+            detail="external execution-authorization JSON is unreadable",
+        )
+    return _d07_load_external_execution_authorization(path="", expected_sha256=expected_sha256, raw_bytes=raw)
 
 
 # ---------------------------------------------------------------------------

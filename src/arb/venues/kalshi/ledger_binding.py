@@ -11,6 +11,8 @@ from __future__ import annotations
 import enum
 import hashlib
 import json
+import os
+import re
 import threading
 import time
 import uuid
@@ -22,6 +24,10 @@ from typing import Callable, Mapping, Sequence
 
 from arb.execution_ledger import (
     ACTIVE_LEDGER_SCHEMA_REVISION,
+    AUTHORIZATION_CONSUMPTION_DEADLINE_NS,
+    AUTHORIZATION_CONSUMPTION_POLICY,
+    AUTHORIZATION_CONSUMPTION_SCHEMA_REVISION,
+    AUTHORIZATION_ORCHESTRATION_CLASSES,
     BOOTSTRAP_CLASS_TO_COMPLETENESS,
     AcquisitionMode,
     ActiveLedgerMeta,
@@ -36,18 +42,22 @@ from arb.execution_ledger import (
     OpenResult,
     RestartClassification,
     SafetyProjection,
+    _acquire_consumption_state,
     _acquire_legacy_import_state,
     _acquire_normal_writer_candidate,
     _acquire_restricted_state,
+    _append_authorization_consumption,
     acquire_local_state,
     canonical_json_bytes,
     canonical_json_text,
     canonical_timestamp,
     end_restricted_session,
     initialize_execution_domain_ledger_v2,
+    is_authorization_identifier,
     parse_canonical_json,
     sha256_hex,
     start_writer_session,
+    validate_authorization_binding_object,
 )
 from arb.venues.kalshi.risk_control import (
     EconomicFillV1,
@@ -751,19 +761,36 @@ class EmergencyControlLedgerHandle:
 
     __slots__ = ("__locked", "__session_id", "__closed")
 
-    def __init__(self, locked: LockedLedger, session_id: str) -> None:
+    def __init__(self, locked: "LockedLedger | None", session_id: str) -> None:
+        # ``locked is None`` with an empty session id is the DORMANT handle
+        # (CORRECTION_05 C04-07 row 10): it holds no lock, owns no restricted
+        # session, and every mutating/inspecting operation fails closed.  It
+        # exists only so an ``EmergencyCancelGate`` can be constructed without a
+        # constructor-induced ``RESTRICTED_SESSION_STARTED``/``ENDED`` pair.
+        if locked is None and session_id != "":
+            raise LedgerError(FailureCode.RESTRICTED_SESSION_STATE_CONFLICT)
         self.__locked = locked
         self.__session_id = session_id
-        self.__closed = False
+        self.__closed = locked is None
 
     @property
     def restricted_session_id(self) -> str:
         return self.__session_id
 
+    @property
+    def _is_dormant(self) -> bool:
+        return self.__locked is None
+
+    def _require_not_dormant(self) -> None:
+        if self.__locked is None:
+            raise LedgerError(FailureCode.RESTRICTED_SESSION_STATE_CONFLICT)
+
     def inspect_validated_projection(self) -> SafetyProjection:
+        self._require_not_dormant()
         return self.__locked.projection()
 
     def _record(self, event_type: EventType, payload: Mapping[str, object], *, event_id: str | None = None, recorded_at_utc: str | None = None):
+        self._require_not_dormant()
         if self.__closed:
             raise LedgerError(FailureCode.RESTRICTED_SESSION_STATE_CONFLICT)
         return self.__locked.append_batch((EventInput(
@@ -772,6 +799,7 @@ class EmergencyControlLedgerHandle:
         ),))
 
     def record_risk_control_state_changed(self, payload: Mapping[str, object], *, event_id: str | None = None, recorded_at_utc: str | None = None):
+        self._require_not_dormant()
         if payload.get("new_state") == "SAFE_HELD":
             projection = self.__locked.projection()
             if (
@@ -800,18 +828,23 @@ class EmergencyControlLedgerHandle:
         return self._record(EventType.CANCEL_RESULT_RECORDED, payload, event_id=event_id, recorded_at_utc=recorded_at_utc)
 
     def record_order_observation(self, payload: Mapping[str, object], *, incident_id: str | None = None):
+        self._require_not_dormant()
         return self.__locked.append_batch((EventInput(EventType.ORDER_OBSERVED, payload, self.__session_id, incident_id),))
 
     def record_fill_observation(self, payload: Mapping[str, object], *, incident_id: str | None = None):
+        self._require_not_dormant()
         return self.__locked.append_batch((EventInput(EventType.FILL_OBSERVED, payload, self.__session_id, incident_id),))
 
     def record_reconciliation(self, payload: Mapping[str, object], *, incident_id: str):
+        self._require_not_dormant()
         return self.__locked.append_batch((EventInput(EventType.RECONCILIATION_RECORDED, payload, self.__session_id, incident_id),))
 
     def record_execution_halt(self, payload: Mapping[str, object], *, incident_id: str | None = None):
+        self._require_not_dormant()
         return self.__locked.append_batch((EventInput(EventType.EXECUTION_HALTED, payload, self.__session_id, incident_id),))
 
     def record_writer_proof_held(self, payload: Mapping[str, object], *, incident_id: str | None = None):
+        self._require_not_dormant()
         return self.__locked.append_batch((EventInput(EventType.WRITER_PROOF_HELD, payload, self.__session_id, incident_id),))
 
     def close(self) -> None:
@@ -3368,6 +3401,14 @@ def _validate_active_contract_against_events(
         or hold.incident_id != active_contract.incident_id
     ):
         raise LedgerError(FailureCode.ACTIVE_DOMAIN_WRITER_PROOF_MISMATCH)
+    # CORRECTION_05 C04-06: every durable authorization-set consumption in this
+    # history must bind exactly this active domain (complete binding, never the
+    # exchange index alone).
+    for consumed in events:
+        if consumed.event_type is not EventType.EXECUTION_AUTHORIZATION_SET_CONSUMED:
+            continue
+        if not _authorization_binding_matches_contract(consumed.payload["binding"], active_contract):
+            raise LedgerError(FailureCode.ACTIVE_DOMAIN_CONTRACT_MISMATCH)
 
 
 def _validate_active_locked(locked: LockedLedger, active_contract: ActiveExecutionDomainContractV1) -> None:
@@ -3456,8 +3497,10 @@ def initialize_active_execution_domain_ledger(
     return row, active_contract
 
 
-def _active_open_kwargs(clock, uuid_factory, fault_hook) -> dict[str, object]:
+def _active_open_kwargs(clock, uuid_factory, fault_hook, *, no_repair: bool = False) -> dict[str, object]:
     kwargs: dict[str, object] = {"ledger_revision": ACTIVE_LEDGER_SCHEMA_REVISION}
+    if no_repair:
+        kwargs["authority_repair"] = False
     if clock is not None:
         kwargs["clock"] = clock
     if uuid_factory is not None:
@@ -3476,10 +3519,16 @@ def read_active_local_safety_state_v1(
     clock=None,
     uuid_factory=None,
     fault_hook=None,
+    no_repair: bool = False,
 ) -> OpenResult:
     """Gate-B local active-domain safety-state read (DSB-WRITER-005).  Opens,
     replays, and validates the active contract against the revision-2 ledger;
-    exposes no LockedLedger and never appends."""
+    exposes no LockedLedger and never appends.
+
+    ``no_repair=True`` (CORRECTION_05) additionally forbids the automatic
+    authority catch-up performed by the default open: an unequal tail returns a
+    ``NO_REPAIR_AUTHORITY_LEDGER_TAIL_MISMATCH`` failure with both stores
+    untouched.  The default (``False``) is unchanged for every existing caller."""
     contract = _require_active_contract(active_contract)
     opened = _acquire_normal_writer_candidate(
         binding,
@@ -3488,7 +3537,7 @@ def read_active_local_safety_state_v1(
         canonical_repository_root=canonical_repository_root,
         expected_ledger_path=expected_ledger_path,
         history_validator=lambda events: _validate_active_contract_against_events(events, contract),
-        **_active_open_kwargs(clock, uuid_factory, fault_hook),
+        **_active_open_kwargs(clock, uuid_factory, fault_hook, no_repair=no_repair),
     )
     locked = opened.handle
     if locked is None:
@@ -3515,8 +3564,10 @@ def read_active_trusted_release_evidence_projection_v1(
     clock=None,
     uuid_factory=None,
     fault_hook=None,
+    no_repair: bool = False,
 ) -> TrustedReleaseEvidenceReadResultV1:
-    """Gate-B active trusted release-evidence projection (DSB-WRITER-005)."""
+    """Gate-B active trusted release-evidence projection (DSB-WRITER-005).
+    ``no_repair`` selects the CORRECTION_05 no-catch-up open."""
     contract = _require_active_contract(active_contract)
     opened = _acquire_normal_writer_candidate(
         binding,
@@ -3525,7 +3576,7 @@ def read_active_trusted_release_evidence_projection_v1(
         canonical_repository_root=canonical_repository_root,
         expected_ledger_path=expected_ledger_path,
         history_validator=lambda events: _validate_active_contract_against_events(events, contract),
-        **_active_open_kwargs(clock, uuid_factory, fault_hook),
+        **_active_open_kwargs(clock, uuid_factory, fault_hook, no_repair=no_repair),
     )
     locked = opened.handle
     if locked is None:
@@ -3590,8 +3641,20 @@ def _acquire_active_narrow_restricted(
     fault_hook,
     monotonic_clock_ns=None,
     release_wall_clock=None,
+    entry_guard: "ActiveAcquisitionEntryGuardV1 | None" = None,
 ) -> RestrictedAcquisition:
     contract = _require_active_contract(active_contract)
+    pre_guard = None
+    if entry_guard is not None:
+        if type(entry_guard) is not ActiveAcquisitionEntryGuardV1:
+            raise LedgerError(FailureCode.ACQUISITION_ENTRY_GUARD_FAILED)
+
+        def pre_guard(locked, projection, _guard=entry_guard, _contract=contract):
+            # Runs against the still-held authority/ledger lock pair BEFORE any
+            # stale-session abandonment or session-start append (C04-08).
+            _validate_active_locked(locked, _contract)
+            _guard.check(locked, projection, contract=_contract, acquisition_mode=acquisition_mode)
+
     opened = _acquire_restricted_state(
         binding,
         conflict_domain_ref=contract.conflict_domain_ref,
@@ -3600,7 +3663,8 @@ def _acquire_active_narrow_restricted(
         acquisition_mode=acquisition_mode,
         expected_ledger_path=expected_ledger_path,
         history_validator=lambda events: _validate_active_contract_against_events(events, contract),
-        **_active_open_kwargs(clock, uuid_factory, fault_hook),
+        pre_acquisition_guard=pre_guard,
+        **_active_open_kwargs(clock, uuid_factory, fault_hook, no_repair=entry_guard is not None),
     )
     if opened.locked is None:
         return RestrictedAcquisition(
@@ -3645,12 +3709,13 @@ def acquire_active_emergency_control_only_v1(
     clock=None,
     uuid_factory=None,
     fault_hook=None,
+    entry_guard: "ActiveAcquisitionEntryGuardV1 | None" = None,
 ) -> RestrictedAcquisition:
     return _acquire_active_narrow_restricted(
         binding, canonical_repository_root=canonical_repository_root,
         acquisition_mode=AcquisitionMode.EMERGENCY_CONTROL_ONLY, active_contract=active_contract,
         expected_ledger_path=expected_ledger_path, clock=clock, uuid_factory=uuid_factory,
-        fault_hook=fault_hook,
+        fault_hook=fault_hook, entry_guard=entry_guard,
     )
 
 
@@ -3665,13 +3730,14 @@ def acquire_active_release_only_v1(
     fault_hook=None,
     monotonic_clock_ns=None,
     release_wall_clock=None,
+    entry_guard: "ActiveAcquisitionEntryGuardV1 | None" = None,
 ) -> RestrictedAcquisition:
     return _acquire_active_narrow_restricted(
         binding, canonical_repository_root=canonical_repository_root,
         acquisition_mode=AcquisitionMode.RELEASE_ONLY, active_contract=active_contract,
         expected_ledger_path=expected_ledger_path, clock=clock, uuid_factory=uuid_factory,
         fault_hook=fault_hook, monotonic_clock_ns=monotonic_clock_ns,
-        release_wall_clock=release_wall_clock,
+        release_wall_clock=release_wall_clock, entry_guard=entry_guard,
     )
 
 
@@ -3871,12 +3937,19 @@ def acquire_active_normal_writer_state_v1(
     clock=None,
     uuid_factory=None,
     fault_hook=None,
+    entry_guard: "ActiveAcquisitionEntryGuardV1 | None" = None,
 ) -> NormalWriterAcquisition:
     """Sole supported revision-2 active-domain normal-writer acquisition
     (DSB-WRITER-005/006, DSB-WRITER-008 Stage 3J/3K).  Rejects a legacy
     contract, a V1 completion token, and any active-contract/domain/
-    bootstrap/incident/proof mismatch before returning a handle."""
+    bootstrap/incident/proof mismatch before returning a handle.
+
+    ``entry_guard`` (CORRECTION_05) is evaluated against the still-held lock
+    pair before the writer session is started; it also selects the no-repair
+    open."""
     contract = _require_active_contract(active_contract)
+    if entry_guard is not None and type(entry_guard) is not ActiveAcquisitionEntryGuardV1:
+        raise LedgerError(FailureCode.ACQUISITION_ENTRY_GUARD_FAILED)
     opened = _acquire_normal_writer_candidate(
         binding,
         conflict_domain_ref=contract.conflict_domain_ref,
@@ -3884,7 +3957,7 @@ def acquire_active_normal_writer_state_v1(
         canonical_repository_root=canonical_repository_root,
         expected_ledger_path=expected_ledger_path,
         history_validator=lambda events: _validate_active_contract_against_events(events, contract),
-        **_active_open_kwargs(clock, uuid_factory, fault_hook),
+        **_active_open_kwargs(clock, uuid_factory, fault_hook, no_repair=entry_guard is not None),
     )
     locked = opened.handle
     if locked is None:
@@ -4030,6 +4103,17 @@ def acquire_active_normal_writer_state_v1(
             projection, projection.restart_classification, None, None,
             FailureCode.CURRENT_PROCESS_RELEASE_COMPLETION_STALE, locked.relation,
         )
+    if entry_guard is not None:
+        try:
+            entry_guard.check(
+                locked, projection, contract=contract,
+                acquisition_mode=AcquisitionMode.NORMAL_WRITER,
+            )
+        except LedgerError as exc:
+            locked.close()
+            return NormalWriterAcquisition(
+                projection, projection.restart_classification, None, None, exc.code, locked.relation,
+            )
     _consume_active_completion(token)
     relation = locked.relation
     try:
@@ -4049,6 +4133,827 @@ def acquire_active_normal_writer_state_v1(
     return NormalWriterAcquisition(
         final_projection, final_projection.restart_classification, locked, session_id, None, relation,
     )
+
+# ===========================================================================
+# CORRECTION_05 (R1-D07 N1) -- trusted typed authorization expectation,
+# durable one-shot authorization-set consumption, live non-reconstructable
+# receipt, and the under-lock pre-acquisition entry guard (C04-05 .. C04-08).
+#
+# This section owns only the *narrow typed* boundary.  Parsing of the private
+# O / G / E schemas lives in the runner; ledger_binding never imports the runner
+# and accepts only fully verified, closed inputs through the private issuers
+# below.  No generic append, no LockedLedger and no caller-selected event ID is
+# exposed.  Existing callers keep their previous behaviour byte-for-byte.
+# ===========================================================================
+
+ACTIVE_ENTRY_CLASS_BOOT_HOLD = "BOOT_HOLD_HELD_BRIDGE_REQUIRED"
+ACTIVE_ENTRY_CLASS_CLEAN_SAFE_HELD = "CLEAN_SAFE_HELD_HELD_RELEASE_ELIGIBLE"
+ACTIVE_ORCHESTRATION_CLASS_BOOT_HOLD = "PRE_RELEASE_BRIDGE_RELEASE_ORCHESTRATION_V1"
+ACTIVE_ORCHESTRATION_CLASS_CLEAN_SAFE_HELD = "CLEAN_SAFE_HELD_RELEASE_CONTINUATION_V1"
+_ORCHESTRATION_CLASS_TO_ENTRY_CLASS = MappingProxyType({
+    ACTIVE_ORCHESTRATION_CLASS_BOOT_HOLD: ACTIVE_ENTRY_CLASS_BOOT_HOLD,
+    ACTIVE_ORCHESTRATION_CLASS_CLEAN_SAFE_HELD: ACTIVE_ENTRY_CLASS_CLEAN_SAFE_HELD,
+})
+ACTIVE_ENTRY_CHECKPOINT_KEYS = frozenset({
+    "authority_instance_id", "authority_namespace_id", "authority_store_path_identity_sha256",
+    "ledger_instance_id", "ledger_path_identity_sha256", "trusted_sequence",
+    "trusted_event_hash", "risk_control_state", "risk_state_epoch", "risk_state_event_id",
+    "writer_proof_id", "writer_proof_state", "writer_proof_release_eligible",
+    "active_risk_config_sha256",
+})
+AUTHORIZATION_BINDING_HASH_DOMAIN = b"ARB_RELEASE_GATE_D_BINDING_V1\x00"
+_EVENT_ID_TEXT_RE = re.compile(r"^evt_[0-9a-f]{32}$")
+
+
+def compute_authorization_binding_sha256(binding: Mapping[str, object]) -> str:
+    """``SHA256(b"ARB_RELEASE_GATE_D_BINDING_V1\\x00" + canonical_json_bytes(B))``
+    over the closed, exact-typed binding object (C04-04)."""
+    validated = validate_authorization_binding_object(binding)
+    return sha256_hex(AUTHORIZATION_BINDING_HASH_DOMAIN + canonical_json_bytes(validated))
+
+
+def _authorization_binding_matches_contract(binding: object, contract: "ActiveExecutionDomainContractV1") -> bool:
+    """The complete active-domain identity (never the exchange index alone)."""
+    if not isinstance(binding, Mapping):
+        return False
+    return (
+        binding.get("active_contract_id") == contract.contract_id
+        and binding.get("active_contract_sha256") == contract.contract_sha256
+        and binding.get("domain_binding_id") == contract.domain_binding_id
+        and binding.get("domain_binding_sha256") == contract.domain_binding_sha256
+        and binding.get("conflict_domain_ref") == contract.conflict_domain_ref
+        and binding.get("account_scope_ref") == contract.account_scope_ref
+        and binding.get("environment") == contract.environment
+        and type(binding.get("subaccount")) is int
+        and binding.get("subaccount") == contract.subaccount
+        and type(binding.get("exchange_index")) is int
+        and binding.get("exchange_index") == contract.exchange_index
+    )
+
+
+def validate_active_entry_checkpoint(checkpoint: object) -> dict:
+    """Strict closed validation of ``E.entry_checkpoint`` (C04-05)."""
+    if not isinstance(checkpoint, Mapping) or set(checkpoint) != ACTIVE_ENTRY_CHECKPOINT_KEYS:
+        raise LedgerError(FailureCode.AUTHORIZATION_CONSUMPTION_PAYLOAD_INVALID)
+    cp = dict(checkpoint)
+    code = FailureCode.AUTHORIZATION_CONSUMPTION_PAYLOAD_INVALID
+    for key in ("authority_instance_id", "authority_namespace_id", "ledger_instance_id", "writer_proof_id"):
+        if type(cp[key]) is not str or not cp[key]:
+            raise LedgerError(code)
+    for key in ("authority_store_path_identity_sha256", "ledger_path_identity_sha256", "trusted_event_hash"):
+        if not _is_exact_sha256_hex(cp[key]):
+            raise LedgerError(code)
+    if (
+        type(cp["trusted_sequence"]) is not int or cp["trusted_sequence"] <= 0
+        or type(cp["risk_state_epoch"]) is not int or cp["risk_state_epoch"] < 0
+        or cp["writer_proof_state"] not in {"HELD", "RELEASED"}
+        or type(cp["writer_proof_release_eligible"]) is not bool
+    ):
+        raise LedgerError(code)
+    if cp["risk_state_event_id"] is not None and (
+        type(cp["risk_state_event_id"]) is not str or _EVENT_ID_TEXT_RE.fullmatch(cp["risk_state_event_id"]) is None
+    ):
+        raise LedgerError(code)
+    if cp["active_risk_config_sha256"] is not None and not _is_exact_sha256_hex(cp["active_risk_config_sha256"]):
+        raise LedgerError(code)
+    state = cp["risk_control_state"]
+    if state == "SAFE_HELD":
+        if cp["risk_state_event_id"] is None or cp["active_risk_config_sha256"] is None or cp["risk_state_epoch"] < 1:
+            raise LedgerError(code)
+    elif state == "BOOT_HOLD":
+        if cp["risk_state_event_id"] is not None or cp["active_risk_config_sha256"] is not None or cp["risk_state_epoch"] != 0:
+            raise LedgerError(code)
+    else:
+        raise LedgerError(code)
+    return cp
+
+
+_AUTHORIZATION_EXPECTATION_ISSUER_KEY = object()
+_AUTHORIZATION_RECEIPT_ISSUER_KEY = object()
+
+
+class AuthorizationFreshnessState(enum.StrEnum):
+    UNUSED = "UNUSED"
+    CONSUMED = "CONSUMED"
+    CONFLICT = "CONFLICT"
+    INDETERMINATE = "INDETERMINATE"
+    STALE_BINDING = "STALE_BINDING"
+
+
+_EXPECTATION_FIELDS = (
+    "execution_package_id", "expectation_carrier_sha256", "authorization_set_id",
+    "binding", "authorization_binding_sha256",
+    "orchestration_authorization_id", "orchestration_authorization_class",
+    "orchestration_authorization_sha256", "d07_read_authorization_id",
+    "d07_read_authorization_sha256", "gate_d_authorization_id",
+    "gate_d_authorization_sha256", "entry_checkpoint",
+)
+
+
+class ActiveAuthorizationExpectationV1:
+    """Private, immutable, launcher-issued trusted expectation (C04-05).
+
+    Only the runner's verified launcher boundary can construct one (through the
+    module-private issuer key).  It is never accepted as a public dict, a
+    ``(JSON, expected_hash)`` caller pair, an environment/CLI value or a
+    deserialized object."""
+
+    __slots__ = _EXPECTATION_FIELDS + ("entry_state_class", "risk_config_semantic_sha256")
+
+    def __init__(self, key: object, **values: object) -> None:
+        if key is not _AUTHORIZATION_EXPECTATION_ISSUER_KEY:
+            raise LedgerError(FailureCode.AUTHORIZATION_CONSUMPTION_PAYLOAD_INVALID)
+        if set(values) != set(_EXPECTATION_FIELDS):
+            raise LedgerError(FailureCode.AUTHORIZATION_CONSUMPTION_PAYLOAD_INVALID)
+        binding = validate_authorization_binding_object(values["binding"])
+        checkpoint = validate_active_entry_checkpoint(values["entry_checkpoint"])
+        code = FailureCode.AUTHORIZATION_CONSUMPTION_PAYLOAD_INVALID
+        for name in (
+            "execution_package_id", "authorization_set_id", "orchestration_authorization_id",
+            "d07_read_authorization_id", "gate_d_authorization_id",
+        ):
+            if not is_authorization_identifier(values[name]):
+                raise LedgerError(code)
+        for name in (
+            "expectation_carrier_sha256", "authorization_binding_sha256",
+            "orchestration_authorization_sha256", "d07_read_authorization_sha256",
+            "gate_d_authorization_sha256",
+        ):
+            if not _is_exact_sha256_hex(values[name]):
+                raise LedgerError(code)
+        if (
+            values["orchestration_authorization_class"] not in AUTHORIZATION_ORCHESTRATION_CLASSES
+            or values["authorization_set_id"] != binding["authorization_set_id"]
+            or values["orchestration_authorization_id"] != binding["orchestration_authorization_id"]
+            or values["orchestration_authorization_class"] != binding["orchestration_authorization_class"]
+            or values["authorization_binding_sha256"] != compute_authorization_binding_sha256(binding)
+            or len({
+                values["orchestration_authorization_id"], values["d07_read_authorization_id"],
+                values["gate_d_authorization_id"],
+            }) != 3
+        ):
+            raise LedgerError(code)
+        expected_entry = _ORCHESTRATION_CLASS_TO_ENTRY_CLASS[values["orchestration_authorization_class"]]
+        if expected_entry == ACTIVE_ENTRY_CLASS_BOOT_HOLD and checkpoint["risk_control_state"] != "BOOT_HOLD":
+            raise LedgerError(code)
+        if expected_entry == ACTIVE_ENTRY_CLASS_CLEAN_SAFE_HELD and (
+            checkpoint["risk_control_state"] != "SAFE_HELD"
+            or checkpoint["active_risk_config_sha256"] != binding["risk_config_semantic_sha256"]
+        ):
+            raise LedgerError(code)
+        for name in _EXPECTATION_FIELDS:
+            if name == "binding":
+                object.__setattr__(self, name, MappingProxyType(dict(binding)))
+            elif name == "entry_checkpoint":
+                object.__setattr__(self, name, MappingProxyType(dict(checkpoint)))
+            else:
+                object.__setattr__(self, name, values[name])
+        object.__setattr__(self, "entry_state_class", expected_entry)
+        object.__setattr__(self, "risk_config_semantic_sha256", binding["risk_config_semantic_sha256"])
+
+    def __setattr__(self, name: str, value: object) -> None:
+        raise AttributeError("ActiveAuthorizationExpectationV1 is immutable")
+
+    def __copy__(self):
+        raise TypeError("ActiveAuthorizationExpectationV1 cannot be copied")
+
+    __deepcopy__ = __copy__
+
+    def __reduce_ex__(self, protocol):
+        del protocol
+        raise TypeError("ActiveAuthorizationExpectationV1 cannot be serialized")
+
+    def __repr__(self) -> str:
+        return "ActiveAuthorizationExpectationV1(<redacted>)"
+
+    def uniqueness_candidate(self) -> dict[str, object]:
+        return {
+            "authorization_set_id": self.authorization_set_id,
+            "orchestration_authorization_id": self.orchestration_authorization_id,
+            "gate_d_authorization_id": self.gate_d_authorization_id,
+            "execution_attempt_id": self.binding["execution_attempt_id"],
+            "invocation_id": self.binding["invocation_id"],
+            "orchestration_authorization_sha256": self.orchestration_authorization_sha256,
+            "gate_d_authorization_sha256": self.gate_d_authorization_sha256,
+        }
+
+
+def _issue_active_authorization_expectation(key: object, **values: object) -> ActiveAuthorizationExpectationV1:
+    return ActiveAuthorizationExpectationV1(key, **values)
+
+
+_RECEIPT_STAGE_ORDER = (
+    "PHASE_1_READ", "BRIDGE_EMERGENCY_ACQUISITION", "BRIDGE_EMERGENCY_CLOSE",
+    "PHASE_2_READ", "RELEASE_ONLY_ACQUISITION", "V2_ISSUANCE",
+    "NORMAL_WRITER_ACQUISITION", "STAGE_3K", "GATE_D_ENTRY",
+)
+_RECEIPT_FIELDS = (
+    "process_instance_id", "authorization_set_id", "orchestration_authorization_id",
+    "orchestration_authorization_class", "gate_d_authorization_id", "execution_attempt_id",
+    "invocation_id", "consumption_event_id", "consumption_event_hash",
+    "consumption_sequence", "expectation_carrier_sha256", "authorization_binding_sha256",
+    "invocation_started_monotonic_ns", "absolute_deadline_monotonic_ns", "entry_state_class",
+    "os_process_id",
+)
+_live_receipt_registry_lock = threading.Lock()
+_live_receipt_registry: dict[int, "ActiveAuthorizationConsumptionV1"] = {}
+
+
+class ActiveAuthorizationConsumptionV1:
+    """Private live receipt of ONE successful anchored consumption (C04-06).
+
+    Minted only inside :func:`consume_active_execution_authorization_set_v1`
+    after ``APPENDED_AND_ANCHORED`` with the exact ``pre + 1`` readback.  It is
+    process-local, one-shot per stage and cannot be constructed, copied,
+    pickled, deserialized or re-derived from durable replay: replay yields only
+    :class:`AuthorizationConsumptionRecordV1` data."""
+
+    __slots__ = _RECEIPT_FIELDS + ("_last_stage_index", "_stage_lock")
+
+    def __init__(self, key: object, **values: object) -> None:
+        if key is not _AUTHORIZATION_RECEIPT_ISSUER_KEY:
+            raise LedgerError(FailureCode.AUTHORIZATION_RECEIPT_INVALID)
+        if set(values) != set(_RECEIPT_FIELDS):
+            raise LedgerError(FailureCode.AUTHORIZATION_RECEIPT_INVALID)
+        for name in _RECEIPT_FIELDS:
+            object.__setattr__(self, name, values[name])
+        object.__setattr__(self, "_last_stage_index", -1)
+        object.__setattr__(self, "_stage_lock", threading.Lock())
+        with _live_receipt_registry_lock:
+            _live_receipt_registry[id(self)] = self
+
+    def __setattr__(self, name: str, value: object) -> None:
+        raise AttributeError("ActiveAuthorizationConsumptionV1 is immutable")
+
+    def __copy__(self):
+        raise TypeError("ActiveAuthorizationConsumptionV1 cannot be copied")
+
+    __deepcopy__ = __copy__
+
+    def __reduce_ex__(self, protocol):
+        del protocol
+        raise TypeError("ActiveAuthorizationConsumptionV1 cannot be serialized")
+
+    def __repr__(self) -> str:
+        return "ActiveAuthorizationConsumptionV1(<redacted>)"
+
+    def assert_live(self, *, process_instance_id: str | None = None) -> None:
+        """Fail closed unless this exact object is the one live receipt minted
+        by the winning invocation of THIS OS process."""
+        with _live_receipt_registry_lock:
+            registered = _live_receipt_registry.get(id(self)) is self
+        if not registered or type(self) is not ActiveAuthorizationConsumptionV1:
+            raise LedgerError(FailureCode.AUTHORIZATION_RECEIPT_INVALID)
+        if self.os_process_id != os.getpid():
+            raise LedgerError(FailureCode.AUTHORIZATION_RECEIPT_PROCESS_MISMATCH)
+        if process_instance_id is not None and process_instance_id != self.process_instance_id:
+            raise LedgerError(FailureCode.AUTHORIZATION_RECEIPT_PROCESS_MISMATCH)
+
+    def claim_stage(self, stage: str) -> None:
+        """Monotonic one-use stage latch (C04-06 step 5): a stage can be claimed
+        once, and never after a later stage has been claimed."""
+        self.assert_live()
+        if stage not in _RECEIPT_STAGE_ORDER:
+            raise LedgerError(FailureCode.AUTHORIZATION_RECEIPT_INVALID)
+        index = _RECEIPT_STAGE_ORDER.index(stage)
+        with self._stage_lock:
+            if index <= self._last_stage_index:
+                raise LedgerError(FailureCode.AUTHORIZATION_RECEIPT_STAGE_LATCH_SPENT)
+            object.__setattr__(self, "_last_stage_index", index)
+
+    @property
+    def claimed_stages(self) -> tuple[str, ...]:
+        with self._stage_lock:
+            return tuple(_RECEIPT_STAGE_ORDER[: self._last_stage_index + 1])
+
+    def revoke(self) -> None:
+        """Retire this receipt (terminal state of the invocation)."""
+        with _live_receipt_registry_lock:
+            if _live_receipt_registry.get(id(self)) is self:
+                del _live_receipt_registry[id(self)]
+
+
+@dataclass(frozen=True, slots=True)
+class AuthorizationFreshnessResultV1:
+    state: AuthorizationFreshnessState
+    reason: str | None = None
+    underlying_failure_code: FailureCode | None = None
+    consumed_event_id: str | None = None
+    consumed_sequence: int | None = None
+    observed_tail_sequence: int | None = None
+    observed_tail_event_hash: str | None = None
+
+
+@dataclass(frozen=True, slots=True)
+class AuthorizationConsumptionResultV1:
+    """``outcome`` is one of CONSUMED, REPLAYED, CONFLICT, STALE_BINDING, FAILED,
+    INDETERMINATE, UNAVAILABLE, DEADLINE_EXPIRED.  Only ``CONSUMED`` carries a
+    receipt."""
+
+    outcome: str
+    receipt: "ActiveAuthorizationConsumptionV1 | None" = None
+    reason: str | None = None
+    underlying_failure_code: FailureCode | None = None
+
+
+def _last_restricted_lifecycle_event(events: Sequence) -> "object | None":
+    for event in reversed(events):
+        if event.event_type in {
+            EventType.RESTRICTED_SESSION_STARTED, EventType.RESTRICTED_SESSION_ENDED,
+            EventType.RESTRICTED_SESSION_ABANDONED,
+        }:
+            return event
+    return None
+
+
+def _observe_entry_checkpoint(locked: LockedLedger, projection: SafetyProjection, contract: ActiveExecutionDomainContractV1) -> dict:
+    tail = locked.events[-1]
+    state_event_id = None
+    for event in reversed(locked.events):
+        if event.event_type is EventType.RISK_CONTROL_STATE_CHANGED:
+            state_event_id = event.event_id
+            break
+    return {
+        "authority_instance_id": locked.authority_meta.authority_instance_id,
+        "authority_namespace_id": locked.authority_meta.authority_namespace_id,
+        "authority_store_path_identity_sha256": locked.authority_meta.authority_store_path_identity_sha256,
+        "ledger_instance_id": locked.ledger_meta.ledger_instance_id,
+        "ledger_path_identity_sha256": locked.ledger_meta.ledger_path_identity_sha256,
+        "trusted_sequence": tail.sequence,
+        "trusted_event_hash": tail.event_hash,
+        "risk_control_state": projection.risk_control_state,
+        "risk_state_epoch": projection.risk_state_epoch,
+        "risk_state_event_id": state_event_id,
+        "writer_proof_id": contract.writer_proof_id,
+        "writer_proof_state": projection.writer_proof_state_by_proof_id.get(contract.writer_proof_id),
+        "writer_proof_release_eligible": projection.writer_proof_release_eligible_by_proof_id.get(contract.writer_proof_id),
+        "active_risk_config_sha256": projection.active_risk_config_sha256,
+    }
+
+
+def _entry_state_reason(
+    locked: LockedLedger, projection: SafetyProjection, *, entry_state_class: str,
+    contract: ActiveExecutionDomainContractV1, risk_config_semantic_sha256: str,
+) -> str | None:
+    """Return ``None`` for a valid entry state, else a closed structural reason
+    (never raw exception text): ``RELEASE_PARTIAL_RESTART_REQUIRES_RECOVERY``,
+    ``ENTRY_STATE_REQUIRES_RECOVERY`` or ``ENTRY_STATE_MISMATCH``."""
+    proof_state = projection.writer_proof_state_by_proof_id.get(contract.writer_proof_id)
+    eligible = projection.writer_proof_release_eligible_by_proof_id.get(contract.writer_proof_id)
+    if (
+        proof_state == "RELEASED"
+        or projection.risk_control_state == "WRITER_ELIGIBLE"
+        or (proof_state == "HELD" and bool(projection.release_records_by_id))
+    ):
+        return "RELEASE_PARTIAL_RESTART_REQUIRES_RECOVERY"
+    if projection.active_restricted_session_id is not None or projection.active_writer_session_id is not None:
+        return "ENTRY_STATE_REQUIRES_RECOVERY"
+    if (
+        projection.history_completeness not in BOOTSTRAP_CLASS_TO_COMPLETENESS.values()
+        or projection.protected_unresolved_legacy_write_count != 0
+        or projection.unresolved_write_request_ids
+        or any(projection.cancel_send_may_have_been_sent_by_attempt.values())
+        or projection.fill_conflicts
+        or proof_state != "HELD"
+        or projection.trusted_sequence != projection.last_sequence
+        or projection.trusted_event_hash != projection.terminal_event_hash
+    ):
+        return "ENTRY_STATE_MISMATCH"
+    if entry_state_class == ACTIVE_ENTRY_CLASS_BOOT_HOLD:
+        if projection.risk_control_state != "BOOT_HOLD" or projection.risk_state_epoch != 0:
+            return "ENTRY_STATE_MISMATCH"
+        return None
+    if entry_state_class == ACTIVE_ENTRY_CLASS_CLEAN_SAFE_HELD:
+        if (
+            projection.risk_control_state != "SAFE_HELD"
+            or projection.risk_state_epoch < 1
+            or eligible is not True
+            or projection.active_risk_config_sha256 != risk_config_semantic_sha256
+        ):
+            return "ENTRY_STATE_MISMATCH"
+        last_restricted = _last_restricted_lifecycle_event(locked.events)
+        if last_restricted is not None and last_restricted.event_type is not EventType.RESTRICTED_SESSION_ENDED:
+            return "ENTRY_STATE_REQUIRES_RECOVERY"
+        return None
+    return "ENTRY_STATE_MISMATCH"
+
+
+def _evaluate_authorization_freshness(
+    locked: LockedLedger, consumption, expectation: ActiveAuthorizationExpectationV1,
+    contract: ActiveExecutionDomainContractV1,
+) -> AuthorizationFreshnessResultV1:
+    """Decidable freshness (C04-06 table) over a fully replayed, equal-tail,
+    no-repair open.  Precedence: integrity (caller) -> CONSUMED/CONFLICT ->
+    STALE_BINDING / entry state -> UNUSED."""
+    tail = locked.events[-1]
+    observed = {"observed_tail_sequence": tail.sequence, "observed_tail_event_hash": tail.event_hash}
+    projection = locked.projection()
+    state, record = consumption.classify(expectation.uniqueness_candidate())
+    if state == "CONSUMED":
+        return AuthorizationFreshnessResultV1(
+            AuthorizationFreshnessState.CONSUMED, "SET_ALREADY_CONSUMED", None,
+            record.event_id, record.sequence, **observed,
+        )
+    if state == "CONFLICT":
+        return AuthorizationFreshnessResultV1(
+            AuthorizationFreshnessState.CONFLICT, "SET_ID_CONFLICT", None,
+            record.event_id, record.sequence, **observed,
+        )
+    if not _authorization_binding_matches_contract(expectation.binding, contract):
+        return AuthorizationFreshnessResultV1(
+            AuthorizationFreshnessState.STALE_BINDING, "BINDING_CONTRACT_MISMATCH", None, **observed,
+        )
+    checkpoint = expectation.entry_checkpoint
+    live = _observe_entry_checkpoint(locked, projection, contract)
+    for key in (
+        "authority_instance_id", "authority_namespace_id", "authority_store_path_identity_sha256",
+        "ledger_instance_id", "ledger_path_identity_sha256",
+    ):
+        if live[key] != checkpoint[key]:
+            return AuthorizationFreshnessResultV1(
+                AuthorizationFreshnessState.STALE_BINDING, "STORE_IDENTITY_MISMATCH", None, **observed,
+            )
+    reason = _entry_state_reason(
+        locked, projection, entry_state_class=expectation.entry_state_class, contract=contract,
+        risk_config_semantic_sha256=expectation.risk_config_semantic_sha256,
+    )
+    if reason is not None:
+        return AuthorizationFreshnessResultV1(
+            AuthorizationFreshnessState.STALE_BINDING, reason, None, **observed,
+        )
+    if live != dict(checkpoint):
+        return AuthorizationFreshnessResultV1(
+            AuthorizationFreshnessState.STALE_BINDING, "ENTRY_CHECKPOINT_MISMATCH", None, **observed,
+        )
+    return AuthorizationFreshnessResultV1(AuthorizationFreshnessState.UNUSED, None, None, **observed)
+
+
+def _consumption_open_kwargs(clock, uuid_factory, fault_hook) -> dict[str, object]:
+    kwargs: dict[str, object] = {}
+    if clock is not None:
+        kwargs["clock"] = clock
+    if uuid_factory is not None:
+        kwargs["uuid_factory"] = uuid_factory
+    if fault_hook is not None:
+        kwargs["fault_hook"] = fault_hook
+    return kwargs
+
+
+def read_active_authorization_freshness_v1(
+    binding: AuthorityNamespaceBinding,
+    *,
+    canonical_repository_root: str,
+    active_contract: ActiveExecutionDomainContractV1,
+    expectation: ActiveAuthorizationExpectationV1,
+    expected_ledger_path: str | None = None,
+    clock=None,
+    uuid_factory=None,
+    fault_hook=None,
+) -> AuthorizationFreshnessResultV1:
+    """Authoritative freshness read (C04-06 lookup).  Acquires the existing
+    authority-first / ledger-second exclusive locks with complete replay and
+    NO catch-up / bootstrap / stale-session abandonment / append.  Ledger-ahead,
+    authority-ahead, mismatched tails or unproven integrity are ``INDETERMINATE``
+    and both stores are left untouched."""
+    if type(expectation) is not ActiveAuthorizationExpectationV1:
+        return AuthorizationFreshnessResultV1(AuthorizationFreshnessState.INDETERMINATE, "EXPECTATION_UNTRUSTED")
+    try:
+        contract = _require_active_contract(active_contract)
+    except LedgerError as exc:
+        return AuthorizationFreshnessResultV1(AuthorizationFreshnessState.INDETERMINATE, "ACTIVE_CONTRACT_INVALID", exc.code)
+    opened = _acquire_consumption_state(
+        binding,
+        conflict_domain_ref=contract.conflict_domain_ref,
+        expected_environment=contract.environment,
+        canonical_repository_root=canonical_repository_root,
+        expected_ledger_path=expected_ledger_path,
+        history_validator=lambda events: _validate_active_contract_against_events(events, contract),
+        **_consumption_open_kwargs(clock, uuid_factory, fault_hook),
+    )
+    locked = opened.locked
+    if locked is None:
+        return AuthorizationFreshnessResultV1(
+            AuthorizationFreshnessState.INDETERMINATE, "NO_REPAIR_OPEN_FAILED", opened.failure_code,
+        )
+    try:
+        _validate_active_locked(locked, contract)
+        return _evaluate_authorization_freshness(locked, opened.consumption, expectation, contract)
+    except LedgerError as exc:
+        return AuthorizationFreshnessResultV1(AuthorizationFreshnessState.INDETERMINATE, "REPLAY_UNPROVEN", exc.code)
+    finally:
+        locked.close()
+
+
+_DEFINITE_CONSUMPTION_FAILURE_CODES = frozenset({
+    FailureCode.LEDGER_COMMIT_FAILURE,
+    FailureCode.AUTHORITY_ANCHOR_COMMIT_FAILURE,
+    FailureCode.AUTHORIZATION_CONSUMPTION_PAYLOAD_INVALID,
+    FailureCode.EVENT_SCHEMA_CONTRACT_VIOLATION,
+    FailureCode.EVENT_ID_CONTENT_CONFLICT,
+    FailureCode.NO_REPAIR_AUTHORITY_LEDGER_TAIL_MISMATCH,
+    FailureCode.ACTIVE_DOMAIN_LEDGER_SCHEMA_REQUIRED,
+    FailureCode.RESTRICTED_SESSION_EVENT_NOT_PERMITTED,
+})
+
+
+def consume_active_execution_authorization_set_v1(
+    binding: AuthorityNamespaceBinding,
+    *,
+    canonical_repository_root: str,
+    active_contract: ActiveExecutionDomainContractV1,
+    expectation: ActiveAuthorizationExpectationV1,
+    process_instance_id: str,
+    invocation_started_monotonic_ns: int,
+    absolute_deadline_monotonic_ns: int,
+    monotonic_clock_ns,
+    expected_ledger_path: str | None = None,
+    clock=None,
+    uuid_factory=None,
+    fault_hook=None,
+) -> AuthorizationConsumptionResultV1:
+    """Consume ONE authorization set durably (C04-06).
+
+    All C04-07 row 1-8 conditions are rechecked under the SAME held lock pair;
+    exactly one event is appended through the canonical append/anchor machinery
+    and read back; only ``APPENDED_AND_ANCHORED`` at ``pre + 1`` mints the
+    private live receipt.  Once the append is attempted any uncertainty is
+    terminal (no retry, no repair, no receipt)."""
+    if type(expectation) is not ActiveAuthorizationExpectationV1:
+        return AuthorizationConsumptionResultV1("STALE_BINDING", None, "EXPECTATION_UNTRUSTED")
+    if (
+        type(process_instance_id) is not str
+        or type(invocation_started_monotonic_ns) is not int
+        or type(absolute_deadline_monotonic_ns) is not int
+        or invocation_started_monotonic_ns < 0
+        or absolute_deadline_monotonic_ns - invocation_started_monotonic_ns != AUTHORIZATION_CONSUMPTION_DEADLINE_NS
+        or not callable(monotonic_clock_ns)
+    ):
+        return AuthorizationConsumptionResultV1("FAILED", None, "CONSUMPTION_CONTEXT_INVALID")
+    try:
+        contract = _require_active_contract(active_contract)
+    except LedgerError as exc:
+        return AuthorizationConsumptionResultV1("STALE_BINDING", None, "ACTIVE_CONTRACT_INVALID", exc.code)
+    opened = _acquire_consumption_state(
+        binding,
+        conflict_domain_ref=contract.conflict_domain_ref,
+        expected_environment=contract.environment,
+        canonical_repository_root=canonical_repository_root,
+        expected_ledger_path=expected_ledger_path,
+        history_validator=lambda events: _validate_active_contract_against_events(events, contract),
+        **_consumption_open_kwargs(clock, uuid_factory, fault_hook),
+    )
+    locked = opened.locked
+    if locked is None:
+        # Nothing was appended.  Busy/unavailable is retryable only by a NEW
+        # separately-approved invocation; ambiguous integrity is INDETERMINATE.
+        if opened.failure_code is FailureCode.LEDGER_CONCURRENT_WRITER:
+            return AuthorizationConsumptionResultV1("UNAVAILABLE", None, "LEDGER_BUSY", opened.failure_code)
+        return AuthorizationConsumptionResultV1("INDETERMINATE", None, "NO_REPAIR_OPEN_FAILED", opened.failure_code)
+    try:
+        try:
+            _validate_active_locked(locked, contract)
+            freshness = _evaluate_authorization_freshness(locked, opened.consumption, expectation, contract)
+        except LedgerError as exc:
+            return AuthorizationConsumptionResultV1("INDETERMINATE", None, "REPLAY_UNPROVEN", exc.code)
+        if freshness.state is AuthorizationFreshnessState.CONSUMED:
+            return AuthorizationConsumptionResultV1("REPLAYED", None, freshness.reason)
+        if freshness.state is AuthorizationFreshnessState.CONFLICT:
+            return AuthorizationConsumptionResultV1("CONFLICT", None, freshness.reason)
+        if freshness.state is not AuthorizationFreshnessState.UNUSED:
+            return AuthorizationConsumptionResultV1("STALE_BINDING", None, freshness.reason)
+        now_ns = monotonic_clock_ns()
+        if type(now_ns) is not int or now_ns >= absolute_deadline_monotonic_ns:
+            return AuthorizationConsumptionResultV1("DEADLINE_EXPIRED", None, "BEFORE_CONSUMPTION")
+        tail = locked.events[-1]
+        payload = {
+            "consumption_schema_revision": AUTHORIZATION_CONSUMPTION_SCHEMA_REVISION,
+            "execution_package_id": expectation.execution_package_id,
+            "expectation_carrier_sha256": expectation.expectation_carrier_sha256,
+            "authorization_set_id": expectation.authorization_set_id,
+            "authorization_binding_sha256": expectation.authorization_binding_sha256,
+            "orchestration_authorization_id": expectation.orchestration_authorization_id,
+            "orchestration_authorization_class": expectation.orchestration_authorization_class,
+            "orchestration_authorization_sha256": expectation.orchestration_authorization_sha256,
+            "d07_read_authorization_id": expectation.d07_read_authorization_id,
+            "d07_read_authorization_sha256": expectation.d07_read_authorization_sha256,
+            "gate_d_authorization_id": expectation.gate_d_authorization_id,
+            "gate_d_authorization_sha256": expectation.gate_d_authorization_sha256,
+            "task_id": expectation.binding["task_id"],
+            "execution_attempt_id": expectation.binding["execution_attempt_id"],
+            "invocation_id": expectation.binding["invocation_id"],
+            "process_instance_id": process_instance_id,
+            "binding": dict(expectation.binding),
+            "authority_instance_id": locked.authority_meta.authority_instance_id,
+            "authority_namespace_id": locked.authority_meta.authority_namespace_id,
+            "authority_store_path_identity_sha256": locked.authority_meta.authority_store_path_identity_sha256,
+            "ledger_instance_id": locked.ledger_meta.ledger_instance_id,
+            "ledger_path_identity_sha256": locked.ledger_meta.ledger_path_identity_sha256,
+            "pre_consumption_sequence": tail.sequence,
+            "pre_consumption_event_hash": tail.event_hash,
+            "invocation_started_monotonic_ns": invocation_started_monotonic_ns,
+            "invocation_absolute_deadline_monotonic_ns": absolute_deadline_monotonic_ns,
+            "consumption_policy": AUTHORIZATION_CONSUMPTION_POLICY,
+        }
+        try:
+            record = _append_authorization_consumption(locked, payload)
+        except LedgerError as exc:
+            if exc.code in _DEFINITE_CONSUMPTION_FAILURE_CODES:
+                return AuthorizationConsumptionResultV1("FAILED", None, "APPEND_FAILED", exc.code)
+            return AuthorizationConsumptionResultV1("INDETERMINATE", None, "APPEND_UNCERTAIN", exc.code)
+        except BaseException:
+            return AuthorizationConsumptionResultV1("INDETERMINATE", None, "APPEND_UNCERTAIN", None)
+    finally:
+        locked.close()
+    # Locks are closed before any phase begins (C04-06 step 5).
+    receipt = ActiveAuthorizationConsumptionV1(
+        _AUTHORIZATION_RECEIPT_ISSUER_KEY,
+        process_instance_id=process_instance_id,
+        authorization_set_id=expectation.authorization_set_id,
+        orchestration_authorization_id=expectation.orchestration_authorization_id,
+        orchestration_authorization_class=expectation.orchestration_authorization_class,
+        gate_d_authorization_id=expectation.gate_d_authorization_id,
+        execution_attempt_id=expectation.binding["execution_attempt_id"],
+        invocation_id=expectation.binding["invocation_id"],
+        consumption_event_id=record.event_id,
+        consumption_event_hash=record.event_hash,
+        consumption_sequence=record.sequence,
+        expectation_carrier_sha256=expectation.expectation_carrier_sha256,
+        authorization_binding_sha256=expectation.authorization_binding_sha256,
+        invocation_started_monotonic_ns=invocation_started_monotonic_ns,
+        absolute_deadline_monotonic_ns=absolute_deadline_monotonic_ns,
+        entry_state_class=expectation.entry_state_class,
+        os_process_id=os.getpid(),
+    )
+    return AuthorizationConsumptionResultV1("CONSUMED", receipt, None)
+
+
+@dataclass(frozen=True, slots=True)
+class ActiveAcquisitionEntryGuardV1:
+    """Under-lock pre-acquisition authorization guard (C04-08).
+
+    Evaluated while the SAME authority/ledger lock pair is still held and
+    BEFORE ``_acquire_restricted_state`` may abandon a stale session or append a
+    session start (and before a normal-writer session start).  A rejected guard
+    leaves both stores byte-identical."""
+
+    receipt: "ActiveAuthorizationConsumptionV1"
+    expected_tail_sequence: int
+    expected_tail_event_hash: str
+    expected_risk_control_state: str
+    expected_risk_state_epoch: int
+    expected_active_risk_config_sha256: "str | None"
+    expected_writer_proof_state: str
+    expected_writer_proof_release_eligible: bool
+
+    def __post_init__(self) -> None:
+        if (
+            type(self.receipt) is not ActiveAuthorizationConsumptionV1
+            or type(self.expected_tail_sequence) is not int or self.expected_tail_sequence <= 0
+            or not _is_exact_sha256_hex(self.expected_tail_event_hash)
+            or type(self.expected_risk_control_state) is not str
+            or type(self.expected_risk_state_epoch) is not int
+            or (self.expected_active_risk_config_sha256 is not None and not _is_exact_sha256_hex(self.expected_active_risk_config_sha256))
+            or self.expected_writer_proof_state not in {"HELD", "RELEASED"}
+            or type(self.expected_writer_proof_release_eligible) is not bool
+        ):
+            raise LedgerError(FailureCode.ACQUISITION_ENTRY_GUARD_FAILED)
+
+    def check(self, locked: LockedLedger, projection: SafetyProjection, *, contract: ActiveExecutionDomainContractV1, acquisition_mode: AcquisitionMode) -> None:
+        del acquisition_mode
+        receipt = self.receipt
+        receipt.assert_live()
+
+        def reject(reason: str) -> None:
+            raise LedgerError(FailureCode.ACQUISITION_ENTRY_GUARD_FAILED, detail=reason)
+
+        if locked.relation is not AuthorityLedgerRelation.EQUAL:
+            reject("RELATION_NOT_EQUAL")
+        tail = locked.events[-1]
+        authority = locked.authority_row
+        if (
+            (tail.sequence, tail.event_hash) != (self.expected_tail_sequence, self.expected_tail_event_hash)
+            or (authority.trusted_sequence, authority.trusted_event_hash) != (tail.sequence, tail.event_hash)
+            or (projection.trusted_sequence, projection.trusted_event_hash) != (tail.sequence, tail.event_hash)
+            or (projection.last_sequence, projection.terminal_event_hash) != (tail.sequence, tail.event_hash)
+        ):
+            reject("TAIL_MOVED")
+        if (
+            receipt.consumption_sequence > len(locked.events)
+            or locked.events[receipt.consumption_sequence - 1].event_hash != receipt.consumption_event_hash
+            or locked.events[receipt.consumption_sequence - 1].event_type is not EventType.EXECUTION_AUTHORIZATION_SET_CONSUMED
+        ):
+            reject("CONSUMPTION_EVENT_MISSING")
+        proof = contract.writer_proof_id
+        if (
+            projection.risk_control_state != self.expected_risk_control_state
+            or projection.risk_state_epoch != self.expected_risk_state_epoch
+            or projection.active_risk_config_sha256 != self.expected_active_risk_config_sha256
+            or projection.writer_proof_state_by_proof_id.get(proof) != self.expected_writer_proof_state
+            or projection.writer_proof_release_eligible_by_proof_id.get(proof) is not self.expected_writer_proof_release_eligible
+        ):
+            reject("STATE_MOVED")
+        if (
+            projection.active_writer_session_id is not None
+            or projection.active_restricted_session_id is not None
+            or projection.unresolved_write_request_ids
+            or projection.protected_unresolved_legacy_write_count != 0
+            or any(projection.cancel_send_may_have_been_sent_by_attempt.values())
+            or projection.fill_conflicts
+        ):
+            reject("UNSAFE_OR_OPEN_STATE")
+
+
+@dataclass(frozen=True, slots=True)
+class EmergencyCloseReadbackV1:
+    """Exact post-close theorem result (C04-08).  ``verified`` is true only when
+    the tail is exactly one clean ``RESTRICTED_SESSION_ENDED`` event at
+    ``pre_close_sequence + 1`` whose parent hash and payload are exactly the
+    pre-close live tail, with no active restricted/writer session."""
+
+    verified: bool
+    projection: SafetyProjection | None = None
+    reason: str | None = None
+    failure_code: FailureCode | None = None
+
+
+def read_active_emergency_close_readback_v1(
+    binding: AuthorityNamespaceBinding,
+    *,
+    canonical_repository_root: str,
+    active_contract: ActiveExecutionDomainContractV1,
+    restricted_session_id: str,
+    pre_close_sequence: int,
+    pre_close_event_hash: str,
+    expected_ledger_path: str | None = None,
+    clock=None,
+    uuid_factory=None,
+    fault_hook=None,
+) -> EmergencyCloseReadbackV1:
+    """Canonical read-only NO-REPAIR reopen that proves the exact clean close of
+    an emergency-control restricted session (C04-08).  Appends nothing and
+    exposes no ``LockedLedger`` or raw event list."""
+    contract = _require_active_contract(active_contract)
+    opened = _acquire_normal_writer_candidate(
+        binding,
+        conflict_domain_ref=contract.conflict_domain_ref,
+        expected_environment=contract.environment,
+        canonical_repository_root=canonical_repository_root,
+        expected_ledger_path=expected_ledger_path,
+        history_validator=lambda events: _validate_active_contract_against_events(events, contract),
+        **_active_open_kwargs(clock, uuid_factory, fault_hook, no_repair=True),
+    )
+    locked = opened.handle
+    if locked is None:
+        return EmergencyCloseReadbackV1(False, opened.projection, "NO_REPAIR_OPEN_FAILED", opened.failure_code)
+    try:
+        _validate_active_locked(locked, contract)
+        projection = locked.projection()
+        events = locked.events
+        end_event = events[-1]
+        expected_payload = {
+            "restricted_session_id": restricted_session_id,
+            "acquisition_mode": AcquisitionMode.EMERGENCY_CONTROL_ONLY.value,
+            "pre_end_trusted_sequence": pre_close_sequence,
+            "pre_end_trusted_event_hash": pre_close_event_hash,
+            "pre_end_ledger_sequence": pre_close_sequence,
+            "pre_end_ledger_event_hash": pre_close_event_hash,
+            "end_reason": "CLEAN_RELEASE_OF_EXCLUSIVE_LOCKS",
+        }
+        authority = locked.authority_row
+        if (
+            locked.relation is not AuthorityLedgerRelation.EQUAL
+            or len(events) != pre_close_sequence + 1
+            or end_event.sequence != pre_close_sequence + 1
+            or events[-2].sequence != pre_close_sequence
+            or events[-2].event_hash != pre_close_event_hash
+            or end_event.previous_event_hash != pre_close_event_hash
+            or end_event.event_hash == pre_close_event_hash
+            or end_event.event_type is not EventType.RESTRICTED_SESSION_ENDED
+            or end_event.writer_session_id != restricted_session_id
+            or dict(end_event.payload) != expected_payload
+            or (authority.trusted_sequence, authority.trusted_event_hash) != (end_event.sequence, end_event.event_hash)
+            or (projection.trusted_sequence, projection.trusted_event_hash) != (end_event.sequence, end_event.event_hash)
+            or (projection.last_sequence, projection.terminal_event_hash) != (end_event.sequence, end_event.event_hash)
+            or projection.active_restricted_session_id is not None
+            or projection.active_writer_session_id is not None
+        ):
+            return EmergencyCloseReadbackV1(False, projection, "CLOSE_READBACK_MISMATCH", None)
+        return EmergencyCloseReadbackV1(True, projection, None, None)
+    except LedgerError as exc:
+        return EmergencyCloseReadbackV1(False, None, "REPLAY_UNPROVEN", exc.code)
+    finally:
+        locked.close()
+
+
+def build_dormant_emergency_control_handle_v1() -> EmergencyControlLedgerHandle:
+    """A dormant emergency-control handle (C04-07 row 10): it holds NO lock and
+    owns NO restricted session, so constructing an ``EmergencyCancelGate`` from
+    it appends no ``RESTRICTED_SESSION_STARTED``/``ENDED`` pair and performs no
+    anchor repair.  Every inspecting or mutating operation fails closed; it
+    cannot open, resume, or stand in for a real emergency acquisition."""
+    return EmergencyControlLedgerHandle(None, "")
+
+
 
 
 # ===========================================================================
