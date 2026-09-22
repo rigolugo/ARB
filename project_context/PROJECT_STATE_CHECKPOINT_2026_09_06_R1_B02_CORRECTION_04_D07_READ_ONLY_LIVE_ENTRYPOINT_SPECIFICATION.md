@@ -3083,3 +3083,218 @@ Gate D, venue write, production activity, source/test/archive edit, package
 installation, or remote Git write. `continuity_update_pending = true` until
 this two-path candidate is independently reviewed and canonically installed.
 The next bounded action is `RETURN_TO_MARCO_FOR_REVIEW_OF_CORRECTION_05`.
+
+### A23 R1-D07 N1 pre-release bridge / same-process Gate-D orchestrator implementation CORRECTION_03 — APPROVED_AND_CANONICALLY_INSTALLED
+
+This is a documentation-only continuity overlay. This continuity candidate is
+prepared directly from canonical `rigolugo/ARB/main` base:
+
+```text
+commit = 60ca9f61cab2ed81310d89a422bd7af4f2b532ad
+tree   = 95821332715eaffb7e33f25e15d2e28806f0d1d4
+parent = 8655fff50ffffd5e82bd32fb1cb6c23b26a0bd38
+```
+
+This section controls current continuity when present on canonical main. It
+alters no implementation bytes and grants no runtime capability.
+
+**WHY this section exists.** A22 (and the artifact-index tail) still describe the
+CORRECTION_05 release-only / writer-eligibility specification as a candidate
+awaiting Marco review, and describe the same-process bridge / Gate-D orchestrator
+as future implementation work that remains required. Both milestones have since
+been independently approved and canonically installed. The continuity workflow
+requires an important implementation/install milestone to preserve what happened,
+why it matters, the exact theorem, its authority/evidence, its exact identities,
+the unresolved state, and the next bounded action. This section records them in
+the existing routed D07 checkpoint; no new checkpoint is created.
+
+**Supersession scope (A22 only, and only where stated).** A23 supersedes A22
+only on: (a) the review/installation status of CORRECTION_05 (A22's wording that
+it is a candidate pending Marco review); (b) the implementation-required /
+uninstalled status of the pre-release bridge and same-process release-to-Gate-D
+substrate; and (c) A22's continuity-pending flag and its next bounded action.
+All historical A22 technical content — the exact N1 binding, the preserved
+CORRECTION_04 authorization theorems, the six-path future implementation edit
+set, and the blocked-predecessor lineage — remains preserved unchanged. A21 and
+earlier sections are not rewritten.
+
+**Current theorem.**
+
+```text
+controlling_spec = CORRECTION_05 / APPROVED_AND_CANONICALLY_INSTALLED
+implementation = CORRECTION_03 / APPROVED_AND_CANONICALLY_INSTALLED
+canonical_main = 60ca9f61cab2ed81310d89a422bd7af4f2b532ad
+canonical_tree = 95821332715eaffb7e33f25e15d2e28806f0d1d4
+live_orchestrator_execution = NOT_RUN
+USER_RISK_CHOICE_REQUIRED = OPEN
+next_bounded_action = RETURN_TO_MARCO_FOR_USER_RISK_CHOICE_AND_SEPARATELY_APPROVED_EXECUTION_PACKAGE_PLANNING
+```
+
+**A23.1 Controlling specification milestone.** The CORRECTION_05 release-only /
+writer-eligibility specification is approved and canonically installed:
+
+```text
+canonical commit    = 8655fff50ffffd5e82bd32fb1cb6c23b26a0bd38
+tree                = 7cf520b41b678494e15010af4c2167222432b35d
+parent              = 1536a13ba415371a0d8569f5e41671735c78e5e1
+spec bytes          = 53002
+spec sha256         = d3bb8add3ab2a3a168bd3ee0da6131c967b0649837d6160fb5c4c98742767d79
+handoff bytes       = 5311
+handoff sha256      = ab6061dea5fb105977f84b5b04829560d3ad0ce2082030156b0fba2db09de4a4
+installation RESULT = 14603 bytes / a07e8e57f1e1adf462337da439f147fdc5725fe73ae82be8f0c105df8f20b374
+installation REPORT = 9453 bytes / d7cfbfae0724a982eeb0e85bd6deb0fcd3fb6ecfa6fba8f91d744efd1ad6b415
+installation review ZIP = 153215 bytes / 2b7386a4f4e5aa08dbb5fc1f9145b3eda4dba4131061957518140eae3568b25f
+```
+
+Preserved unchanged: the exact current N1 binding is `subaccount = 1`,
+`exchange_index = 0`; the exchange index is one exact field and not a standalone
+uniqueness theorem (the complete active-contract / domain / account / subaccount
+/ exchange / market / implementation / risk / attempt / invocation binding
+remains required); `USER_RISK_CHOICE_REQUIRED = OPEN`; Candidate-02 remains
+proof-only (raw SHA-256
+`4495ade7fed522bf17a202d6f5422f608765b65a4463121175695c862b3f904c`, semantic
+SHA-256
+`e16c9219b495062647b82b9e8a4d5e9c1b98f3e54ce43f0044c1a85fea162bbb`) and all four
+normal send maxima remain zero; no write-capable risk values have been selected.
+
+**A23.2 Implementation milestone.** The approved implementation candidate is:
+
+```text
+task   = R1-D07_N1_PRE_RELEASE_BRIDGE_REFRESH_AND_SAME_PROCESS_GATE_D_ORCHESTRATOR_IMPLEMENTATION_01_CORRECTION_03
+commit = 60ca9f61cab2ed81310d89a422bd7af4f2b532ad
+tree   = 95821332715eaffb7e33f25e15d2e28806f0d1d4
+parent = 8655fff50ffffd5e82bd32fb1cb6c23b26a0bd38
+commits above base = 1
+```
+
+Exact approved review provenance (Marco decision `APPROVE`, technical review
+only):
+
+```text
+review ZIP      = 541015 bytes / c8b739e4d7b2952daffaacba38bc9acd52d999fde2cfa785f045cca354126552
+submission ZIP  = 561979 bytes / a4e2fc591c49a45e690b0789d5137265f33252b450d3bb6a56c4a711d2429187
+candidate.patch = 428658 bytes / 1464ce7036deca6aec8809d37f6305910034a790040792d7e5c821770f1fd572
+Marco approval  = 7034 bytes / e6b5910b2307485b1ed81ebd08b14a2927af5ea08ee0bf616e80a456f0dff742
+```
+
+Blocked predecessor candidates `a65db56e227cb098d85f25a1947db8e3bbdda352`
+(CORRECTION_01) and `9e4caade5e1c22cb36e93fc93e3a25f881ae1957`
+(CORRECTION_02) remain Marco-BLOCKED, noncanonical, never installed, and not
+ancestry. Marco-reported approval test evidence (accepted review evidence, not
+re-run by this continuity task): `test_execution_ledger.py` 78 passed / 82
+subtests; `test_kalshi_ledger_binding.py` 453 passed / 59 subtests; the runner
+module 1375 passed / 2 skipped / 156 subtests; combined three modules 1906 passed
+/ 2 skipped / 297 subtests; full repository 3789 passed / 2 skipped / 911
+subtests.
+
+Exactly six installed paths and identities (as installed at
+`60ca9f61cab2ed81310d89a422bd7af4f2b532ad`):
+
+| Path | Bytes | SHA-256 | Git blob |
+|---|---|---|---|
+| `src/arb/execution_ledger.py` | 215456 | `a21813677b7344968dc2df2860fe4d3d91ad194c8bb6b003c2a159f561573b9b` | `608f4cd281525a8bf53fafa2b19eb23cc5b669ac` |
+| `src/arb/venues/kalshi/ledger_binding.py` | 241761 | `a09b8a3867b110ab5253f68ae140684e2161bdcf542ca41b64460c57f40a8c6c` | `f7ca4949954606d85006ccca4006a529ce5431b2` |
+| `src/arb/venues/kalshi/minimal_market_maker_experiment_runner.py` | 676456 | `80d9a95bd53dfc1b592270d3a3a6c1571aaf0a1975b4c4408ba7ce41992d9d91` | `1c11d5208aac05d88a4b7c3c0a1a3dd47d1b1046` |
+| `tests/test_execution_ledger.py` | 118705 | `9075256e11f27b40d6f88d3870d9c37b14a74d9d596e73269611715e26a8adb1` | `242566dd3146e1a8461e59f71c9e2c2f8b6dd701` |
+| `tests/test_kalshi_ledger_binding.py` | 308541 | `a90a98d90e7756c814e22aaac8ef40cf37a9af65337f918b8c4e0905e7bab6e2` | `c7f93e0510bf704d2e87c7e218d3688ef12b27b6` |
+| `tests/test_kalshi_minimal_market_maker_experiment_runner.py` | 715961 | `21c6b8afb978010a7b48a187b031ce21193b837d5252f3037c319bc887f31288` | `60ed6c2aa6152ed4c41ac32d8ed760ee9eb6020f` |
+
+Implementation theorem (installed substrate; not executed):
+
+- active-ledger-only durable `EXECUTION_AUTHORIZATION_SET_CONSUMED`;
+- cross-restart consumed-authorization replay rejection;
+- no-repair authorization freshness/admission;
+- `BOOT_HOLD` two-pass bridge and clean `SAFE_HELD` one-pass route;
+- one absolute 300-second deadline and bounded read budgets;
+- exact close + post-close readback + new post-bridge `ADRS2` identity;
+- 19-predicate release evaluation;
+- same-process release -> `CurrentProcessReleaseCompletionV2` -> `NormalWriter`
+  -> Stage 3K -> separately authorized Gate D;
+- private launcher-only trusted-expectations boundary;
+- trusted E semantic snapshot recursively immutable and alias-independent
+  (the CORRECTION_03 delta over the blocked CORRECTION_02 seed: exactly the
+  runner and its test module);
+- exact current N1 binding uses `subaccount = 1`, `exchange_index = 0`;
+- the D07 read-only path remains read-only.
+
+This is installed substrate only. It is not a live release or Gate-D execution.
+
+**A23.3 Canonical implementation installation.** Installation task
+`R1-D07_N1_PRE_RELEASE_BRIDGE_REFRESH_AND_SAME_PROCESS_GATE_D_ORCHESTRATOR_IMPLEMENTATION_01_CORRECTION_03_CANONICAL_INSTALLATION_01`
+(Marco decision `APPROVE`):
+
+```text
+previous main    = 8655fff50ffffd5e82bd32fb1cb6c23b26a0bd38
+installed main   = 60ca9f61cab2ed81310d89a422bd7af4f2b532ad
+installed tree   = 95821332715eaffb7e33f25e15d2e28806f0d1d4
+installed parent = 8655fff50ffffd5e82bd32fb1cb6c23b26a0bd38
+candidate source = EXACT_APPROVED_COMMIT_OBJECT
+post-push classification = REMOTE_INSTALLATION_CONFIRMED
+push commands = 1
+push retries = 0
+force / force-with-lease = 0
+```
+
+Accepted installation evidence (external/local, by identity only):
+
+```text
+RESULT              = 8916 bytes / 24d06403b65796d7e2681e7a890bb0be82369c84c52a2e5a38dc9f974f19bcba
+REPORT              = 11632 bytes / 60ca372d795591ad72f1748d4b2dacb7d7d41ffe971920b3d6eae1b05efee52a
+GIT_TRANSCRIPT      = 18165 bytes / 088c1c23d0ed1660b98f265680e70629b72d3729dbc0a7d35b4358e35505f0da
+PUSH_ATTEMPT_MARKER = 1541 bytes / 6ad559e42431d41ccbff4af3d655e3ace352380315a37623837d7949796409d9
+DELIVERY_MANIFEST   = 2697 bytes / bc17fad5532939341b95cef6ffa6e2af118d4fd3f03f611c16dcb85322559e50
+final MARCO_REVIEW.zip = 21314 bytes / b1604ab0593d3a1a66085c4fccb4beac88b6fbf1ce6bd612b9d5dcdb7da62cf9
+Marco installation acceptance = 3174 bytes / 44689b7f762eb32e7ed76fa9d3a70f4b52dd8d47bd6ee754d089ad5d53f1f4fa
+```
+
+Accepted nonblocking local-sync deviation: after authoritative remote
+confirmation, local synchronization used `git fetch origin` followed by
+`git merge --ff-only origin/main`, with zero additional remote write.
+
+**A23.4 Corrected provenance fact.** The earlier CORRECTION_03 "dispatch bundle
+contamination" disclosure was false and is retracted. The exact ZIP
+`a31ab07da14423421956bb062860927219f819bd362eb012300541b55fc0e503` (6794430
+bytes) had 84 entries, one intended root, and zero foreign members; the false
+report came from reuse of a dirty extraction directory and must not be
+canonicalized as a property of that ZIP.
+
+**A23.5 Current operational state.**
+
+```text
+implementation_substrate = APPROVED_AND_CANONICALLY_INSTALLED
+live_orchestrator_execution = NOT_RUN
+deployed_n1_activity_from_implementation_or_install = NONE
+Kalshi/API/venue activity from implementation/install = NONE
+credential use = NONE
+RELEASE_ONLY real acquisition = NONE
+writer-proof release = NONE
+NormalWriter real acquisition = NONE
+Gate-D real execution = NONE
+production = NONE
+USER_RISK_CHOICE_REQUIRED = OPEN
+```
+
+The prior accepted deployed-state theorem `BOOT_HOLD / HELD /
+writer_proof_release_eligible=false` is preserved only as historical /
+current-until-refreshed knowledge. This continuity task did not read deployed N1
+state and makes no fresh deployed-state claim. No launcher / O / G / E execution
+package has been issued by this milestone, and no user risk choice has been made.
+
+**A23.6 Next bounded action.**
+
+```text
+next_bounded_action = RETURN_TO_MARCO_FOR_USER_RISK_CHOICE_AND_SEPARATELY_APPROVED_EXECUTION_PACKAGE_PLANNING
+```
+
+The user must separately choose the write-capable risk values. After that, a
+separately reviewed exact launcher + E/O/G package may be prepared. Actual Demo
+release / writer / Gate-D execution still requires separate explicit user
+authorization. This continuity canonicalization grants none of those
+capabilities and is not profitability or arbitrage evidence.
+
+**A23.7 Boundary.** This continuity record authorizes no credential use,
+N1/deployed-state access, Kalshi/API/venue activity, risk selection, risk-config
+consumption, restricted-session append, RELEASE_ONLY, writer-proof release,
+NormalWriter, Gate D, venue write, production, R1-D08, or remote Git write.
+Recording an approved specification or an installed implementation is
+Git/review provenance and never an execution authorization.
