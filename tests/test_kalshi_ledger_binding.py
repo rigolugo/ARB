@@ -87,6 +87,9 @@ from arb.venues.kalshi.emergency_cancel import (
     EmergencyRateLane,
 )
 from arb.venues.kalshi.risk_control import (
+    ACCOUNT_AGGREGATE_UNIVERSE_COMPLETE,
+    UNKNOWN_UNBOUNDED,
+    AccountAggregateInputV1,
     AccountRiskLimits,
     EconomicFillV1,
     FlowRiskLimits,
@@ -98,6 +101,7 @@ from arb.venues.kalshi.risk_control import (
     PerMarketRiskLimits,
     PerOrderRiskLimits,
     PermitStage,
+    RiskControlCode,
     RiskControlError,
     RiskLimitConfigV1,
     StateIntegrityLimits,
@@ -105,6 +109,8 @@ from arb.venues.kalshi.risk_control import (
     WorkingOrderV1,
     WriterEligibilityAssessment,
     WriterEligibilityGate,
+    account_aggregate_current_state_within_limits,
+    compute_account_aggregate_totals,
 )
 
 
@@ -5912,6 +5918,274 @@ class AuthorizationConsumptionBindingTests(unittest.TestCase):
         ):
             self.assertNotIn(forbidden, self._event_types())
         self.assertEqual(self._event_types().count("EXECUTION_AUTHORIZATION_SET_CONSUMED"), 1)
+
+
+class AccountAggregateReleaseSemanticsTestCase(unittest.TestCase):
+    """CORRECTION_07 C06-LB-01..10 / C07-06 / C07-AGG-001..005.
+
+    Release / current-state evaluation and the CREATE candidate path share
+    ONE aggregate numeric meaning, the three account leaves are compared
+    inclusively, and an incomplete / conflicting / unequal-tail universe can
+    never mint a usable aggregate snapshot.
+    """
+
+    MARKET_A = "MKT-A"
+    MARKET_B = "MKT-B"
+    T0 = "2026-08-13T20:00:00.000000Z"
+    READ_SET_ID = "ADRS2_" + "b" * 64
+
+    def _config(
+        self,
+        *,
+        max_aggregate_exposure_usd=Decimal("100"),
+        max_aggregate_working_orders=50,
+        max_aggregate_working_contracts=Decimal("100"),
+        max_conservative_unresolved_write_exposure_usd=Decimal("1"),
+    ) -> RiskLimitConfigV1:
+        """Only the three existing account leaves vary; no new leaf exists.
+
+        The conservative unresolved-exposure leaf is left generous so these
+        tests isolate the three AGGREGATE predicates rather than re-testing
+        the separate predecessor unresolved-write predicate.
+        """
+        return RiskLimitConfigV1(
+            1, "KALSHI|KALSHI_DEMO|SYNTHETIC|SUBACCOUNT=0", "USD",
+            PerOrderRiskLimits(Decimal("10"), Decimal("10"), True, Decimal("0.10"), 1_000),
+            PerMarketRiskLimits(Decimal("20"), Decimal("20"), 10, Decimal("20"), Decimal("20")),
+            AccountRiskLimits(
+                max_aggregate_exposure_usd, max_aggregate_working_orders,
+                max_aggregate_working_contracts, 0,
+                max_conservative_unresolved_write_exposure_usd,
+            ),
+            FlowRiskLimits(1, 1_000, 1, 1_000, 1, 1_000, 1, 1_000, 2, 1_000, 1, 500, 1, 10, 100),
+            StateIntegrityLimits(1_000, 1_000, 10, 1, 500, 10, 100),
+            VenueDefensePolicy("NOT_REQUIRED", None, True, "NO_SAFETY_CREDIT", "NO_SAFETY_CREDIT"),
+        )
+
+    def _fill(self, market, fill_id, side, quantity, yes_price):
+        return EconomicFillV1(market, fill_id, side, quantity, yes_price, self.T0)
+
+    def _order(self, market, order_id, side, remaining, yes_price):
+        return WorkingOrderV1(market, order_id, side, remaining, yes_price)
+
+    def _risk(self, *, fills=(), orders=(), unresolved=Decimal("0")):
+        return ReleaseRiskSnapshotV1(tuple(fills), tuple(orders), 0, unresolved, {})
+
+    def _release_pass(self, risk, config):
+        return _lb.ReleaseLedgerHandle._economic_release_pass(risk, config)
+
+    # -- C06-LB-01 ------------------------------------------------------
+
+    def test_c06_lb_01_release_uses_the_same_shared_numeric_helper_as_the_candidate_path(self) -> None:
+        """The release aggregate equals the shared helper's totals exactly,
+        for a genuinely multi-market universe including unresolved exposure."""
+
+        fills = (
+            self._fill(self.MARKET_A, "f1", "YES", Decimal("1.00"), Decimal("0.40")),
+            self._fill(self.MARKET_B, "f2", "NO", Decimal("1.00"), Decimal("0.25")),
+        )
+        orders = (
+            self._order(self.MARKET_A, "o1", "YES", Decimal("1.00"), Decimal("0.30")),
+            self._order(self.MARKET_B, "o2", "NO", Decimal("1.00"), Decimal("0.90")),
+        )
+        unresolved = Decimal("0.05")
+        totals = compute_account_aggregate_totals(
+            fills=fills, working_orders=orders, unresolved_exposure=unresolved,
+        )
+        expected = unresolved + Decimal("0.4000") + Decimal("0.3000") + Decimal("0.7500") + Decimal("0.1000")
+        self.assertEqual(totals.aggregate_exposure_usd, expected)
+        self.assertEqual(totals.aggregate_working_orders, 2)
+        self.assertEqual(totals.aggregate_working_contracts, Decimal("2.00"))
+
+        risk = self._risk(fills=fills, orders=orders, unresolved=unresolved)
+        # Release passes at exactly the helper's totals and fails one
+        # representable step below each of them -- i.e. it is deciding on the
+        # same numbers, not a parallel derivation.
+        exact = self._config(
+            max_aggregate_exposure_usd=totals.aggregate_exposure_usd,
+            max_aggregate_working_orders=totals.aggregate_working_orders,
+            max_aggregate_working_contracts=totals.aggregate_working_contracts,
+        )
+        self.assertTrue(self._release_pass(risk, exact))
+        self.assertTrue(account_aggregate_current_state_within_limits(totals, exact))
+
+        for tighter in (
+            self._config(max_aggregate_exposure_usd=totals.aggregate_exposure_usd - Decimal("0.000001")),
+            self._config(max_aggregate_working_orders=totals.aggregate_working_orders - 1),
+            self._config(max_aggregate_working_contracts=totals.aggregate_working_contracts - Decimal("0.01")),
+        ):
+            self.assertFalse(self._release_pass(risk, tighter))
+            self.assertFalse(account_aggregate_current_state_within_limits(totals, tighter))
+
+    # -- C06-LB-02..05 --------------------------------------------------
+
+    def test_c06_lb_02_and_03_release_exposure_equality_passes_and_micro_excess_fails(self) -> None:
+        orders = (self._order(self.MARKET_A, "o1", "YES", Decimal("1.00"), Decimal("0.30")),)
+        risk = self._risk(orders=orders, unresolved=Decimal("0.20"))
+        total = Decimal("0.20") + Decimal("0.3000")
+
+        self.assertTrue(self._release_pass(risk, self._config(max_aggregate_exposure_usd=total)))
+        self.assertFalse(self._release_pass(
+            risk, self._config(max_aggregate_exposure_usd=total - Decimal("0.000001")),
+        ))
+
+    def test_c06_lb_04_release_working_orders_equality_passes_and_plus_one_fails(self) -> None:
+        orders = (
+            self._order(self.MARKET_A, "o1", "YES", Decimal("1.00"), Decimal("0.10")),
+            self._order(self.MARKET_B, "o2", "YES", Decimal("1.00"), Decimal("0.10")),
+        )
+        risk = self._risk(orders=orders)
+
+        self.assertTrue(self._release_pass(risk, self._config(max_aggregate_working_orders=2)))
+        self.assertFalse(self._release_pass(risk, self._config(max_aggregate_working_orders=1)))
+
+    def test_c06_lb_05_release_working_contracts_equality_passes_and_plus_hundredth_fails(self) -> None:
+        orders = (
+            self._order(self.MARKET_A, "o1", "YES", Decimal("1.00"), Decimal("0.10")),
+            self._order(self.MARKET_B, "o2", "YES", Decimal("1.00"), Decimal("0.10")),
+        )
+        risk = self._risk(orders=orders)
+
+        self.assertTrue(self._release_pass(risk, self._config(max_aggregate_working_contracts=Decimal("2.00"))))
+        self.assertFalse(self._release_pass(
+            risk, self._config(max_aggregate_working_contracts=Decimal("2.00") - Decimal("0.01")),
+        ))
+
+    # -- C06-LB-06 ------------------------------------------------------
+
+    def test_c06_lb_06_universe_spans_markets_and_retains_fills_after_an_order_stops_resting(self) -> None:
+        """A multi-market universe is aggregated across markets, and a fill's
+        exposure survives its order leaving the working set."""
+
+        fills = (
+            self._fill(self.MARKET_A, "f1", "YES", Decimal("1.00"), Decimal("0.40")),
+            self._fill(self.MARKET_B, "f2", "YES", Decimal("1.00"), Decimal("0.60")),
+        )
+        resting = (self._order(self.MARKET_A, "o1", "YES", Decimal("1.00"), Decimal("0.30")),)
+
+        while_resting = compute_account_aggregate_totals(
+            fills=fills, working_orders=resting, unresolved_exposure=Decimal("0"),
+        )
+        after_terminal = compute_account_aggregate_totals(
+            fills=fills, working_orders=(), unresolved_exposure=Decimal("0"),
+        )
+
+        self.assertEqual(while_resting.markets, (self.MARKET_A, self.MARKET_B))
+        self.assertEqual(while_resting.aggregate_exposure_usd, Decimal("1.0000") + Decimal("0.3000"))
+        self.assertEqual(after_terminal.markets, (self.MARKET_A, self.MARKET_B))
+        self.assertEqual(after_terminal.aggregate_exposure_usd, Decimal("1.0000"))
+        self.assertEqual(after_terminal.aggregate_working_orders, 0)
+        self.assertEqual(after_terminal.aggregate_working_contracts, Decimal("0"))
+
+    # -- C06-LB-07 ------------------------------------------------------
+
+    def test_c06_lb_07_order_or_fill_identity_conflict_prevents_a_usable_aggregate_universe(self) -> None:
+        """Conflicting durable identities fail closed: the shared helper
+        rejects contradictory fills, and any derived conflict id makes the
+        aggregate input unconstructable."""
+
+        contradictory = (
+            EconomicFillV1(self.MARKET_A, "f1", "YES", Decimal("1.00"), Decimal("0.40"), self.T0),
+            EconomicFillV1(self.MARKET_A, "f1", "YES", Decimal("2.00"), Decimal("0.40"), self.T0),
+        )
+        with self.assertRaises(RiskControlError) as caught:
+            compute_account_aggregate_totals(
+                fills=contradictory, working_orders=(), unresolved_exposure=Decimal("0"),
+            )
+        self.assertIs(caught.exception.code, RiskControlCode.RISK_INPUT_UNAVAILABLE)
+
+        duplicate_orders = (
+            self._order(self.MARKET_A, "o1", "YES", Decimal("1.00"), Decimal("0.30")),
+            self._order(self.MARKET_A, "o1", "YES", Decimal("1.00"), Decimal("0.30")),
+        )
+        with self.assertRaises(RiskControlError):
+            compute_account_aggregate_totals(
+                fills=(), working_orders=duplicate_orders, unresolved_exposure=Decimal("0"),
+            )
+
+        with self.assertRaises(RiskControlError):
+            self._aggregate_input(conflict_ids=("fill-identity:f1",))
+
+    # -- C06-LB-08 ------------------------------------------------------
+
+    def _aggregate_input(self, **overrides) -> AccountAggregateInputV1:
+        config = self._config()
+        values = dict(
+            conflict_domain_ref=config.conflict_domain,
+            authority_namespace_id="ns-1",
+            authority_instance_id="auth-1",
+            ledger_instance_id="ledger-1",
+            authority_trusted_sequence=5,
+            authority_trusted_hash="c" * 64,
+            ledger_terminal_sequence=5,
+            ledger_terminal_hash="c" * 64,
+            risk_config_sha256=config.sha256,
+            trusted_dynamic_read_set_id=self.READ_SET_ID,
+            reconciliation_snapshot_sha256="d" * 64,
+            universe_completeness=ACCOUNT_AGGREGATE_UNIVERSE_COMPLETE,
+            conflict_ids=(),
+            fills=(),
+            working_orders=(),
+            unresolved_exposure_usd=Decimal("0"),
+        )
+        values.update(overrides)
+        return AccountAggregateInputV1(**values)
+
+    def test_c06_lb_08_unequal_authority_and_ledger_tails_cannot_mint_a_snapshot(self) -> None:
+        # Equal tails are usable ...
+        usable = self._aggregate_input()
+        self.assertEqual(usable.authority_trusted_sequence, usable.ledger_terminal_sequence)
+
+        # ... any inequality is not.
+        with self.assertRaises(RiskControlError):
+            self._aggregate_input(ledger_terminal_sequence=6)
+        with self.assertRaises(RiskControlError):
+            self._aggregate_input(authority_trusted_hash="e" * 64)
+        # An incomplete universe is likewise unusable.
+        with self.assertRaises(RiskControlError):
+            self._aggregate_input(universe_completeness="INCOMPLETE")
+        # And UNKNOWN unresolved exposure is never treated as zero.
+        with self.assertRaises(RiskControlError) as caught:
+            self._aggregate_input(unresolved_exposure_usd=UNKNOWN_UNBOUNDED)
+        self.assertIs(caught.exception.code, RiskControlCode.UNKNOWN_UNBOUNDED_EXPOSURE)
+
+    # -- C06-LB-09 ------------------------------------------------------
+
+    def test_c06_lb_09_no_event_vocabulary_or_schema_revision_change_is_required(self) -> None:
+        """The correction adds no event type and no schema revision: the
+        aggregate is derived from the EXISTING durable ORDER_OBSERVED /
+        FILL_OBSERVED vocabulary and the existing risk-limit schema."""
+
+        self.assertEqual(self._config().schema_version, 1)
+        # The aggregate derivation consumes only the existing economic
+        # element types -- it introduces no event of its own.
+        self.assertIn("ORDER_OBSERVED", {event.name for event in EventType})
+        self.assertIn("FILL_OBSERVED", {event.name for event in EventType})
+        self.assertNotIn(
+            "ACCOUNT_AGGREGATE_EVALUATED", {event.name for event in EventType},
+        )
+        # No new risk-limit leaf: the account limits object still has exactly
+        # its five predecessor fields.
+        self.assertEqual(
+            tuple(field.name for field in fields(AccountRiskLimits)),
+            (
+                "max_aggregate_exposure_usd", "max_aggregate_working_orders",
+                "max_aggregate_working_contracts", "max_unresolved_write_count",
+                "max_conservative_unresolved_write_exposure_usd",
+            ),
+        )
+
+    # -- C06-LB-10 ------------------------------------------------------
+
+    def test_c06_lb_10_unknown_unbounded_release_exposure_still_fails_closed(self) -> None:
+        """The predecessor fail-closed release theorem is preserved: UNKNOWN
+        unresolved exposure can never pass the economic release predicate,
+        however small the market universe is."""
+
+        risk = ReleaseRiskSnapshotV1((), (), 1, UNKNOWN_UNBOUNDED, {})
+        self.assertFalse(self._release_pass(risk, self._config()))
+        # A missing configuration is equally fail-closed.
+        self.assertFalse(self._release_pass(self._risk(), None))
 
 
 if __name__ == "__main__":

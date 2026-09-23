@@ -60,6 +60,8 @@ from arb.execution_ledger import (
     validate_authorization_binding_object,
 )
 from arb.venues.kalshi.risk_control import (
+    ACCOUNT_AGGREGATE_UNIVERSE_COMPLETE,
+    AccountAggregateInputV1,
     EconomicFillV1,
     FreshnessStampV1,
     RiskControlCode,
@@ -68,6 +70,8 @@ from arb.venues.kalshi.risk_control import (
     UNKNOWN_UNBOUNDED,
     WorkingOrderV1,
     WriterEligibilityGate,
+    account_aggregate_current_state_within_limits,
+    compute_account_aggregate_totals,
     compute_market_economic_state,
     freshness_age_ms,
 )
@@ -1406,6 +1410,61 @@ def _derive_authoritative_release_universe(locked: "LockedLedger") -> _Authorita
     )
 
 
+def build_account_aggregate_input(
+    locked: "LockedLedger",
+    *,
+    risk_config_sha256: str,
+    unresolved_exposure_usd: "Decimal | str",
+    trusted_dynamic_read_set_id: "str | None",
+    reconciliation_snapshot_sha256: str,
+) -> AccountAggregateInputV1:
+    """CORRECTION_07 C07-AGG-003: the COMPLETE authoritative conflict-domain
+    universe for candidate-aware account aggregate enforcement.
+
+    The universe comes from the one canonical durable
+    ``ORDER_OBSERVED``/``FILL_OBSERVED`` truth interpreter
+    (``_derive_authoritative_release_universe``) that release evaluation also
+    uses -- it spans every market represented in the active conflict-domain
+    ledger, not only a selected ticker.  A ticker-scoped venue read can never
+    be substituted for it, and "no other market exposure" is never inferred.
+
+    Raises ``RiskControlError`` when a complete, conflict-free,
+    identity-consistent universe cannot be proven, so CREATE fails closed.
+    """
+
+    if type(locked) is not LockedLedger or getattr(locked, "closed", False):
+        raise RiskControlError(RiskControlCode.RISK_INPUT_UNAVAILABLE)
+    projection = locked.projection()
+    tail = locked.events[-1]
+    authority = locked.authority_row
+    if (
+        projection.conflict_domain_ref != locked.conflict_domain_ref
+        or projection.last_sequence != len(locked.events)
+        or (projection.trusted_sequence, projection.trusted_event_hash) != (tail.sequence, tail.event_hash)
+        or (projection.last_sequence, projection.terminal_event_hash) != (tail.sequence, tail.event_hash)
+    ):
+        raise RiskControlError(RiskControlCode.RISK_INPUT_UNAVAILABLE)
+    universe = _derive_authoritative_release_universe(locked)
+    return AccountAggregateInputV1(
+        conflict_domain_ref=locked.conflict_domain_ref,
+        authority_namespace_id=locked.authority_meta.authority_namespace_id,
+        authority_instance_id=locked.authority_meta.authority_instance_id,
+        ledger_instance_id=locked.ledger_meta.ledger_instance_id,
+        authority_trusted_sequence=authority.trusted_sequence,
+        authority_trusted_hash=authority.trusted_event_hash,
+        ledger_terminal_sequence=tail.sequence,
+        ledger_terminal_hash=tail.event_hash,
+        risk_config_sha256=risk_config_sha256,
+        trusted_dynamic_read_set_id=trusted_dynamic_read_set_id,
+        reconciliation_snapshot_sha256=reconciliation_snapshot_sha256,
+        universe_completeness=ACCOUNT_AGGREGATE_UNIVERSE_COMPLETE,
+        conflict_ids=universe.conflict_ids,
+        fills=universe.fills,
+        working_orders=universe.working_orders,
+        unresolved_exposure_usd=unresolved_exposure_usd,
+    )
+
+
 _CURRENT_PROCESS_RELEASE_COMPLETION_KEY = object()
 _current_process_release_completion_registry_lock = threading.Lock()
 
@@ -1696,9 +1755,6 @@ class ReleaseLedgerHandle:
         ):
             return False
         markets = sorted({item.market for item in risk.fills} | {item.market for item in risk.working_orders})
-        aggregate_exposure = unresolved
-        aggregate_working_orders = 0
-        aggregate_working_contracts = Decimal("0")
         for market in markets:
             state = compute_market_economic_state(market, risk.fills, risk.working_orders)
             market_orders = tuple(item for item in risk.working_orders if item.market == market)
@@ -1723,14 +1779,19 @@ class ReleaseLedgerHandle:
                 or state.working_exposure_usd > config.per_market.max_working_order_exposure_usd
             ):
                 return False
-            aggregate_exposure += gross
-            aggregate_working_orders += state.working_order_count
-            aggregate_working_contracts += state.working_contracts
-        return (
-            aggregate_exposure <= config.conflict_domain_account.max_aggregate_exposure_usd
-            and aggregate_working_orders <= config.conflict_domain_account.max_aggregate_working_orders
-            and aggregate_working_contracts <= config.conflict_domain_account.max_aggregate_working_contracts
-        )
+        # CORRECTION_07 C07-AGG-001 / C07-06: the account aggregate totals and
+        # the inclusive account-limit comparison come from the ONE shared
+        # canonical derivation that the CREATE candidate path also uses, so
+        # release/current-state and candidate projection cannot drift into two
+        # numeric meanings.  The release semantics are unchanged: unresolved
+        # exposure counted once, plus every market's filled + working exposure.
+        try:
+            totals = compute_account_aggregate_totals(
+                fills=risk.fills, working_orders=risk.working_orders, unresolved_exposure=unresolved,
+            )
+        except RiskControlError:
+            return False
+        return account_aggregate_current_state_within_limits(totals, config)
 
     def _derive(
         self,
@@ -5110,6 +5171,7 @@ def reconcile_retained_bootstrap_floor_v1(
 
 
 __all__ = [
+    "build_account_aggregate_input",
     "AuthorityAnchoredSendGate", "CURRENT_ACCOUNT_SCOPE_REF", "CURRENT_CLIENT_ORDER_ID",
     "CURRENT_CONFLICT_DOMAIN_REF", "CURRENT_DISPOSITION", "CURRENT_ENVIRONMENT",
     "CURRENT_INCIDENT_ID", "CURRENT_LEGACY_INCIDENT_CONTRACT", "CURRENT_TICKER",

@@ -47,6 +47,7 @@ from arb.execution_ledger import (
     initialize_authority_namespace,
 )
 from arb.venues.kalshi.ledger_binding import (
+    build_account_aggregate_input,
     CURRENT_ACCOUNT_SCOPE_REF,
     CURRENT_CLIENT_ORDER_ID,
     CURRENT_DISPOSITION,
@@ -76,6 +77,7 @@ from arb.venues.kalshi.emergency_cancel import (
     EmergencyRateLane,
 )
 from arb.venues.kalshi.risk_control import (
+    AccountAggregateInputV1,
     AccountRiskLimits,
     CandidateOrderV1,
     FlowRiskLimits,
@@ -84,11 +86,15 @@ from arb.venues.kalshi.risk_control import (
     NormalWriteAdapter,
     PerMarketRiskLimits,
     PerOrderRiskLimits,
+    RiskControlCode,
+    RiskControlError,
     RiskLimitConfigV1,
     StateIntegrityLimits,
     VenueDefensePolicy,
     WorkingOrderV1,
     WriterEligibilityGate,
+    build_account_aggregate_authority_expectation,
+    build_account_aggregate_snapshot,
 )
 from arb.venues.kalshi.orderbook import (
     KalshiNativeOrderBookLevel,
@@ -3411,6 +3417,20 @@ class GateDTestCase(GateCTests):
         candidate = CandidateOrderV1(self.TICKER, outcome_side, D("1.00"), yes_price)
         state = MarketEconomicState(D("0"), D("0"), D("0"), D("0"), D("0"), 0, D("0"))
         risk_state_epoch = locked.projection().risk_state_epoch
+        # CORRECTION_07 C07-AGG-001..004: a seeded CREATE is a production-shaped
+        # write, so it carries the same complete durable conflict-domain
+        # account aggregate input the real Gate-D CREATE path builds.
+        account_aggregate_input = build_account_aggregate_input(
+            locked, risk_config_sha256=gate_d_runtime.risk_config.sha256,
+            unresolved_exposure_usd=D("0"), trusted_dynamic_read_set_id=None,
+            reconciliation_snapshot_sha256="c" * 64,
+        )
+        # CORRECTION_01 Gate A: the authoritative expectation is obtained
+        # independently from the same locked ledger.
+        account_aggregate_expectation = build_account_aggregate_authority_expectation(
+            locked, risk_config_sha256=gate_d_runtime.risk_config.sha256,
+            trusted_dynamic_read_set_id=None, reconciliation_snapshot_sha256="c" * 64,
+        )
         assessment = build_writer_eligibility_assessment(
             risk_assessment_id=f"ra_{request_seed}", request_id=f"req_{request_seed}", candidate=candidate,
             market_economic_state=state, unresolved_exposure=D("0"), risk_config=gate_d_runtime.risk_config,
@@ -3418,6 +3438,8 @@ class GateDTestCase(GateCTests):
             market_data_freshness_identity_sha256="b" * 64, reconciliation_snapshot_sha256="c" * 64,
             reconciliation_freshness_identity_sha256="d" * 64, risk_state_epoch=risk_state_epoch,
             freshness_deadline_monotonic_ns=999_999_999_999,
+            account_aggregate_input=account_aggregate_input,
+            account_aggregate_expectation=account_aggregate_expectation,
         )
         quote_generation_id = "qg_" + hashlib.sha256(request_seed.encode("utf-8")).hexdigest()[:32]
         outer_intent = build_mm_create_intent_payload(
@@ -3526,48 +3548,62 @@ class GateDLoopBehaviorTests(GateDTestCase):
         self.assertNotIn("quote_decision_callback", field_names)
 
     def test_gd11_empty_portfolio_create_new_charges_budget_and_uses_real_strategy_pipeline(self) -> None:
-        """MM07-CLAR-001/003/004 integration: an empty-portfolio cycle
-        selects CREATE_NEW (never a cleanup lane), the ordinary send budget
-        is charged, and the real `evaluate_market_maker_input` (not a
-        substitutable seam) drives the desired quote."""
+        """MM07-CLAR-001/003 integration: an empty-portfolio cycle selects
+        CREATE_NEW (never a cleanup lane) and the real
+        `evaluate_market_maker_input` (not a substitutable seam) drives the
+        desired quote.
+
+        CORRECTION_08: this legacy (non-ADRS2) runtime cannot satisfy the
+        dedicated Strategy-1 Gate-D CREATE permit entrypoint, which requires
+        the active ``ADRS2_<64hex>`` read-set identity (C08-SCOPED-003), and
+        there is no generic fallback (C08-RUN-001).  The CREATE therefore
+        fails closed before permit issuance: no budget charge, no transport.
+        The positive budget-charge path is carried by
+        `test_c08_run_active_gd11_...` on the active Strategy-1 runtime."""
         stage3, gate_d_runtime, invocation, transport, write_transport = self._gate_d_ready()
         self._queue_gate_d_read_cycle(transport, order_ids=())
-        transport.queue(RunnerOperation.GET_ORDER, _order_payload("venue-order-created-1", ticker=self.TICKER))
-        write_transport.queue(_json_response({"order": {"order_id": "venue-order-created-1"}}))
 
         real_evaluate = runner.evaluate_market_maker_input
         with mock.patch.object(runner, "evaluate_market_maker_input", wraps=real_evaluate) as spy:
             result = run_gate_d_ordinary_decision_loop(stage3, gate_d_runtime, invocation, decision_cycle_max=1)
 
         self.assertTrue(spy.called)
-        self.assertEqual(result.ordinary_writes_sent, 1)
+        self.assertEqual(result.ordinary_writes_sent, 0)
         self.assertEqual(result.cleanup_cancels_sent, 0)
         outcome = result.cycle_results[0].write_outcome
         self.assertIsNotNone(outcome)
         self.assertEqual(outcome.action, "CREATE")
         self.assertEqual(outcome.lane, "ORDINARY")
-        self.assertTrue(outcome.budget_charged)
-        self.assertEqual(outcome.result_classification, "BOUND_ACTIVE")
+        self.assertTrue(outcome.assessment_eligible)
+        self.assertFalse(outcome.budget_charged)
+        self.assertFalse(outcome.transport_invoked)
+        self.assertEqual(outcome.result_classification, "PERMIT_ISSUANCE_FAILED")
+        self.assertEqual(len(write_transport.calls), 0)
 
         end_writer_session(
             stage3.normal_writer_acquisition.handle, writer_session_id=stage3.normal_writer_session_id,
         )
 
     def test_gd12_budget_charged_even_when_adapter_raises(self) -> None:
-        """MM07-CLAR-004: the ordinary send-budget unit is spent the
-        instant trusted T3 durably commits -- an adapter-level transport
-        exception afterward must not un-charge it."""
+        """MM07-CLAR-004 (positive path carried by
+        `test_c08_run_active_gd12_...` on the active Strategy-1 runtime).
+
+        CORRECTION_08: on this legacy (non-ADRS2) runtime the scoped
+        Strategy-1 Gate-D CREATE entrypoint rejects before permit issuance,
+        so T3 never commits, no budget is charged and the adapter -- whose
+        scripted exception would otherwise fire -- is never reached."""
         stage3, gate_d_runtime, invocation, transport, write_transport = self._gate_d_ready()
         self._queue_gate_d_read_cycle(transport, order_ids=())
         write_transport.queue(ConnectionError("synthetic transport failure"))
 
         result = run_gate_d_ordinary_decision_loop(stage3, gate_d_runtime, invocation, decision_cycle_max=1)
 
-        self.assertEqual(result.ordinary_writes_sent, 1)
+        self.assertEqual(result.ordinary_writes_sent, 0)
         outcome = result.cycle_results[0].write_outcome
-        self.assertTrue(outcome.budget_charged)
-        self.assertEqual(outcome.result_classification, "ADAPTER_EXCEPTION")
-        self.assertTrue(outcome.transport_invoked)
+        self.assertFalse(outcome.budget_charged)
+        self.assertEqual(outcome.result_classification, "PERMIT_ISSUANCE_FAILED")
+        self.assertFalse(outcome.transport_invoked)
+        self.assertEqual(len(write_transport.calls), 0)
 
         end_writer_session(
             stage3.normal_writer_acquisition.handle, writer_session_id=stage3.normal_writer_session_id,
@@ -5432,7 +5468,12 @@ class ActiveGateDDomainBoundPermitTestCase(ActiveStage3EndToEndTestCase):
                 "position_count_fp": position_count_fp}
 
     def _capture_permits(self):
+        # CORRECTION_08: ordinary CANCEL still issues through the generic
+        # `issue_and_persist_write_permit` helper, while Strategy-1 Gate-D
+        # CREATE issues through the dedicated scoped gate entrypoint.  Capture
+        # the permit from whichever of the two real surfaces is invoked.
         real = runner.issue_and_persist_write_permit
+        real_scoped = WriterEligibilityGate.issue_strategy1_gate_d_create_permit
         permits: list = []
 
         def _wrapper(**kwargs):
@@ -5440,7 +5481,20 @@ class ActiveGateDDomainBoundPermitTestCase(ActiveStage3EndToEndTestCase):
             permits.append(permit)
             return permit
 
-        return mock.patch.object(runner, "issue_and_persist_write_permit", side_effect=_wrapper), permits
+        def _scoped_wrapper(gate, **kwargs):
+            permit = real_scoped(gate, **kwargs)
+            permits.append(permit)
+            return permit
+
+        @contextlib.contextmanager
+        def _patched():
+            with mock.patch.object(runner, "issue_and_persist_write_permit", side_effect=_wrapper), \
+                    mock.patch.object(
+                        WriterEligibilityGate, "issue_strategy1_gate_d_create_permit",
+                        autospec=True, side_effect=_scoped_wrapper):
+                yield
+
+        return _patched(), permits
 
     def _seed_active_resting_order(
         self, stage3, rt, *, quote_slot, client_order_id, venue_order_id, yes_price, request_seed,
@@ -5460,13 +5514,24 @@ class ActiveGateDDomainBoundPermitTestCase(ActiveStage3EndToEndTestCase):
         candidate = CandidateOrderV1(self.TICKER, outcome_side, D("1.00"), yes_price)
         state = MarketEconomicState(D("0"), D("0"), D("0"), D("0"), D("0"), 0, D("0"))
         risk_state_epoch = locked.projection().risk_state_epoch
+        # CORRECTION_07 C07-AGG-001..004: same production-shaped complete durable
+        # conflict-domain account aggregate input the real CREATE path builds.
+        account_aggregate_input = build_account_aggregate_input(
+            locked, risk_config_sha256=rt.risk_config.sha256, unresolved_exposure_usd=D("0"),
+            trusted_dynamic_read_set_id=None, reconciliation_snapshot_sha256="c" * 64)
+        # CORRECTION_01 Gate A authoritative expectation, sourced independently.
+        account_aggregate_expectation = build_account_aggregate_authority_expectation(
+            locked, risk_config_sha256=rt.risk_config.sha256,
+            trusted_dynamic_read_set_id=None, reconciliation_snapshot_sha256="c" * 64)
         assessment = build_writer_eligibility_assessment(
             risk_assessment_id=f"ra_{request_seed}", request_id=f"req_{request_seed}", candidate=candidate,
             market_economic_state=state, unresolved_exposure=D("0"), risk_config=rt.risk_config,
             prepared_request_sha256=prepared["prepared_request_sha256"], market_data_snapshot_sha256="a" * 64,
             market_data_freshness_identity_sha256="b" * 64, reconciliation_snapshot_sha256="c" * 64,
             reconciliation_freshness_identity_sha256="d" * 64, risk_state_epoch=risk_state_epoch,
-            freshness_deadline_monotonic_ns=999_999_999_999)
+            freshness_deadline_monotonic_ns=999_999_999_999,
+            account_aggregate_input=account_aggregate_input,
+            account_aggregate_expectation=account_aggregate_expectation)
         quote_generation_id = "qg_" + hashlib.sha256(request_seed.encode("utf-8")).hexdigest()[:32]
         outer_intent = build_mm_create_intent_payload(
             execution_attempt_id=f"ea_{request_seed}", conflict_domain_ref=locked.conflict_domain_ref,
@@ -5623,6 +5688,271 @@ class ActiveGateDDomainBoundPermitTestCase(ActiveStage3EndToEndTestCase):
         self.assertFalse(outcome.transport_invoked)
         self.assertEqual(len(wt.calls), 0)
         self.assertEqual(outcome.result_classification, "NORMAL_WRITER_PERMIT_DOMAIN_MISMATCH")
+        end_writer_session(
+            stage3.normal_writer_acquisition.handle, writer_session_id=stage3.normal_writer_session_id)
+
+    # ---- CORRECTION_08 Strategy-1 Gate-D CREATE scoped permit path ------
+
+    _C08_T1_T3 = ("EXECUTION_INTENT_RECORDED", "REQUEST_PREPARED", "WRITE_SEND_BOUNDARY_ENTERED")
+
+    def _c08_active_create_ready(self, *, create_response: bool = True):
+        wt = _ScriptedWriteTransport()
+        if create_response:
+            wt.queue(_json_response({"order": {"order_id": "venue-c08-create-1"}}))
+        rt = self._runtime(gate_d=True, write_transport=wt)
+        invocation, stage3 = self._reach_stage3(rt)
+        self._reset_reads()
+        self._q_empty_read_cycle()
+        if create_response:
+            self._transport.queue(RunnerOperation.GET_ORDER, _order_payload(
+                "venue-c08-create-1", ticker=self.TICKER, subaccount=1, exchange_index=0))
+        return rt, invocation, stage3, wt
+
+    def _c08_scoped_spy(self):
+        real_scoped = WriterEligibilityGate.issue_strategy1_gate_d_create_permit
+        return mock.patch.object(
+            WriterEligibilityGate, "issue_strategy1_gate_d_create_permit",
+            autospec=True, side_effect=lambda gate, **kwargs: real_scoped(gate, **kwargs))
+
+    def _c08_generic_forbidden(self):
+        """Test doubles that fail loudly if Strategy-1 CREATE ever reaches the
+        generic permit surface (C08-RUN-001 no-generic-fallback proof)."""
+
+        def _forbidden(*args, **kwargs):
+            raise AssertionError("generic permit surface invoked for Strategy-1 Gate-D CREATE")
+
+        stack = contextlib.ExitStack()
+        stack.enter_context(mock.patch.object(WriterEligibilityGate, "issue_permit", side_effect=_forbidden))
+        stack.enter_context(mock.patch.object(runner, "issue_and_persist_write_permit", side_effect=_forbidden))
+        return stack
+
+    def test_c08_run_01_gate_d_create_uses_scoped_entrypoint_only(self) -> None:
+        """C08-RUN-01 / C08-RUN-001: `_gate_d_execute_create` obtains its
+        permit ONLY from the dedicated Strategy-1 Gate-D CREATE entrypoint.
+        The generic `issue_permit` and the generic
+        `issue_and_persist_write_permit` helper are replaced by doubles that
+        raise if invoked; the CREATE still reaches transport exactly once."""
+        rt, invocation, stage3, wt = self._c08_active_create_ready()
+        with self._c08_scoped_spy() as scoped, self._c08_generic_forbidden():
+            result = runner.run_gate_d_ordinary_decision_loop(stage3, rt, invocation, decision_cycle_max=1)
+        outcome = result.cycle_results[0].write_outcome
+        self.assertEqual(outcome.action, "CREATE")
+        self.assertTrue(outcome.transport_invoked)
+        self.assertEqual(result.ordinary_writes_sent, 1)
+        self.assertEqual(len(wt.calls), 1)
+        self.assertEqual(scoped.call_count, 1)
+        # Static half of the proof: the CREATE body names the scoped
+        # entrypoint and contains no call to either generic surface.
+        source = inspect.getsource(runner._gate_d_execute_create)
+        self.assertIn(".issue_strategy1_gate_d_create_permit(", source)
+        self.assertNotIn(".issue_permit(", source)
+        self.assertNotIn("issue_and_persist_write_permit(", source)
+        end_writer_session(
+            stage3.normal_writer_acquisition.handle, writer_session_id=stage3.normal_writer_session_id)
+
+    def test_c08_run_02_aggregate_unavailable_emits_no_permit_lineage_or_transport(self) -> None:
+        """C08-RUN-02 / C08-RUN-003: when the complete account aggregate
+        cannot be built, the CREATE obtains no permit, persists no T1/T2/T3,
+        and invokes neither the adapter nor transport."""
+        rt, invocation, stage3, wt = self._c08_active_create_ready(create_response=False)
+        locked = stage3.normal_writer_acquisition.handle
+        before = len(locked.events)
+
+        def _unavailable(*args, **kwargs):
+            raise RiskControlError(RiskControlCode.RISK_INPUT_UNAVAILABLE)
+
+        with self._c08_scoped_spy() as scoped, self._c08_generic_forbidden(), \
+                mock.patch.object(runner, "build_account_aggregate_input", side_effect=_unavailable), \
+                mock.patch.object(NormalWriteAdapter, "invoke", side_effect=AssertionError("adapter reached")):
+            result = runner.run_gate_d_ordinary_decision_loop(stage3, rt, invocation, decision_cycle_max=1)
+        outcome = result.cycle_results[0].write_outcome
+        self.assertEqual(outcome.action, "CREATE")
+        self.assertFalse(outcome.assessment_eligible)
+        self.assertFalse(outcome.budget_charged)
+        self.assertFalse(outcome.transport_invoked)
+        self.assertEqual(result.ordinary_writes_sent, 0)
+        self.assertEqual(len(wt.calls), 0)
+        # An ineligible assessment never even reaches the scoped entrypoint.
+        self.assertEqual(scoped.call_count, 0)
+        appended = {event.event_type.name for event in locked.events[before:]}
+        for name in self._C08_T1_T3:
+            self.assertNotIn(name, appended)
+        end_writer_session(locked, writer_session_id=stage3.normal_writer_session_id)
+
+    def _c08_assert_identity_mismatch_fails_before_permit(self, boundary: str, key: str, value) -> None:
+        """C08-RUN-03 / C08-RUN-004: an aggregate identity that differs from
+        the independent current authority expectation fails closed before
+        permit, T1/T2/T3 and transport.  ``boundary == "input"`` substitutes
+        the aggregate INPUT (Gate A -> ineligible, scoped entrypoint never
+        reached); ``boundary == "binding"`` substitutes the post-assessment
+        aggregate BINDING (Gate B inside the scoped entrypoint)."""
+        rt, invocation, stage3, wt = self._c08_active_create_ready(create_response=False)
+        locked = stage3.normal_writer_acquisition.handle
+        before = len(locked.events)
+        real_input = runner.build_account_aggregate_input
+        real_assessment = runner.build_writer_eligibility_assessment
+
+        def _mutated_input(*args, **kwargs):
+            return dataclasses.replace(real_input(*args, **kwargs), **{key: value})
+
+        def _mutated_assessment(*args, **kwargs):
+            assessment = real_assessment(*args, **kwargs)
+            self.assertTrue(assessment.eligible)
+            return dataclasses.replace(assessment, **{key: value})
+
+        seam = (
+            mock.patch.object(runner, "build_account_aggregate_input", side_effect=_mutated_input)
+            if boundary == "input" else
+            mock.patch.object(runner, "build_writer_eligibility_assessment", side_effect=_mutated_assessment)
+        )
+        with self._c08_scoped_spy() as scoped, self._c08_generic_forbidden(), seam:
+            result = runner.run_gate_d_ordinary_decision_loop(stage3, rt, invocation, decision_cycle_max=1)
+        outcome = result.cycle_results[0].write_outcome
+        self.assertEqual(outcome.action, "CREATE")
+        self.assertFalse(outcome.budget_charged)
+        self.assertFalse(outcome.transport_invoked)
+        self.assertEqual(result.ordinary_writes_sent, 0)
+        self.assertEqual(len(wt.calls), 0)
+        if boundary == "input":
+            self.assertFalse(outcome.assessment_eligible)
+            self.assertEqual(outcome.result_classification, "ELIGIBLE_NOT_SENT")
+            self.assertEqual(scoped.call_count, 0)
+        else:
+            self.assertEqual(outcome.result_classification, "PERMIT_ISSUANCE_FAILED")
+            self.assertEqual(scoped.call_count, 1)
+        appended = {event.event_type.name for event in locked.events[before:]}
+        for name in self._C08_T1_T3:
+            self.assertNotIn(name, appended)
+        end_writer_session(locked, writer_session_id=stage3.normal_writer_session_id)
+
+    def test_c08_run_03_input_wrong_conflict_domain(self) -> None:
+        self._c08_assert_identity_mismatch_fails_before_permit("input", "conflict_domain_ref", "cd_c08_foreign")
+
+    def test_c08_run_03_input_wrong_authority_namespace(self) -> None:
+        self._c08_assert_identity_mismatch_fails_before_permit("input", "authority_namespace_id", "ns_c08_foreign")
+
+    def test_c08_run_03_input_wrong_authority_instance(self) -> None:
+        self._c08_assert_identity_mismatch_fails_before_permit("input", "authority_instance_id", "ai_c08_foreign")
+
+    def test_c08_run_03_input_wrong_ledger_instance(self) -> None:
+        self._c08_assert_identity_mismatch_fails_before_permit("input", "ledger_instance_id", "li_c08_foreign")
+
+    def test_c08_run_03_input_wrong_risk_config(self) -> None:
+        self._c08_assert_identity_mismatch_fails_before_permit("input", "risk_config_sha256", "e" * 64)
+
+    def test_c08_run_03_input_wrong_read_set(self) -> None:
+        self._c08_assert_identity_mismatch_fails_before_permit(
+            "input", "trusted_dynamic_read_set_id", "ADRS2_" + "e" * 64)
+
+    def test_c08_run_03_input_wrong_reconciliation(self) -> None:
+        self._c08_assert_identity_mismatch_fails_before_permit(
+            "input", "reconciliation_snapshot_sha256", "e" * 64)
+
+    def test_c08_run_03_binding_wrong_conflict_domain(self) -> None:
+        self._c08_assert_identity_mismatch_fails_before_permit(
+            "binding", "account_aggregate_conflict_domain_ref", "cd_c08_foreign")
+
+    def test_c08_run_03_binding_wrong_authority_namespace(self) -> None:
+        self._c08_assert_identity_mismatch_fails_before_permit(
+            "binding", "account_aggregate_authority_namespace_id", "ns_c08_foreign")
+
+    def test_c08_run_03_binding_wrong_authority_instance(self) -> None:
+        self._c08_assert_identity_mismatch_fails_before_permit(
+            "binding", "account_aggregate_authority_instance_id", "ai_c08_foreign")
+
+    def test_c08_run_03_binding_wrong_ledger_instance(self) -> None:
+        self._c08_assert_identity_mismatch_fails_before_permit(
+            "binding", "account_aggregate_ledger_instance_id", "li_c08_foreign")
+
+    def test_c08_run_03_binding_wrong_risk_config(self) -> None:
+        self._c08_assert_identity_mismatch_fails_before_permit(
+            "binding", "account_aggregate_risk_config_sha256", "e" * 64)
+
+    def test_c08_run_03_binding_wrong_read_set(self) -> None:
+        self._c08_assert_identity_mismatch_fails_before_permit(
+            "binding", "account_aggregate_trusted_dynamic_read_set_id", "ADRS2_" + "e" * 64)
+
+    def test_c08_run_03_binding_wrong_reconciliation(self) -> None:
+        self._c08_assert_identity_mismatch_fails_before_permit(
+            "binding", "account_aggregate_reconciliation_snapshot_sha256", "e" * 64)
+
+    def test_c08_run_03_binding_moved_tail(self) -> None:
+        self._c08_assert_identity_mismatch_fails_before_permit(
+            "binding", "account_aggregate_ledger_terminal_sequence", 10**9)
+
+    def test_c08_run_04_valid_complete_aggregate_reaches_persistence_and_adapter(self) -> None:
+        """C08-RUN-04 / C08-RUN-005: a complete exact aggregate within limits
+        obtains the scoped permit and reaches the same next stages as the
+        valid C01 path -- durable T1 -> T2 -> T3 in order, then exactly one
+        adapter/transport invocation -- with no extra send entitlement."""
+        rt, invocation, stage3, wt = self._c08_active_create_ready()
+        locked = stage3.normal_writer_acquisition.handle
+        before = len(locked.events)
+        patcher, permits = self._capture_permits()
+        with patcher:
+            result = runner.run_gate_d_ordinary_decision_loop(
+                stage3, rt, invocation, decision_cycle_max=1, ordinary_write_send_max=1)
+        outcome = result.cycle_results[0].write_outcome
+        self.assertTrue(outcome.assessment_eligible)
+        self.assertTrue(outcome.budget_charged)
+        self.assertTrue(outcome.transport_invoked)
+        self.assertEqual(result.ordinary_writes_sent, 1)
+        self.assertEqual(len(wt.calls), 1)
+        self.assertEqual(len(permits), 1)
+        permit = permits[0]
+        from arb.venues.kalshi.risk_control import NormalWriterPermit
+        self.assertIs(type(permit), NormalWriterPermit)
+        self.assertEqual(permit.operation_kind, "CREATE_ORDER_V2")
+        self.assertEqual(permit.trusted_dynamic_read_set_id, stage3.trusted_dynamic_read_set_id)
+        appended = [event.event_type.name for event in locked.events[before:]]
+        lineage = [name for name in appended if name in self._C08_T1_T3]
+        self.assertEqual(lineage, list(self._C08_T1_T3))
+        end_writer_session(locked, writer_session_id=stage3.normal_writer_session_id)
+
+    def test_c08_run_active_gd11_empty_portfolio_create_new_charges_budget_and_uses_real_strategy_pipeline(self) -> None:
+        """MM07-CLAR-001/003/004 carried onto the active Strategy-1 path
+        (CORRECTION_08 routes every Gate-D CREATE through the scoped
+        entrypoint, which requires the active ADRS2 read-set identity)."""
+        rt, invocation, stage3, wt = self._c08_active_create_ready()
+        real_evaluate = runner.evaluate_market_maker_input
+        with mock.patch.object(runner, "evaluate_market_maker_input", wraps=real_evaluate) as spy:
+            result = runner.run_gate_d_ordinary_decision_loop(stage3, rt, invocation, decision_cycle_max=1)
+        self.assertTrue(spy.called)
+        self.assertEqual(result.ordinary_writes_sent, 1)
+        outcome = result.cycle_results[0].write_outcome
+        self.assertEqual(outcome.action, "CREATE")
+        self.assertEqual(outcome.lane, "ORDINARY")
+        self.assertTrue(outcome.budget_charged)
+        self.assertEqual(outcome.result_classification, "BOUND_ACTIVE")
+        self.assertEqual(result.cleanup_cancels_sent, 0)
+        end_writer_session(
+            stage3.normal_writer_acquisition.handle, writer_session_id=stage3.normal_writer_session_id)
+
+    def test_c08_run_active_gd12_budget_charged_even_when_adapter_raises(self) -> None:
+        """MM07-CLAR-004 carried onto the active Strategy-1 path."""
+        rt, invocation, stage3, wt = self._c08_active_create_ready(create_response=False)
+        wt.queue(ConnectionError("synthetic transport failure"))
+        result = runner.run_gate_d_ordinary_decision_loop(stage3, rt, invocation, decision_cycle_max=1)
+        self.assertEqual(result.ordinary_writes_sent, 1)
+        outcome = result.cycle_results[0].write_outcome
+        self.assertTrue(outcome.budget_charged)
+        self.assertEqual(outcome.result_classification, "ADAPTER_EXCEPTION")
+        self.assertTrue(outcome.transport_invoked)
+        end_writer_session(
+            stage3.normal_writer_acquisition.handle, writer_session_id=stage3.normal_writer_session_id)
+
+    def test_c08_run_active_c06_run_06a_ordinary_create_charges_the_one_ordinary_counter(self) -> None:
+        """C07-FLOW-001 carried onto the active Strategy-1 path: an ordinary
+        CREATE is charged against `ordinary_writes_sent`, bounded by
+        `G.max_ordinary_write_sends` alone."""
+        rt, invocation, stage3, wt = self._c08_active_create_ready()
+        created = runner.run_gate_d_ordinary_decision_loop(
+            stage3, rt, invocation, decision_cycle_max=1, ordinary_write_send_max=1)
+        self.assertEqual(created.cycle_results[0].write_outcome.action, "CREATE")
+        self.assertEqual(created.cycle_results[0].write_outcome.lane, "ORDINARY")
+        self.assertTrue(created.cycle_results[0].write_outcome.budget_charged)
+        self.assertEqual(created.ordinary_writes_sent, 1)
+        self.assertEqual(created.cleanup_cancels_sent, 0)
         end_writer_session(
             stage3.normal_writer_acquisition.handle, writer_session_id=stage3.normal_writer_session_id)
 
@@ -10822,12 +11152,16 @@ class ReleaseOrchestrationTestCase(unittest.TestCase):
             ledger_path=str(self.ledger_path), clock=self.inputs.clock, uuid_factory=self.inputs.uuid)
         # TEST-ONLY synthetic write-capable RiskLimitConfigV1 fixture.  It is NOT a user
         # selection and NOT an operator default: USER_RISK_CHOICE_REQUIRED remains OPEN.
+        # CORRECTION_07 C07-08 / C07-10 / C07-FLOW-002: a write-capable Strategy-1
+        # package must present the EXACT admission profile -- flow sentinels
+        # 1/0/1/1, one-order/one-contract topology capacities, and both positive
+        # bounded user caps.  The fixture therefore carries those exact values.
         self.config = RiskLimitConfigV1(
             1, self.domain_binding.conflict_domain_ref, "USD",
             PerOrderRiskLimits(Decimal("10"), Decimal("10"), True, Decimal("0.10"), 1_000),
-            PerMarketRiskLimits(Decimal("20"), Decimal("20"), 10, Decimal("20"), Decimal("20")),
-            AccountRiskLimits(Decimal("100"), 50, Decimal("100"), 0, Decimal("0")),
-            FlowRiskLimits(1, 1_000, 1, 1_000, 1, 1_000, 1, 1_000, 2, 1_000, 1, 500, 1, 10, 100),
+            PerMarketRiskLimits(Decimal("20"), Decimal("20"), 1, Decimal("1.00"), Decimal("1.000000")),
+            AccountRiskLimits(Decimal("100"), 1, Decimal("1.00"), 0, Decimal("0")),
+            FlowRiskLimits(1, 1_000, 0, 1_000, 1, 1_000, 1, 1_000, 2, 1_000, 1, 500, 1, 10, 100),
             StateIntegrityLimits(1_000, 1_000, 10, 1, 500, 10, 100),
             VenueDefensePolicy("NOT_REQUIRED", None, True, "NO_SAFETY_CREDIT", "NO_SAFETY_CREDIT"))
         self._packages = 0
@@ -12475,6 +12809,855 @@ def _plain(value):
     if isinstance(value, tuple):
         return [_plain(item) for item in value]
     return value
+
+
+class Strategy1RiskProfileAdmissionTests(unittest.TestCase):
+    """CORRECTION_07 C06-RUN-01..05, C06-RUN-13/14 and C07-RUN-01..05.
+
+    `_orch_require_write_capable_risk` is Row 6 of authorization-set
+    admission: it runs BEFORE any durable consumption, reconciliation or
+    SAFE_HELD mutation, so every rejection below happens before any
+    authorization is burned and before any state changes.
+    """
+
+    DOMAIN = "KALSHI|KALSHI_DEMO|ARB_KALSHI_DEMO_PRIMARY_ACCOUNT|SUBACCOUNT=1"
+    OTHER_RAW_SHA = "1" * 64
+
+    def _config(
+        self,
+        *,
+        flow=None,
+        create_max_sends=1,
+        modify_replace_max_sends=0,
+        ordinary_cancel_max_sends=1,
+        automated_execution_max_sends=1,
+        max_aggregate_working_orders=1,
+        max_aggregate_working_contracts=Decimal("1.00"),
+        max_authoritative_working_orders=1,
+        max_working_contracts=Decimal("1.00"),
+        max_abs_reference_price_deviation_usd=Decimal("0.10"),
+        max_working_order_exposure_usd=Decimal("1.000000"),
+    ) -> RiskLimitConfigV1:
+        """The exact C07-10 write-capable Strategy-1 profile by default; each
+        keyword varies exactly one predicate."""
+        flow = flow or FlowRiskLimits(
+            create_max_sends, 1_000, modify_replace_max_sends, 1_000,
+            ordinary_cancel_max_sends, 1_000, automated_execution_max_sends, 1_000,
+            1, 1_000, 1, 500, 0, 10, 100,
+        )
+        return RiskLimitConfigV1(
+            1, self.DOMAIN, "USD",
+            PerOrderRiskLimits(
+                Decimal("1.00"), Decimal("1.000000"), True,
+                max_abs_reference_price_deviation_usd, 1_000,
+            ),
+            PerMarketRiskLimits(
+                Decimal("1.00"), Decimal("1.000000"), max_authoritative_working_orders,
+                max_working_contracts, max_working_order_exposure_usd,
+            ),
+            AccountRiskLimits(
+                Decimal("1.000000"), max_aggregate_working_orders,
+                max_aggregate_working_contracts, 0, Decimal("0.000000"),
+            ),
+            flow,
+            StateIntegrityLimits(1_000, 1_000, 10, 1, 500, 10, 100),
+            VenueDefensePolicy("NOT_REQUIRED", None, True, "NO_SAFETY_CREDIT", "NO_SAFETY_CREDIT"),
+        )
+
+    def _g(self, *, max_ordinary_write_sends=1, max_cleanup_cancel_sends=0) -> dict:
+        return {
+            "max_ordinary_write_sends": max_ordinary_write_sends,
+            "max_cleanup_cancel_sends": max_cleanup_cancel_sends,
+        }
+
+    def _admit(self, config, g=None):
+        runner._orch_require_write_capable_risk(
+            config, g or self._g(), raw_sha256=self.OTHER_RAW_SHA,
+        )
+
+    def _reject(self, config, g=None, *, code=None):
+        with self.assertRaises(RunnerError) as caught:
+            self._admit(config, g)
+        self.assertIs(
+            caught.exception.code,
+            code or RunnerFailureCode.USER_RISK_CHOICE_REQUIRED,
+        )
+        return caught.exception
+
+    # -- C06-RUN-01 -----------------------------------------------------
+
+    def test_c06_run_01_exact_sentinels_pass_strategy_1_admission(self) -> None:
+        """create=1, modify_replace=0, ordinary_cancel=1, automated=1."""
+        self._admit(self._config())
+
+    # -- C06-RUN-02 -----------------------------------------------------
+
+    def test_c06_run_02_each_sentinel_changed_independently_fails_before_consumption(self) -> None:
+        for kwargs in (
+            {"create_max_sends": 2},
+            {"modify_replace_max_sends": 1},
+            {"ordinary_cancel_max_sends": 2},
+            {"automated_execution_max_sends": 2},
+        ):
+            with self.subTest(**kwargs):
+                self._reject(self._config(**kwargs))
+        # A zero sentinel is the predecessor proof-only shape and is also rejected.
+        for kwargs in (
+            {"create_max_sends": 0},
+            {"ordinary_cancel_max_sends": 0},
+            {"automated_execution_max_sends": 0},
+        ):
+            with self.subTest(**kwargs):
+                self._reject(self._config(**kwargs))
+
+    # -- C06-RUN-03 -----------------------------------------------------
+
+    def test_c06_run_03_automated_sentinel_creates_no_route_capability_or_extra_budget(self) -> None:
+        """C07-FLOW-002: `automated_execution_max_sends == 1` is a
+        compatibility sentinel only."""
+        config = self._config(automated_execution_max_sends=1)
+        self._admit(config)
+
+        # No automated-execution operation, route, or lane exists.
+        operation_names = {operation.name for operation in RunnerOperation}
+        for forbidden in ("AUTOMATED_EXECUTION", "CREATE_AUTOMATED_ORDER", "MODIFY_ORDER", "REPLACE_ORDER"):
+            self.assertNotIn(forbidden, operation_names)
+        self.assertFalse({name for name in operation_names if "AUTOMATED" in name})
+
+        # The ONLY numerical ordinary budget is G; the sentinel does not
+        # enlarge it.  G=1 stays 1 whatever the sentinel says.
+        self._admit(config, self._g(max_ordinary_write_sends=1))
+        self.assertEqual(config.flow.automated_execution_max_sends, 1)
+
+    # -- C06-RUN-04 -----------------------------------------------------
+
+    def test_c06_run_04_topology_capacities_are_exact_one_and_one_hundredth(self) -> None:
+        """C07-08: the four topology-derived capacities are exactly
+        1 / 1.00 / 1 / 1.00; zero disables the canary and anything larger
+        expands scope."""
+        self._admit(self._config())
+        for kwargs in (
+            {"max_aggregate_working_orders": 0},
+            {"max_aggregate_working_orders": 2},
+            {"max_aggregate_working_contracts": Decimal("0")},
+            {"max_aggregate_working_contracts": Decimal("2.00")},
+            {"max_authoritative_working_orders": 0},
+            {"max_authoritative_working_orders": 2},
+            {"max_working_contracts": Decimal("0")},
+            {"max_working_contracts": Decimal("2.00")},
+        ):
+            with self.subTest(**kwargs):
+                self._reject(self._config(**kwargs))
+
+    # -- C06-RUN-05 -----------------------------------------------------
+
+    def test_c06_run_05_g_budget_is_accepted_only_within_installed_range_and_is_sentinel_independent(self) -> None:
+        """C07-FLOW-001: `G.max_ordinary_write_sends` is the sole numerical
+        ordinary budget, bounded by the installed maximum of 4, and it is
+        completely independent of the flow sentinels."""
+        self.assertEqual(GATE_D_ORDINARY_WRITE_SEND_MAX, 4)
+        config = self._config()
+        for value in (0, 1, 2, 3, 4):
+            with self.subTest(g=value):
+                self._admit(config, self._g(max_ordinary_write_sends=value))
+        self._reject(
+            config, self._g(max_ordinary_write_sends=5),
+            code=RunnerFailureCode.BRIDGE_AUTHORIZATION_RISK_CONFIG_MISMATCH,
+        )
+        # The sentinels stay exactly 1/0/1/1 across every accepted G value --
+        # the budget never changes them and they never change the budget.
+        self.assertEqual(
+            (config.flow.create_max_sends, config.flow.modify_replace_max_sends,
+             config.flow.ordinary_cancel_max_sends, config.flow.automated_execution_max_sends),
+            (1, 0, 1, 1),
+        )
+
+    # -- C06-RUN-13 -----------------------------------------------------
+
+    def test_c06_run_13_no_cleanup_lane_appears_and_cleanup_capability_stays_zero(self) -> None:
+        self._admit(self._config(), self._g(max_cleanup_cancel_sends=0))
+        self._reject(
+            self._config(), self._g(max_cleanup_cancel_sends=1),
+            code=RunnerFailureCode.BRIDGE_AUTHORIZATION_RISK_CONFIG_MISMATCH,
+        )
+
+    # -- C06-RUN-14 -----------------------------------------------------
+
+    def test_c06_run_14_modify_replace_remains_unreachable(self) -> None:
+        """The sentinel must be exactly 0 and no MODIFY/REPLACE operation or
+        quote action exists to reach."""
+        self._reject(self._config(modify_replace_max_sends=1))
+        operation_names = {operation.name for operation in RunnerOperation}
+        self.assertNotIn("MODIFY_ORDER", operation_names)
+        self.assertNotIn("REPLACE_ORDER", operation_names)
+        action_values = {action.value for action in runner.QuoteAction}
+        self.assertFalse({value for value in action_values if "MODIFY" in value or "REPLACE" in value})
+
+    # -- C07-RUN-01 -----------------------------------------------------
+
+    def test_c07_run_01_rejects_non_positive_reference_price_deviation_cap(self) -> None:
+        """C07-PRICE-002/004: a zero or negative cap is not write-capable."""
+        for cap in (Decimal("0"), Decimal("0.0000")):
+            with self.subTest(cap=cap):
+                error = self._reject(self._config(max_abs_reference_price_deviation_usd=cap))
+                self.assertIn("reference-price deviation cap", str(error))
+
+    # -- C07-RUN-02 -----------------------------------------------------
+
+    def test_c07_run_02_rejects_reference_price_deviation_cap_above_one(self) -> None:
+        """C07-PRICE-002: the binary-price domain bounds the cap at 1."""
+        self._admit(self._config(max_abs_reference_price_deviation_usd=Decimal("1")))
+        for cap in (Decimal("1.0001"), Decimal("2")):
+            with self.subTest(cap=cap):
+                self._reject(self._config(max_abs_reference_price_deviation_usd=cap))
+
+    # -- C07-RUN-03 -----------------------------------------------------
+
+    def test_c07_run_03_a_valid_price_cap_alone_widens_nothing(self) -> None:
+        """C07-USER-001: choosing the price cap changes no budget, no order
+        quantity, and no market/account/emergency ceiling."""
+        low = self._config(max_abs_reference_price_deviation_usd=Decimal("0.01"))
+        high = self._config(max_abs_reference_price_deviation_usd=Decimal("1"))
+        self._admit(low)
+        self._admit(high)
+
+        for config in (low, high):
+            self.assertEqual(config.per_order.max_contracts, Decimal("1.00"))
+            self.assertEqual(config.per_order.max_worst_case_exposure_usd, Decimal("1.000000"))
+            self.assertEqual(config.per_market.max_authoritative_working_orders, 1)
+            self.assertEqual(config.per_market.max_working_contracts, Decimal("1.00"))
+            self.assertEqual(config.conflict_domain_account.max_aggregate_exposure_usd, Decimal("1.000000"))
+            self.assertEqual(config.conflict_domain_account.max_aggregate_working_orders, 1)
+            self.assertEqual(config.conflict_domain_account.max_aggregate_working_contracts, Decimal("1.00"))
+            self.assertEqual(config.flow.emergency_cancel_max_sends, 1)
+            self.assertEqual(config.flow.emergency_cancel_max_in_flight, 1)
+            self.assertEqual(config.flow.emergency_retry_max_attempts_per_target_per_action, 0)
+
+        # G is unchanged by either choice and is still bounded by the
+        # installed maximum.
+        self._admit(low, self._g(max_ordinary_write_sends=4))
+        self._admit(high, self._g(max_ordinary_write_sends=4))
+        self._reject(
+            high, self._g(max_ordinary_write_sends=5),
+            code=RunnerFailureCode.BRIDGE_AUTHORIZATION_RISK_CONFIG_MISMATCH,
+        )
+
+    # -- C07-RUN-04 -----------------------------------------------------
+
+    def test_c07_run_04_price_cap_and_working_exposure_cap_are_independently_bound(self) -> None:
+        """C07-USER-002 / C07-10: both are positive bounded user choices,
+        neither is derived from the other, and changing either changes the
+        risk semantic identity."""
+        base = self._config()
+
+        # Both caps must be positive and bounded.
+        self._reject(self._config(max_working_order_exposure_usd=Decimal("0")))
+        self._reject(self._config(max_working_order_exposure_usd=Decimal("1.000001")))
+        self._admit(self._config(max_working_order_exposure_usd=Decimal("1.000000")))
+
+        # Each moves independently, and each changes the semantic identity.
+        price_only = self._config(max_abs_reference_price_deviation_usd=Decimal("0.25"))
+        exposure_only = self._config(max_working_order_exposure_usd=Decimal("0.500000"))
+        self._admit(price_only)
+        self._admit(exposure_only)
+
+        self.assertNotEqual(price_only.sha256, base.sha256)
+        self.assertNotEqual(exposure_only.sha256, base.sha256)
+        self.assertNotEqual(price_only.sha256, exposure_only.sha256)
+
+        # No auto-adjustment: changing the price cap leaves the exposure cap
+        # exactly as configured, and vice versa.
+        self.assertEqual(
+            price_only.per_market.max_working_order_exposure_usd,
+            base.per_market.max_working_order_exposure_usd,
+        )
+        self.assertEqual(
+            exposure_only.per_order.max_abs_reference_price_deviation_usd,
+            base.per_order.max_abs_reference_price_deviation_usd,
+        )
+
+    # -- C07-RUN-05 -----------------------------------------------------
+
+    def test_c07_run_05_candidate_02_zero_price_cap_package_stays_rejected(self) -> None:
+        """C07-PRICE-004: the exact Candidate-02 proof-only artifact is
+        rejected by raw identity and by semantic identity, and a
+        structurally equivalent zero-cap config is rejected on its own."""
+        config = self._config()
+        with self.assertRaises(RunnerError) as by_raw:
+            runner._orch_require_write_capable_risk(
+                config, self._g(), raw_sha256=runner._ORCH_CANDIDATE_02_RISK_RAW_SHA256,
+            )
+        self.assertIs(by_raw.exception.code, RunnerFailureCode.USER_RISK_CHOICE_REQUIRED)
+        self.assertIn("candidate-02", str(by_raw.exception))
+
+        # And any zero reference-price cap is rejected regardless of identity.
+        self._reject(self._config(max_abs_reference_price_deviation_usd=Decimal("0.0000")))
+
+        # The pinned Candidate-02 raw identity is unchanged by this correction.
+        self.assertEqual(
+            runner._ORCH_CANDIDATE_02_RISK_RAW_SHA256,
+            "4495ade7fed522bf17a202d6f5422f608765b65a4463121175695c862b3f904c",
+        )
+
+
+class GateDAccountAggregateEnforcementTests(GateDTestCase):
+    """CORRECTION_07 C06-RUN-06/07/10 and C07-AGG-002/003 against the real
+    Gate-D ordinary decision loop."""
+
+    def setUp(self) -> None:
+        super().setUp()
+        self._opened_stage3: list = []
+
+    def tearDown(self) -> None:
+        # Close every ledger handle this test opened BEFORE the base tearDown
+        # removes the temporary directory (unittest runs addCleanup callbacks
+        # only after tearDown, which is too late on Windows).
+        for stage3 in self._opened_stage3:
+            self._close(stage3)
+        super().tearDown()
+
+    def _ready(self):
+        opened = self._gate_d_ready()
+        self._opened_stage3.append(opened[0])
+        return opened
+
+    def _tight_account_runtime(self, gate_d_runtime, **account_changes):
+        """The same runtime with only `conflict_domain_account` leaves varied."""
+        base = gate_d_runtime.risk_config
+        account = base.conflict_domain_account
+        values = {
+            "max_aggregate_exposure_usd": account.max_aggregate_exposure_usd,
+            "max_aggregate_working_orders": account.max_aggregate_working_orders,
+            "max_aggregate_working_contracts": account.max_aggregate_working_contracts,
+            "max_unresolved_write_count": account.max_unresolved_write_count,
+            "max_conservative_unresolved_write_exposure_usd":
+                account.max_conservative_unresolved_write_exposure_usd,
+        }
+        values.update(account_changes)
+        tightened = RiskLimitConfigV1(
+            base.schema_version, base.conflict_domain, base.currency, base.per_order,
+            base.per_market, AccountRiskLimits(**values), base.flow, base.state_integrity,
+            base.venue_defense,
+        )
+        return dataclasses.replace(gate_d_runtime, risk_config=tightened)
+
+    def test_c06_run_07_aggregate_breach_emits_no_permit_no_send_boundary_and_no_transport(self) -> None:
+        """An account aggregate breach before CREATE produces zero permit,
+        zero WRITE_SEND_BOUNDARY_ENTERED event, zero transport invocation and
+        charges zero ordinary budget."""
+        stage3, gate_d_runtime, invocation, transport, write_transport = self._ready()
+        locked = stage3.normal_writer_acquisition.handle
+        before = len(locked.events)
+
+        # Zero account working-order capacity: the candidate's +1 projected
+        # working order alone breaches the existing account leaf.
+        breached = self._tight_account_runtime(gate_d_runtime, max_aggregate_working_orders=0)
+
+        self._queue_gate_d_read_cycle(transport, order_ids=())
+        result = run_gate_d_ordinary_decision_loop(stage3, breached, invocation, decision_cycle_max=1)
+
+        outcome = result.cycle_results[0].write_outcome
+        self.assertIsNotNone(outcome)
+        self.assertEqual(outcome.action, "CREATE")
+        self.assertFalse(outcome.assessment_eligible)
+        self.assertFalse(outcome.budget_charged)
+        self.assertFalse(outcome.transport_invoked)
+        self.assertEqual(result.ordinary_writes_sent, 0)
+        self.assertEqual(len(write_transport.calls), 0)
+
+        appended = {event.event_type.name for event in locked.events[before:]}
+        self.assertNotIn("WRITE_SEND_BOUNDARY_ENTERED", appended)
+        self.assertNotIn("EXECUTION_INTENT_RECORDED", appended)
+        self.assertNotIn("REQUEST_PREPARED", appended)
+
+    def test_c06_run_07b_exact_account_limits_admit_the_create_inclusively(self) -> None:
+        """C07-AGG-002 / C07-12: the account comparison is inclusive `<=` at
+        the exact configured limit.  The breach direction is covered by
+        `test_c06_run_07_...`; every per-leaf equality/excess boundary is
+        covered exhaustively in `tests/test_kalshi_risk_control.py`."""
+        stage3, gate_d_runtime, invocation, transport, write_transport = self._ready()
+        exact = self._tight_account_runtime(
+            gate_d_runtime,
+            max_aggregate_working_orders=1,
+            max_aggregate_working_contracts=Decimal("1.00"),
+            max_aggregate_exposure_usd=Decimal("1.000000"),
+        )
+        self._queue_gate_d_read_cycle(transport, order_ids=())
+        transport.queue(
+            RunnerOperation.GET_ORDER, _order_payload("venue-order-created-1", ticker=self.TICKER),
+        )
+        write_transport.queue(_json_response({"order": {"order_id": "venue-order-created-1"}}))
+
+        result = run_gate_d_ordinary_decision_loop(stage3, exact, invocation, decision_cycle_max=1)
+
+        outcome = result.cycle_results[0].write_outcome
+        self.assertIsNotNone(outcome)
+        self.assertEqual(outcome.action, "CREATE")
+        # The one-order / one-contract canary limits are met EXACTLY (the
+        # candidate projects +1 working order and +1.00 contracts onto an
+        # empty account), and inclusive `<=` admits it.
+        self.assertTrue(outcome.assessment_eligible)
+        # CORRECTION_08: on this legacy (non-ADRS2) runtime the eligible
+        # CREATE still cannot pass the dedicated Strategy-1 Gate-D CREATE
+        # permit entrypoint (C08-SCOPED-003), so nothing is sent.
+        self.assertEqual(outcome.result_classification, "PERMIT_ISSUANCE_FAILED")
+        self.assertEqual(result.ordinary_writes_sent, 0)
+        self.assertEqual(len(write_transport.calls), 0)
+
+    def test_c06_run_10_ticker_scoped_truth_alone_cannot_satisfy_the_account_aggregate(self) -> None:
+        """C07-AGG-003: the account aggregate universe is derived from the
+        COMPLETE durable conflict-domain ledger replay, not from the
+        ticker-scoped Gate-D venue read.
+
+        Proven structurally: the CREATE path calls
+        `build_account_aggregate_input` with the locked ledger, and if that
+        durable derivation is unavailable the CREATE fails closed even though
+        the ticker read succeeded and reported an empty book.
+        """
+        stage3, gate_d_runtime, invocation, transport, write_transport = self._ready()
+        self._queue_gate_d_read_cycle(transport, order_ids=())
+
+        captured = []
+        real = runner.build_account_aggregate_input
+
+        def unavailable(locked, **kwargs):
+            captured.append(kwargs)
+            raise RiskControlError(RiskControlCode.RISK_INPUT_UNAVAILABLE)
+
+        with mock.patch.object(runner, "build_account_aggregate_input", unavailable):
+            result = run_gate_d_ordinary_decision_loop(
+                stage3, gate_d_runtime, invocation, decision_cycle_max=1,
+            )
+
+        # The durable account universe was demanded ...
+        self.assertTrue(captured)
+        # ... and without it the ticker read alone produced no write at all.
+        outcome = result.cycle_results[0].write_outcome
+        self.assertIsNotNone(outcome)
+        self.assertFalse(outcome.assessment_eligible)
+        self.assertFalse(outcome.transport_invoked)
+        self.assertEqual(result.ordinary_writes_sent, 0)
+        self.assertEqual(len(write_transport.calls), 0)
+        self.assertIs(runner.build_account_aggregate_input, real)
+
+    def test_c08_run_legacy_gate_d_create_fails_closed_at_scoped_entrypoint(self) -> None:
+        """C08-RUN-001 / C08-SCOPED-003 / C08-SCOPE-004: the legacy
+        (non-ADRS2) runtime's Gate-D CREATE reaches the dedicated Strategy-1
+        Gate-D CREATE entrypoint -- never the generic surfaces, whose doubles
+        raise if invoked -- and is rejected there before permit construction
+        because no active ADRS2 read-set identity exists.  No subaccount or
+        legacy-status heuristic exempts it, and nothing falls back to the
+        generic `issue_permit`: no T1/T2/T3, no adapter, no transport."""
+        stage3, gate_d_runtime, invocation, transport, write_transport = self._ready()
+        locked = stage3.normal_writer_acquisition.handle
+        self._queue_gate_d_read_cycle(transport, order_ids=())
+        before = len(locked.events)
+
+        def _forbidden(*args, **kwargs):
+            raise AssertionError("generic permit surface invoked for Strategy-1 Gate-D CREATE")
+
+        real_scoped = WriterEligibilityGate.issue_strategy1_gate_d_create_permit
+        scoped_errors: list = []
+
+        def _scoped(gate, **kwargs):
+            try:
+                return real_scoped(gate, **kwargs)
+            except RiskControlError as exc:
+                scoped_errors.append(exc.code)
+                raise
+
+        with mock.patch.object(WriterEligibilityGate, "issue_permit", side_effect=_forbidden), \
+                mock.patch.object(runner, "issue_and_persist_write_permit", side_effect=_forbidden), \
+                mock.patch.object(NormalWriteAdapter, "invoke", side_effect=AssertionError("adapter reached")), \
+                mock.patch.object(
+                    WriterEligibilityGate, "issue_strategy1_gate_d_create_permit",
+                    autospec=True, side_effect=_scoped) as scoped:
+            result = run_gate_d_ordinary_decision_loop(stage3, gate_d_runtime, invocation, decision_cycle_max=1)
+
+        outcome = result.cycle_results[0].write_outcome
+        self.assertEqual(outcome.action, "CREATE")
+        self.assertTrue(outcome.assessment_eligible)
+        self.assertEqual(outcome.result_classification, "PERMIT_ISSUANCE_FAILED")
+        self.assertFalse(outcome.budget_charged)
+        self.assertFalse(outcome.transport_invoked)
+        self.assertEqual(scoped.call_count, 1)
+        self.assertEqual(scoped_errors, [RiskControlCode.NORMAL_WRITER_PERMIT_INVALID])
+        self.assertEqual(len(write_transport.calls), 0)
+        appended = {event.event_type.name for event in locked.events[before:]}
+        self.assertNotIn("EXECUTION_INTENT_RECORDED", appended)
+        self.assertNotIn("REQUEST_PREPARED", appended)
+        self.assertNotIn("WRITE_SEND_BOUNDARY_ENTERED", appended)
+
+    def test_c06_run_06a_ordinary_create_charges_the_one_ordinary_counter(self) -> None:
+        """C07-FLOW-001: an ordinary CREATE is charged against
+        `ordinary_writes_sent`, which is bounded by `G.max_ordinary_write_sends`
+        alone.  The positive charge is carried by
+        `test_c08_run_active_c06_run_06a_...` on the active Strategy-1
+        runtime.
+
+        CORRECTION_08: on this legacy (non-ADRS2) runtime the CREATE fails
+        closed at the dedicated Strategy-1 Gate-D CREATE permit entrypoint,
+        so the ordinary counter is NOT charged and no cleanup lane appears."""
+        stage3, gate_d_runtime, invocation, transport, write_transport = self._ready()
+        self._queue_gate_d_read_cycle(transport, order_ids=())
+
+        created = run_gate_d_ordinary_decision_loop(
+            stage3, gate_d_runtime, invocation, decision_cycle_max=1, ordinary_write_send_max=1,
+        )
+        self.assertEqual(created.cycle_results[0].write_outcome.action, "CREATE")
+        self.assertEqual(created.cycle_results[0].write_outcome.lane, "ORDINARY")
+        self.assertFalse(created.cycle_results[0].write_outcome.budget_charged)
+        self.assertEqual(
+            created.cycle_results[0].write_outcome.result_classification, "PERMIT_ISSUANCE_FAILED",
+        )
+        self.assertEqual(created.ordinary_writes_sent, 0)
+        self.assertEqual(created.cleanup_cancels_sent, 0)
+        self.assertEqual(len(write_transport.calls), 0)
+
+    def test_c06_run_06b_ordinary_cancel_charges_the_same_one_ordinary_counter(self) -> None:
+        """C07-FLOW-001: an ordinary CANCEL is charged against the SAME
+        `ordinary_writes_sent` counter as CREATE -- there is no separate
+        cancel budget and no cleanup lane."""
+        stage3, gate_d_runtime, invocation, transport, write_transport = self._ready()
+        self._seed_active_exact_order(
+            stage3, gate_d_runtime, quote_slot=QuoteSlot.LOWER_YES_BID.value,
+            client_order_id="99999999-9999-4999-8999-999999999999",
+            venue_order_id="venue-order-old-1", yes_price=D("0.05"), request_seed="run06",
+        )
+        self._queue_gate_d_read_cycle(transport, order_ids=("venue-order-old-1",))
+        transport.queue(
+            RunnerOperation.GET_ORDER,
+            _order_payload(
+                "venue-order-old-1", ticker=self.TICKER, status="canceled",
+                remaining_count_fp="1.00", fill_count_fp="0.00", initial_count_fp="1.00",
+                client_order_id="99999999-9999-4999-8999-999999999999", yes_price_dollars="0.05",
+            ),
+        )
+        transport.queue(RunnerOperation.GET_FILLS, _fills_payload([]))
+        write_transport.queue(_cancel_result_payload(order_id="venue-order-old-1", reduced_by="1.00"))
+
+        cancelled = run_gate_d_ordinary_decision_loop(
+            stage3, gate_d_runtime, invocation, decision_cycle_max=1, ordinary_write_send_max=1,
+        )
+        self.assertEqual(cancelled.cycle_results[0].write_outcome.action, "CANCEL")
+        self.assertEqual(cancelled.cycle_results[0].write_outcome.lane, "ORDINARY")
+        self.assertTrue(cancelled.cycle_results[0].write_outcome.budget_charged)
+        self.assertEqual(cancelled.ordinary_writes_sent, 1)
+        self.assertEqual(cancelled.cleanup_cancels_sent, 0)
+
+    def test_c06_run_06c_a_zero_ordinary_budget_stops_before_any_write(self) -> None:
+        """The one numerical budget governs both actions: with G=0 the loop
+        stops on the ordinary-write budget and sends nothing."""
+        stage3, gate_d_runtime, invocation, transport, write_transport = self._ready()
+        self._queue_gate_d_read_cycle(transport, order_ids=())
+
+        result = run_gate_d_ordinary_decision_loop(
+            stage3, gate_d_runtime, invocation, decision_cycle_max=1, ordinary_write_send_max=0,
+        )
+        self.assertEqual(result.stop_reason, "ORDINARY_WRITE_BUDGET_EXHAUSTED")
+        self.assertEqual(result.ordinary_writes_sent, 0)
+        self.assertEqual(result.cleanup_cancels_sent, 0)
+        self.assertEqual(len(write_transport.calls), 0)
+
+    def test_c06_run_13_gate_d_loop_never_increments_a_cleanup_lane(self) -> None:
+        """MM07-CLAR-001 preserved under C07: the loop reports exactly zero
+        cleanup cancels, whatever ordinary writes it performed."""
+        stage3, gate_d_runtime, invocation, transport, write_transport = self._ready()
+        self._queue_gate_d_read_cycle(transport, order_ids=())
+
+        result = run_gate_d_ordinary_decision_loop(
+            stage3, gate_d_runtime, invocation, decision_cycle_max=1,
+        )
+        # CORRECTION_08: the legacy (non-ADRS2) CREATE fails closed at the
+        # scoped Strategy-1 Gate-D CREATE entrypoint, so no ordinary write is
+        # sent here; the cleanup-lane count stays exactly zero either way.
+        self.assertEqual(result.ordinary_writes_sent, 0)
+        self.assertEqual(result.cleanup_cancels_sent, 0)
+
+
+    def _live_aggregate_input(self, stage3, gate_d_runtime, *, read_set_id=None, **overrides):
+        locked = stage3.normal_writer_acquisition.handle
+        live = build_account_aggregate_input(
+            locked, risk_config_sha256=gate_d_runtime.risk_config.sha256,
+            unresolved_exposure_usd=D("0"), trusted_dynamic_read_set_id=read_set_id,
+            reconciliation_snapshot_sha256="c" * 64,
+        )
+        if not overrides:
+            return live
+        values = {field.name: getattr(live, field.name) for field in dataclasses.fields(live)}
+        values.update(overrides)
+        return AccountAggregateInputV1(**values)
+
+    def _live_aggregate_expectation(self, stage3, gate_d_runtime, *, read_set_id=None):
+        """CORRECTION_01 Gate A: the authoritative expected identity, read
+        straight off the live locked ledger.  It is NEVER derived from the
+        aggregate input, so no test can satisfy both sides of the identity
+        comparison from one mutated object."""
+        return build_account_aggregate_authority_expectation(
+            stage3.normal_writer_acquisition.handle,
+            risk_config_sha256=gate_d_runtime.risk_config.sha256,
+            trusted_dynamic_read_set_id=read_set_id, reconciliation_snapshot_sha256="c" * 64,
+        )
+
+    def _create_assessment(self, stage3, gate_d_runtime, aggregate_input, expectation=None):
+        if expectation is None:
+            expectation = self._live_aggregate_expectation(stage3, gate_d_runtime)
+        return build_writer_eligibility_assessment(
+            risk_assessment_id=f"ra_{'5' * 32}", request_id=f"req_{'5' * 32}",
+            candidate=CandidateOrderV1(self.TICKER, "YES", D("1.00"), D("0.05")),
+            market_economic_state=MarketEconomicState(D("0"), D("0"), D("0"), D("0"), D("0"), 0, D("0")),
+            unresolved_exposure=D("0"), risk_config=gate_d_runtime.risk_config,
+            prepared_request_sha256="f" * 64, market_data_snapshot_sha256="a" * 64,
+            market_data_freshness_identity_sha256="b" * 64, reconciliation_snapshot_sha256="c" * 64,
+            reconciliation_freshness_identity_sha256="d" * 64,
+            risk_state_epoch=stage3.normal_writer_acquisition.handle.projection().risk_state_epoch,
+            freshness_deadline_monotonic_ns=999_999_999_999,
+            account_aggregate_input=aggregate_input,
+            account_aggregate_expectation=expectation,
+        )
+
+    def _assert_identity_substitution_rejected(self, stage3, gate_d_runtime, **override):
+        """CORR01-RUN-03: exactly one aggregate identity field is substituted
+        while the authoritative expectation stays untouched.  The assessment
+        must be ineligible, carry NO aggregate binding, and -- because
+        `issue_permit` refuses a non-eligible assessment -- obtain no permit,
+        emit no send-boundary event and invoke no transport."""
+        label = ",".join(sorted(override))
+        locked = stage3.normal_writer_acquisition.handle
+        before = len(locked.events)
+
+        assessment = self._create_assessment(
+            stage3, gate_d_runtime,
+            self._live_aggregate_input(stage3, gate_d_runtime, **override),
+        )
+        self.assertFalse(assessment.eligible, label)
+        self.assertIsNone(assessment.account_aggregate_snapshot_sha256, label)
+        self.assertIsNone(assessment.account_aggregate_conflict_domain_ref, label)
+        self.assertIsNone(assessment.account_aggregate_authority_namespace_id, label)
+        self.assertIsNone(assessment.account_aggregate_ledger_instance_id, label)
+
+        with self.assertRaises(RiskControlError, msg=label):
+            gate_d_runtime.normal_gate.issue_permit(
+                locked=locked, normal_writer_session_id=stage3.normal_writer_session_id,
+                assessment=assessment,
+                intent_payload={
+                    "intent_payload": {"request_id": assessment.request_id},
+                    "execution_attempt_id": f"ea_{'7' * 32}",
+                },
+                prepared_payload={
+                    "request_id": assessment.request_id,
+                    "operation_name": assessment.operation_kind,
+                    "prepared_request_sha256": assessment.candidate_request_sha256,
+                },
+            )
+        # No permit means no T1/T2/T3 lineage and no send boundary.
+        self.assertEqual(len(locked.events), before, label)
+        appended = {event.event_type.name for event in locked.events[before:]}
+        self.assertNotIn("WRITE_SEND_BOUNDARY_ENTERED", appended)
+
+    def test_c06_run_08_a_moved_ledger_tail_between_assessment_and_permit_rejects_before_send(self) -> None:
+        """C06-RUN-08 / C07-AGG-004: an assessment whose aggregate state was
+        derived over an earlier tail cannot obtain a permit once the active
+        tail has moved, so no send-boundary event and no transport follow."""
+        stage3, gate_d_runtime, invocation, transport, write_transport = self._ready()
+        locked = stage3.normal_writer_acquisition.handle
+        session_id = stage3.normal_writer_session_id
+
+        stale = self._live_aggregate_input(stage3, gate_d_runtime)
+        assessment = self._create_assessment(stage3, gate_d_runtime, stale)
+        self.assertTrue(assessment.eligible)
+        self.assertEqual(
+            assessment.account_aggregate_ledger_terminal_sequence, locked.events[-1].sequence,
+        )
+
+        # The active tail moves for a genuine reason: one real production-shaped
+        # seeded write appends its own T1/T2/T3 lineage plus its closure and
+        # identity-binding events.  (CORRECTION_08: a legacy non-ADRS2 Gate-D
+        # CREATE cycle can no longer obtain a permit, so it cannot move the
+        # tail itself.)
+        self._seed_active_exact_order(
+            stage3, gate_d_runtime, quote_slot=QuoteSlot.LOWER_YES_BID.value,
+            client_order_id="88888888-8888-4888-8888-888888888888",
+            venue_order_id="venue-order-tail-mover-1", yes_price=D("0.05"), request_seed="run08tail",
+        )
+        self.assertNotEqual(
+            assessment.account_aggregate_ledger_terminal_sequence, locked.events[-1].sequence,
+        )
+
+        before = len(locked.events)
+        sent_before = len(write_transport.calls)
+        with self.assertRaises(RiskControlError) as caught:
+            gate_d_runtime.normal_gate.issue_permit(
+                locked=locked, normal_writer_session_id=session_id, assessment=assessment,
+                intent_payload={"intent_payload": {"request_id": assessment.request_id},
+                                "execution_attempt_id": f"ea_{'5' * 32}"},
+                prepared_payload={"request_id": assessment.request_id,
+                                  "operation_name": assessment.operation_kind,
+                                  "prepared_request_sha256": assessment.candidate_request_sha256},
+            )
+        self.assertIs(
+            caught.exception.code, RiskControlCode.NORMAL_WRITER_PERMIT_UNEXPECTED_TAIL,
+        )
+        # The stale assessment appended nothing further and sent nothing.
+        self.assertEqual(len(locked.events), before)
+        self.assertEqual(len(write_transport.calls), sent_before)
+
+    def test_corr01_run_01_production_shaped_trusted_create_passes_gate_a(self) -> None:
+        """CORR01-RUN-01: the real Gate-D construction --
+        `build_account_aggregate_input(locked, ...)` plus the independently
+        obtained authoritative expectation -- passes the aggregate identity
+        gate and reaches the preexisting next gate."""
+        stage3, gate_d_runtime, invocation, transport, write_transport = self._ready()
+        locked = stage3.normal_writer_acquisition.handle
+
+        assessment = self._create_assessment(
+            stage3, gate_d_runtime, self._live_aggregate_input(stage3, gate_d_runtime),
+        )
+
+        self.assertTrue(assessment.eligible)
+        self.assertIsNotNone(assessment.account_aggregate_snapshot_sha256)
+        # The binding carries the exact authoritative identity for the
+        # permit-stage recheck.
+        self.assertEqual(assessment.account_aggregate_conflict_domain_ref, locked.conflict_domain_ref)
+        self.assertEqual(
+            assessment.account_aggregate_authority_namespace_id,
+            locked.authority_meta.authority_namespace_id,
+        )
+        self.assertEqual(
+            assessment.account_aggregate_authority_instance_id,
+            locked.authority_meta.authority_instance_id,
+        )
+        self.assertEqual(
+            assessment.account_aggregate_ledger_instance_id, locked.ledger_meta.ledger_instance_id,
+        )
+        self.assertEqual(
+            assessment.account_aggregate_risk_config_sha256, assessment.risk_config_sha256,
+        )
+        self.assertEqual(
+            assessment.account_aggregate_reconciliation_snapshot_sha256,
+            assessment.reconciliation_snapshot_sha256,
+        )
+        self.assertEqual(
+            assessment.account_aggregate_ledger_terminal_sequence, locked.events[-1].sequence,
+        )
+        # And it really does obtain a permit.
+        permit = gate_d_runtime.normal_gate.issue_permit(
+            locked=locked, normal_writer_session_id=stage3.normal_writer_session_id,
+            assessment=assessment,
+            intent_payload={
+                "intent_payload": {"request_id": assessment.request_id},
+                "execution_attempt_id": f"ea_{'8' * 32}",
+            },
+            prepared_payload={
+                "request_id": assessment.request_id,
+                "operation_name": assessment.operation_kind,
+                "prepared_request_sha256": assessment.candidate_request_sha256,
+            },
+        )
+        self.assertEqual(permit.request_id, assessment.request_id)
+        self.assertEqual(len(write_transport.calls), 0)
+
+    def test_corr01_run_02_foreign_conflict_domain_is_actually_rejected(self) -> None:
+        """CORR01-RUN-02: replaces the blocked predecessor assertion that
+        compared only snapshot digests.
+
+        A foreign aggregate `conflict_domain_ref` -- with every other value
+        trusted and the self-hash perfectly self-consistent -- must produce an
+        ineligible assessment, no permit, no send boundary and zero transport.
+        """
+        stage3, gate_d_runtime, invocation, transport, write_transport = self._ready()
+        locked = stage3.normal_writer_acquisition.handle
+        foreign = "KALSHI|KALSHI_DEMO|SOME_OTHER_ACCOUNT|SUBACCOUNT=9"
+        self.assertNotEqual(foreign, locked.conflict_domain_ref)
+
+        self._assert_identity_substitution_rejected(
+            stage3, gate_d_runtime, conflict_domain_ref=foreign,
+        )
+        self.assertEqual(len(write_transport.calls), 0)
+
+        # Sanity: the SAME construction with the true domain is eligible, so
+        # the rejection above is caused by the substituted domain alone.
+        trusted = self._create_assessment(
+            stage3, gate_d_runtime, self._live_aggregate_input(stage3, gate_d_runtime),
+        )
+        self.assertTrue(trusted.eligible)
+
+    def test_corr01_run_03_wrong_authority_ledger_or_reconciliation_identity_is_rejected(self) -> None:
+        """CORR01-RUN-03: each isolated substitution of an authority, ledger,
+        config, read-set, reconciliation or tail identity is rejected with
+        zero transport."""
+        stage3, gate_d_runtime, invocation, transport, write_transport = self._ready()
+        locked = stage3.normal_writer_acquisition.handle
+        tail = locked.events[-1]
+
+        for override in (
+            {"authority_namespace_id": "foreign-authority-namespace"},
+            {"authority_instance_id": "foreign-authority-instance"},
+            {"ledger_instance_id": "foreign-ledger-instance"},
+            {"risk_config_sha256": "0" * 64},
+            {"reconciliation_snapshot_sha256": "9" * 64},
+            {"trusted_dynamic_read_set_id": "ADRS2_" + "e" * 64},
+            {
+                "authority_trusted_sequence": tail.sequence + 1,
+                "ledger_terminal_sequence": tail.sequence + 1,
+            },
+        ):
+            with self.subTest(**override):
+                self._assert_identity_substitution_rejected(stage3, gate_d_runtime, **override)
+
+        self.assertEqual(len(write_transport.calls), 0)
+
+    def test_corr01_run_04_ticker_truth_cannot_supply_the_expected_identity(self) -> None:
+        """CORRECTION_01 structural property: the expected identity is an
+        unforgeable product of the locked-ledger boundary.  Neither the
+        ticker-scoped read truth nor the aggregate object itself can mint
+        one, so the two sides of the comparison can never share a source."""
+        stage3, gate_d_runtime, invocation, transport, _write_transport = self._ready()
+        aggregate_input = self._live_aggregate_input(stage3, gate_d_runtime)
+
+        for impostor in (None, object(), aggregate_input):
+            with self.assertRaises(RiskControlError):
+                build_account_aggregate_authority_expectation(
+                    impostor,
+                    risk_config_sha256=gate_d_runtime.risk_config.sha256,
+                    trusted_dynamic_read_set_id=None, reconciliation_snapshot_sha256="c" * 64,
+                )
+
+        # A complete aggregate with NO expectation is ineligible.
+        assessment = build_writer_eligibility_assessment(
+            risk_assessment_id=f"ra_{'6' * 32}", request_id=f"req_{'6' * 32}",
+            candidate=CandidateOrderV1(self.TICKER, "YES", D("1.00"), D("0.05")),
+            market_economic_state=MarketEconomicState(D("0"), D("0"), D("0"), D("0"), D("0"), 0, D("0")),
+            unresolved_exposure=D("0"), risk_config=gate_d_runtime.risk_config,
+            prepared_request_sha256="f" * 64, market_data_snapshot_sha256="a" * 64,
+            market_data_freshness_identity_sha256="b" * 64, reconciliation_snapshot_sha256="c" * 64,
+            reconciliation_freshness_identity_sha256="d" * 64,
+            risk_state_epoch=stage3.normal_writer_acquisition.handle.projection().risk_state_epoch,
+            freshness_deadline_monotonic_ns=999_999_999_999,
+            account_aggregate_input=aggregate_input,
+            account_aggregate_expectation=None,
+        )
+        self.assertFalse(assessment.eligible)
+        self.assertIsNone(assessment.account_aggregate_snapshot_sha256)
+
+
+class ProtectedStrategySourceTests(unittest.TestCase):
+    """CORRECTION_07 C07-PRICE-006 / C07-13 / test-contract section G."""
+
+    def test_c07_protected_market_maker_source_is_unchanged_by_this_correction(self) -> None:
+        """The installed strategy source is a PROTECTED, non-writable
+        dependency for C07.  Its exact canonical-base identity is pinned
+        here, so any implementation diff to it fails this test."""
+        path = (
+            Path(__file__).resolve().parents[1]
+            / "src" / "arb" / "venues" / "kalshi" / "minimal_market_maker.py"
+        )
+        raw = path.read_bytes()
+        self.assertEqual(len(raw), 52968)
+        self.assertEqual(
+            hashlib.sha256(raw).hexdigest(),
+            "5787272c1fa23a9d70d36533f3a4716b2db989fc5ade3050f93dae4422201f39",
+        )
 
 
 if __name__ == "__main__":

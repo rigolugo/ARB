@@ -45,17 +45,23 @@ from arb.venues.kalshi.minimal_market_maker import (
 from arb.venues.kalshi.order_lifecycle import build_cancel_query, generate_client_order_id, is_valid_lowercase_uuid4
 from arb.venues.kalshi.risk_control import (
     UNKNOWN_UNBOUNDED,
+    AccountAggregateAuthorityExpectationV1,
+    AccountAggregateInputV1,
+    AccountAggregateSnapshotV1,
     CandidateOrderV1,
     EconomicFillV1,
     MarketEconomicState,
     NormalWriterPermit,
     PriceRangeV1,
+    RiskControlCode,
     RiskControlError,
     RiskLimitConfigV1,
     WorkingOrderV1,
     WriterEligibilityAssessment,
     WriterEligibilityGate,
+    build_account_aggregate_snapshot,
     compute_market_economic_state,
+    enforce_account_aggregate_limits,
     enforce_projected_limits,
     project_candidate_risk,
 )
@@ -606,10 +612,56 @@ def build_writer_eligibility_assessment(
     freshness_deadline_monotonic_ns: int,
     active_domain_commitment: Mapping[str, object] | None = None,
     trusted_dynamic_read_set_id: str | None = None,
+    account_aggregate_input: AccountAggregateInputV1 | None = None,
+    account_aggregate_expectation: AccountAggregateAuthorityExpectationV1 | None = None,
 ) -> WriterEligibilityAssessment:
+    """CORRECTION_07 C07-AGG-001..005.
+
+    The CREATE assessment now additionally derives the candidate-aware
+    conflict-domain account aggregate over the COMPLETE trusted universe
+    supplied in ``account_aggregate_input`` and enforces the existing
+    ``conflict_domain_account`` leaves before eligibility.  A missing,
+    incomplete, stale, conflicting, or identity-mismatched aggregate input
+    cannot produce a snapshot, which makes the assessment ineligible and --
+    by the permit-issuance gate in ``risk_control`` -- unable to obtain a
+    permit, emit a send-boundary event, or reach transport.
+
+    The aggregate snapshot digest participates in
+    ``candidate_economic_sha256``, so the same candidate evaluated against a
+    different aggregate state carries a different candidate economic
+    identity and cannot be substituted.
+    """
+
     active_fields = _active_commitment_fields(
         active_domain_commitment, trusted_dynamic_read_set_id=trusted_dynamic_read_set_id,
     )
+    aggregate_snapshot: AccountAggregateSnapshotV1 | None = None
+    if type(account_aggregate_input) is AccountAggregateInputV1:
+        try:
+            # CORRECTION_01 Gate A — authoritative aggregate identity equality.
+            #
+            # ``account_aggregate_expectation`` is an unforgeable trusted
+            # product of the locked-ledger acquisition boundary. Every
+            # aggregate identity (conflict domain, authority namespace and
+            # instance, ledger instance, risk-config identity, trusted
+            # read-set identity, reconciliation identity, and the
+            # authority/ledger tail) must equal it exactly, field by field,
+            # before the snapshot can be minted. A deterministic self-hash is
+            # NOT authority proof, so it is never accepted on its own.
+            #
+            # Ownership note: the expected conflict domain comes from the
+            # LOCKED ledger, not from the active-domain commitment. A mutated
+            # active-domain commitment therefore still reaches -- and is still
+            # classified by -- the predecessor DSB-WRITER-007/008 permit and
+            # pre-adapter equality gates, exactly as before.
+            if type(account_aggregate_expectation) is not AccountAggregateAuthorityExpectationV1:
+                raise RiskControlError(RiskControlCode.RISK_INPUT_UNAVAILABLE)
+            aggregate_snapshot = build_account_aggregate_snapshot(
+                aggregate_input=account_aggregate_input, candidate=candidate, config=risk_config,
+                expectation=account_aggregate_expectation,
+            )
+        except RiskControlError:
+            aggregate_snapshot = None
     economic_preimage = {
         "market": candidate.market, "outcome_side": candidate.outcome_side,
         "quantity": candidate.quantity, "yes_price": candidate.yes_price,
@@ -621,19 +673,47 @@ def build_writer_eligibility_assessment(
         economic_preimage["active_contract_sha256"] = active_fields["active_contract_sha256"]
         economic_preimage["domain_binding_sha256"] = active_fields["domain_binding_sha256"]
         economic_preimage["trusted_dynamic_read_set_id"] = active_fields["trusted_dynamic_read_set_id"]
+    if aggregate_snapshot is not None:
+        # C07-AGG-004: the aggregate snapshot digest is part of the candidate
+        # economic identity carried into the permit.
+        economic_preimage["account_aggregate_snapshot_sha256"] = aggregate_snapshot.sha256
     candidate_economic_sha256 = sha256_hex(canonical_json_bytes(economic_preimage))
     try:
+        if aggregate_snapshot is None:
+            raise RiskControlError(RiskControlCode.RISK_INPUT_UNAVAILABLE)
         projected = project_candidate_risk(market_economic_state, candidate, unresolved_exposure)
         enforce_projected_limits(projected, candidate, risk_config)
+        enforce_account_aggregate_limits(aggregate_snapshot.projected, risk_config)
         eligible = True
     except RiskControlError:
         eligible = False
+    aggregate_fields: dict[str, object] = {}
+    if aggregate_snapshot is not None:
+        bound_input = aggregate_snapshot.aggregate_input
+        aggregate_fields = {
+            "account_aggregate_snapshot_sha256": aggregate_snapshot.sha256,
+            "account_aggregate_authority_trusted_sequence": aggregate_snapshot.authority_trusted_sequence,
+            "account_aggregate_authority_trusted_hash": aggregate_snapshot.authority_trusted_hash,
+            "account_aggregate_ledger_terminal_sequence": aggregate_snapshot.ledger_terminal_sequence,
+            "account_aggregate_ledger_terminal_hash": aggregate_snapshot.ledger_terminal_hash,
+            # CORRECTION_01 Gate B input: carry the aggregate universe's own
+            # domain/store and current-context identities so permit issuance
+            # can recheck them independently against the live LockedLedger
+            # and against this assessment's authoritative top-level values.
+            "account_aggregate_conflict_domain_ref": bound_input.conflict_domain_ref,
+            "account_aggregate_authority_namespace_id": bound_input.authority_namespace_id,
+            "account_aggregate_authority_instance_id": bound_input.authority_instance_id,
+            "account_aggregate_ledger_instance_id": bound_input.ledger_instance_id,
+            "account_aggregate_risk_config_sha256": bound_input.risk_config_sha256,
+            "account_aggregate_trusted_dynamic_read_set_id": bound_input.trusted_dynamic_read_set_id,
+            "account_aggregate_reconciliation_snapshot_sha256": bound_input.reconciliation_snapshot_sha256,
+        }
     return WriterEligibilityAssessment(
         risk_assessment_id, "CREATE_ORDER_V2", request_id, prepared_request_sha256, candidate_economic_sha256,
         risk_config.sha256, market_data_snapshot_sha256, market_data_freshness_identity_sha256,
         reconciliation_snapshot_sha256, reconciliation_freshness_identity_sha256, risk_state_epoch,
         freshness_deadline_monotonic_ns, eligible,
-        **active_fields,
+        **active_fields, **aggregate_fields,
     )
 
 

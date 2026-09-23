@@ -12,6 +12,7 @@ acquisition path (the same mechanism the predecessor test suite uses to reach
 
 from __future__ import annotations
 
+import dataclasses
 import hashlib
 import uuid
 from datetime import datetime, timedelta, timezone
@@ -31,6 +32,7 @@ from arb.execution_ledger import (
 )
 from arb.venues.kalshi.emergency_cancel import EmergencyCancelGate, EmergencyRateConfigV1, EmergencyRateLane
 from arb.venues.kalshi.ledger_binding import (
+    build_account_aggregate_input,
     LegacyIncidentContract,
     ReleaseEvaluationStateV1,
     ReleaseReconciliationSnapshotV1,
@@ -41,6 +43,10 @@ from arb.venues.kalshi.ledger_binding import (
 )
 from arb.venues.kalshi.minimal_market_maker import DesiredQuoteV1, QuoteSlot, SlotClassification, StrategyOwnedWorkingOrderV1
 from arb.venues.kalshi.risk_control import (
+    ACCOUNT_AGGREGATE_UNIVERSE_COMPLETE,
+    UNKNOWN_UNBOUNDED,
+    AccountAggregateAuthorityExpectationV1,
+    AccountAggregateInputV1,
     AccountRiskLimits,
     CandidateOrderV1,
     EconomicFillV1,
@@ -49,11 +55,18 @@ from arb.venues.kalshi.risk_control import (
     MarketEconomicState,
     PerMarketRiskLimits,
     PerOrderRiskLimits,
+    RiskControlCode,
+    RiskControlError,
     RiskLimitConfigV1,
     StateIntegrityLimits,
     VenueDefensePolicy,
     WorkingOrderV1,
     WriterEligibilityGate,
+    build_account_aggregate_authority_expectation,
+    compute_account_aggregate_totals,
+    enforce_projected_limits,
+    project_account_aggregate,
+    project_candidate_risk,
 )
 from arb.venues.kalshi.quote_lifecycle import (
     CREATE_ORDER_ALLOWED_FIELDS,
@@ -490,7 +503,26 @@ def writer_eligible_ledger(tmp_path: Path):
         locked.close()
 
 
-def _assessment_and_payloads(*, request_id: str, execution_attempt_id: str):
+def _live_account_aggregate_input(locked):
+    """CORRECTION_07 C07-AGG-001..004: the complete durable conflict-domain
+    account aggregate input, bound to this ledger's live authority/ledger
+    tail -- exactly what the real CREATE path builds."""
+    return build_account_aggregate_input(
+        locked, risk_config_sha256=risk_config().sha256, unresolved_exposure_usd=D("0"),
+        trusted_dynamic_read_set_id=None, reconciliation_snapshot_sha256="c" * 64,
+    )
+
+
+def _live_account_aggregate_expectation(locked):
+    """CORRECTION_01 Gate A: the authoritative expected identity for the same
+    locked ledger, obtained INDEPENDENTLY of the aggregate input above."""
+    return build_account_aggregate_authority_expectation(
+        locked, risk_config_sha256=risk_config().sha256,
+        trusted_dynamic_read_set_id=None, reconciliation_snapshot_sha256="c" * 64,
+    )
+
+
+def _assessment_and_payloads(*, request_id: str, execution_attempt_id: str, locked=None):
     binding = VenueBindingV1(adapter_payload_schema_id="mm-create-v1")
     body = build_mm_create_order_body(
         ticker="TICK-1", client_order_id="11111111-1111-4111-8111-111111111111", venue_side="bid",
@@ -508,6 +540,10 @@ def _assessment_and_payloads(*, request_id: str, execution_attempt_id: str):
         prepared_request_sha256=prepared["prepared_request_sha256"], market_data_snapshot_sha256="a" * 64,
         market_data_freshness_identity_sha256="b" * 64, reconciliation_snapshot_sha256="c" * 64,
         reconciliation_freshness_identity_sha256="d" * 64, risk_state_epoch=WRITER_ELIGIBLE_RISK_STATE_EPOCH, freshness_deadline_monotonic_ns=999_999_999_999,
+        account_aggregate_input=None if locked is None else _live_account_aggregate_input(locked),
+        account_aggregate_expectation=(
+            None if locked is None else _live_account_aggregate_expectation(locked)
+        ),
     )
     outer_intent = build_mm_create_intent_payload(
         execution_attempt_id=execution_attempt_id, conflict_domain_ref=TEST_CONFLICT_DOMAIN_REF,
@@ -525,7 +561,7 @@ def test_real_gate_real_ledger_accepts_corrected_t1_t2_t3_chain(writer_eligible_
     locked, session_id, _inputs = writer_eligible_ledger
     request_id = "req_" + "9" * 32
     execution_attempt_id = "ea_" + "8" * 32
-    assessment, outer_intent, prepared = _assessment_and_payloads(request_id=request_id, execution_attempt_id=execution_attempt_id)
+    assessment, outer_intent, prepared = _assessment_and_payloads(request_id=request_id, execution_attempt_id=execution_attempt_id, locked=locked)
     gate = WriterEligibilityGate(monotonic_clock_ns=lambda: 1, wall_clock=lambda: datetime(2026, 8, 15, 13, tzinfo=timezone.utc))
 
     permit = issue_and_persist_write_permit(
@@ -557,7 +593,7 @@ def test_real_gate_real_ledger_accepts_corrected_t1_t2_t3_chain(writer_eligible_
 def test_real_ledger_rejects_flat_top_level_request_id_fixture(writer_eligible_ledger) -> None:
     locked, session_id, _inputs = writer_eligible_ledger
     request_id = "req_" + "7" * 32
-    assessment, _outer, prepared = _assessment_and_payloads(request_id=request_id, execution_attempt_id="ea_" + "6" * 32)
+    assessment, _outer, prepared = _assessment_and_payloads(request_id=request_id, execution_attempt_id="ea_" + "6" * 32, locked=locked)
     gate = WriterEligibilityGate(monotonic_clock_ns=lambda: 1, wall_clock=lambda: datetime(2026, 8, 15, 13, tzinfo=timezone.utc))
     with pytest.raises(Exception):
         gate.issue_permit(
@@ -569,7 +605,7 @@ def test_real_ledger_rejects_flat_top_level_request_id_fixture(writer_eligible_l
 def test_real_gate_rejects_missing_execution_attempt_id(writer_eligible_ledger) -> None:
     locked, session_id, _inputs = writer_eligible_ledger
     request_id = "req_" + "5" * 32
-    assessment, outer_intent, prepared = _assessment_and_payloads(request_id=request_id, execution_attempt_id="ea_" + "4" * 32)
+    assessment, outer_intent, prepared = _assessment_and_payloads(request_id=request_id, execution_attempt_id="ea_" + "4" * 32, locked=locked)
     del outer_intent["execution_attempt_id"]
     gate = WriterEligibilityGate(monotonic_clock_ns=lambda: 1, wall_clock=lambda: datetime(2026, 8, 15, 13, tzinfo=timezone.utc))
     with pytest.raises(Exception):
@@ -582,7 +618,7 @@ def test_real_gate_rejects_missing_execution_attempt_id(writer_eligible_ledger) 
 def test_real_gate_rejects_wrong_nested_request_id(writer_eligible_ledger) -> None:
     locked, session_id, _inputs = writer_eligible_ledger
     request_id = "req_" + "3" * 32
-    assessment, outer_intent, prepared = _assessment_and_payloads(request_id=request_id, execution_attempt_id="ea_" + "2" * 32)
+    assessment, outer_intent, prepared = _assessment_and_payloads(request_id=request_id, execution_attempt_id="ea_" + "2" * 32, locked=locked)
     outer_intent["intent_payload"]["request_id"] = "req_" + "0" * 32
     gate = WriterEligibilityGate(monotonic_clock_ns=lambda: 1, wall_clock=lambda: datetime(2026, 8, 15, 13, tzinfo=timezone.utc))
     with pytest.raises(Exception):
@@ -601,7 +637,7 @@ def test_real_ledger_rejects_missing_t2_execution_attempt_parent(writer_eligible
     locked, session_id, _inputs = writer_eligible_ledger
     request_id = "req_" + "1" * 30 + "aa"
     execution_attempt_id = "ea_" + "1" * 30 + "bb"
-    assessment, outer_intent, prepared = _assessment_and_payloads(request_id=request_id, execution_attempt_id=execution_attempt_id)
+    assessment, outer_intent, prepared = _assessment_and_payloads(request_id=request_id, execution_attempt_id=execution_attempt_id, locked=locked)
     gate = WriterEligibilityGate(monotonic_clock_ns=lambda: 1, wall_clock=lambda: datetime(2026, 8, 15, 13, tzinfo=timezone.utc))
     permit = gate.issue_permit(
         locked=locked, normal_writer_session_id=session_id, assessment=assessment,
@@ -845,6 +881,8 @@ def _persist_mm_create(locked, session_id, inputs, *, request_id: str, execution
         market_data_freshness_identity_sha256="b" * 64, reconciliation_snapshot_sha256="c" * 64,
         reconciliation_freshness_identity_sha256="d" * 64, risk_state_epoch=WRITER_ELIGIBLE_RISK_STATE_EPOCH,
         freshness_deadline_monotonic_ns=999_999_999_999,
+        account_aggregate_input=_live_account_aggregate_input(locked),
+        account_aggregate_expectation=_live_account_aggregate_expectation(locked),
     )
     outer_intent = build_mm_create_intent_payload(
         execution_attempt_id=execution_attempt_id, conflict_domain_ref=TEST_CONFLICT_DOMAIN_REF,
@@ -2142,3 +2180,543 @@ def test_t_no_hardcoded_subaccount_one_gate() -> None:
     meta = _ql2.active_prepared_request_domain_metadata(v2, canonical_request_sha256="0" * 64)
     assert meta["subaccount"] == 31
     assert meta["conflict_domain_ref"].endswith("SUBACCOUNT=31")
+
+
+# ---------------------------------------------------------------------------
+# CORRECTION_07 C06-QL-01..07 -- candidate-aware account aggregate enforcement
+# and identity binding in the CREATE writer-eligibility assessment.
+# ---------------------------------------------------------------------------
+
+
+QL_AGG_READ_SET_ID = "ADRS2_" + "b" * 64
+QL_AGG_RECONCILIATION_SHA = "c" * 64
+
+
+def aggregate_risk_config(
+    *,
+    max_aggregate_exposure_usd: Decimal = D("100"),
+    max_aggregate_working_orders: int = 50,
+    max_aggregate_working_contracts: Decimal = D("100"),
+) -> RiskLimitConfigV1:
+    """``risk_config()`` with only the three existing account leaves varied --
+    no new risk-limit schema leaf is introduced (C07-AGG-002)."""
+    base = risk_config()
+    return RiskLimitConfigV1(
+        base.schema_version, base.conflict_domain, base.currency, base.per_order, base.per_market,
+        AccountRiskLimits(
+            max_aggregate_exposure_usd, max_aggregate_working_orders, max_aggregate_working_contracts,
+            base.conflict_domain_account.max_unresolved_write_count,
+            base.conflict_domain_account.max_conservative_unresolved_write_exposure_usd,
+        ),
+        base.flow, base.state_integrity, base.venue_defense,
+    )
+
+
+# ---------------------------------------------------------------------------
+# CORRECTION_01 — authoritative aggregate identity helpers.
+#
+# Marco C07-IMPL-BLOCK-01: a deterministic self-hash is not authority proof.
+# Both the aggregate universe AND the expected identity are now sourced from
+# the SAME real LockedLedger, independently of each other:
+#
+#   aggregate actual identity  <- build_account_aggregate_input(locked, ...)
+#   expected identity          <- build_account_aggregate_authority_expectation(locked, ...)
+#
+# A test then substitutes exactly ONE field of the aggregate input. The
+# expectation is never rebuilt from the mutated object, so no test can satisfy
+# both sides of a comparison from one mutated source.
+# ---------------------------------------------------------------------------
+
+
+def ql_authority_expectation(
+    locked,
+    *,
+    risk_cfg: RiskLimitConfigV1 | None = None,
+    read_set_id: str | None = QL_AGG_READ_SET_ID,
+    reconciliation_snapshot_sha256: str = QL_AGG_RECONCILIATION_SHA,
+) -> AccountAggregateAuthorityExpectationV1:
+    """The unforgeable authoritative expectation, read straight off the live
+    locked ledger plus this invocation's own current context."""
+    risk_cfg = risk_cfg if risk_cfg is not None else risk_config()
+    return build_account_aggregate_authority_expectation(
+        locked, risk_config_sha256=risk_cfg.sha256, trusted_dynamic_read_set_id=read_set_id,
+        reconciliation_snapshot_sha256=reconciliation_snapshot_sha256,
+    )
+
+
+def ql_aggregate_input(
+    locked,
+    *,
+    risk_cfg: RiskLimitConfigV1 | None = None,
+    read_set_id: str | None = QL_AGG_READ_SET_ID,
+    reconciliation_snapshot_sha256: str = QL_AGG_RECONCILIATION_SHA,
+    **overrides,
+) -> AccountAggregateInputV1:
+    """The trusted all-market aggregate universe for this locked ledger, with
+    optional single-field substitution used by the negative tests."""
+    risk_cfg = risk_cfg if risk_cfg is not None else risk_config()
+    live = build_account_aggregate_input(
+        locked, risk_config_sha256=risk_cfg.sha256, unresolved_exposure_usd=D("0"),
+        trusted_dynamic_read_set_id=read_set_id,
+        reconciliation_snapshot_sha256=reconciliation_snapshot_sha256,
+    )
+    if not overrides:
+        return live
+    values = {field.name: getattr(live, field.name) for field in dataclasses.fields(live)}
+    values.update(overrides)
+    return AccountAggregateInputV1(**values)
+
+
+def ql_create_assessment(
+    *,
+    risk_cfg: RiskLimitConfigV1 | None = None,
+    account_aggregate_input: AccountAggregateInputV1 | None = None,
+    account_aggregate_expectation: AccountAggregateAuthorityExpectationV1 | None = None,
+    candidate: CandidateOrderV1 | None = None,
+    market_economic_state: MarketEconomicState | None = None,
+):
+    risk_cfg = risk_cfg if risk_cfg is not None else risk_config()
+    candidate = candidate or CandidateOrderV1("TICK-1", "YES", D("1.00"), D("0.44"))
+    state = market_economic_state or MarketEconomicState(D("0"), D("0"), D("0"), D("0"), D("0"), 0, D("0"))
+    return build_writer_eligibility_assessment(
+        risk_assessment_id="ra_" + "1" * 32, request_id="req_" + "9" * 32, candidate=candidate,
+        market_economic_state=state, unresolved_exposure=D("0"), risk_config=risk_cfg,
+        prepared_request_sha256="f" * 64, market_data_snapshot_sha256="a" * 64,
+        market_data_freshness_identity_sha256="b" * 64,
+        reconciliation_snapshot_sha256=QL_AGG_RECONCILIATION_SHA,
+        reconciliation_freshness_identity_sha256="d" * 64,
+        risk_state_epoch=WRITER_ELIGIBLE_RISK_STATE_EPOCH, freshness_deadline_monotonic_ns=999_999_999_999,
+        account_aggregate_input=account_aggregate_input,
+        account_aggregate_expectation=account_aggregate_expectation,
+    )
+
+
+def ql_trusted_assessment(locked, **kwargs):
+    """A production-shaped assessment: universe and expectation both sourced
+    authoritatively from the same locked ledger."""
+    risk_cfg = kwargs.pop("risk_cfg", None)
+    aggregate_input = kwargs.pop(
+        "account_aggregate_input", ql_aggregate_input(locked, risk_cfg=risk_cfg),
+    )
+    expectation = kwargs.pop(
+        "account_aggregate_expectation", ql_authority_expectation(locked, risk_cfg=risk_cfg),
+    )
+    return ql_create_assessment(
+        risk_cfg=risk_cfg, account_aggregate_input=aggregate_input,
+        account_aggregate_expectation=expectation, **kwargs,
+    )
+
+
+def test_c06_ql_01_create_assessment_is_ineligible_without_complete_aggregate_input(
+    writer_eligible_ledger,
+) -> None:
+    """C06-QL-01: no complete account aggregate input -> never eligible, and
+    no aggregate identity is fabricated.  CORRECTION_01 adds: a missing
+    authoritative expectation is equally fatal."""
+
+    locked, _session_id, _inputs = writer_eligible_ledger
+
+    missing_input = ql_create_assessment(
+        account_aggregate_input=None,
+        account_aggregate_expectation=ql_authority_expectation(locked),
+    )
+    assert missing_input.eligible is False
+    assert missing_input.account_aggregate_snapshot_sha256 is None
+    assert missing_input.account_aggregate_authority_trusted_sequence is None
+    assert missing_input.account_aggregate_conflict_domain_ref is None
+
+    # CORRECTION_01: a complete universe with NO authoritative expectation is
+    # also ineligible -- self-consistency alone is never accepted.
+    missing_expectation = ql_create_assessment(
+        account_aggregate_input=ql_aggregate_input(locked),
+        account_aggregate_expectation=None,
+    )
+    assert missing_expectation.eligible is False
+    assert missing_expectation.account_aggregate_snapshot_sha256 is None
+
+    # The very same candidate WITH both is eligible, so the ineligibility
+    # above is caused by the missing piece alone.
+    assert ql_trusted_assessment(locked).eligible is True
+
+
+def test_c06_ql_02_aggregate_snapshot_sha_participates_in_candidate_economic_identity(
+    writer_eligible_ledger,
+) -> None:
+    """C06-QL-02: the aggregate digest is part of the candidate economic
+    identity carried into the permit."""
+
+    locked, _session_id, _inputs = writer_eligible_ledger
+    with_aggregate = ql_trusted_assessment(locked)
+    without_aggregate = ql_create_assessment(account_aggregate_input=None)
+
+    assert with_aggregate.account_aggregate_snapshot_sha256 is not None
+    assert len(with_aggregate.account_aggregate_snapshot_sha256) == 64
+    assert with_aggregate.candidate_economic_sha256 != without_aggregate.candidate_economic_sha256
+
+
+def test_c06_ql_03_same_candidate_different_aggregate_state_gives_a_different_economic_sha(
+    writer_eligible_ledger,
+) -> None:
+    """C06-QL-03: an identical candidate/request evaluated against a different
+    aggregate state cannot present the same candidate economic identity."""
+
+    locked, _session_id, _inputs = writer_eligible_ledger
+    base = ql_trusted_assessment(locked)
+
+    # A genuinely different trusted read acquisition (both sides moved
+    # together, so this remains authoritative -- just a different one).
+    other_read_set = ql_create_assessment(
+        account_aggregate_input=ql_aggregate_input(locked, read_set_id="ADRS2_" + "c" * 64),
+        account_aggregate_expectation=ql_authority_expectation(locked, read_set_id="ADRS2_" + "c" * 64),
+    )
+    other_reconciliation = ql_create_assessment(
+        account_aggregate_input=ql_aggregate_input(locked, reconciliation_snapshot_sha256="9" * 64),
+        account_aggregate_expectation=ql_authority_expectation(
+            locked, reconciliation_snapshot_sha256="9" * 64,
+        ),
+    )
+    # A different economic universe under the same authoritative identity.
+    other_universe = ql_create_assessment(
+        account_aggregate_input=ql_aggregate_input(
+            locked, working_orders=(WorkingOrderV1("TICK-2", "o1", "YES", D("1.00"), D("0.10")),),
+        ),
+        account_aggregate_expectation=ql_authority_expectation(locked),
+    )
+
+    shas = {
+        base.candidate_economic_sha256,
+        other_read_set.candidate_economic_sha256,
+        other_reconciliation.candidate_economic_sha256,
+        other_universe.candidate_economic_sha256,
+    }
+    assert len(shas) == 4
+
+
+def test_c06_ql_04_account_breach_is_ineligible_even_when_per_order_and_per_market_pass(
+    writer_eligible_ledger,
+) -> None:
+    """C06-QL-04: each of the three account leaves independently blocks a
+    candidate whose per-order and per-market checks all pass."""
+
+    locked, _session_id, _inputs = writer_eligible_ledger
+    candidate = CandidateOrderV1("TICK-1", "YES", D("1.00"), D("0.44"))
+    state = MarketEconomicState(D("0"), D("0"), D("0"), D("0"), D("0"), 0, D("0"))
+
+    # Sanity: per-order / per-market alone accept this candidate.
+    enforce_projected_limits(project_candidate_risk(state, candidate), candidate, risk_config())
+
+    exposure_cfg = aggregate_risk_config(max_aggregate_exposure_usd=D("0.44") - D("0.000001"))
+    orders_cfg = aggregate_risk_config(max_aggregate_working_orders=0)
+    contracts_cfg = aggregate_risk_config(max_aggregate_working_contracts=D("1.00") - D("0.01"))
+
+    for cfg in (exposure_cfg, orders_cfg, contracts_cfg):
+        assessment = ql_trusted_assessment(
+            locked, risk_cfg=cfg, candidate=candidate, market_economic_state=state,
+        )
+        # The identity still exists (so it can be compared), but eligibility is false.
+        assert assessment.account_aggregate_snapshot_sha256 is not None
+        assert assessment.eligible is False
+
+
+def test_c06_ql_05_exact_account_limits_permit_eligibility(writer_eligible_ledger) -> None:
+    """C06-QL-05: inclusive equality on all three account leaves is eligible,
+    subject to every other gate."""
+
+    locked, _session_id, _inputs = writer_eligible_ledger
+    candidate = CandidateOrderV1("TICK-1", "YES", D("1.00"), D("0.44"))
+
+    # The limits are derived from the REAL durable universe of this ledger
+    # plus the candidate, so each account leaf sits exactly at its limit.
+    live = ql_aggregate_input(locked)
+    totals = compute_account_aggregate_totals(
+        fills=live.fills, working_orders=live.working_orders,
+        unresolved_exposure=live.unresolved_exposure_usd,
+    )
+    projected = project_account_aggregate(totals, candidate)
+    cfg = aggregate_risk_config(
+        max_aggregate_exposure_usd=projected.projected_exposure_usd,
+        max_aggregate_working_orders=projected.projected_working_orders,
+        max_aggregate_working_contracts=projected.projected_working_contracts,
+    )
+    assessment = ql_trusted_assessment(locked, risk_cfg=cfg, candidate=candidate)
+    assert assessment.eligible is True
+
+    # One representable step below any leaf is no longer eligible.
+    for tighter in (
+        aggregate_risk_config(
+            max_aggregate_exposure_usd=projected.projected_exposure_usd - D("0.000001"),
+            max_aggregate_working_orders=projected.projected_working_orders,
+            max_aggregate_working_contracts=projected.projected_working_contracts,
+        ),
+        aggregate_risk_config(
+            max_aggregate_exposure_usd=projected.projected_exposure_usd,
+            max_aggregate_working_orders=projected.projected_working_orders - 1,
+            max_aggregate_working_contracts=projected.projected_working_contracts,
+        ),
+        aggregate_risk_config(
+            max_aggregate_exposure_usd=projected.projected_exposure_usd,
+            max_aggregate_working_orders=projected.projected_working_orders,
+            max_aggregate_working_contracts=projected.projected_working_contracts - D("0.01"),
+        ),
+    ):
+        assert ql_trusted_assessment(locked, risk_cfg=tighter, candidate=candidate).eligible is False
+
+
+def test_c06_ql_06_stale_incomplete_or_conflicting_aggregate_input_is_ineligible(
+    writer_eligible_ledger,
+) -> None:
+    """C06-QL-06 / C07-AGG-005: an incomplete, conflicting, unequal-tail or
+    UNKNOWN aggregate universe cannot even be constructed, so it can never
+    reach the assessment."""
+
+    locked, _session_id, _inputs = writer_eligible_ledger
+    for overrides in (
+        {"universe_completeness": "INCOMPLETE"},
+        {"conflict_ids": ("fill-identity:f1",)},
+        {"ledger_terminal_sequence": 9_999},
+        {"unresolved_exposure_usd": UNKNOWN_UNBOUNDED},
+    ):
+        with pytest.raises(RiskControlError):
+            ql_aggregate_input(locked, **overrides)
+
+
+def test_c06_ql_07_assessment_exposes_the_exact_bound_aggregate_tails(
+    writer_eligible_ledger,
+) -> None:
+    """C06-QL-07: the assessment carries the exact authority/ledger tail its
+    aggregate state was derived over, plus (CORRECTION_01) the aggregate's own
+    domain/store and current-context identities, so permit issuance can
+    independently revalidate all of them."""
+
+    locked, _session_id, _inputs = writer_eligible_ledger
+    tail = locked.events[-1]
+    assessment = ql_trusted_assessment(locked)
+
+    assert assessment.account_aggregate_authority_trusted_sequence == tail.sequence
+    assert assessment.account_aggregate_authority_trusted_hash == tail.event_hash
+    assert assessment.account_aggregate_ledger_terminal_sequence == tail.sequence
+    assert assessment.account_aggregate_ledger_terminal_hash == tail.event_hash
+
+    assert assessment.account_aggregate_conflict_domain_ref == locked.conflict_domain_ref
+    assert (
+        assessment.account_aggregate_authority_namespace_id
+        == locked.authority_meta.authority_namespace_id
+    )
+    assert (
+        assessment.account_aggregate_authority_instance_id
+        == locked.authority_meta.authority_instance_id
+    )
+    assert assessment.account_aggregate_ledger_instance_id == locked.ledger_meta.ledger_instance_id
+    assert assessment.account_aggregate_risk_config_sha256 == assessment.risk_config_sha256
+    assert (
+        assessment.account_aggregate_reconciliation_snapshot_sha256
+        == assessment.reconciliation_snapshot_sha256
+    )
+
+
+# ---------------------------------------------------------------------------
+# CORRECTION_01 CORR01-QL-01..08 — assessment-stage (Gate A) authoritative
+# identity equality, proven by isolated single-field substitution.
+#
+# In every negative case below the aggregate universe is otherwise entirely
+# trusted and its self-hash is perfectly self-consistent; ONE identity field
+# differs from the independently sourced authoritative expectation. That alone
+# must make the assessment ineligible and leave no aggregate binding.
+# ---------------------------------------------------------------------------
+
+
+def _assert_aggregate_identity_rejected(locked, **override) -> None:
+    field = ",".join(sorted(override))
+    assessment = ql_create_assessment(
+        account_aggregate_input=ql_aggregate_input(locked, **override),
+        account_aggregate_expectation=ql_authority_expectation(locked),
+    )
+    assert assessment.eligible is False, field
+    assert assessment.account_aggregate_snapshot_sha256 is None, field
+    assert assessment.account_aggregate_conflict_domain_ref is None, field
+    assert assessment.account_aggregate_authority_namespace_id is None, field
+    assert assessment.account_aggregate_ledger_instance_id is None, field
+
+
+def test_corr01_ql_01_exact_trusted_identity_is_accepted(writer_eligible_ledger) -> None:
+    """CORR01-QL-01: a production-shaped aggregate whose every identity is
+    exact IS eligible, subject to all economic/freshness gates."""
+
+    locked, _session_id, _inputs = writer_eligible_ledger
+    assessment = ql_trusted_assessment(locked)
+
+    assert assessment.eligible is True
+    assert assessment.account_aggregate_snapshot_sha256 is not None
+    assert assessment.account_aggregate_conflict_domain_ref == locked.conflict_domain_ref
+
+
+def test_corr01_ql_02_foreign_conflict_domain_is_rejected(writer_eligible_ledger) -> None:
+    """CORR01-QL-02: only ``conflict_domain_ref`` differs -> ineligible.
+
+    This is the exact case the blocked predecessor proved only as digest
+    inequality.  Rejection is now asserted directly.
+    """
+
+    locked, _session_id, _inputs = writer_eligible_ledger
+    foreign = "KALSHI|KALSHI_DEMO|SOME_OTHER_ACCOUNT|SUBACCOUNT=9"
+    assert foreign != locked.conflict_domain_ref
+    _assert_aggregate_identity_rejected(locked, conflict_domain_ref=foreign)
+
+
+def test_corr01_ql_03_foreign_authority_namespace_is_rejected(writer_eligible_ledger) -> None:
+    """CORR01-QL-03."""
+    locked, _session_id, _inputs = writer_eligible_ledger
+    _assert_aggregate_identity_rejected(locked, authority_namespace_id="foreign-authority-namespace")
+
+
+def test_corr01_ql_04_foreign_authority_instance_is_rejected(writer_eligible_ledger) -> None:
+    """CORR01-QL-04."""
+    locked, _session_id, _inputs = writer_eligible_ledger
+    _assert_aggregate_identity_rejected(locked, authority_instance_id="foreign-authority-instance")
+
+
+def test_corr01_ql_05_foreign_ledger_instance_is_rejected(writer_eligible_ledger) -> None:
+    """CORR01-QL-05."""
+    locked, _session_id, _inputs = writer_eligible_ledger
+    _assert_aggregate_identity_rejected(locked, ledger_instance_id="foreign-ledger-instance")
+
+
+def test_corr01_ql_06_foreign_reconciliation_identity_is_rejected(writer_eligible_ledger) -> None:
+    """CORR01-QL-06."""
+    locked, _session_id, _inputs = writer_eligible_ledger
+    _assert_aggregate_identity_rejected(locked, reconciliation_snapshot_sha256="9" * 64)
+
+
+def test_corr01_ql_07_foreign_trusted_read_set_is_rejected(writer_eligible_ledger) -> None:
+    """CORR01-QL-07: a different trusted read acquisition, and an absent one
+    where an active identity is expected, are both rejected."""
+
+    locked, _session_id, _inputs = writer_eligible_ledger
+    _assert_aggregate_identity_rejected(locked, trusted_dynamic_read_set_id="ADRS2_" + "e" * 64)
+    _assert_aggregate_identity_rejected(locked, trusted_dynamic_read_set_id=None)
+
+
+def test_corr01_ql_08_foreign_risk_config_identity_is_rejected(writer_eligible_ledger) -> None:
+    """CORR01-QL-08."""
+    locked, _session_id, _inputs = writer_eligible_ledger
+    _assert_aggregate_identity_rejected(locked, risk_config_sha256="0" * 64)
+
+
+def test_corr01_ql_09_moved_aggregate_tail_is_rejected_at_assessment(
+    writer_eligible_ledger,
+) -> None:
+    """CORRECTION_01: the authority/ledger tail is an identity too.  An
+    aggregate bound to any other tail than the live one is ineligible at Gate
+    A, before the permit boundary is ever reached."""
+
+    locked, _session_id, _inputs = writer_eligible_ledger
+    tail = locked.events[-1]
+    _assert_aggregate_identity_rejected(
+        locked,
+        authority_trusted_sequence=tail.sequence + 1,
+        ledger_terminal_sequence=tail.sequence + 1,
+    )
+
+
+def test_corr01_ql_10_expectation_cannot_be_derived_from_the_aggregate_object(
+    writer_eligible_ledger,
+) -> None:
+    """CORRECTION_01 structural property: the authoritative expectation is an
+    unforgeable product of the locked-ledger boundary.  It cannot be built
+    from an ``AccountAggregateInputV1``, so a caller can never satisfy both
+    sides of the identity comparison from one mutated object."""
+
+    locked, _session_id, _inputs = writer_eligible_ledger
+    foreign_input = ql_aggregate_input(locked, conflict_domain_ref="KALSHI|X|Y|SUBACCOUNT=9")
+
+    # Direct construction is refused.
+    with pytest.raises(RiskControlError):
+        AccountAggregateAuthorityExpectationV1(object())
+    # And the builder refuses anything that is not a real LockedLedger.
+    for impostor in (None, object(), foreign_input):
+        with pytest.raises(RiskControlError):
+            build_account_aggregate_authority_expectation(
+                impostor,  # type: ignore[arg-type]
+                risk_config_sha256=risk_config().sha256,
+                trusted_dynamic_read_set_id=QL_AGG_READ_SET_ID,
+                reconciliation_snapshot_sha256=QL_AGG_RECONCILIATION_SHA,
+            )
+
+    # The real expectation reflects the LOCKED ledger, not the foreign input.
+    expectation = ql_authority_expectation(locked)
+    assert expectation.conflict_domain_ref == locked.conflict_domain_ref
+    assert expectation.conflict_domain_ref != foreign_input.conflict_domain_ref
+
+
+def test_c07_agg_004_permit_issuance_rejects_a_moved_aggregate_tail(writer_eligible_ledger) -> None:
+    """C07-AGG-004 / CORR01-RC-03 against the REAL gate and the REAL ledger.
+
+    A production-shaped assessment whose aggregate identity is exact obtains a
+    permit.  Once the active tail genuinely moves, that same assessment is
+    refused with the existing unexpected-tail classification, and nothing
+    further is appended -- so no send-boundary event and no transport can
+    follow.
+    """
+
+    locked, session_id, _inputs = writer_eligible_ledger
+    request_id = "req_" + "7" * 32
+    execution_attempt_id = "ea_" + "6" * 32
+    _base_assessment, outer_intent, prepared = _assessment_and_payloads(
+        request_id=request_id, execution_attempt_id=execution_attempt_id,
+    )
+    candidate = CandidateOrderV1("TICK-1", "YES", D("1.00"), D("0.44"))
+    state = MarketEconomicState(D("0"), D("0"), D("0"), D("0"), D("0"), 0, D("0"))
+
+    def assessment_for(aggregate_input, expectation):
+        return build_writer_eligibility_assessment(
+            risk_assessment_id="ra_" + "2" * 32, request_id=request_id, candidate=candidate,
+            market_economic_state=state, unresolved_exposure=D("0"), risk_config=risk_config(),
+            prepared_request_sha256=prepared["prepared_request_sha256"], market_data_snapshot_sha256="a" * 64,
+            market_data_freshness_identity_sha256="b" * 64, reconciliation_snapshot_sha256="c" * 64,
+            reconciliation_freshness_identity_sha256="d" * 64,
+            risk_state_epoch=WRITER_ELIGIBLE_RISK_STATE_EPOCH,
+            freshness_deadline_monotonic_ns=999_999_999_999,
+            account_aggregate_input=aggregate_input,
+            account_aggregate_expectation=expectation,
+        )
+
+    # Production-shaped: universe and expectation both sourced authoritatively
+    # from the same locked ledger, at the same live tail.
+    live_assessment = assessment_for(
+        _live_account_aggregate_input(locked), _live_account_aggregate_expectation(locked),
+    )
+    assert live_assessment.eligible is True
+    assert live_assessment.account_aggregate_ledger_terminal_sequence == locked.events[-1].sequence
+
+    gate = WriterEligibilityGate(
+        monotonic_clock_ns=lambda: 1, wall_clock=lambda: datetime(2026, 8, 15, 13, tzinfo=timezone.utc),
+    )
+    permit = gate.issue_permit(
+        locked=locked, normal_writer_session_id=session_id, assessment=live_assessment,
+        intent_payload=outer_intent, prepared_payload=prepared,
+    )
+    assert permit.request_id == request_id
+
+    # The active tail now genuinely moves (T1 is persisted for that permit).
+    tail_before = locked.events[-1].sequence
+    gate.persist_intent(permit, locked)
+    assert locked.events[-1].sequence == tail_before + 1
+
+    # The SAME assessment, still bound to the earlier tail, can no longer
+    # obtain a permit, and appends nothing.
+    appended_before = len(locked.events)
+    with pytest.raises(RiskControlError) as excinfo:
+        gate.issue_permit(
+            locked=locked, normal_writer_session_id=session_id, assessment=live_assessment,
+            intent_payload=outer_intent, prepared_payload=prepared,
+        )
+    assert excinfo.value.code is RiskControlCode.NORMAL_WRITER_PERMIT_UNEXPECTED_TAIL
+    assert len(locked.events) == appended_before
+
+    # A freshly derived aggregate at the NEW tail is eligible again, proving
+    # the rejection above was caused by tail movement alone.
+    refreshed = assessment_for(
+        _live_account_aggregate_input(locked), _live_account_aggregate_expectation(locked),
+    )
+    assert refreshed.eligible is True
+    assert refreshed.account_aggregate_ledger_terminal_sequence == locked.events[-1].sequence

@@ -540,6 +540,459 @@ def enforce_projected_limits(projected: ProjectedRiskV1, candidate: CandidateOrd
         raise RiskControlError(RiskControlCode.RISK_LIMIT_EXCEEDED)
 
 
+# ---------------------------------------------------------------------------
+# CORRECTION_07 C07-AGG-001..005 -- the one shared canonical conflict-domain
+# account aggregate economic meaning.
+#
+# There is exactly ONE aggregate derivation in the system.  Release /
+# current-state evaluation (``ledger_binding``) and CREATE candidate pre-send
+# evaluation (``quote_lifecycle``) both call the functions below, so the two
+# paths cannot drift into two numeric meanings (C07-AGG-001 / C07-06).
+#
+# No new risk-limit schema leaf is introduced: enforcement reuses the existing
+# ``conflict_domain_account`` leaves (C07-AGG-002).
+# ---------------------------------------------------------------------------
+
+ACCOUNT_AGGREGATE_SCHEMA_ID = "ARB_KALSHI_ACCOUNT_AGGREGATE_V1"
+ACCOUNT_AGGREGATE_UNIVERSE_COMPLETE = "COMPLETE"
+_ADRS2_PREFIX = "ADRS2_"
+_ADRS2_LENGTH = 70
+
+
+@dataclass(frozen=True, slots=True)
+class AccountAggregateTotalsV1:
+    """Current complete conflict-domain account totals (C07-AGG-001).
+
+    ``aggregate_exposure_usd`` counts unresolved-write exposure exactly once
+    and then adds, for every market represented in the trusted universe, that
+    market's filled exposure plus its working exposure.
+    """
+
+    unresolved_exposure_usd: Decimal
+    aggregate_exposure_usd: Decimal
+    aggregate_working_orders: int
+    aggregate_working_contracts: Decimal
+    markets: tuple[str, ...]
+
+
+def compute_account_aggregate_totals(
+    *,
+    fills: Sequence[EconomicFillV1],
+    working_orders: Sequence[WorkingOrderV1],
+    unresolved_exposure: Decimal | str,
+) -> AccountAggregateTotalsV1:
+    """C07-AGG-001 shared account aggregate derivation.
+
+    ``UNKNOWN_UNBOUNDED`` unresolved exposure fails closed here and is never
+    converted to zero (C07-AGG-005).  Every economic value stays exact
+    ``Decimal``; a non-``Decimal``/non-finite value cannot reach the gate
+    because the element constructors already reject it, and this function
+    additionally rejects a foreign element type.
+    """
+
+    if unresolved_exposure == UNKNOWN_UNBOUNDED:
+        raise RiskControlError(RiskControlCode.UNKNOWN_UNBOUNDED_EXPOSURE)
+    unresolved = _require_decimal(unresolved_exposure, nonnegative=True)
+    fill_items = tuple(fills)
+    order_items = tuple(working_orders)
+    if any(type(item) is not EconomicFillV1 for item in fill_items) or any(
+        type(item) is not WorkingOrderV1 for item in order_items
+    ):
+        raise RiskControlError(RiskControlCode.RISK_INPUT_UNAVAILABLE)
+    markets = tuple(sorted({item.market for item in fill_items} | {item.market for item in order_items}))
+    aggregate_exposure = unresolved
+    aggregate_working_orders = 0
+    aggregate_working_contracts = ZERO
+    for market in markets:
+        state = compute_market_economic_state(market, fill_items, order_items)
+        aggregate_exposure += state.filled_exposure_usd + state.working_exposure_usd
+        aggregate_working_orders += state.working_order_count
+        aggregate_working_contracts += state.working_contracts
+    return AccountAggregateTotalsV1(
+        unresolved, aggregate_exposure, aggregate_working_orders, aggregate_working_contracts, markets,
+    )
+
+
+@dataclass(frozen=True, slots=True)
+class ProjectedAccountAggregateV1:
+    """Candidate-adjusted CREATE totals (C07-AGG-001)."""
+
+    candidate_exposure_usd: Decimal
+    projected_exposure_usd: Decimal
+    projected_working_orders: int
+    projected_working_contracts: Decimal
+
+
+def project_account_aggregate(
+    totals: AccountAggregateTotalsV1, candidate: CandidateOrderV1,
+) -> ProjectedAccountAggregateV1:
+    """Add exactly the candidate liability, one working order, and the
+    candidate quantity to the current account totals (C07-AGG-001).
+
+    The candidate liability uses the identical exact binary-contract formula
+    already used for the per-market projection -- there is no second economic
+    schema and no offsetting/netting credit.
+    """
+
+    if type(totals) is not AccountAggregateTotalsV1 or type(candidate) is not CandidateOrderV1:
+        raise RiskControlError(RiskControlCode.RISK_INPUT_UNAVAILABLE)
+    candidate_exposure = _liability(candidate.outcome_side, candidate.quantity, candidate.yes_price)
+    return ProjectedAccountAggregateV1(
+        candidate_exposure,
+        totals.aggregate_exposure_usd + candidate_exposure,
+        totals.aggregate_working_orders + 1,
+        totals.aggregate_working_contracts + candidate.quantity,
+    )
+
+
+def enforce_account_aggregate_limits(
+    projected: ProjectedAccountAggregateV1, config: RiskLimitConfigV1,
+) -> None:
+    """C07-AGG-002: the existing account leaves, compared inclusively.
+
+    No ``max_aggregate_projected_exposure_usd`` field is added.
+    """
+
+    if type(projected) is not ProjectedAccountAggregateV1 or type(config) is not RiskLimitConfigV1:
+        raise RiskControlError(RiskControlCode.RISK_INPUT_UNAVAILABLE)
+    account = config.conflict_domain_account
+    if not (
+        projected.projected_exposure_usd <= account.max_aggregate_exposure_usd
+        and projected.projected_working_orders <= account.max_aggregate_working_orders
+        and projected.projected_working_contracts <= account.max_aggregate_working_contracts
+    ):
+        raise RiskControlError(RiskControlCode.RISK_LIMIT_EXCEEDED)
+
+
+def account_aggregate_current_state_within_limits(
+    totals: AccountAggregateTotalsV1, config: RiskLimitConfigV1,
+) -> bool:
+    """Release / current-state form of the same inclusive comparison
+    (C07-06).  Returns a predicate rather than raising because the release
+    predicate vector is boolean; the numeric meaning is exactly
+    ``enforce_account_aggregate_limits`` with no candidate added.
+    """
+
+    if type(totals) is not AccountAggregateTotalsV1 or type(config) is not RiskLimitConfigV1:
+        raise RiskControlError(RiskControlCode.RISK_INPUT_UNAVAILABLE)
+    account = config.conflict_domain_account
+    return (
+        totals.aggregate_exposure_usd <= account.max_aggregate_exposure_usd
+        and totals.aggregate_working_orders <= account.max_aggregate_working_orders
+        and totals.aggregate_working_contracts <= account.max_aggregate_working_contracts
+    )
+
+
+@dataclass(frozen=True, slots=True)
+class AccountAggregateInputV1:
+    """The complete, identity-bound trusted conflict-domain universe.
+
+    Construction itself is the C07-AGG-005 fail-closed gate: an incomplete
+    universe, any identity conflict, an unequal authority/ledger tail, a
+    malformed identity, an unknown/unbounded unresolved exposure, or a
+    missing trusted read-set identity makes the object unconstructable, so no
+    aggregate snapshot can be minted and no CREATE assessment can become
+    eligible.
+    """
+
+    conflict_domain_ref: str
+    authority_namespace_id: str
+    authority_instance_id: str
+    ledger_instance_id: str
+    authority_trusted_sequence: int
+    authority_trusted_hash: str
+    ledger_terminal_sequence: int
+    ledger_terminal_hash: str
+    risk_config_sha256: str
+    # C07-AGG-004 binds "trusted_dynamic_read_set_id / required reconciliation
+    # identity".  The active revision-2 runtime always supplies the exact
+    # ``ADRS2_<64hex>`` read-set identity; the legacy SUBACCOUNT=0 path has no
+    # such identity and binds ``None`` here, remaining bound to the required
+    # reconciliation snapshot identity below.  Either way the snapshot cannot
+    # be carried across a different trusted read acquisition.
+    trusted_dynamic_read_set_id: str | None
+    reconciliation_snapshot_sha256: str
+    universe_completeness: str
+    conflict_ids: tuple[str, ...]
+    fills: tuple[EconomicFillV1, ...]
+    working_orders: tuple[WorkingOrderV1, ...]
+    unresolved_exposure_usd: Decimal | str
+
+    def __post_init__(self) -> None:
+        unavailable = RiskControlCode.RISK_INPUT_UNAVAILABLE
+        for value in (
+            self.conflict_domain_ref, self.authority_namespace_id, self.authority_instance_id,
+            self.ledger_instance_id, self.universe_completeness,
+        ):
+            if type(value) is not str or not value or unicodedata.normalize("NFC", value) != value:
+                raise RiskControlError(unavailable)
+        for value in (
+            self.authority_trusted_hash, self.ledger_terminal_hash, self.risk_config_sha256,
+            self.reconciliation_snapshot_sha256,
+        ):
+            if type(value) is not str or _HEX64_RE.fullmatch(value) is None:
+                raise RiskControlError(unavailable)
+        for value in (self.authority_trusted_sequence, self.ledger_terminal_sequence):
+            if type(value) is not int or value < 0:
+                raise RiskControlError(unavailable)
+        read_set_id = self.trusted_dynamic_read_set_id
+        if read_set_id is not None and (
+            type(read_set_id) is not str
+            or len(read_set_id) != _ADRS2_LENGTH
+            or read_set_id[:6] != _ADRS2_PREFIX
+            or _HEX64_RE.fullmatch(read_set_id[6:]) is None
+        ):
+            raise RiskControlError(unavailable)
+        # C07-AGG-005 / C06-LB-08: an unequal authority/ledger tail can never
+        # mint a usable aggregate snapshot.
+        if (self.authority_trusted_sequence, self.authority_trusted_hash) != (
+            self.ledger_terminal_sequence, self.ledger_terminal_hash
+        ):
+            raise RiskControlError(unavailable)
+        # C07-AGG-003 / C07-AGG-005: an incomplete universe or any identity
+        # conflict fails closed and is never treated as "no other exposure".
+        if self.universe_completeness != ACCOUNT_AGGREGATE_UNIVERSE_COMPLETE or self.conflict_ids != ():
+            raise RiskControlError(unavailable)
+        if type(self.fills) is not tuple or type(self.working_orders) is not tuple:
+            raise RiskControlError(unavailable)
+        if any(type(item) is not EconomicFillV1 for item in self.fills) or any(
+            type(item) is not WorkingOrderV1 for item in self.working_orders
+        ):
+            raise RiskControlError(unavailable)
+        if self.unresolved_exposure_usd == UNKNOWN_UNBOUNDED:
+            raise RiskControlError(RiskControlCode.UNKNOWN_UNBOUNDED_EXPOSURE)
+        _require_decimal(self.unresolved_exposure_usd, nonnegative=True)
+
+
+@dataclass(frozen=True, slots=True)
+class AccountAggregateSnapshotV1:
+    """Deterministic aggregate snapshot identity (C07-AGG-004).
+
+    ``sha256`` binds the domain/authority/ledger/config/read-set identities
+    together with the exact current and projected aggregate economics, so a
+    candidate assessment cannot be carried across a changed authority/ledger
+    tail or a different trusted read acquisition.
+    """
+
+    aggregate_input: AccountAggregateInputV1
+    totals: AccountAggregateTotalsV1
+    projected: ProjectedAccountAggregateV1
+    sha256: str
+
+    @property
+    def authority_trusted_sequence(self) -> int:
+        return self.aggregate_input.authority_trusted_sequence
+
+    @property
+    def authority_trusted_hash(self) -> str:
+        return self.aggregate_input.authority_trusted_hash
+
+    @property
+    def ledger_terminal_sequence(self) -> int:
+        return self.aggregate_input.ledger_terminal_sequence
+
+    @property
+    def ledger_terminal_hash(self) -> str:
+        return self.aggregate_input.ledger_terminal_hash
+
+
+def account_aggregate_snapshot_preimage(
+    aggregate_input: AccountAggregateInputV1,
+    totals: AccountAggregateTotalsV1,
+    projected: ProjectedAccountAggregateV1,
+) -> dict[str, object]:
+    """Exact C07-AGG-004 hash preimage.  Every economic value is an exact
+    ``Decimal`` encoded by the existing canonical encoder; no float
+    conversion occurs anywhere in this preimage."""
+
+    return {
+        "schema_id": ACCOUNT_AGGREGATE_SCHEMA_ID,
+        "conflict_domain_ref": aggregate_input.conflict_domain_ref,
+        "authority_namespace_id": aggregate_input.authority_namespace_id,
+        "authority_instance_id": aggregate_input.authority_instance_id,
+        "ledger_instance_id": aggregate_input.ledger_instance_id,
+        "authority_trusted_sequence": aggregate_input.authority_trusted_sequence,
+        "authority_trusted_hash": aggregate_input.authority_trusted_hash,
+        "ledger_terminal_sequence": aggregate_input.ledger_terminal_sequence,
+        "ledger_terminal_hash": aggregate_input.ledger_terminal_hash,
+        "risk_config_sha256": aggregate_input.risk_config_sha256,
+        "trusted_dynamic_read_set_id": aggregate_input.trusted_dynamic_read_set_id,
+        "reconciliation_snapshot_sha256": aggregate_input.reconciliation_snapshot_sha256,
+        "universe_completeness": aggregate_input.universe_completeness,
+        "markets": list(totals.markets),
+        "unresolved_exposure_usd": totals.unresolved_exposure_usd,
+        "current_aggregate_exposure_usd": totals.aggregate_exposure_usd,
+        "current_aggregate_working_orders": totals.aggregate_working_orders,
+        "current_aggregate_working_contracts": totals.aggregate_working_contracts,
+        "candidate_exposure_usd": projected.candidate_exposure_usd,
+        "projected_aggregate_exposure_usd": projected.projected_exposure_usd,
+        "projected_aggregate_working_orders": projected.projected_working_orders,
+        "projected_aggregate_working_contracts": projected.projected_working_contracts,
+    }
+
+
+_AGGREGATE_EXPECTATION_KEY = object()
+
+# CORRECTION_01 C07-IMPL-BLOCK-01: the exact identity fields that must compare
+# equal between the aggregate universe actually supplied and the independently
+# sourced authoritative expectation.  A deterministic self-hash proves internal
+# consistency only; it is NOT authority proof.
+ACCOUNT_AGGREGATE_IDENTITY_FIELDS = (
+    "conflict_domain_ref",
+    "authority_namespace_id",
+    "authority_instance_id",
+    "ledger_instance_id",
+    "authority_trusted_sequence",
+    "authority_trusted_hash",
+    "ledger_terminal_sequence",
+    "ledger_terminal_hash",
+    "risk_config_sha256",
+    "trusted_dynamic_read_set_id",
+    "reconciliation_snapshot_sha256",
+)
+
+
+@dataclass(frozen=True, slots=True, init=False)
+class AccountAggregateAuthorityExpectationV1:
+    """CORRECTION_01 Gate A — the authoritative expected aggregate identity.
+
+    This object is an UNFORGEABLE trusted product of the locked-ledger
+    acquisition boundary: it can only be produced by
+    ``build_account_aggregate_authority_expectation``, which reads every
+    store/domain/tail value directly from the live ``LockedLedger`` and takes
+    the remaining current-context identities from the caller's own
+    authoritative invocation state.
+
+    It is deliberately NOT derivable from an ``AccountAggregateInputV1``, so a
+    caller cannot satisfy both sides of the comparison from one mutated
+    object.
+    """
+
+    conflict_domain_ref: str
+    authority_namespace_id: str
+    authority_instance_id: str
+    ledger_instance_id: str
+    authority_trusted_sequence: int
+    authority_trusted_hash: str
+    ledger_terminal_sequence: int
+    ledger_terminal_hash: str
+    risk_config_sha256: str
+    trusted_dynamic_read_set_id: str | None
+    reconciliation_snapshot_sha256: str
+
+    def __init__(self, key: object, **values: object) -> None:
+        if key is not _AGGREGATE_EXPECTATION_KEY:
+            raise RiskControlError(RiskControlCode.RISK_INPUT_UNAVAILABLE)
+        for field in fields(type(self)):
+            object.__setattr__(self, field.name, values[field.name])
+
+
+def build_account_aggregate_authority_expectation(
+    locked: LockedLedger,
+    *,
+    risk_config_sha256: str,
+    trusted_dynamic_read_set_id: str | None,
+    reconciliation_snapshot_sha256: str,
+) -> AccountAggregateAuthorityExpectationV1:
+    """CORRECTION_01 Gate A source of truth.
+
+    Every store/domain/tail value is read from the live ``LockedLedger``; the
+    config, trusted read-set and reconciliation identities come from the
+    caller's current invocation context.  Nothing here is copied from the
+    aggregate object being validated.
+    """
+
+    if type(locked) is not LockedLedger or getattr(locked, "closed", False):
+        raise RiskControlError(RiskControlCode.RISK_INPUT_UNAVAILABLE)
+    tail = locked.events[-1]
+    authority = locked.authority_row
+    if (authority.trusted_sequence, authority.trusted_event_hash) != (tail.sequence, tail.event_hash):
+        # An authority row that has not caught up to the terminal ledger event
+        # cannot mint an authoritative expectation.
+        raise RiskControlError(RiskControlCode.RISK_INPUT_UNAVAILABLE)
+    return AccountAggregateAuthorityExpectationV1(
+        _AGGREGATE_EXPECTATION_KEY,
+        conflict_domain_ref=locked.conflict_domain_ref,
+        authority_namespace_id=locked.authority_meta.authority_namespace_id,
+        authority_instance_id=locked.authority_meta.authority_instance_id,
+        ledger_instance_id=locked.ledger_meta.ledger_instance_id,
+        authority_trusted_sequence=authority.trusted_sequence,
+        authority_trusted_hash=authority.trusted_event_hash,
+        ledger_terminal_sequence=tail.sequence,
+        ledger_terminal_hash=tail.event_hash,
+        risk_config_sha256=risk_config_sha256,
+        trusted_dynamic_read_set_id=trusted_dynamic_read_set_id,
+        reconciliation_snapshot_sha256=reconciliation_snapshot_sha256,
+    )
+
+
+def require_account_aggregate_identity(
+    aggregate_input: AccountAggregateInputV1,
+    expectation: AccountAggregateAuthorityExpectationV1,
+) -> None:
+    """CORRECTION_01 Gate A: exact equality on every C07-AGG-005 identity.
+
+    Any single mismatched field fails closed with the existing risk-input
+    semantics, so a foreign conflict domain, authority namespace/instance,
+    ledger instance, risk-config identity, trusted read-set identity,
+    reconciliation identity, or authority/ledger tail can never support an
+    eligible CREATE assessment.
+    """
+
+    if (
+        type(aggregate_input) is not AccountAggregateInputV1
+        or type(expectation) is not AccountAggregateAuthorityExpectationV1
+    ):
+        raise RiskControlError(RiskControlCode.RISK_INPUT_UNAVAILABLE)
+    for name in ACCOUNT_AGGREGATE_IDENTITY_FIELDS:
+        actual = getattr(aggregate_input, name)
+        expected = getattr(expectation, name)
+        if type(actual) is not type(expected) or actual != expected:
+            raise RiskControlError(RiskControlCode.RISK_INPUT_UNAVAILABLE)
+
+
+def build_account_aggregate_snapshot(
+    *,
+    aggregate_input: AccountAggregateInputV1,
+    candidate: CandidateOrderV1,
+    config: RiskLimitConfigV1,
+    expectation: AccountAggregateAuthorityExpectationV1,
+) -> AccountAggregateSnapshotV1:
+    """Derive and bind the candidate-aware account aggregate snapshot.
+
+    CORRECTION_01: the snapshot can only be minted after the supplied
+    aggregate universe has been proven identical, field by field, to the
+    independently sourced authoritative expectation.  The digest below then
+    records an already-authoritative identity; it never substitutes for one.
+
+    This function establishes IDENTITY only; it deliberately does not decide
+    economic eligibility, so the snapshot digest exists for an over-limit
+    candidate too and can participate in the candidate economic identity.
+    Limit enforcement is the separate ``enforce_account_aggregate_limits``
+    call.
+    """
+
+    if (
+        type(aggregate_input) is not AccountAggregateInputV1
+        or type(candidate) is not CandidateOrderV1
+        or type(config) is not RiskLimitConfigV1
+    ):
+        raise RiskControlError(RiskControlCode.RISK_INPUT_UNAVAILABLE)
+    require_account_aggregate_identity(aggregate_input, expectation)
+    if aggregate_input.risk_config_sha256 != config.sha256:
+        raise RiskControlError(RiskControlCode.RISK_INPUT_UNAVAILABLE)
+    totals = compute_account_aggregate_totals(
+        fills=aggregate_input.fills,
+        working_orders=aggregate_input.working_orders,
+        unresolved_exposure=aggregate_input.unresolved_exposure_usd,
+    )
+    projected = project_account_aggregate(totals, candidate)
+    digest = sha256_hex(canonical_json_bytes(
+        account_aggregate_snapshot_preimage(aggregate_input, totals, projected),
+    ))
+    return AccountAggregateSnapshotV1(aggregate_input, totals, projected, digest)
+
+
 @dataclass(frozen=True, slots=True)
 class WriterEligibilityAssessment:
     risk_assessment_id: str
@@ -577,6 +1030,32 @@ class WriterEligibilityAssessment:
     # so a permit/assessment cannot be carried across current-read
     # acquisitions.  ``None`` on the legacy path.
     trusted_dynamic_read_set_id: str | None = None
+    # CORRECTION_07 C07-AGG-004: the exact candidate-aware conflict-domain
+    # account aggregate snapshot digest, plus the authority/ledger tail that
+    # aggregate state was derived over.  ``None`` on the legacy path and on
+    # the ordinary CANCEL path (which projects no CREATE candidate).
+    # CORRECTION_08: the aggregate binding is mandatory only through the
+    # dedicated ``issue_strategy1_gate_d_create_permit`` entrypoint; the
+    # generic ``issue_permit`` accepts an ABSENT binding under predecessor
+    # semantics, so ``operation_kind`` alone never selects C07 scope.
+    account_aggregate_snapshot_sha256: str | None = None
+    account_aggregate_authority_trusted_sequence: int | None = None
+    account_aggregate_authority_trusted_hash: str | None = None
+    account_aggregate_ledger_terminal_sequence: int | None = None
+    account_aggregate_ledger_terminal_hash: str | None = None
+    # CORRECTION_01 Gate B: the aggregate universe's own domain/store and
+    # current-context identities are carried here so permit issuance can
+    # INDEPENDENTLY recheck them against the live LockedLedger and against
+    # this assessment's own authoritative top-level identities.  Without
+    # these a permit could accept a post-assessment substitution whose
+    # self-hash is merely internally consistent.
+    account_aggregate_conflict_domain_ref: str | None = None
+    account_aggregate_authority_namespace_id: str | None = None
+    account_aggregate_authority_instance_id: str | None = None
+    account_aggregate_ledger_instance_id: str | None = None
+    account_aggregate_risk_config_sha256: str | None = None
+    account_aggregate_trusted_dynamic_read_set_id: str | None = None
+    account_aggregate_reconciliation_snapshot_sha256: str | None = None
 
 
 _PERMIT_CONSTRUCTION_KEY = object()
@@ -728,6 +1207,156 @@ def _active_permit_commitment_from_assessment(
     return fields_out
 
 
+def _assessment_aggregate_binding_core(
+    assessment: "WriterEligibilityAssessment",
+) -> tuple[object, ...]:
+    """The aggregate binding fields that are mandatory in every COMPLETE
+    binding.  ``account_aggregate_trusted_dynamic_read_set_id`` is excluded
+    because ``None`` is its legitimate value on the legacy non-ADRS2 path."""
+
+    return (
+        assessment.account_aggregate_snapshot_sha256,
+        assessment.account_aggregate_authority_trusted_sequence,
+        assessment.account_aggregate_authority_trusted_hash,
+        assessment.account_aggregate_ledger_terminal_sequence,
+        assessment.account_aggregate_ledger_terminal_hash,
+        assessment.account_aggregate_conflict_domain_ref,
+        assessment.account_aggregate_authority_namespace_id,
+        assessment.account_aggregate_authority_instance_id,
+        assessment.account_aggregate_ledger_instance_id,
+        assessment.account_aggregate_risk_config_sha256,
+        assessment.account_aggregate_reconciliation_snapshot_sha256,
+    )
+
+
+def _assessment_aggregate_binding_absent(assessment: "WriterEligibilityAssessment") -> bool:
+    """CORRECTION_08 C08-DEF-004 ABSENT: every aggregate binding field,
+    including the aggregate read-set identity, is ``None``.  A lone
+    aggregate read-set identity is a PARTIAL binding, never ABSENT."""
+
+    return (
+        all(item is None for item in _assessment_aggregate_binding_core(assessment))
+        and assessment.account_aggregate_trusted_dynamic_read_set_id is None
+    )
+
+
+def _require_generic_aggregate_binding(
+    assessment: "WriterEligibilityAssessment", locked: LockedLedger, tail: object,
+) -> None:
+    """CORRECTION_08 C08-GEN-002..005 aggregate gate for the shared generic
+    ``WriterEligibilityGate.issue_permit`` entrypoint.
+
+    ABSENT is passed through unchanged, so a non-C07 caller (the ordinary
+    CANCEL operation, the accepted one-order-lifecycle CREATE spine, the
+    legacy non-aggregate path) keeps its predecessor semantics even for a
+    genuine ``CREATE_ORDER_V2``: ``operation_kind`` alone never selects C07
+    aggregate scope (C08-SCOPE-001/005).  PARTIAL_OR_MALFORMED and COMPLETE
+    bindings receive the full CORRECTION_01 Gate-B validation.
+    """
+
+    if _assessment_aggregate_binding_absent(assessment):
+        return
+    _require_assessment_aggregate_binding(assessment, locked, tail)
+
+
+def _require_strategy1_gate_d_create_aggregate_binding(
+    assessment: "WriterEligibilityAssessment", locked: LockedLedger, tail: object,
+) -> None:
+    """CORRECTION_08 C08-SCOPED-002..004 aggregate gate for the dedicated
+    R1-D07 N1 Strategy-1 Gate-D CREATE entrypoint.
+
+    ABSENT and PARTIAL_OR_MALFORMED are both invalid.  COMPLETE additionally
+    requires a well-formed non-null ``ADRS2_<64hex>`` aggregate read-set
+    identity equal to the assessment's active ``trusted_dynamic_read_set_id``
+    and then every CORRECTION_01 Gate-B equality.
+    """
+
+    read_set_id = assessment.account_aggregate_trusted_dynamic_read_set_id
+    if (
+        type(read_set_id) is not str
+        or len(read_set_id) != _ADRS2_LENGTH
+        or read_set_id[:6] != _ADRS2_PREFIX
+        or _HEX64_RE.fullmatch(read_set_id[6:]) is None
+        or read_set_id != assessment.trusted_dynamic_read_set_id
+        or any(item is None for item in _assessment_aggregate_binding_core(assessment))
+    ):
+        raise RiskControlError(RiskControlCode.NORMAL_WRITER_PERMIT_INVALID)
+    _require_assessment_aggregate_binding(assessment, locked, tail)
+
+
+def _require_assessment_aggregate_binding(
+    assessment: "WriterEligibilityAssessment", locked: LockedLedger, tail: object,
+) -> None:
+    """CORRECTION_07 C07-AGG-004 permit-issuance anti-substitution gate for a
+    binding that is not ABSENT.
+
+    Permit issuance MUST reject if the active locked tail no longer equals
+    the tail that aggregate state was derived over, or if the bound identity
+    is partial or malformed.  A candidate assessment therefore cannot be
+    carried across a changed authority/ledger tail.
+
+    An aggregate BREACH never reaches this gate at all: the aggregate limits
+    are enforced inside ``build_writer_eligibility_assessment``, a breach
+    makes the assessment ineligible, and permit issuance already refuses a
+    non-eligible assessment.  So an aggregate failure emits no permit, no
+    send-boundary event, and invokes no transport.
+
+    Whether an ABSENT binding is acceptable is decided by the calling
+    entrypoint gate (CORRECTION_08), never here.
+    """
+
+    # CORRECTION_01: a PARTIAL aggregate binding is invalid.  The read-set
+    # identity is intentionally excluded from this completeness tuple because
+    # ``None`` is its legitimate value on the legacy non-ADRS2 path; it is
+    # compared for exact equality against the assessment below either way.
+    if any(item is None for item in _assessment_aggregate_binding_core(assessment)):
+        raise RiskControlError(RiskControlCode.NORMAL_WRITER_PERMIT_INVALID)
+    if (
+        type(assessment.account_aggregate_snapshot_sha256) is not str
+        or _HEX64_RE.fullmatch(assessment.account_aggregate_snapshot_sha256) is None
+    ):
+        raise RiskControlError(RiskControlCode.NORMAL_WRITER_PERMIT_INVALID)
+    # CORRECTION_01 Gate B — independent authoritative recheck.
+    #
+    # The domain and store identities are compared against the LIVE
+    # LockedLedger, and the config / read-set / reconciliation identities
+    # against this assessment's own authoritative top-level values.  Neither
+    # side is taken from the aggregate object, so a caller-constructed or
+    # post-assessment-substituted aggregate identity cannot pass merely
+    # because its self-hash is internally consistent.
+    #
+    # Ownership note: this does NOT re-decide the predecessor
+    # DSB-WRITER-007/008 active-domain commitment, which is a separate object
+    # validated by its own gate and keeps its own exact classification.
+    if (
+        assessment.account_aggregate_conflict_domain_ref != locked.conflict_domain_ref
+        or assessment.account_aggregate_authority_namespace_id
+        != locked.authority_meta.authority_namespace_id
+        or assessment.account_aggregate_authority_instance_id
+        != locked.authority_meta.authority_instance_id
+        or assessment.account_aggregate_ledger_instance_id
+        != locked.ledger_meta.ledger_instance_id
+        or assessment.account_aggregate_risk_config_sha256 != assessment.risk_config_sha256
+        or assessment.account_aggregate_reconciliation_snapshot_sha256
+        != assessment.reconciliation_snapshot_sha256
+        or assessment.account_aggregate_trusted_dynamic_read_set_id
+        != assessment.trusted_dynamic_read_set_id
+    ):
+        raise RiskControlError(RiskControlCode.NORMAL_WRITER_PERMIT_INVALID)
+    # Tail movement retains the existing unexpected-tail classification.
+    if (
+        assessment.account_aggregate_authority_trusted_sequence,
+        assessment.account_aggregate_authority_trusted_hash,
+        assessment.account_aggregate_ledger_terminal_sequence,
+        assessment.account_aggregate_ledger_terminal_hash,
+    ) != (
+        tail.sequence, tail.event_hash, tail.sequence, tail.event_hash,
+    ) or (
+        locked.authority_row.trusted_sequence, locked.authority_row.trusted_event_hash,
+    ) != (tail.sequence, tail.event_hash):
+        raise RiskControlError(RiskControlCode.NORMAL_WRITER_PERMIT_UNEXPECTED_TAIL)
+
+
 class PermitStage(enum.StrEnum):
     INTENT = "INTENT"
     PREPARED = "PREPARED"
@@ -815,6 +1444,63 @@ class WriterEligibilityGate:
         intent_payload: Mapping[str, object],
         prepared_payload: Mapping[str, object],
     ) -> NormalWriterPermit:
+        """Shared predecessor-compatible permit entrypoint (C08-GEN-001..006).
+
+        An ABSENT aggregate binding does not by itself reject; a partial or
+        malformed binding rejects; a complete binding keeps the CORRECTION_01
+        Gate-B anti-substitution checks.  This entrypoint never grants the
+        R1-D07 N1 Strategy-1 Gate-D CREATE scope, which is reachable only
+        through ``issue_strategy1_gate_d_create_permit``."""
+
+        return self.__issue_permit_with_aggregate_gate(
+            locked=locked, normal_writer_session_id=normal_writer_session_id,
+            assessment=assessment, intent_payload=intent_payload,
+            prepared_payload=prepared_payload,
+            aggregate_gate=_require_generic_aggregate_binding,
+        )
+
+    def issue_strategy1_gate_d_create_permit(
+        self,
+        *,
+        locked: LockedLedger,
+        normal_writer_session_id: str,
+        assessment: WriterEligibilityAssessment,
+        intent_payload: Mapping[str, object],
+        prepared_payload: Mapping[str, object],
+    ) -> NormalWriterPermit:
+        """Dedicated R1-D07 N1 Strategy-1 Gate-D CREATE permit entrypoint
+        (C08-SCOPED-001..007).  The entrypoint itself is the C07 scope
+        discriminator: it accepts only ``CREATE_ORDER_V2`` and requires a
+        COMPLETE aggregate binding with the active ``ADRS2_<64hex>`` read-set
+        identity plus every Gate-B equality.  It shares the private permit
+        construction/state machine with ``issue_permit`` and never falls
+        back to it."""
+
+        if (
+            type(assessment) is not WriterEligibilityAssessment
+            or assessment.operation_kind != "CREATE_ORDER_V2"
+        ):
+            raise RiskControlError(RiskControlCode.NORMAL_WRITER_PERMIT_INVALID)
+        return self.__issue_permit_with_aggregate_gate(
+            locked=locked, normal_writer_session_id=normal_writer_session_id,
+            assessment=assessment, intent_payload=intent_payload,
+            prepared_payload=prepared_payload,
+            aggregate_gate=_require_strategy1_gate_d_create_aggregate_binding,
+        )
+
+    def __issue_permit_with_aggregate_gate(
+        self,
+        *,
+        locked: LockedLedger,
+        normal_writer_session_id: str,
+        assessment: WriterEligibilityAssessment,
+        intent_payload: Mapping[str, object],
+        prepared_payload: Mapping[str, object],
+        aggregate_gate: Callable[[WriterEligibilityAssessment, LockedLedger, object], None],
+    ) -> NormalWriterPermit:
+        """The one shared permit construction/state-machine mechanism behind
+        both public entrypoints (C08-SCOPED-005)."""
+
         with self.__mutex:
             nested_intent_payload = intent_payload.get("intent_payload")
             execution_attempt_id = intent_payload.get("execution_attempt_id")
@@ -837,6 +1523,7 @@ class WriterEligibilityGate:
             if projection.active_writer_session_id != normal_writer_session_id or projection.risk_control_state != "WRITER_ELIGIBLE" or projection.risk_state_epoch != assessment.risk_state_epoch:
                 raise RiskControlError(RiskControlCode.NORMAL_WRITER_PERMIT_INVALID)
             tail = locked.events[-1]
+            aggregate_gate(assessment, locked, tail)
             now = self.__monotonic()
             if type(now) is not int or now < 0 or now > assessment.freshness_deadline_monotonic_ns:
                 raise RiskControlError(RiskControlCode.NORMAL_WRITER_PERMIT_EXPIRED)
@@ -1053,6 +1740,14 @@ HISTORICAL_UNRESOLVED_EXPOSURE = UNKNOWN_UNBOUNDED
 
 
 __all__ = [
+    "ACCOUNT_AGGREGATE_IDENTITY_FIELDS", "ACCOUNT_AGGREGATE_SCHEMA_ID",
+    "ACCOUNT_AGGREGATE_UNIVERSE_COMPLETE", "AccountAggregateAuthorityExpectationV1",
+    "build_account_aggregate_authority_expectation", "require_account_aggregate_identity",
+    "AccountAggregateInputV1", "AccountAggregateSnapshotV1", "AccountAggregateTotalsV1",
+    "ProjectedAccountAggregateV1", "account_aggregate_current_state_within_limits",
+    "account_aggregate_snapshot_preimage", "build_account_aggregate_snapshot",
+    "compute_account_aggregate_totals", "enforce_account_aggregate_limits",
+    "project_account_aggregate",
     "AccountRiskLimits", "CandidateOrderV1", "EconomicFillV1", "FlowRiskLimits",
     "FreshnessRegistry", "FreshnessStampV1", "HISTORICAL_INCIDENT_CANCEL_TARGET",
     "HISTORICAL_INCIDENT_WRITER_RELEASE_ELIGIBLE", "HISTORICAL_UNRESOLVED_EXPOSURE",

@@ -121,6 +121,7 @@ from arb.venues.kalshi.ledger_binding import (
     acquire_active_release_only_v1,
     acquire_normal_writer_state,
     acquire_release_only,
+    build_account_aggregate_input,
     build_dormant_emergency_control_handle_v1,
     compute_authorization_binding_sha256,
     consume_active_execution_authorization_set_v1,
@@ -156,6 +157,7 @@ from arb.venues.kalshi.risk_control import (
     VenueDefensePolicy,
     WorkingOrderV1,
     WriterEligibilityGate,
+    build_account_aggregate_authority_expectation,
     build_orderbook_reference,
     compute_market_economic_state,
     compute_permit_domain_commitment_sha256,
@@ -4910,6 +4912,41 @@ def _gate_d_execute_create(
     )
     market_economic_state = compute_market_economic_state(invocation.market_ticker, truth.fills, truth.working_orders)
     candidate = candidate_for_desired_quote(market_ticker=invocation.market_ticker, desired=desired)
+    # CORRECTION_07 C07-AGG-003: the account aggregate universe is derived from
+    # the COMPLETE durable conflict-domain ledger replay, spanning every market
+    # in the active domain -- never from the ticker-scoped Gate-D venue read
+    # above.  When a complete, conflict-free, identity-consistent universe
+    # cannot be proven the input stays ``None``, which makes the assessment
+    # ineligible and denies permit issuance (fail closed).
+    account_aggregate_input = None
+    try:
+        account_aggregate_input = build_account_aggregate_input(
+            locked,
+            risk_config_sha256=runtime.risk_config.sha256,
+            unresolved_exposure_usd=unresolved_exposure_usd,
+            trusted_dynamic_read_set_id=active_trusted_read_set_id,
+            reconciliation_snapshot_sha256=reconciliation_snapshot_sha256,
+        )
+    except (RiskControlError, LedgerError):
+        account_aggregate_input = None
+    # CORRECTION_01 Gate A: the EXPECTED aggregate identity is obtained
+    # independently of the aggregate object above.  Its domain/store/tail
+    # values are read straight from the live LockedLedger and its
+    # config/read-set/reconciliation values from this invocation's own
+    # authoritative context -- never synthesized from
+    # ``account_aggregate_input``.  Both are then compared field by field
+    # inside the assessment, so a foreign or substituted aggregate identity
+    # cannot become eligible merely by being internally self-consistent.
+    account_aggregate_expectation = None
+    try:
+        account_aggregate_expectation = build_account_aggregate_authority_expectation(
+            locked,
+            risk_config_sha256=runtime.risk_config.sha256,
+            trusted_dynamic_read_set_id=active_trusted_read_set_id,
+            reconciliation_snapshot_sha256=reconciliation_snapshot_sha256,
+        )
+    except (RiskControlError, LedgerError):
+        account_aggregate_expectation = None
     assessment = build_writer_eligibility_assessment(
         risk_assessment_id=f"ra_{runtime.uuid_factory().hex}", request_id=request_id, candidate=candidate,
         market_economic_state=market_economic_state, unresolved_exposure=unresolved_exposure_usd,
@@ -4922,6 +4959,8 @@ def _gate_d_execute_create(
         freshness_deadline_monotonic_ns=now_ns + OPERATION_DEADLINE_MS * 1_000_000,
         active_domain_commitment=active_commitment,
         trusted_dynamic_read_set_id=active_trusted_read_set_id,
+        account_aggregate_input=account_aggregate_input,
+        account_aggregate_expectation=account_aggregate_expectation,
     )
     outer_intent = build_mm_create_intent_payload(
         execution_attempt_id=execution_attempt_id, conflict_domain_ref=conflict_domain_ref,
@@ -4945,11 +4984,22 @@ def _gate_d_execute_create(
     if not assessment.eligible:
         return _outcome(budget_charged=False, transport_invoked=False, classification="ELIGIBLE_NOT_SENT")
 
+    # CORRECTION_08 C08-RUN-001/002: the R1-D07 N1 Strategy-1 Gate-D CREATE
+    # permit comes ONLY from the dedicated scoped entrypoint, which requires
+    # CREATE_ORDER_V2 plus a COMPLETE aggregate binding with the active
+    # ADRS2 read-set identity and every Gate-B equality.  The generic
+    # ``issue_and_persist_write_permit`` helper (which calls the generic
+    # ``issue_permit``) is deliberately not used here, so there is no
+    # reachable generic fallback.  After scoped issuance the existing gate
+    # persistence methods run in the exact predecessor T1 -> T2 -> T3 order.
     try:
-        permit = issue_and_persist_write_permit(
-            gate=runtime.normal_gate, locked=locked, normal_writer_session_id=session_id, assessment=assessment,
-            outer_intent_payload=outer_intent, prepared_payload=prepared,
+        permit = runtime.normal_gate.issue_strategy1_gate_d_create_permit(
+            locked=locked, normal_writer_session_id=session_id, assessment=assessment,
+            intent_payload=outer_intent, prepared_payload=prepared,
         )
+        runtime.normal_gate.persist_intent(permit, locked)
+        runtime.normal_gate.persist_prepared(permit, locked)
+        runtime.normal_gate.persist_send_boundary(permit, locked)
     except (RiskControlError, LedgerError):
         return _outcome(budget_charged=False, transport_invoked=False, classification="PERMIT_ISSUANCE_FAILED")
 
@@ -9949,10 +9999,47 @@ def _orch_require_write_capable_risk(config: RiskLimitConfigV1, g: dict, *, raw_
     or defaulted here."""
     risk_gate = RunnerFailureCode.USER_RISK_CHOICE_REQUIRED
     if raw_sha256 == _ORCH_CANDIDATE_02_RISK_RAW_SHA256 or config.sha256 == _ORCH_CANDIDATE_02_RISK_SEMANTIC_SHA256:
+        # C07-PRICE-004 / C07-RUN-05: Candidate-02's exact zero price cap stays
+        # valid proof-only content and can never be a write-capable selection.
         raise _orch_fail(risk_gate, "candidate-02 proof-only risk configuration")
     flow = config.flow
     if flow.create_max_sends < 1 or flow.automated_execution_max_sends < 1 or flow.ordinary_cancel_max_sends < 1:
         raise _orch_fail(risk_gate, "risk configuration is not write-capable")
+    # CORRECTION_07 C07-FLOW-002 / C06-RUN-01..02: the exact Strategy-1
+    # compatibility/admission sentinels.  These are NOT runtime send counters
+    # and grant no budget, route, or capability; ordinary CREATE/CANCEL remain
+    # charged solely against ``G.max_ordinary_write_sends`` below.
+    if (
+        flow.create_max_sends != 1
+        or flow.modify_replace_max_sends != 0
+        or flow.ordinary_cancel_max_sends != 1
+        or flow.automated_execution_max_sends != 1
+    ):
+        raise _orch_fail(risk_gate, "strategy-1 flow sentinels are not exactly 1/0/1/1")
+    # C07-08 / C06-RUN-04: topology-derived one-order / one-contract capacities.
+    account = config.conflict_domain_account
+    per_market = config.per_market
+    if (
+        account.max_aggregate_working_orders != 1
+        or account.max_aggregate_working_contracts != Decimal("1.00")
+        or per_market.max_authoritative_working_orders != 1
+        or per_market.max_working_contracts != Decimal("1.00")
+    ):
+        raise _orch_fail(risk_gate, "strategy-1 one-order/one-contract topology capacities are not exact")
+    # C07-PRICE-002 / C07-USER-001 / C07-RUN-01..02: a write-capable Strategy-1
+    # package requires a POSITIVE bounded reference-price deviation cap.  A
+    # zero cap admits no actual positive-spread candidate; a cap above 1
+    # admits no binary candidate/reference pair that 1 would not already
+    # admit.  The value is never defaulted, derived, or widened here.
+    price_cap = config.per_order.max_abs_reference_price_deviation_usd
+    if not (Decimal("0") < price_cap <= Decimal("1")):
+        raise _orch_fail(risk_gate, "reference-price deviation cap outside strategy-1 range (0,1]")
+    # C07-USER-002: the working-order exposure cap is an INDEPENDENT positive
+    # bounded user choice; it is never derived from, or adjusted with, the
+    # price cap above.
+    working_exposure_cap = per_market.max_working_order_exposure_usd
+    if not (Decimal("0") < working_exposure_cap <= Decimal("1.000000")):
+        raise _orch_fail(risk_gate, "working-order exposure cap outside strategy-1 range (0,1.000000]")
     if g["max_ordinary_write_sends"] > GATE_D_ORDINARY_WRITE_SEND_MAX:
         raise _orch_fail(RunnerFailureCode.BRIDGE_AUTHORIZATION_RISK_CONFIG_MISMATCH, "G ordinary maximum exceeds installed Gate-D contract")
     # The installed ordinary loop never consumes a cleanup lane (MM07-CLAR-001):

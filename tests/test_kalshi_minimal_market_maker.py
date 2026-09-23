@@ -18,12 +18,15 @@ from arb.venues.kalshi.risk_control import (
     FlowRiskLimits,
     FreshnessStampV1,
     MarketEconomicState,
+    OrderbookReferenceV1,
     PerMarketRiskLimits,
     PerOrderRiskLimits,
     PriceRangeV1,
     RiskLimitConfigV1,
     StateIntegrityLimits,
     VenueDefensePolicy,
+    build_orderbook_reference,
+    price_reasonable,
 )
 from arb.venues.kalshi.minimal_market_maker import (
     MarketMakerEconomicTruthV1,
@@ -50,10 +53,14 @@ from arb.venues.kalshi.minimal_market_maker import (
 D = Decimal
 
 
-def risk_config() -> RiskLimitConfigV1:
+def risk_config(*, deviation_cap: Decimal = D("0.10")) -> RiskLimitConfigV1:
+    """``deviation_cap`` is the exact ``per_order.max_abs_reference_price_
+    deviation_usd`` leaf (CORRECTION_07 C07-PRICE-001).  It is a parameter
+    only so tests can construct the exact C07 boundary cases; no value is
+    selected or defaulted by this project."""
     return RiskLimitConfigV1(
         1, "kalshi-demo:portfolio:0", "USD",
-        PerOrderRiskLimits(D("10"), D("10"), True, D("0.10"), 1_000),
+        PerOrderRiskLimits(D("10"), D("10"), True, deviation_cap, 1_000),
         PerMarketRiskLimits(D("20"), D("20"), 10, D("20"), D("20")),
         AccountRiskLimits(D("100"), 50, D("100"), 0, D("0")),
         FlowRiskLimits(1, 1_000, 1, 1_000, 1, 1_000, 1, 1_000, 2, 1_000, 1, 500, 1, 10, 100),
@@ -121,8 +128,10 @@ def make_input(
     book_freshness: FreshnessStampV1 | None = None,
     reconciliation_freshness: FreshnessStampV1 | None = None,
     risk_control_state: str = "WRITER_ELIGIBLE",
+    risk_cfg: RiskLimitConfigV1 | None = None,
 ) -> MarketMakerInputV1:
     cfg = cfg or config()
+    risk_cfg = risk_cfg if risk_cfg is not None else risk_config()
     truth = truth if truth is not None else neutral_truth()
     snap = book_snapshot(yes_bid=yes_bid, no_bid=no_bid, ticker=cfg.market_ticker)
     book_fresh = book_freshness or fresh("f" * 64)
@@ -134,8 +143,8 @@ def make_input(
     return MarketMakerInputV1(
         strategy_config=cfg, book_snapshot=snap, book_snapshot_sha256=snap.canonical_snapshot_sha256,
         book_freshness=book_fresh, price_ranges=ranges, price_grid_sha256=compute_price_grid_sha256(ranges),
-        risk_control_state=risk_control_state, risk_state_epoch=1, risk_config=risk_config(),
-        risk_config_sha256=risk_config().sha256, reconciliation_snapshot_sha256="1" * 64,
+        risk_control_state=risk_control_state, risk_state_epoch=1, risk_config=risk_cfg,
+        risk_config_sha256=risk_cfg.sha256, reconciliation_snapshot_sha256="1" * 64,
         reconciliation_freshness=recon_fresh, economic_truth=truth, strategy_working_orders=working_orders,
         slot_classifications=slots, process_instance_id=PROC, now_monotonic_ns=now_monotonic_ns,
         now_utc="2026-08-15T00:00:00.000000Z",
@@ -626,3 +635,175 @@ def test_prior_process_book_freshness_remains_unusable() -> None:
     plan = evaluate_market_maker_input(make_input(book_freshness=foreign))
     assert plan.plan_classification == PlanClassification.NO_NEW_QUOTE_PLAN.value
     assert ReasonCode.INPUT_BOOK_STALE.value in plan.reason_codes
+
+
+# ---------------------------------------------------------------------------
+# CORRECTION_07 C07-MM-01..04 -- reference-price deviation cap against the
+# ACTUAL installed strategy.
+#
+# These tests exercise `src/arb/venues/kalshi/minimal_market_maker.py`
+# unchanged.  C07-PRICE-006 forbids modifying that source for this
+# correction, and C07-13 lists it as a protected, non-writable dependency:
+# the dynamic price-reasonability theorem is already implemented there and
+# only needs to be proven.
+#
+# All four cases run the real `evaluate_market_maker_input` pipeline, so the
+# candidate prices are the strategy's own grid/maker-adjusted candidates, not
+# hand-written stand-ins.
+# ---------------------------------------------------------------------------
+
+
+def _reference_for(*, yes_bid: Decimal, no_bid: Decimal) -> OrderbookReferenceV1:
+    """The exact reference the strategy itself derives from this book."""
+    return build_orderbook_reference(((yes_bid, D("100")),), ((no_bid, D("100")),))
+
+
+# Scenario A: one-cent grid, spread 0.02, book 0.40 / 0.50.
+#   reference_yes_price = 0.4500, lower candidate 0.44, upper candidate 0.46,
+#   so D_candidate is exactly 0.0100 on both sides.
+_A_YES_BID = D("0.40")
+_A_NO_BID = D("0.50")
+_A_SPREAD = D("0.02")
+_A_D_CANDIDATE = D("0.0100")
+
+# Scenario B: two-step grid (0.01 below 0.50, 0.05 above), spread 0.02,
+#   book 0.50 / 0.40.  reference_yes_price = 0.5500 and the coarse 0.05 grid
+#   pushes the candidates to 0.50 / 0.60, so D_candidate is exactly 0.0500 --
+#   five times the half-spread.
+_B_YES_BID = D("0.50")
+_B_NO_BID = D("0.40")
+_B_SPREAD = D("0.02")
+_B_D_CANDIDATE = D("0.0500")
+
+
+def _plan_with_cap(cap: Decimal, *, ranges, yes_bid: Decimal, no_bid: Decimal, spread: Decimal):
+    return evaluate_market_maker_input(make_input(
+        ranges=ranges, yes_bid=yes_bid, no_bid=no_bid, cfg=config(spread=spread),
+        risk_cfg=risk_config(deviation_cap=cap),
+    ))
+
+
+def test_c07_mm_01_zero_cap_suppresses_an_otherwise_surviving_candidate() -> None:
+    """C07-MM-01 / C07-PRICE-004: with a strictly positive strategy spread the
+    strategy DOES produce real lower/upper candidates, but a proof-only zero
+    deviation cap suppresses both by price reasonability.
+
+    This is the exact defect C07 corrects: a fixed cap of zero is not a
+    write-capable Strategy-1 selection because it admits no actual candidate.
+    """
+
+    # The same book/spread with a positive cap yields two real candidates ...
+    baseline = _plan_with_cap(
+        D("0.10"), ranges=ONE_CENT_GRID, yes_bid=_A_YES_BID, no_bid=_A_NO_BID, spread=_A_SPREAD,
+    )
+    assert baseline.plan_classification == PlanClassification.VALID_DESIRED_STATE.value
+    assert baseline.lower_quote is not None and baseline.upper_quote is not None
+
+    reference = _reference_for(yes_bid=_A_YES_BID, no_bid=_A_NO_BID)
+    assert abs(baseline.lower_quote.yes_price - reference.reference_yes_price) == _A_D_CANDIDATE
+    assert abs(baseline.upper_quote.yes_price - reference.reference_yes_price) == _A_D_CANDIDATE
+
+    # ... and a zero cap suppresses both of those very candidates.
+    plan = _plan_with_cap(
+        D("0"), ranges=ONE_CENT_GRID, yes_bid=_A_YES_BID, no_bid=_A_NO_BID, spread=_A_SPREAD,
+    )
+    assert plan.lower_quote is None
+    assert plan.upper_quote is None
+    assert ReasonCode.LOWER_SUPPRESSED_PRICE_REASONABILITY.value in plan.reason_codes
+    assert ReasonCode.UPPER_SUPPRESSED_PRICE_REASONABILITY.value in plan.reason_codes
+
+
+def test_c07_mm_02_cap_exactly_equal_to_d_candidate_passes() -> None:
+    """C07-MM-02 / C07-PRICE-003 / C07-12: equality is inclusive.
+
+    ``selected_cap == D_candidate`` survives price reasonability, subject to
+    every other strategy gate (which this book/grid also satisfies).
+    """
+
+    plan = _plan_with_cap(
+        _A_D_CANDIDATE, ranges=ONE_CENT_GRID, yes_bid=_A_YES_BID, no_bid=_A_NO_BID, spread=_A_SPREAD,
+    )
+    reference = _reference_for(yes_bid=_A_YES_BID, no_bid=_A_NO_BID)
+
+    assert plan.plan_classification == PlanClassification.VALID_DESIRED_STATE.value
+    assert plan.lower_quote is not None and plan.upper_quote is not None
+    assert abs(plan.lower_quote.yes_price - reference.reference_yes_price) == _A_D_CANDIDATE
+    assert abs(plan.upper_quote.yes_price - reference.reference_yes_price) == _A_D_CANDIDATE
+    assert ReasonCode.LOWER_SUPPRESSED_PRICE_REASONABILITY.value not in plan.reason_codes
+    assert ReasonCode.UPPER_SUPPRESSED_PRICE_REASONABILITY.value not in plan.reason_codes
+
+
+def test_c07_mm_03_cap_one_exact_decimal_below_d_candidate_suppresses() -> None:
+    """C07-MM-03 / C07-12: one exact Decimal increment below the boundary
+    suppresses the candidate.  The comparison is exact Decimal arithmetic and
+    C07 imposes no new quantization on this leaf, so the below-boundary value
+    is constructed as an exact smaller Decimal."""
+
+    below = _A_D_CANDIDATE - D("0.0001")
+    assert below < _A_D_CANDIDATE
+
+    plan = _plan_with_cap(
+        below, ranges=ONE_CENT_GRID, yes_bid=_A_YES_BID, no_bid=_A_NO_BID, spread=_A_SPREAD,
+    )
+    assert plan.lower_quote is None
+    assert plan.upper_quote is None
+    assert ReasonCode.LOWER_SUPPRESSED_PRICE_REASONABILITY.value in plan.reason_codes
+    assert ReasonCode.UPPER_SUPPRESSED_PRICE_REASONABILITY.value in plan.reason_codes
+
+
+def test_c07_mm_04_cap_must_not_be_derived_from_half_the_spread() -> None:
+    """C07-MM-04 / C07-PRICE-005: no half-spread derivation is valid.
+
+    On a coarse price grid the maker/grid adjustment moves the actual
+    candidate well away from ``reference +/- minimum_spread_usd / 2``.  Here
+    ``D_candidate`` is 0.0500 while ``minimum_spread_usd / 2`` is 0.0100, so a
+    cap auto-derived as half the spread would suppress a candidate the user's
+    real selection admits.  The cap is therefore an independent user choice
+    and is never inferred from the strategy spread.
+    """
+
+    reference = _reference_for(yes_bid=_B_YES_BID, no_bid=_B_NO_BID)
+    half_spread = _B_SPREAD / D("2")
+
+    baseline = _plan_with_cap(
+        D("0.10"), ranges=TWO_STEP_GRID, yes_bid=_B_YES_BID, no_bid=_B_NO_BID, spread=_B_SPREAD,
+    )
+    assert baseline.lower_quote is not None and baseline.upper_quote is not None
+    lower_deviation = abs(baseline.lower_quote.yes_price - reference.reference_yes_price)
+    upper_deviation = abs(baseline.upper_quote.yes_price - reference.reference_yes_price)
+    assert lower_deviation == _B_D_CANDIDATE
+    assert upper_deviation == _B_D_CANDIDATE
+    # The load-bearing inequality: the real deviation is NOT the half-spread.
+    assert lower_deviation != half_spread
+    assert upper_deviation != half_spread
+
+    # A half-spread-derived cap would wrongly suppress both real candidates.
+    derived = _plan_with_cap(
+        half_spread, ranges=TWO_STEP_GRID, yes_bid=_B_YES_BID, no_bid=_B_NO_BID, spread=_B_SPREAD,
+    )
+    assert derived.lower_quote is None
+    assert derived.upper_quote is None
+    assert ReasonCode.LOWER_SUPPRESSED_PRICE_REASONABILITY.value in derived.reason_codes
+    assert ReasonCode.UPPER_SUPPRESSED_PRICE_REASONABILITY.value in derived.reason_codes
+
+    # The user's own exact selection admits them.
+    selected = _plan_with_cap(
+        _B_D_CANDIDATE, ranges=TWO_STEP_GRID, yes_bid=_B_YES_BID, no_bid=_B_NO_BID, spread=_B_SPREAD,
+    )
+    assert selected.lower_quote is not None
+    assert selected.upper_quote is not None
+
+
+def test_c07_mm_05_price_reasonable_is_the_exact_inclusive_deviation_predicate() -> None:
+    """C07-PRICE-003 directly on the installed pure predicate: equality
+    passes, any excess fails, and the cap is never widened."""
+
+    reference = _reference_for(yes_bid=_A_YES_BID, no_bid=_A_NO_BID)
+    candidate = D("0.44")
+    deviation = abs(candidate - reference.reference_yes_price)
+
+    assert deviation == _A_D_CANDIDATE
+    assert price_reasonable(candidate, reference, deviation) is True
+    assert price_reasonable(candidate, reference, deviation - D("0.0001")) is False
+    assert price_reasonable(candidate, reference, deviation + D("0.0001")) is True
+    assert price_reasonable(candidate, reference, D("0")) is False
