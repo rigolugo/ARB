@@ -3298,3 +3298,258 @@ consumption, restricted-session append, RELEASE_ONLY, writer-proof release,
 NormalWriter, Gate D, venue write, production, R1-D08, or remote Git write.
 Recording an approved specification or an installed implementation is
 Git/review provenance and never an execution authorization.
+
+### A24 R1-D07 N1 release-only / writer-eligibility CORRECTION_08 scope clarification + implementation — APPROVED_AND_CANONICALLY_INSTALLED
+
+This is a documentation-only continuity overlay (task
+`R1-D07_N1_RELEASE_ONLY_AND_WRITER_ELIGIBILITY_SPEC_01_CORRECTION_08_CANONICAL_CONTINUITY_01`).
+This continuity candidate is prepared directly from the exact installed
+implementation commit on canonical `rigolugo/ARB/main`:
+
+```text
+commit = d17df1b8c88357aaecf12f7231c01b486b8d497c
+tree   = b0c684e743d98ce768270f7b2dc45ef1ede6e5a0
+parent = e0993b79391cadedc22ac40cea114813007cfd51
+```
+
+This section controls current state only when this continuity candidate is
+itself later present on canonical `main`. It alters no implementation bytes and
+grants no runtime capability.
+
+**WHY this section exists.** A23 records CORRECTION_05 and the CORRECTION_03
+orchestrator implementation as the latest installed D07 milestone, with
+canonical `main` at `60ca9f61cab2ed81310d89a422bd7af4f2b532ad`. Since then the
+CORRECTION_08 scope clarification of the release-only / writer-eligibility
+specification and its implementation (`CORRECTION_08 IMPLEMENTATION_01`) were
+independently Marco-approved, and the exact approved implementation commit was
+canonically installed. This section records the milestone in the existing
+routed D07 checkpoint; no new checkpoint is created.
+
+**Supersession scope (A23 only, and only where stated).** A24 supersedes A23
+only on: (a) the current controlling-specification identity (now CORRECTION_08
+by identity reference); (b) the current installed implementation identity and
+canonical `main`; (c) the user-risk-choice readiness state; and (d) A23's next
+bounded action. All historical A23 technical content — the CORRECTION_05
+specification installation, the CORRECTION_03 orchestrator substrate and its
+six installed paths, the retracted contamination disclosure, and the preserved
+deployed-state theorem — remains preserved unchanged. A1-A23 are not rewritten.
+
+**Current theorem.**
+
+```text
+controlling_spec = CORRECTION_08 / APPROVED_AND_CANONICALLY_INSTALLED_BY_IDENTITY_REFERENCE
+implementation = CORRECTION_08 IMPLEMENTATION_01 / APPROVED_AND_CANONICALLY_INSTALLED
+installed_implementation_commit = d17df1b8c88357aaecf12f7231c01b486b8d497c
+installed_implementation_tree = b0c684e743d98ce768270f7b2dc45ef1ede6e5a0
+live_C08_release_or_GateD_execution = NOT_RUN
+USER_RISK_CHOICE_REQUIRED = OPEN
+USER_RISK_CHOICE_READY = YES
+risk_values_selected = NONE
+next_bounded_action = RETURN_TO_MARCO_FOR_USER_RISK_CHOICE
+```
+
+**A24.1 Controlling specification (by identity reference).** The CORRECTION_08
+scope clarification is Marco-approved. Its raw artifacts are external/local
+and are canonical here by exact identity only:
+
+```text
+spec                = KALSHI_DEMO_R1-D07_N1_RELEASE_ONLY_AND_WRITER_ELIGIBILITY_SPEC_01_CORRECTION_08.md
+spec bytes          = 39387
+spec sha256         = f1601a674aa4b777d44d2723ea3b61f49dc4d05ddc0391f8096b2cabd72521b6
+handoff             = HANDOFF_KALSHI_DEMO_R1-D07_N1_RELEASE_ONLY_AND_WRITER_ELIGIBILITY_SPEC_01_CORRECTION_08.md
+handoff bytes       = 6778
+handoff sha256      = 72424cb4c9d37b66bcdc0cd95c827c1e90387ad991b6a9e9c34677d0f7e92785
+spec submission ZIP = 83963 bytes / 76ac0333bd40770cbaa583143a3a3850429b5ac518bf020d6a6a9d3676d124ab
+Marco spec approval = 8571 bytes / a5a83ac3c3cbbea5a7409d0553c6f8bf896523b87c8bb39fbb77581021cf3942
+scope decision      = MARCO_R1_D07_C07_AGGREGATE_SCOPE_DECISION_01.md, 3487 bytes / 059d812f67da1a759b4395501243a4729964cd261b65a6c893aaf2cf7157bfe4
+```
+
+Status when A24 is canonical:
+`CORRECTION_08 = APPROVED_AND_CANONICALLY_INSTALLED_BY_IDENTITY_REFERENCE`.
+
+Predecessor / supersession history:
+
+- CORRECTION_08 supersedes only CORRECTION_07's bounded shared-gate scope
+  interpretation (which permit surface must require the C07 aggregate binding);
+- the CORRECTION_07 economic / risk / user-choice contract remains incorporated
+  unchanged;
+- CORRECTION_05 remains incorporated predecessor lineage as recorded in A23;
+- the stopped CORRECTION_02 / CORRECTION_03 implementation interpretations of
+  the C07 scope remain noncanonical historical correction evidence only;
+- the blocked C01 implementation candidate
+  `b69a3e68cced0876dfdb7cdd83f036b4974137f6` was a content seed only and is not
+  ancestry of the installed implementation.
+
+**A24.2 Installed implementation.**
+
+```text
+implementation task = R1-D07_N1_RELEASE_ONLY_AND_WRITER_ELIGIBILITY_SPEC_01_CORRECTION_08_IMPLEMENTATION_01
+commit = d17df1b8c88357aaecf12f7231c01b486b8d497c
+tree   = b0c684e743d98ce768270f7b2dc45ef1ede6e5a0
+parent = e0993b79391cadedc22ac40cea114813007cfd51
+commits above base = 1
+changed paths = exact nine
+status = APPROVED_AND_CANONICALLY_INSTALLED
+```
+
+Exactly nine installed paths and identities (as installed at
+`d17df1b8c88357aaecf12f7231c01b486b8d497c`):
+
+| Path | Bytes | SHA-256 | Git blob |
+|---|---|---|---|
+| `src/arb/venues/kalshi/risk_control.py` | 82785 | `f5772f2d7c87dadabeae13c0fdc3c688f4e634856bad5d213359fe51a5f77229` | `111685c8c1dc7735a53b45830d93844c329f23e3` |
+| `src/arb/venues/kalshi/quote_lifecycle.py` | 68400 | `020fe5a2f1ccb96e1b2c285af3d1480734e2601bf0f8074946dc2bdfd5d30821` | `8d857abc15aafb2601a549f0bd8bbd7ed05d679b` |
+| `src/arb/venues/kalshi/ledger_binding.py` | 244789 | `d3219a0dfbfc864b204de219420553861ae1ca2cb9162797697242f39d4dd63a` | `fac56b5555b48ee04da1753a4042b1f11debaf97` |
+| `src/arb/venues/kalshi/minimal_market_maker_experiment_runner.py` | 681674 | `12a3963247e209a62a0d51c0d6ab0ccb1f9e6b782c309add749524b75306af58` | `4dd0d06978276fe53373010aaf27e177483cd508` |
+| `tests/test_kalshi_risk_control.py` | 67837 | `db4439d7c23ab9ceecef0707a6eef242011279e5222976d1f49c2936b19e969b` | `c19a15db167f7664ae94b9944d17d5af4ae716da` |
+| `tests/test_kalshi_quote_lifecycle.py` | 148010 | `df4629568c3e0f25e5da13a467f525ae92168d36cffef3589092be0133f9f428` | `3d5cf1373a7282ebc6ad36809a8391ce1438ae30` |
+| `tests/test_kalshi_ledger_binding.py` | 322287 | `825bd7d15848fd8a087970de2cdfba0ea6702612b929683dc0d150bac6a533e0` | `9786ce5d5fa609c5ed5f2d7ca9804cd736e8c3f5` |
+| `tests/test_kalshi_minimal_market_maker_experiment_runner.py` | 779433 | `f2a270ce97bba3ffeab61245ee6c85f6b67a556fe0c10153b55feddf2499f46f` | `b9dbc8a25ba36f1c54ed0ed0a622f6f8a9a20213` |
+| `tests/test_kalshi_minimal_market_maker.py` | 37743 | `3fa81587a640dc72b3391e2d60bcc285af07ac5d907afd0ca6317b4cb192717a` | `43e2a7fdbdbcfd769713e6e04cbaa321d8313e44` |
+
+Exact approved implementation review provenance (Marco decision `APPROVE`,
+technical review only):
+
+```text
+review ZIP                  = 557054 bytes / ef7f1046a0eccbe7e2a693c104dcd3a097b48cda7579f4a2b35ca894e7edfec7
+submission ZIP              = 635756 bytes / b54e3a664915a30877f97bbf3d37980ff1f344a265144f86e2e84a1882fecc6f
+candidate.patch             = 243995 bytes / 9b578296d4a4e0aa5231463c6e4a5cbaaaa4f8a48bd6ab911be84d18fd2b9cf3
+candidate_vs_c01_seed.patch = 64222 bytes / 7b7b50e5105e80c86da3f8af49d6eadeff8c41a1a13797bffed39d74d183444e
+Marco implementation approval = 11827 bytes / 245d05dd7ed131e518cb068459e3ee0c6032be44fc41d34f523e386fedc7fc55
+```
+
+Canonical installation: one ordinary non-force push of the exact approved
+commit object (`candidate_source = EXACT_APPROVED_COMMIT_OBJECT`, no
+reconstruction), previous `main` `e0993b79391cadedc22ac40cea114813007cfd51`,
+post-push classification `REMOTE_INSTALLATION_CONFIRMED`, push commands = 1,
+retries = 0, force / force-with-lease = 0; the canonical checkout was then
+synchronized by `git pull --ff-only`. The installation evidence is
+external/local and is identified by exact identity in `ARTIFACT_INDEX.md`
+ART-0130.
+
+Protected-path theorem: `src/arb/venues/kalshi/order_lifecycle.py`
+(`2ea2c40437626de7218dc318432db94e9bc9d4f5`),
+`tests/test_kalshi_one_order_lifecycle.py`
+(`850ed38cdb8fe526e9c947a003d8a1d5a433e3e5`),
+`src/arb/venues/kalshi/minimal_market_maker.py`
+(`be1bbfa31c7d814d48751f9b2399ef62c866d36e`) and
+`src/arb/execution_ledger.py` (`608f4cd281525a8bf53fafa2b19eb23cc5b669ac`)
+remain the exact canonical-base blobs.
+
+**A24.3 Technical theorem (installed substrate; not executed; no scope
+expansion).**
+
+```text
+C08 aggregate-required permit scope
+    = R1_D07_N1_STRATEGY1_GATE_D_CREATE
+
+generic WriterEligibilityGate.issue_permit
+    = predecessor-compatible shared entrypoint
+    = aggregate absent does not itself impose C08 requirement
+    = partial/malformed aggregate rejects
+    = complete aggregate retains Gate-B anti-substitution
+
+dedicated scoped Strategy-1 Gate-D CREATE permit entrypoint
+    = CREATE only
+    = complete aggregate required
+    = active ADRS2 required
+    = C01 Gate-B equality required
+    = one shared private permit/state-machine mechanism
+
+Gate-D CREATE
+    = scoped entrypoint only
+    = no generic fallback
+
+one-order lifecycle
+    = protected predecessor-compatible path
+    = no C08 migration
+```
+
+Accepted narrow V1 consequence: a legacy V1 Strategy-1 Gate-D CREATE without
+an active ADRS2 read-set fails closed at scoped permit issuance
+(`PERMIT_ISSUANCE_FAILED`; no T1/T2/T3, budget not charged, transport not
+invoked). This does not generalize to all legacy CREATE operations; the
+separate one-order-lifecycle CREATE remains on the generic predecessor permit
+surface.
+
+**A24.4 Test theorem (accepted review evidence; not re-run by this
+continuity task).**
+
+```text
+risk_control         = 49 passed
+quote_lifecycle      = 123 passed
+ledger_binding       = 462 passed + 59 subtests
+minimal_market_maker = 67 passed
+experiment_runner    = 1513 passed + 2 skipped + 187 subtests
+one_order_lifecycle  = 424 passed + 106 subtests
+combined six         = 2638 passed + 2 skipped + 352 subtests
+full repository      = 3987 passed + 2 skipped + 942 subtests, exit 0
+```
+
+The one-order-lifecycle source and test remained canonical-base byte-identical.
+
+Disclosure: the intermittent authorization-consumption test
+`test_parallel_consumption_has_at_most_one_winner_and_never_retries` (both
+consumers `UNAVAILABLE / LEDGER_BUSY`, zero winners) is pre-existing on the
+canonical base, fail-closed (no double consumption), and nonblocking for C08.
+It remains an unresolved separate liveness/test issue suitable for a separate
+bounded task. No exact failure-rate relationship is claimed, and it is not
+identified as the earlier unidentified CORRECTION_03 one-off failure.
+
+**A24.5 Current capability / operational state.**
+
+```text
+implementation_substrate = APPROVED_AND_CANONICALLY_INSTALLED
+live_C08_release_or_GateD_execution = NOT_RUN
+Kalshi/API/venue activity from spec/implementation/install/continuity = NONE
+credential use = NONE
+deployed_N1 activity = NONE
+risk-config consumption = NONE
+RELEASE_ONLY real acquisition = NONE
+writer-proof release = NONE
+NormalWriter real acquisition = NONE
+Gate-D real execution = NONE
+production = NONE
+
+USER_RISK_CHOICE_REQUIRED = OPEN
+USER_RISK_CHOICE_READY = YES
+risk_values_selected = NONE
+
+per_order.max_abs_reference_price_deviation_usd
+    = OPEN_USER_CHOICE Decimal (0,1]
+
+per_market.max_working_order_exposure_usd
+    = OPEN_USER_CHOICE Decimal (0,1.000000]
+
+G.max_ordinary_write_sends
+    = LATER_GATE_D_AUTHORIZATION_CHOICE integer 1..4
+```
+
+`USER_RISK_CHOICE_READY = YES` means only that the two open user risk values
+may now be chosen. It does not authorize G, risk-config consumption, release,
+writer admission, or any execution. The prior accepted deployed-state theorem
+`BOOT_HOLD / HELD / writer_proof_release_eligible=false` is preserved only as
+historical / current-until-refreshed knowledge; this continuity task did not
+read deployed N1 state and makes no fresh deployed-state claim.
+
+**A24.6 Next bounded action.**
+
+```text
+next_bounded_action = RETURN_TO_MARCO_FOR_USER_RISK_CHOICE
+```
+
+The user chooses the two open risk values only
+(`per_order.max_abs_reference_price_deviation_usd` and
+`per_market.max_working_order_exposure_usd`). G
+(`max_ordinary_write_sends`) remains a later, separate Gate-D authorization
+choice. After the risk choice, any write-capable risk artifact/configuration
+and any release / writer / Gate-D execution package each require separate
+review and explicit authorization. Nothing here is profitability or arbitrage
+evidence.
+
+**A24.7 Boundary.** This continuity record authorizes no credential use,
+N1/deployed-state access, Kalshi/API/venue activity, risk selection, risk-config
+consumption, restricted-session append, RELEASE_ONLY, writer-proof release,
+NormalWriter, Gate D, venue write, production, R1-D08, or remote Git write.
+Recording an approved specification or an installed implementation is
+Git/review provenance and never an execution authorization.
