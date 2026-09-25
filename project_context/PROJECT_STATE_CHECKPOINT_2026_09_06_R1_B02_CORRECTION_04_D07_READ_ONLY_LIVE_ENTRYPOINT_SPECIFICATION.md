@@ -3829,3 +3829,272 @@ production = NONE
 Recording an approved specification by identity is review provenance and never
 an execution authorization. Nothing here is profitability or arbitrage
 evidence.
+
+### A26 R1-D07 N1 user-proposed test-parameter profile implementation — APPROVED_AND_CANONICALLY_INSTALLED
+
+This is a documentation-only continuity overlay (task
+`R1-D07_N1_USER_PROPOSED_TEST_PARAMETERS_PROFILE_IMPLEMENTATION_01_CANONICAL_CONTINUITY_UPDATE_01`).
+This candidate is prepared directly from the exact canonical base on
+`rigolugo/ARB/main`:
+
+```text
+commit = 67dcfa1e5710de082e9c52d7ced6630c523cb524
+tree   = f82d980bf83e950799d58af90e83e74753c14c0f
+parent = 9bf62c576579449f1ceee59c4970c76bf0e53f12
+```
+
+This section controls current state only when this continuity candidate is
+itself later present on canonical `main`. It alters no implementation bytes,
+installs no profile file, and grants no runtime capability. It updates exactly
+three existing documentation paths (this checkpoint, `project_context/START_HERE.md`,
+`project_context/ARTIFACT_INDEX.md`); no new checkpoint or repository file is
+created and canonical read order is unchanged.
+
+**WHY this section exists.** A25 canonicalized the approved profile mechanism
+specification by identity and routed to
+`RETURN_TO_MARCO_FOR_PROFILE_MECHANISM_IMPLEMENTATION_DISPATCH`. That
+implementation was then dispatched, implemented, Marco-approved, and installed
+on canonical `main` by a single non-force fast-forward. This section records
+that installed milestone.
+
+**Supersession scope (A25 only, and only where stated).** A26 supersedes A25
+only on A25's next bounded action and by adding the installed-implementation
+state. A25's mechanism identities, canonical-versus-mutable theorem,
+noncontrolling example identities, global state, and withdrawn-predecessor and
+prior-finding records remain unchanged. A1-A25 are not rewritten.
+
+**A26.1 Installed implementation identity.**
+
+```text
+R1-D07_N1_USER_PROPOSED_TEST_PARAMETERS_PROFILE_IMPLEMENTATION_01
+  = APPROVED_AND_CANONICALLY_INSTALLED
+
+installed commit      = 67dcfa1e5710de082e9c52d7ced6630c523cb524
+installed tree        = f82d980bf83e950799d58af90e83e74753c14c0f
+installed sole parent = 9bf62c576579449f1ceee59c4970c76bf0e53f12
+```
+
+Exact installed path identities (the only four paths changed relative to the
+parent; two added, two modified):
+
+```text
+afca36f80735f08fa005536923658ccb79474fbf
+  src/arb/venues/kalshi/strategy1_test_parameter_profile.py
+  bytes 27111
+  sha256 8941adf7134e494befadbb43266a284ccb13633ab17703a8771c6f37b2ed0804
+
+a82cd2f33f4dc384e4b7d6a1166e2226d9c82b1d
+  tests/test_kalshi_strategy1_test_parameter_profile.py
+  bytes 47969
+  sha256 8068983084bf5dfcb09c17f971b93a147ca9570ce822573225faea4a862577ee
+
+1a073b6e5e67cfa792c238697a6c22900485088b
+  src/arb/venues/kalshi/minimal_market_maker_experiment_runner.py
+  bytes 688397
+  sha256 31a32a1a3e6b9a02ad56ebee68e58506d5132477532f5429080073e8a2054aa7
+
+4fa5f16cc38fa7caf45136422d156db6127f538c
+  tests/test_kalshi_minimal_market_maker_experiment_runner.py
+  bytes 800408
+  sha256 b9be98f46d791e5659236da2e57cdb66851e20afbae4bc90edd137c4e24939b8
+```
+
+Controlling specification (unchanged, A25.1):
+`KALSHI_DEMO_R1_D07_N1_USER_PROPOSED_TEST_PARAMETERS_PROFILE_SPEC_01.md`,
+24718 bytes, sha256
+`0a58a505373d602a13a9fb1e66d5addd36b53a8dda8c2a99ee744735f03eaedc`.
+
+**A26.2 Installed technical theorem.**
+
+- The mechanism validates explicitly selected
+  `ARB_USER_PROPOSED_TEST_PARAMETERS_V1` scenario profiles (exact path read
+  once, or an already-validated immutable carrier): strict UTF-8 without BOM,
+  duplicate-key rejection, exact schema/constants, exact Decimal-string grammar
+  and ranges, `raw_profile_sha256`, and `parameter_set_sha256` over the
+  installed ARB canonical JSON/Decimal serialization.
+- Profile-controlled values remain exactly the two approved Decimal leaves:
+  `per_order.max_abs_reference_price_deviation_usd` and
+  `per_market.max_working_order_exposure_usd`.
+- Derivation changes only those two leaves of a conforming fixed C07/C08
+  Strategy-1 `RiskLimitConfigV1`; a full differential check fails closed on any
+  other leaf delta (`PROFILE_OVERRIDE_FORBIDDEN`), and a nonconforming fixed
+  contract fails closed (`PROFILE_FIXED_CONTRACT_INVALID`).
+- The exact four-value `ProfileRiskBindingV1`
+  (`profile_id`, `raw_profile_sha256`, `parameter_set_sha256`,
+  `derived_risk_config_sha256`) is technical provenance only; reconciliation is
+  exact equality.
+- No default profile, directory scan, fallback, environment default, or hot
+  reload.
+- G is excluded from profiles, carriers, bindings, and derivation.
+- A valid profile means only `VALID_SCENARIO_PARAMETERS`.
+- The runner gains only a bounded profile preflight seam
+  (`run_strategy1_test_parameter_profile_preflight`,
+  `admit_strategy1_profile_bound_stage`) that completes validation, derivation,
+  and tuple reconciliation before any caller-supplied later stage; no existing
+  runtime path, the read-only Stage-3 CLI, or the Gate-D path calls it.
+- The existing O/G/E schemas, `RiskLimitConfigV1`, canonical serialization,
+  and all protected modules were not changed by this mechanism.
+
+**A26.3 Implementation review evidence.** Marco decision `APPROVE`. Raw
+artifacts are external/local accepted artifacts, canonical here by exact
+identity only:
+
+```text
+Marco implementation approval handoff
+  R1-D07_N1_USER_PROPOSED_TEST_PARAMETERS_PROFILE_IMPLEMENTATION_01_MARCO_APPROVAL_HANDOFF_01.md
+  bytes = 7731
+  sha256 = cf42043ccfaf2558a5ad0674fb46ba6a6c174de720916ea70e7661361b40057b
+
+implementation review ZIP
+  R1-D07_N1_USER_PROPOSED_TEST_PARAMETERS_PROFILE_IMPLEMENTATION_01_MARCO_REVIEW.zip
+  bytes = 355995
+  sha256 = 5390f65a4eef09591b550df151e94224aafecf9834c78ce8e72e606deec7f5b8
+
+implementation submission ZIP
+  R1-D07_N1_USER_PROPOSED_TEST_PARAMETERS_PROFILE_IMPLEMENTATION_01_MARCO_SUBMISSION_BUNDLE.zip
+  bytes = 368536
+  sha256 = c42234d71bed6d617e1783919bcfaa7244733ab2ef923e1d37de418de34bcc61
+
+candidate.patch
+  bytes = 107230
+  sha256 = 389895bf5cb1583cbaf76cbed7a16b27575bc511fee05d1994b2c4985188679c
+```
+
+**A26.4 Accepted final offline test evidence** (committed candidate; synthetic
+fixtures only; no network, credential, venue, or deployed-state activity):
+
+```text
+profile module:        58 passed, 342 subtests
+runner module:         1525 passed, 2 skipped, 200 subtests
+one-order lifecycle:   424 passed, 106 subtests
+full repository serial: 4057 passed, 2 skipped, 1297 subtests, 0 failures
+```
+
+Disclosed earlier attempt (not the evidence run): a full-suite run executed in
+parallel with the runner module reported one failure in the unchanged,
+protected ledger concurrency test
+`tests/test_kalshi_ledger_binding.py::AuthorizationConsumptionBindingTests::test_parallel_consumption_has_at_most_one_winner_and_never_retries`.
+That test passed 5/5 isolated reruns and the later serial full suite passed.
+Marco did not classify it as a candidate defect. All `PROFILE-01` through
+`PROFILE-32` requirements are mapped to passing tests.
+
+**A26.5 Canonical installation evidence.** Marco installation-review decision
+`APPROVE`. Raw artifacts are external/local, canonical here by exact identity
+only:
+
+```text
+installation dispatch bundle
+  R1-D07_N1_USER_PROPOSED_TEST_PARAMETERS_PROFILE_IMPLEMENTATION_01_CANONICAL_INSTALLATION_01_CLAUDE_DISPATCH_BUNDLE.zip
+  bytes = 1033358
+  sha256 = 8d6b776eba0121d8342d6a5f5f2ce1ef026e312c4bceb7d0582139d9594405d4
+
+installation evidence bundle
+  R1-D07_N1_USER_PROPOSED_TEST_PARAMETERS_PROFILE_IMPLEMENTATION_01_CANONICAL_INSTALLATION_01_EVIDENCE_BUNDLE.zip
+  bytes = 11518
+  sha256 = 35145af74f6964e8f9a9f9f2a0d2c352fe0be4ac942904010ba2fa2bde41f5d4
+
+RESULT.json
+  bytes = 6275
+  sha256 = 64779c9612aa2f2227f7a7855b219d6804dce88bf47db9a7827be09bcb2db327
+
+REPORT.md
+  bytes = 4642
+  sha256 = 1fe73ba9d741026f414051ad604e2113ef3b0024f2fb2a8810ceaaf45a102444
+
+GIT_TRANSCRIPT.txt
+  bytes = 9035
+  sha256 = 9f1d01d07c81c6206e787cc9b79ed3db25b539587de03523190f19258c13a72d
+
+PUSH_ATTEMPT_MARKER.json
+  bytes = 888
+  sha256 = bb08dee6438d63311810b3dc03533678caa6b212d4bf8d25a8b97c93e4a1fc7b
+
+CONTINUITY_CANONICALIZATION_HANDOFF.md
+  bytes = 4290
+  sha256 = 228a574c6a047c850e3fdbe93d00230f55cb58c377594d6ab2c50302bb1853b8
+
+INSTALLATION_DELIVERY_MANIFEST.json
+  bytes = 2759
+  sha256 = e8dfa04ba1652e7c43041a6c4bb58267923feefb8057b1b7d6f82a7cb4080486
+
+Marco installation-review approval handoff
+  R1-D07_N1_USER_PROPOSED_TEST_PARAMETERS_PROFILE_IMPLEMENTATION_01_CANONICAL_INSTALLATION_01_MARCO_APPROVAL_HANDOFF_01.md
+  bytes = 6190
+  sha256 = cf0b0db17823cfbc2ea2d4ce6a85c992a4739acd841753caea2fb8715daf0f64
+```
+
+Installation theorem:
+
+```text
+push_attempts     = 1
+force_attempts    = 0
+automatic_retries = 0
+remote_before     = 9bf62c576579449f1ceee59c4970c76bf0e53f12
+remote_after      = 67dcfa1e5710de082e9c52d7ced6630c523cb524
+classification    = REMOTE_INSTALLATION_CONFIRMED
+```
+
+The durable pre-push marker was written and read back before the push
+boundary; only `refs/heads/main` changed on the remote.
+
+**A26.6 Carried-forward procedural finding.**
+
+```text
+UNAUTHORIZED_LOCAL_GIT_MAINTENANCE_WORKTREE_PRUNE
+classification = NONBLOCKING_FOR_APPROVED_CANDIDATE_CONFORMANCE
+repeated_during_installation = NO
+```
+
+The implementation task ended with an unauthorized, unnecessary
+`git worktree prune`; it did not affect the approved candidate object and was
+not repeated.
+
+**A26.7 Current global state (unchanged except the implementation status).**
+
+```text
+PROFILE_SPEC_01 = APPROVED_AND_CANONICALLY_INSTALLED_BY_IDENTITY_REFERENCE
+PROFILE_IMPLEMENTATION_01 = APPROVED_AND_CANONICALLY_INSTALLED
+USER_RISK_CHOICE_REQUIRED = OPEN
+USER_RISK_CHOICE_READY = YES
+risk_values_selected = NONE
+USER_PROPOSED_TEST_PARAMETER_PROFILE_SCHEMA = AVAILABLE
+profile_values = USER_MUTABLE_PER_SCENARIO
+default_profile = NONE
+G_selection = NONE
+profile_runtime_consumption = NOT_RUN
+```
+
+Per-scenario profile values are not global selected risk values.
+
+**A26.8 No-runtime-authorization theorem.** The installed code and any profile
+validation do not grant:
+
+```text
+risk-config runtime consumption
+RELEASE_ONLY
+writer-proof release
+NormalWriter
+Gate-D execution
+G selection
+venue writes
+deployed-N1 access
+production
+```
+
+No profile was selected or consumed by the implementation or installation
+tasks. Installed write-capable code does not imply permission to execute.
+
+**A26.9 Next bounded action and boundary.**
+
+```text
+NEXT_BOUNDED_ACTION =
+RETURN_TO_MARCO_FOR_SCENARIO_PROFILE_SELECTION_AND_SEPARATELY_AUTHORIZED_EXECUTION_PACKAGE_PLANNING
+```
+
+This is orchestration routing only, not a technical authorization. Any future
+write-capable use must explicitly bind the exact four-value profile/risk tuple
+as required by the controlling profile specification (TP-BIND-003/004). G
+remains a separate later integer `1..4` authorization choice. No default
+profile exists. No venue or runtime activity is authorized by this routing
+text. Recording an installed implementation is review provenance and never an
+execution authorization; nothing here is profitability or arbitrage evidence.
