@@ -3553,3 +3553,279 @@ consumption, restricted-session append, RELEASE_ONLY, writer-proof release,
 NormalWriter, Gate D, venue write, production, R1-D08, or remote Git write.
 Recording an approved specification or an installed implementation is
 Git/review provenance and never an execution authorization.
+
+### A25 R1-D07 N1 user-proposed test-parameter profile mechanism — APPROVED_AND_CANONICALLY_INSTALLED_BY_IDENTITY_REFERENCE
+
+This is a documentation-only canonicalization overlay (task
+`R1-D07_N1_USER_PROPOSED_TEST_PARAMETERS_PROFILE_SPEC_01_CANONICALIZATION_01`).
+This candidate is prepared directly from the exact canonical base on
+`rigolugo/ARB/main`:
+
+```text
+commit = 7a8f75b41d17cef9303744a7112a20dbfd2bb10a
+tree   = 66c54945cdd733dd2f21ea57dffc8ed45490d52b
+parent = d17df1b8c88357aaecf12f7231c01b486b8d497c
+```
+
+This section controls current state only when this continuity candidate is
+itself later present on canonical `main`. It alters no implementation bytes,
+installs no profile file, and grants no runtime capability.
+
+**WHY this section exists.** A24 left `USER_RISK_CHOICE_REQUIRED = OPEN` with
+next action `RETURN_TO_MARCO_FOR_USER_RISK_CHOICE`. The user then clarified that
+the two open risk values are mutable per-scenario test parameters, not one
+immutable global risk policy. Marco approved
+`R1-D07_N1_USER_PROPOSED_TEST_PARAMETERS_PROFILE_SPEC_01`, a technical mechanism
+for explicit, validated, identity-bound user-proposed test-parameter profiles.
+This section canonicalizes that mechanism by exact identity reference in the
+existing routed D07 checkpoint; no new checkpoint is created.
+
+**Supersession scope (A24 only, and only where stated).** A25 supersedes A24
+only on A24's next bounded action and by adding the profile-mechanism state.
+A24's controlling-specification identity, installed implementation identity,
+technical theorem, test theorem, and `USER_RISK_CHOICE_REQUIRED = OPEN` /
+`USER_RISK_CHOICE_READY = YES` / `risk_values_selected = NONE` remain unchanged.
+A1-A24 are not rewritten.
+
+**A25.1 Approved mechanism identity.** Marco decision `APPROVE`
+(specification-only). Raw artifacts remain external/local accepted artifacts
+and are canonical here by exact identity only:
+
+```text
+main spec
+  KALSHI_DEMO_R1_D07_N1_USER_PROPOSED_TEST_PARAMETERS_PROFILE_SPEC_01.md
+  24718 bytes
+  sha256 0a58a505373d602a13a9fb1e66d5addd36b53a8dda8c2a99ee744735f03eaedc
+
+handoff
+  HANDOFF_KALSHI_DEMO_R1_D07_N1_USER_PROPOSED_TEST_PARAMETERS_PROFILE_SPEC_01.md
+  2891 bytes
+  sha256 914b0bc714f24b8d08e40a1e71cd5dc32ac8e0c112825ccb8206403d26c29b86
+
+schema
+  ARB_USER_PROPOSED_TEST_PARAMETERS_V1.schema.json
+  1506 bytes
+  sha256 d17c217c7a9d590991161cd0def3bab978b2ba542aa3b20e748a4754208072fc
+
+validation/identity contract
+  R1-D07_N1_TEST_PROFILE_VALIDATION_AND_IDENTITY_CONTRACT_01.md
+  6916 bytes
+  sha256 9277d1f7405573c04e76102b58157cebfe8b30b9181e3d4d3c5457d458a00dcb
+
+derivation contract
+  R1-D07_N1_TEST_PROFILE_TO_RISK_CONFIG_DERIVATION_CONTRACT_01.md
+  6493 bytes
+  sha256 3cda18c760056a9cf706594df63c4e88169c05e3c5823ae6c17da3ffc67e8122
+
+experiment-binding contract
+  R1-D07_N1_TEST_PROFILE_EXPERIMENT_BINDING_CONTRACT_01.md
+  3561 bytes
+  sha256 b5780a1f05882b51415b0839919b004bfeaf16c0a99a7e81fcf70825285e22a9
+
+implementation edit-set decision
+  R1-D07_N1_TEST_PROFILE_IMPLEMENTATION_EDIT_SET_DECISION_01.md
+  3243 bytes
+  sha256 a3b49e95b3c3834dc80eed0b925e30b7e3d0dcdfe398ce4d24e18ffc9219a3f5
+
+implementation test requirements
+  R1-D07_N1_TEST_PROFILE_IMPLEMENTATION_TEST_REQUIREMENTS_01.md
+  4747 bytes
+  sha256 b3acc7d29f36a987cba2038542421942b072d289e175c3f6a4f3b5988fa23f9c
+
+requirement traceability
+  R1-D07_N1_TEST_PROFILE_REQUIREMENT_TRACEABILITY_01.md
+  999 bytes
+  sha256 c71adb5dbe6d89de931142b6d883439cef55a07a655ecd8985a2b84ca11934ed
+
+review ZIP
+  R1-D07_N1_USER_PROPOSED_TEST_PARAMETERS_PROFILE_SPEC_01_MARCO_REVIEW.zip
+  29618 bytes
+  sha256 584fd5cafdb5766fb1854037537de61fee20c4be06c173d274058ad9e4b1a064
+
+submission ZIP
+  R1-D07_N1_USER_PROPOSED_TEST_PARAMETERS_PROFILE_SPEC_01_MARCO_SUBMISSION_BUNDLE.zip
+  59813 bytes
+  sha256 7841a454425bcb6fdac03021c0dc2968e39e06502c5efd067d4160995b1f6f8b
+
+Marco approval
+  R1-D07_N1_USER_PROPOSED_TEST_PARAMETERS_PROFILE_SPEC_01_MARCO_APPROVAL_HANDOFF_01.md
+  10142 bytes
+  sha256 2345af886c1fe28e1033fa0006cd9dda0e607415642e2288941d69f9b0356c02
+```
+
+Status when A25 is canonical:
+
+```text
+PROFILE_SPEC_01 =
+APPROVED_AND_CANONICALLY_INSTALLED_BY_IDENTITY_REFERENCE
+```
+
+The raw specification, schema, contract, and example files remain
+external/local accepted artifacts and are not repository-resident; only their
+exact identities are canonical.
+
+**A25.2 Canonical mechanism versus mutable scenario data.**
+
+```text
+canonical mechanism:
+  ARB_USER_PROPOSED_TEST_PARAMETERS_V1 schema/validation
+  exact two permitted economic parameter names
+    per_order.max_abs_reference_price_deviation_usd
+    per_market.max_working_order_exposure_usd
+  Decimal grammar/ranges ((0,1] and (0,1.000000]; Decimal strings only)
+  duplicate/unknown-field rejection
+  raw_profile_sha256
+  parameter_set_sha256
+  explicit profile selection
+  no default
+  no directory scan
+  no fallback
+  no hot reload
+  deterministic profile -> RiskLimitConfigV1 derivation
+  experiment binding tuple
+  no-authority theorem
+
+user-mutable per-scenario data:
+  profile filenames
+  profile_id values
+  the two numeric profile values
+  future valid scenario profiles
+```
+
+Explicit theorem:
+
+```text
+profile existence != policy selection
+profile Git presence != policy selection
+profile validation != execution authority
+one experiment binding != global risk-policy selection
+```
+
+A valid profile establishes only `VALID_SCENARIO_PARAMETERS`. A bound
+experiment is immutable; changing a profile value after binding requires a new
+identity.
+
+**A25.3 Example profiles are noncontrolling.** Values are listed as
+deviation / exposure.
+
+```text
+conservative.json
+  values = 0.10 / 0.30
+  bytes = 366
+  raw_sha256 = 54aee22303c93767a0ded3c057cdccc78a4b2a45a187af5690959f5f52d39552
+  parameter_set_sha256 = c1b199e41b00d416410ea9c141a881993118e3486a94e85df8687156289d3693
+
+trial_01.json
+  values = 0.30 / 0.60
+  bytes = 362
+  raw_sha256 = 92f469aaf57e8d5323bf2c06be58f45219e014444a0eb4d29eab341f3d58dbc8
+  parameter_set_sha256 = a995c6b02f8107fbfae94d143bdf8a1febee05fc5f84e1661cb63419dcc02d9d
+
+wider_test.json
+  values = 0.50 / 0.80
+  bytes = 364
+  raw_sha256 = 7c7a295a9e375e4332bd676fa549f71b3d9b44add4f27b8aab60df5c679147c8
+  parameter_set_sha256 = 106eef5d859634adc3d315a881c2ccc97810ba56bcb8ed0cc5d233217e8a6bb8
+```
+
+For all three:
+
+```text
+classification = NONCONTROLLING_SCENARIO_EXAMPLE
+authority = NONE
+runtime_authorization = NONE
+default = NO
+```
+
+They are not repository-installed by this canonicalization.
+
+**A25.4 Global state preservation.**
+
+```text
+USER_RISK_CHOICE_REQUIRED = OPEN
+USER_RISK_CHOICE_READY = YES
+risk_values_selected = NONE
+
+USER_PROPOSED_TEST_PARAMETER_PROFILE_SCHEMA = AVAILABLE
+profile_values = USER_MUTABLE_PER_SCENARIO
+default_profile = NONE
+automatic_profile_discovery = PROHIBITED
+hot_reload = PROHIBITED
+G_selection = NONE
+profile_runtime_consumption = NOT_RUN
+```
+
+The user's earlier `0.30 / 0.60` trial values did not become a global
+selection; they exist only as the noncontrolling `trial_01.json` example. G
+(`G.max_ordinary_write_sends`) remains outside the profile schema and remains a
+later separate Gate-D authorization choice, integer 1..4.
+
+**A25.5 Future implementation theorem.** The approved future implementation
+edit set is exactly:
+
+```text
+src/arb/venues/kalshi/strategy1_test_parameter_profile.py
+tests/test_kalshi_strategy1_test_parameter_profile.py
+src/arb/venues/kalshi/minimal_market_maker_experiment_runner.py
+tests/test_kalshi_minimal_market_maker_experiment_runner.py
+```
+
+All other repository paths remain protected; an insufficient edit set stops
+with `PROFILE_IMPLEMENTATION_EDIT_SET_INSUFFICIENT`. All `PROFILE-01` through
+`PROFILE-32` are required for the future implementation, including the upper
+boundaries and the unchanged one-order-lifecycle regression. No implementation
+is performed by A25.
+
+**A25.6 Withdrawn predecessor.**
+
+```text
+R1-D07_N1_STRATEGY1_RISK_CONFIG_AFTER_USER_CHOICE_SPEC_01 =
+WITHDRAWN_BEFORE_EXECUTION_NONCANONICAL_DO_NOT_USE
+bundle_sha256     = c7c588195b00b783df0f6fc40afe8b30d6759a735341cfafbd79de822742f3f1
+standalone_sha256 = 218f17e707cf81ef1ca1533c95df7b8fa72ce5b12ab5f6ae236e475b74f7cb30
+```
+
+It never changed canonical state and is not controlling.
+
+**A25.7 Prior canonical-installation procedural finding.**
+
+```text
+finding = C08-CONT-INSTALL-FINDING-01
+disposition = ACCEPT FINDING
+classification = ACCEPTED_NONBLOCKING_PROCEDURAL_DEFECT
+artifact bytes = 6678
+artifact sha256 = c81929ebd0452d2688106f785db9f9286f5f9d87fbfa07f8873d502014603e62
+```
+
+The A24 continuity commit installation result remains accepted and canonical.
+The required pre-push durable marker was written post hoc, not before push;
+this was a real nonblocking procedural defect. Future remote-write launchers
+that require such a marker must fail closed on marker write/readback failure
+before crossing the remote-write boundary. A24 historical text is not
+rewritten.
+
+**A25.8 Next bounded action and boundary.**
+
+```text
+next_bounded_action =
+RETURN_TO_MARCO_FOR_PROFILE_MECHANISM_IMPLEMENTATION_DISPATCH
+```
+
+```text
+implementation = NOT_PERFORMED
+profile runtime consumption = NONE
+risk-config consumption = NONE
+Kalshi/API/venue = NONE
+credentials = NONE
+deployed N1 = NONE
+RELEASE_ONLY = NONE
+writer-proof release = NONE
+NormalWriter = NONE
+Gate-D execution = NONE
+G selection = NONE
+production = NONE
+```
+
+Recording an approved specification by identity is review provenance and never
+an execution authorization. Nothing here is profitability or arbitrage
+evidence.
