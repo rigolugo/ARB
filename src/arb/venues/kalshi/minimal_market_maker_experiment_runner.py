@@ -220,6 +220,16 @@ from arb.venues.kalshi.minimal_market_maker import (
     compute_price_grid_sha256,
     evaluate_market_maker_input,
 )
+from arb.venues.kalshi.strategy1_test_parameter_profile import (
+    VALIDATION_RESULT as _PROFILE_VALIDATION_RESULT,
+    ProfileFailureCode,
+    ProfileRiskBindingV1,
+    ProfileValidationError,
+    ValidatedTestParameterProfileV1,
+    derive_and_bind_strategy1_profile,
+    reconcile_profile_risk_binding,
+    select_and_validate_test_parameter_profile,
+)
 from arb.venues.kalshi.quote_lifecycle import (
     QuoteAction,
     QuoteLifecycleError,
@@ -311,6 +321,10 @@ __all__ = [
     "build_live_entrypoint_arg_parser",
     "run_read_only_stage3_live_entrypoint",
     "main",
+    # R1-D07 N1 user-proposed test-parameter profile preflight seam.
+    "Strategy1ProfilePreflightResultV1",
+    "run_strategy1_test_parameter_profile_preflight",
+    "admit_strategy1_profile_bound_stage",
 ]
 
 
@@ -12699,6 +12713,135 @@ def run_read_only_stage3_live_entrypoint(
         "normal_writer": "NOT_ACQUIRED",
         "gate_d": "NOT_ENTERED",
     }
+
+
+# ---------------------------------------------------------------------------
+# 40.7A -- R1-D07 N1 user-proposed test-parameter profile preflight seam
+# (KALSHI_DEMO_R1_D07_N1_USER_PROPOSED_TEST_PARAMETERS_PROFILE_SPEC_01,
+# sha256 0a58a505373d602a13a9fb1e66d5addd36b53a8dda8c2a99ee744735f03eaedc,
+# TP-BIND-002..006 / TP-RUN-001..004).
+#
+# A bounded, reusable preflight ONLY.  It is not wired into the read-only
+# Stage-3 CLI, mints no authorization, defines no O/G/E carrier, and never
+# selects G.  A future, separately specified write-capable package may call
+# ``admit_strategy1_profile_bound_stage`` so that profile identity
+# verification, semantic validation, fixed-contract derivation, derived-risk
+# hash verification and four-value tuple reconciliation all complete BEFORE
+# its continuation (the only place any authorization consumption,
+# restricted session, credential, venue, writer, or Gate-D work could occur)
+# is entered.  Every profile failure raises ``ProfileValidationError`` and the
+# continuation is never called.
+# ---------------------------------------------------------------------------
+
+
+@dataclass(frozen=True, slots=True)
+class Strategy1ProfilePreflightResultV1:
+    """Immutable in-memory admitted scenario (TP-BIND-005): the retained
+    validated profile, derived ``RiskLimitConfigV1`` and binding tuple.  It
+    is evidence only -- ``authority`` / ``runtime_authorization`` are always
+    ``NONE`` and there is no reload/rebind surface."""
+
+    validated_profile: ValidatedTestParameterProfileV1
+    derived_risk_config: RiskLimitConfigV1
+    binding: ProfileRiskBindingV1
+    tuple_reconciled: bool
+    status: str = _PROFILE_VALIDATION_RESULT
+    authority: str = "NONE"
+    runtime_authorization: str = "NONE"
+
+
+def run_strategy1_test_parameter_profile_preflight(
+    *,
+    fixed_risk_config_path: str,
+    fixed_risk_config_sha256: str,
+    profile_path: "str | os.PathLike[str] | None" = None,
+    validated_profile: "ValidatedTestParameterProfileV1 | None" = None,
+    bound_tuple: "ProfileRiskBindingV1 | None" = None,
+    admitted_scenario: "Strategy1ProfilePreflightResultV1 | None" = None,
+    mono: "Callable[[], int] | None" = None,
+    end_ns: "int | None" = None,
+) -> Strategy1ProfilePreflightResultV1:
+    """Explicit profile selection + validation + derivation + (optional)
+    exact tuple reconciliation.  Pure local/offline: no network, credential,
+    persistence, authority, or wall-clock deadline of its own.
+
+    ``admitted_scenario`` exists only to refuse in-place rebinding: an
+    already-admitted scenario is immutable, so any attempt to feed it back
+    for re-selection is ``PROFILE_HOT_RELOAD_PROHIBITED``.
+
+    When ``mono``/``end_ns`` are supplied they are the caller's EXISTING
+    absolute deadline (TP-RUN-003); it is only checked, never reset,
+    extended, or replaced.
+    """
+    if admitted_scenario is not None:
+        raise ProfileValidationError(ProfileFailureCode.PROFILE_HOT_RELOAD_PROHIBITED)
+    if (mono is None) != (end_ns is None):
+        raise _d07_risk_error("profile preflight deadline must supply both mono and end_ns or neither")
+    if mono is not None:
+        _orch_require_before_deadline(mono, end_ns, "profile preflight entry")
+    # TP-VAL-001/002: exactly one explicit selection; one exact read.
+    profile = select_and_validate_test_parameter_profile(
+        profile_path=profile_path, validated_profile=validated_profile,
+    )
+    # Existing strict SHA-bound risk-config machinery supplies the exact
+    # fixed C07/C08 Strategy-1 contract (raw SHA verified before use).
+    fixed_contract = _load_sha_bound_risk_config(
+        path=fixed_risk_config_path, expected_sha256=fixed_risk_config_sha256,
+    )
+    derived, binding = derive_and_bind_strategy1_profile(fixed_contract, profile)
+    tuple_reconciled = False
+    if bound_tuple is not None:
+        reconcile_profile_risk_binding(binding, bound_tuple)
+        tuple_reconciled = True
+    if mono is not None:
+        _orch_require_before_deadline(mono, end_ns, "profile preflight complete")
+    return Strategy1ProfilePreflightResultV1(
+        validated_profile=profile,
+        derived_risk_config=derived,
+        binding=binding,
+        tuple_reconciled=tuple_reconciled,
+    )
+
+
+def admit_strategy1_profile_bound_stage(
+    *,
+    fixed_risk_config_path: str,
+    fixed_risk_config_sha256: str,
+    bound_tuple: ProfileRiskBindingV1,
+    continuation: "Callable[[Strategy1ProfilePreflightResultV1], object] | None",
+    profile_path: "str | os.PathLike[str] | None" = None,
+    validated_profile: "ValidatedTestParameterProfileV1 | None" = None,
+    mono: "Callable[[], int] | None" = None,
+    end_ns: "int | None" = None,
+) -> object:
+    """TP-BIND-003/004 ordering seam for a FUTURE write-capable package.
+
+    The package-bound four-value tuple is mandatory here.  The complete
+    profile preflight (including exact reconciliation) runs first; only on
+    success is ``continuation`` invoked with the immutable admitted
+    scenario.  With ``continuation=None`` (no runtime authorization supplied)
+    the result stays validation-only and no later stage is entered.  This
+    seam itself grants nothing: whatever the continuation does remains
+    governed by its own separately specified authorization.
+    """
+    if type(bound_tuple) is not ProfileRiskBindingV1:
+        raise ProfileValidationError(ProfileFailureCode.PROFILE_BINDING_MISMATCH)
+    if continuation is not None and not callable(continuation):
+        raise _d07_risk_error("profile-bound stage continuation must be callable")
+    admitted = run_strategy1_test_parameter_profile_preflight(
+        fixed_risk_config_path=fixed_risk_config_path,
+        fixed_risk_config_sha256=fixed_risk_config_sha256,
+        profile_path=profile_path,
+        validated_profile=validated_profile,
+        bound_tuple=bound_tuple,
+        mono=mono,
+        end_ns=end_ns,
+    )
+    if admitted.tuple_reconciled is not True:  # pragma: no cover - defensive
+        raise ProfileValidationError(ProfileFailureCode.PROFILE_BINDING_MISMATCH)
+    if continuation is None:
+        return admitted
+    return continuation(admitted)
 
 
 # ---------------------------------------------------------------------------

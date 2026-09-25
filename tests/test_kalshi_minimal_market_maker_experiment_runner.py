@@ -145,6 +145,12 @@ from arb.venues.kalshi.minimal_market_maker_experiment_runner import (
     run_gate_d_ordinary_decision_loop,
     run_pre_release_read_phase,
 )
+from arb.venues.kalshi.strategy1_test_parameter_profile import (
+    ProfileFailureCode,
+    ProfileRiskBindingV1,
+    ProfileValidationError,
+    validate_test_parameter_profile_bytes,
+)
 
 
 # ---------------------------------------------------------------------------
@@ -13658,6 +13664,379 @@ class ProtectedStrategySourceTests(unittest.TestCase):
             hashlib.sha256(raw).hexdigest(),
             "5787272c1fa23a9d70d36533f3a4716b2db989fc5ade3050f93dae4422201f39",
         )
+
+
+# ---------------------------------------------------------------------------
+# R1-D07 N1 user-proposed test-parameter profile preflight seam
+# (KALSHI_DEMO_R1_D07_N1_USER_PROPOSED_TEST_PARAMETERS_PROFILE_SPEC_01
+# TP-BIND-003..005 / TP-RUN-001..004; PROFILE-19/20/30/31/32 integration).
+# ---------------------------------------------------------------------------
+
+
+_PROFILE_TRIAL_01_BYTES = (
+    b'{"authority":"NONE","parameters":{"per_market.max_working_order_exposure_usd":"0.60",'
+    b'"per_order.max_abs_reference_price_deviation_usd":"0.30"},"profile_class":'
+    b'"USER_PROPOSED_TEST_PARAMETERS","profile_id":"trial_01","purpose":'
+    b'"R1_D07_N1_STRATEGY1_SCENARIO_TEST","runtime_authorization":"NONE","schema_id":'
+    b'"ARB_USER_PROPOSED_TEST_PARAMETERS_V1","schema_version":1}'
+)
+_PROFILE_TRIAL_01_RAW_SHA256 = "92f469aaf57e8d5323bf2c06be58f45219e014444a0eb4d29eab341f3d58dbc8"
+_PROFILE_TRIAL_01_PARAMETER_SHA256 = "a995c6b02f8107fbfae94d143bdf8a1febee05fc5f84e1661cb63419dcc02d9d"
+
+
+def _profile_fixed_contract(**flow_overrides: int) -> RiskLimitConfigV1:
+    """Synthetic fixed C07/C08 Strategy-1 contract (every TP-DERIVE-003
+    predicate); the two profile-controlled leaves are placeholders."""
+    flow = dataclasses.replace(
+        FlowRiskLimits(1, 1_000, 0, 1_000, 1, 1_000, 1, 1_000, 1, 1_000, 1, 500, 0, 10, 100),
+        **flow_overrides,
+    )
+    return RiskLimitConfigV1(
+        1, "synthetic-profile-domain", "USD",
+        PerOrderRiskLimits(Decimal("1.00"), Decimal("1.000000"), True, Decimal("0"), 1_000),
+        PerMarketRiskLimits(Decimal("1.00"), Decimal("1.000000"), 1, Decimal("1.00"), Decimal("1.000000")),
+        AccountRiskLimits(Decimal("1.000000"), 1, Decimal("1.00"), 0, Decimal("0.000000")),
+        flow,
+        StateIntegrityLimits(1_000, 1_000, 10, 1, 500, 10, 100),
+        VenueDefensePolicy("NOT_REQUIRED", None, True, "NO_SAFETY_CREDIT", "NO_SAFETY_CREDIT"),
+    )
+
+
+def _risk_config_file_bytes(config: RiskLimitConfigV1) -> bytes:
+    """Serialize into the existing strict SHA-bound RISK_CONFIG.json shape
+    (Decimal text, exact ints/bools/strings) read by
+    ``runner._load_sha_bound_risk_config``."""
+    def section(obj: object) -> dict:
+        out: dict = {}
+        for f in dataclasses.fields(obj):
+            value = getattr(obj, f.name)
+            out[f.name] = str(value) if type(value) is Decimal else value
+        return out
+
+    document = {
+        "schema_version": config.schema_version,
+        "conflict_domain": config.conflict_domain,
+        "currency": config.currency,
+    }
+    for name in ("per_order", "per_market", "conflict_domain_account", "flow", "state_integrity", "venue_defense"):
+        document[name] = section(getattr(config, name))
+    return json.dumps(document, sort_keys=True).encode("utf-8")
+
+
+class _WriteCapableStageSpy:
+    """Fake later write-capable stage.  Each counter stands for one class of
+    capability a future package could exercise only AFTER the profile
+    preflight admits the scenario."""
+
+    COUNTERS = (
+        "authorization_consumption_calls",
+        "restricted_session_calls",
+        "credential_resolution_calls",
+        "venue_calls",
+        "writer_acquisition_calls",
+        "Gate_D_write_calls",
+    )
+
+    def __init__(self) -> None:
+        self.counts = {name: 0 for name in self.COUNTERS}
+        self.admitted: list = []
+
+    def hit(self, name: str) -> None:
+        self.counts[name] += 1
+
+    def continuation(self, admitted: object) -> str:
+        self.admitted.append(admitted)
+        for name in self.COUNTERS:
+            self.hit(name)
+        return "SYNTHETIC_LATER_STAGE_ENTERED"
+
+
+class Strategy1TestParameterProfilePreflightTests(unittest.TestCase):
+    def setUp(self) -> None:
+        self._tmp = tempfile.TemporaryDirectory()
+        self.addCleanup(self._tmp.cleanup)
+        self.dir = Path(self._tmp.name)
+        self.fixed = _profile_fixed_contract()
+        raw_fixed = _risk_config_file_bytes(self.fixed)
+        self.fixed_path = self.dir / "fixed_strategy1_risk_config.json"
+        self.fixed_path.write_bytes(raw_fixed)
+        self.fixed_sha = hashlib.sha256(raw_fixed).hexdigest()
+        self.profile_path = self.dir / "trial_01.json"
+        self.profile_path.write_bytes(_PROFILE_TRIAL_01_BYTES)
+        offline = runner.run_strategy1_test_parameter_profile_preflight(
+            fixed_risk_config_path=str(self.fixed_path),
+            fixed_risk_config_sha256=self.fixed_sha,
+            profile_path=self.profile_path,
+        )
+        self.bound = offline.binding
+        self.spy = _WriteCapableStageSpy()
+        # Structural tripwires on the installed authority/writer/Gate-D/venue
+        # surfaces: any call during profile preflight is counted.
+        tripwires = {
+            "consume_active_execution_authorization_set_v1": "authorization_consumption_calls",
+            "acquire_active_release_only_v1": "restricted_session_calls",
+            "acquire_release_only": "restricted_session_calls",
+            "acquire_active_normal_writer_state_v1": "writer_acquisition_calls",
+            "acquire_normal_writer_state": "writer_acquisition_calls",
+            "_d07_default_read_pem_text": "credential_resolution_calls",
+            "run_active_experiment_stage3_and_gate_d": "Gate_D_write_calls",
+            "run_pre_release_read_phase_v2": "venue_calls",
+        }
+        for attr, counter in tripwires.items():
+            if hasattr(runner, attr):
+                patcher = mock.patch.object(runner, attr, side_effect=lambda *a, _c=counter, **k: self.spy.hit(_c))
+                patcher.start()
+                self.addCleanup(patcher.stop)
+        for target, counter in (
+            ("socket.socket.connect", "venue_calls"),
+            ("socket.create_connection", "venue_calls"),
+            ("http.client.HTTPConnection.request", "venue_calls"),
+        ):
+            patcher = mock.patch(target, side_effect=lambda *a, _c=counter, **k: self.spy.hit(_c))
+            patcher.start()
+            self.addCleanup(patcher.stop)
+        patcher = mock.patch.object(
+            WriterEligibilityGate, "issue_strategy1_gate_d_create_permit",
+            side_effect=lambda *a, **k: self.spy.hit("Gate_D_write_calls"),
+        )
+        patcher.start()
+        self.addCleanup(patcher.stop)
+
+    def admit(self, **overrides: object) -> object:
+        kwargs: dict = {
+            "fixed_risk_config_path": str(self.fixed_path),
+            "fixed_risk_config_sha256": self.fixed_sha,
+            "bound_tuple": self.bound,
+            "continuation": self.spy.continuation,
+            "profile_path": self.profile_path,
+        }
+        kwargs.update(overrides)
+        return runner.admit_strategy1_profile_bound_stage(**kwargs)
+
+    def assertZeroCalls(self) -> None:
+        self.assertEqual(self.spy.counts, {name: 0 for name in _WriteCapableStageSpy.COUNTERS})
+        self.assertEqual(self.spy.admitted, [])
+
+    def assertProfileFailureBeforeAuthority(self, code: ProfileFailureCode, **overrides: object) -> None:
+        with self.assertRaises(ProfileValidationError) as ctx:
+            self.admit(**overrides)
+        self.assertIs(ctx.exception.code, code)
+        self.assertZeroCalls()
+
+    def test_bound_tuple_matches_exact_vectors_and_installed_semantic_hash(self) -> None:
+        self.assertEqual(self.bound.profile_id, "trial_01")
+        self.assertEqual(self.bound.raw_profile_sha256, _PROFILE_TRIAL_01_RAW_SHA256)
+        self.assertEqual(self.bound.parameter_set_sha256, _PROFILE_TRIAL_01_PARAMETER_SHA256)
+        expected = dataclasses.replace(
+            self.fixed,
+            per_order=dataclasses.replace(self.fixed.per_order, max_abs_reference_price_deviation_usd=Decimal("0.30")),
+            per_market=dataclasses.replace(self.fixed.per_market, max_working_order_exposure_usd=Decimal("0.60")),
+        )
+        self.assertEqual(self.bound.derived_risk_config_sha256, expected.sha256)
+        self.assertZeroCalls()
+
+    def test_successful_admission_enters_continuation_only_after_reconciliation(self) -> None:
+        result = self.admit()
+        self.assertEqual(result, "SYNTHETIC_LATER_STAGE_ENTERED")
+        self.assertEqual(len(self.spy.admitted), 1)
+        admitted = self.spy.admitted[0]
+        self.assertIs(type(admitted), runner.Strategy1ProfilePreflightResultV1)
+        self.assertTrue(admitted.tuple_reconciled)
+        self.assertEqual(admitted.binding, self.bound)
+        self.assertEqual(admitted.derived_risk_config.sha256, self.bound.derived_risk_config_sha256)
+        # The derived config still satisfies the installed C07/C08 write-
+        # capable admission predicates (existing absolute checks unchanged).
+        runner._orch_require_write_capable_risk(
+            admitted.derived_risk_config, {"max_ordinary_write_sends": 1, "max_cleanup_cancel_sends": 0},
+            raw_sha256="0" * 64,
+        )
+
+    def test_profile_19_omitted_or_ambiguous_selection_fails_closed_before_authority(self) -> None:
+        self.assertProfileFailureBeforeAuthority(ProfileFailureCode.PROFILE_SELECTION_MISSING, profile_path=None)
+        self.assertProfileFailureBeforeAuthority(ProfileFailureCode.PROFILE_SELECTION_MISSING, profile_path="")
+        carrier = validate_test_parameter_profile_bytes(_PROFILE_TRIAL_01_BYTES)
+        self.assertProfileFailureBeforeAuthority(
+            ProfileFailureCode.PROFILE_SELECTION_AMBIGUOUS, validated_profile=carrier,
+        )
+        self.assertProfileFailureBeforeAuthority(
+            ProfileFailureCode.PROFILE_SELECTION_AMBIGUOUS, profile_path=[self.profile_path, self.profile_path],
+        )
+
+    def test_profile_19_no_default_directory_scan_environment_or_fallback(self) -> None:
+        scan_guard = AssertionError("directory scan")
+        (self.dir / "conservative.json").write_bytes(_PROFILE_TRIAL_01_BYTES.replace(b"trial_01", b"conservative"))
+        with mock.patch.dict(os.environ, {"ARB_TEST_PARAMETER_PROFILE": str(self.profile_path)}), \
+                mock.patch("os.listdir", side_effect=scan_guard), \
+                mock.patch("os.scandir", side_effect=scan_guard), \
+                mock.patch.object(Path, "iterdir", side_effect=scan_guard), \
+                mock.patch.object(Path, "glob", side_effect=scan_guard):
+            self.assertProfileFailureBeforeAuthority(ProfileFailureCode.PROFILE_SELECTION_MISSING, profile_path=None)
+            self.assertProfileFailureBeforeAuthority(ProfileFailureCode.PROFILE_READ_FAILED, profile_path=self.dir)
+            self.assertProfileFailureBeforeAuthority(
+                ProfileFailureCode.PROFILE_READ_FAILED, profile_path=self.dir / "missing.json",
+            )
+        source = inspect.getsource(runner.run_strategy1_test_parameter_profile_preflight)
+        source += inspect.getsource(runner.admit_strategy1_profile_bound_stage)
+        for forbidden in ("environ", "getenv", "listdir", "scandir", "glob", "iterdir", "default_profile"):
+            self.assertNotIn(forbidden, source)
+
+    def test_invalid_profile_bytes_fail_before_authority(self) -> None:
+        cases = {
+            ProfileFailureCode.PROFILE_UTF8_INVALID: b"\xef\xbb\xbf" + _PROFILE_TRIAL_01_BYTES,
+            ProfileFailureCode.PROFILE_DUPLICATE_KEY: _PROFILE_TRIAL_01_BYTES[:-1] + b',"authority":"NONE"}',
+            ProfileFailureCode.PROFILE_CONSTANT_MISMATCH: _PROFILE_TRIAL_01_BYTES.replace(b'"authority":"NONE"', b'"authority":"ALL"'),
+            ProfileFailureCode.PROFILE_DECIMAL_TYPE_INVALID: _PROFILE_TRIAL_01_BYTES.replace(b'"0.30"', b"0.30"),
+            ProfileFailureCode.PROFILE_DECIMAL_LEXICAL_INVALID: _PROFILE_TRIAL_01_BYTES.replace(b'"0.30"', b'"3e-1"'),
+            ProfileFailureCode.PROFILE_DECIMAL_RANGE_INVALID: _PROFILE_TRIAL_01_BYTES.replace(b'"0.60"', b'"1.000001"'),
+            ProfileFailureCode.PROFILE_PARAMETER_KEYS_MISMATCH: _PROFILE_TRIAL_01_BYTES.replace(
+                b'"per_order.max_abs_reference_price_deviation_usd"', b'"G.max_ordinary_write_sends"'),
+        }
+        for code, raw in cases.items():
+            with self.subTest(code=code):
+                bad = self.dir / f"bad_{code.value}.json"
+                bad.write_bytes(raw)
+                self.assertProfileFailureBeforeAuthority(code, profile_path=bad)
+
+    def test_profile_30_each_tuple_hash_mismatch_fails_before_authority_network_mutation(self) -> None:
+        for field in ("raw_profile_sha256", "parameter_set_sha256", "derived_risk_config_sha256"):
+            with self.subTest(field=field):
+                bound = dataclasses.replace(self.bound, **{field: "e" * 64})
+                self.assertProfileFailureBeforeAuthority(ProfileFailureCode.PROFILE_BINDING_MISMATCH, bound_tuple=bound)
+        with self.subTest(field="profile_id"):
+            bound = dataclasses.replace(self.bound, profile_id="trial_02")
+            self.assertProfileFailureBeforeAuthority(ProfileFailureCode.PROFILE_BINDING_MISMATCH, bound_tuple=bound)
+        with self.subTest(field="absent tuple"):
+            self.assertProfileFailureBeforeAuthority(ProfileFailureCode.PROFILE_BINDING_MISMATCH, bound_tuple=None)
+            self.assertProfileFailureBeforeAuthority(
+                ProfileFailureCode.PROFILE_BINDING_MISMATCH, bound_tuple=dataclasses.asdict(self.bound),
+            )
+        with self.subTest(field="derived via different fixed contract"):
+            other_fixed = dataclasses.replace(
+                self.fixed, state_integrity=dataclasses.replace(self.fixed.state_integrity, max_reconciliation_lag_ms=2_000),
+            )
+            raw_other = _risk_config_file_bytes(other_fixed)
+            other_path = self.dir / "other_fixed.json"
+            other_path.write_bytes(raw_other)
+            self.assertProfileFailureBeforeAuthority(
+                ProfileFailureCode.PROFILE_BINDING_MISMATCH,
+                fixed_risk_config_path=str(other_path),
+                fixed_risk_config_sha256=hashlib.sha256(raw_other).hexdigest(),
+            )
+
+    def test_fixed_contract_failures_fail_before_authority(self) -> None:
+        with self.assertRaises(RunnerError):
+            self.admit(fixed_risk_config_sha256="0" * 64)
+        self.assertZeroCalls()
+        bad_fixed = _profile_fixed_contract(create_max_sends=2)
+        raw_bad = _risk_config_file_bytes(bad_fixed)
+        bad_path = self.dir / "bad_fixed.json"
+        bad_path.write_bytes(raw_bad)
+        self.assertProfileFailureBeforeAuthority(
+            ProfileFailureCode.PROFILE_FIXED_CONTRACT_INVALID,
+            fixed_risk_config_path=str(bad_path),
+            fixed_risk_config_sha256=hashlib.sha256(raw_bad).hexdigest(),
+        )
+
+    def test_profile_20_path_mutation_after_binding_cannot_change_admitted_scenario(self) -> None:
+        retained = validate_test_parameter_profile_bytes(self.profile_path.read_bytes())
+        admitted_before = runner.run_strategy1_test_parameter_profile_preflight(
+            fixed_risk_config_path=str(self.fixed_path), fixed_risk_config_sha256=self.fixed_sha,
+            validated_profile=retained, bound_tuple=self.bound,
+        )
+        # Economic mutation of the selected path after binding.
+        self.profile_path.write_bytes(_PROFILE_TRIAL_01_BYTES.replace(b'"0.30"', b'"0.90"'))
+        self.assertEqual(admitted_before.validated_profile.max_abs_reference_price_deviation_usd, Decimal("0.30"))
+        self.assertEqual(admitted_before.binding, self.bound)
+        # Fresh path admission now mismatches: terminal, no update-in-place.
+        self.assertProfileFailureBeforeAuthority(ProfileFailureCode.PROFILE_BINDING_MISMATCH)
+        # Display-only mutation also changes raw identity -> terminal.
+        self.profile_path.write_bytes(_PROFILE_TRIAL_01_BYTES.replace(b'"0.30"', b'"0.3"'))
+        self.assertProfileFailureBeforeAuthority(ProfileFailureCode.PROFILE_BINDING_MISMATCH)
+        # The retained immutable carrier still admits the ORIGINAL scenario
+        # without rereading the (now mutated) path.
+        with mock.patch("arb.venues.kalshi.strategy1_test_parameter_profile._read_profile_bytes",
+                        side_effect=AssertionError("reread")):
+            result = self.admit(profile_path=None, validated_profile=retained)
+        self.assertEqual(result, "SYNTHETIC_LATER_STAGE_ENTERED")
+        self.assertEqual(self.spy.admitted[0].binding, self.bound)
+
+    def test_hot_reload_of_admitted_scenario_prohibited(self) -> None:
+        admitted = runner.run_strategy1_test_parameter_profile_preflight(
+            fixed_risk_config_path=str(self.fixed_path), fixed_risk_config_sha256=self.fixed_sha,
+            profile_path=self.profile_path, bound_tuple=self.bound,
+        )
+        with mock.patch("arb.venues.kalshi.strategy1_test_parameter_profile._read_profile_bytes",
+                        side_effect=AssertionError("reread")):
+            with self.assertRaises(ProfileValidationError) as ctx:
+                runner.run_strategy1_test_parameter_profile_preflight(
+                    fixed_risk_config_path=str(self.fixed_path), fixed_risk_config_sha256=self.fixed_sha,
+                    profile_path=self.profile_path, bound_tuple=self.bound, admitted_scenario=admitted,
+                )
+        self.assertIs(ctx.exception.code, ProfileFailureCode.PROFILE_HOT_RELOAD_PROHIBITED)
+        with self.assertRaises(dataclasses.FrozenInstanceError):
+            admitted.binding = self.bound  # type: ignore[misc]
+        for name in dir(admitted):
+            self.assertFalse(any(word in name.lower() for word in ("reload", "rebind", "refresh", "watch")))
+        self.assertZeroCalls()
+
+    def test_profile_31_valid_profile_without_runtime_authorization_stays_validation_only(self) -> None:
+        result = self.admit(continuation=None)
+        self.assertIs(type(result), runner.Strategy1ProfilePreflightResultV1)
+        self.assertEqual(result.status, "VALID_SCENARIO_PARAMETERS")
+        self.assertEqual((result.authority, result.runtime_authorization), ("NONE", "NONE"))
+        offline = runner.run_strategy1_test_parameter_profile_preflight(
+            fixed_risk_config_path=str(self.fixed_path), fixed_risk_config_sha256=self.fixed_sha,
+            profile_path=self.profile_path,
+        )
+        self.assertFalse(offline.tuple_reconciled)
+        self.assertZeroCalls()
+        # The read-only Stage-3 CLI is not turned into a profile/write CLI.
+        options = {opt for action in runner.build_live_entrypoint_arg_parser()._actions for opt in action.option_strings}
+        self.assertFalse(any("profile" in opt for opt in options))
+        # The seam is referenced only by its own definition / the seam wrapper
+        # / ``__all__``: no existing runtime path (CLI, Stage-3, Gate-D) calls it.
+        module_source = inspect.getsource(runner)
+        self.assertEqual(module_source.count("admit_strategy1_profile_bound_stage("), 1)
+        self.assertEqual(module_source.count("run_strategy1_test_parameter_profile_preflight("), 2)
+
+    def test_profile_32_retained_profile_still_carries_no_authority(self) -> None:
+        result = self.admit(continuation=None)
+        field_names = {f.name for f in dataclasses.fields(result)}
+        self.assertEqual(
+            field_names,
+            {"validated_profile", "derived_risk_config", "binding", "tuple_reconciled", "status",
+             "authority", "runtime_authorization"},
+        )
+        for obj in (result.validated_profile, result.binding):
+            for name in dir(obj):
+                self.assertFalse(any(w in name.lower() for w in ("permit", "writer", "gate", "release", "credential")))
+        self.assertFalse(hasattr(runner, "DEFAULT_TEST_PARAMETER_PROFILE"))
+        self.assertZeroCalls()
+
+    def test_existing_absolute_deadline_is_checked_never_reset(self) -> None:
+        calls: list = []
+
+        def mono() -> int:
+            calls.append(1)
+            return 1_000
+
+        runner.run_strategy1_test_parameter_profile_preflight(
+            fixed_risk_config_path=str(self.fixed_path), fixed_risk_config_sha256=self.fixed_sha,
+            profile_path=self.profile_path, bound_tuple=self.bound, mono=mono, end_ns=2_000,
+        )
+        self.assertEqual(len(calls), 2)
+        with self.assertRaises(RunnerError) as ctx:
+            self.admit(mono=lambda: 2_000, end_ns=2_000)
+        self.assertIs(ctx.exception.code, RunnerFailureCode.BRIDGE_AUTHORIZATION_DEADLINE_EXPIRED)
+        self.assertZeroCalls()
+        ticks = iter((1_000, 3_000))
+        with self.assertRaises(RunnerError) as ctx:
+            self.admit(mono=lambda: next(ticks), end_ns=2_000)
+        self.assertIs(ctx.exception.code, RunnerFailureCode.BRIDGE_AUTHORIZATION_DEADLINE_EXPIRED)
+        self.assertZeroCalls()
+        with self.assertRaises(RunnerError):
+            self.admit(mono=lambda: 0)
+        self.assertZeroCalls()
 
 
 if __name__ == "__main__":
