@@ -4098,3 +4098,314 @@ remains a separate later integer `1..4` authorization choice. No default
 profile exists. No venue or runtime activity is authorized by this routing
 text. Recording an installed implementation is review provenance and never an
 execution authorization; nothing here is profitability or arbitrage evidence.
+
+### A27 R1-D07 N1 conservative scenario profile + S1 technical binding — APPROVED
+
+This is a documentation-only continuity overlay (task
+`R1-D07_N1_CONSERVATIVE_PROFILE_BINDING_CANONICAL_CONTINUITY_UPDATE_01`).
+This candidate is prepared directly from the exact canonical base on
+`rigolugo/ARB/main`:
+
+```text
+commit = 47a8c95e60c256f5b4ce50dec87bb047caa22032
+tree   = 70b9a27dc73d8089b6a2c1a4dbf2f892935da784
+parent = 67dcfa1e5710de082e9c52d7ced6630c523cb524
+```
+
+This section controls current state only when this continuity candidate is
+itself later present on canonical `main`. It alters no implementation bytes,
+installs no profile or risk-config file, and grants no runtime capability. It
+updates exactly three existing documentation paths (this checkpoint,
+`project_context/START_HERE.md`, `project_context/ARTIFACT_INDEX.md`); no new
+checkpoint or repository file is created and canonical read order is unchanged.
+
+**WHY this section exists.** A26 routed to
+`RETURN_TO_MARCO_FOR_SCENARIO_PROFILE_SELECTION_AND_SEPARATELY_AUTHORIZED_EXECUTION_PACKAGE_PLANNING`.
+The user then explicitly selected the `conservative` profile for the current
+scenario, and the bounded offline task
+`R1-D07_N1_CONSERVATIVE_PROFILE_OFFLINE_BINDING_AND_EXECUTION_PACKAGE_PLANNING_01`
+(S1) derived the conservative risk config through the installed code and
+completed the exact four-value `ProfileRiskBindingV1`. Marco approved S1
+(`APPROVE`). This section records that accepted technical provenance.
+
+**Supersession scope (A26 only, and only where stated).** A27 supersedes A26
+only on A26's next bounded action and on A26's description of the current
+scenario as having no selected values (`risk_values_selected = NONE`). A26
+remains historical and byte-identical. The per-scenario profile is now
+explicitly selected for the current scenario only; that selection is not a
+global risk-policy selection and does not create a default profile. A1-A26 are
+not rewritten.
+
+**A27.1 Selected scenario profile.**
+
+```text
+selection_status = USER_SELECTED_FOR_CURRENT_SCENARIO
+selection_scope = R1_D07_N1_STRATEGY1_SCENARIO_TEST
+selection_is_global_policy = NO
+runtime_authorization_effect = NONE
+
+profile_id = conservative
+per_order.max_abs_reference_price_deviation_usd = "0.10"
+per_market.max_working_order_exposure_usd = "0.30"
+
+raw_profile_bytes = 366
+raw_profile_sha256 =
+54aee22303c93767a0ded3c057cdccc78a4b2a45a187af5690959f5f52d39552
+
+parameter_set_sha256 =
+c1b199e41b00d416410ea9c141a881993118e3486a94e85df8687156289d3693
+```
+
+Preserved mechanism state:
+
+```text
+default_profile = NONE
+automatic_profile_discovery = PROHIBITED
+hot_reload = PROHIBITED
+```
+
+**A27.2 Exact S1 seed / fixed / derived identities.**
+
+```text
+Seed
+  bytes = 1722
+  raw_sha256 =
+  4495ade7fed522bf17a202d6f5422f608765b65a4463121175695c862b3f904c
+  semantic_RiskLimitConfigV1_sha256 =
+  e16c9219b495062647b82b9e8a4d5e9c1b98f3e54ce43f0044c1a85fea162bbb
+
+Fixed C07/C08 Strategy-1 contract
+  bytes = 1722
+  raw_sha256 =
+  5161a2c62f342bb82fd5750200757a0612415e279f73c60ad4a31e20478e851b
+  semantic_RiskLimitConfigV1_sha256 =
+  9936329643ca690c8ee5cb6dec503e864568382c0af3fb1c17e246b669ed6030
+
+Derived conservative risk config
+  bytes = 1716
+  raw_sha256 =
+  557bde061a1724af3eda382a95a3ec614f3cdabd1aea4e9b4cfc0bdf7370c84c
+  semantic_RiskLimitConfigV1_sha256 =
+  726111949c5d25a2a7b5173db91923d62fe5abcf3798b8c930a5944aafe761c2
+```
+
+Accepted differential theorem:
+
+```text
+seed -> fixed:
+  leaf_count = 45
+  changed = 7
+  unchanged = 38
+
+fixed -> derived:
+  leaf_count = 45
+  changed = 2
+  unchanged = 43
+```
+
+Exact seed -> fixed changed set:
+
+```text
+conflict_domain_account.max_aggregate_working_contracts
+conflict_domain_account.max_aggregate_working_orders
+flow.automated_execution_max_sends
+flow.create_max_sends
+flow.ordinary_cancel_max_sends
+per_market.max_authoritative_working_orders
+per_market.max_working_contracts
+```
+
+Exact fixed -> derived changed set:
+
+```text
+per_market.max_working_order_exposure_usd
+per_order.max_abs_reference_price_deviation_usd
+```
+
+No other leaf changed.
+
+**A27.3 Accepted four-value `ProfileRiskBindingV1`.**
+
+```text
+profile_id =
+conservative
+
+raw_profile_sha256 =
+54aee22303c93767a0ded3c057cdccc78a4b2a45a187af5690959f5f52d39552
+
+parameter_set_sha256 =
+c1b199e41b00d416410ea9c141a881993118e3486a94e85df8687156289d3693
+
+derived_risk_config_sha256 =
+726111949c5d25a2a7b5173db91923d62fe5abcf3798b8c930a5944aafe761c2
+```
+
+```text
+binding_field_count = 4
+G_in_binding = NO
+binding_status = APPROVED_FOR_TECHNICAL_PROVENANCE
+```
+
+`derived_risk_config_sha256` is the semantic `RiskLimitConfigV1` identity of the
+derived config; its raw-file identity is recorded separately in A27.2.
+
+**A27.4 Marco review provenance.** Marco decision `APPROVE`. Raw artifacts are
+external/local accepted artifacts, canonical here by exact identity only:
+
+```text
+Marco approval handoff
+  R1-D07_N1_CONSERVATIVE_PROFILE_OFFLINE_BINDING_AND_EXECUTION_PACKAGE_PLANNING_01_MARCO_APPROVAL_HANDOFF_01.md
+  bytes = 9407
+  sha256 =
+  4ce5f48e6ab7147f9a2fae2a00ce17ab67397c4a4f155da5a9aa7b7bfb240f59
+
+Marco review ZIP
+  R1-D07_N1_CONSERVATIVE_PROFILE_OFFLINE_BINDING_AND_EXECUTION_PACKAGE_PLANNING_01_MARCO_REVIEW.zip
+  bytes = 20572
+  sha256 =
+  13343fb4ae0ebd463c9d59f893ea04453ed6b05c915d26d0514235d7f7e4da0d
+
+Marco submission bundle
+  R1-D07_N1_CONSERVATIVE_PROFILE_OFFLINE_BINDING_AND_EXECUTION_PACKAGE_PLANNING_01_MARCO_SUBMISSION_BUNDLE.zip
+  bytes = 26417
+  sha256 =
+  ff08f6c78fa0c3637222a480309ab930b4957d2608ad08fd30bb332015e21b70
+
+scenario-selection handoff
+  R1-D07_N1_CONSERVATIVE_PROFILE_SCENARIO_SELECTION_HANDOFF_01.md
+  bytes = 4948
+  sha256 =
+  5942ac87a3a660dbc467cfd3fe3142f0c97da5026be3a29cc8c2cd1d69728e7c
+```
+
+Optional verification test disclosure (S1 task):
+
+```text
+stdlib unittest profile module = 58 tests, OK, exit 0
+pytest = NOT_INSTALLED
+package_installation = NONE
+```
+
+This is not a full-regression rerun. The controlling S1 verification was the
+exact deterministic offline derivation/static identity contract.
+
+**A27.5 Raw C07/C08 retrievability finding.**
+
+```text
+finding =
+C07_C08_RAW_CONTROLLING_ARTIFACT_DURABLE_RETRIEVABILITY_GAP
+
+effect_on_approved_S1_binding =
+NONBLOCKING
+
+technical_theorem_lost =
+NO
+
+artifact_identities_lost =
+NO
+
+exact_raw_C07_C08_spec_bytes_reverified_by_S1_task =
+NO
+```
+
+- The historical C07/C08 accepted identities and theorem remain preserved in
+  the canonical record.
+- Their raw Markdown specification bytes were not byte-retrievable in the S1
+  implementer environment.
+- S1 used the bounded frozen seven-leaf C07/C08 contraction from canonical
+  A24/A26 state plus the canonically installed code, with a required stop on
+  any observed conflict.
+- This continuity task does not repair the raw archive.
+- No future task may claim those historical raw bytes are retrievable unless
+  the raw-byte continuity / dispatch-completeness gate actually passes.
+- If a later task requires those exact raw bytes, it must stop for a bounded
+  archive/canonicalization repair or receive an authorized exact transfer.
+
+This finding is a continuity/retrievability finding only; it is not a technical
+defect in the accepted S1 result.
+
+**A27.6 Current state after S1 approval.**
+
+```text
+PROFILE_SPEC_01 =
+APPROVED_AND_CANONICALLY_INSTALLED_BY_IDENTITY_REFERENCE
+
+PROFILE_IMPLEMENTATION_01 =
+APPROVED_AND_CANONICALLY_INSTALLED
+
+selected_profile_for_current_scenario =
+conservative
+
+selected_scenario_parameters =
+0.10 / 0.30
+
+S1_offline_technical_binding =
+APPROVED
+
+ProfileRiskBindingV1 =
+APPROVED_FOR_TECHNICAL_PROVENANCE
+
+default_profile =
+NONE
+
+G_selection =
+NONE
+
+profile_runtime_consumption =
+NOT_RUN
+
+risk_config_runtime_consumption =
+NOT_RUN
+
+fresh_deployed_N1_state =
+NOT_RUN
+
+execution_authorization =
+NONE
+
+Demo_write_execution =
+NOT_RUN
+```
+
+A26's `risk_values_selected = NONE` remains historical and is no longer the
+current description of this scenario: the per-scenario profile `conservative`
+is now explicitly selected for `R1_D07_N1_STRATEGY1_SCENARIO_TEST`. This is not
+a global risk-policy selection.
+
+**A27.7 No-runtime-authorization theorem.** S1 approval, the scenario
+selection, and this record grant no:
+
+```text
+G selection
+credential use
+Kalshi/API/venue access
+deployed-N1 access
+persistent execution-state mutation
+profile runtime consumption
+risk-config runtime consumption
+RELEASE_ONLY
+writer-proof release
+NormalWriter
+Gate-D execution
+venue write
+production
+```
+
+The accepted binding is technical provenance only. Nothing here is
+profitability or arbitrage evidence.
+
+**A27.8 Next bounded route.**
+
+```text
+NEXT_BOUNDED_ACTION =
+RETURN_TO_MARCO_FOR_SEPARATE_G_SELECTION
+```
+
+```text
+G.max_ordinary_write_sends = UNSELECTED
+legal later user choice = integer 1..4
+G.max_cleanup_cancel_sends = 0
+```
+
+This is routing only. It does not select or recommend a G value and authorizes
+no venue or runtime activity.
