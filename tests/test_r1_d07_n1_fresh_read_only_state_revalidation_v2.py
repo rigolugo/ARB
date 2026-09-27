@@ -70,6 +70,7 @@ the `correction_01_theorem` docstring annotations below.
 """
 from __future__ import annotations
 
+import ast
 import hashlib
 import json
 import os
@@ -895,6 +896,140 @@ class TestProductionParameterSurface(unittest.TestCase):
                 self.assertEqual(source.count(banned), 0, f"embedded probe must not call {banned}")
 
 
+# ARB_LOCAL_EXECUTION_CONFIG_V1_PORTABILITY_SPEC_01_CORRECTION_01 LEC-MIG-003 /
+# LEC-MIG-004: every direct launcher command this module constructs must bind
+# the launcher's existing `-Python` seam to the running test interpreter, so no
+# test inherits the archived launcher's user-specific default interpreter.
+EXPECTED_DIRECT_LAUNCHER_COMMAND_SITES = (
+    "_V2FixtureCase.run_launcher_raw",
+    "TestV2LauncherEndToEnd.test_c02_t01_default_invocation_rejects_fixture_overrides",
+    "TestV2LauncherEndToEnd.test_c03_t03_race_hook_is_refused_outside_fixture_mode",
+)
+
+
+def _is_name(node: ast.AST, name: str) -> bool:
+    return isinstance(node, ast.Name) and node.id == name
+
+
+def _is_str_constant(node: ast.AST, value: str) -> bool:
+    return isinstance(node, ast.Constant) and node.value == value
+
+
+def _is_launcher_path_argument(node: ast.AST) -> bool:
+    """`str(LAUNCHER_PATH)` exactly."""
+    return (
+        isinstance(node, ast.Call) and _is_name(node.func, "str")
+        and len(node.args) == 1 and not node.keywords
+        and _is_name(node.args[0], "LAUNCHER_PATH")
+    )
+
+
+def _is_sys_executable(node: ast.AST) -> bool:
+    return isinstance(node, ast.Attribute) and node.attr == "executable" and _is_name(node.value, "sys")
+
+
+def _direct_launcher_command_sites(source: str) -> list:
+    """Every list literal in `source` that is a direct PowerShell command line,
+    as `(qualified_enclosing_scope, list_node)`. A list is a command line when
+    it starts with `PWSH` or carries `-File` followed by `str(LAUNCHER_PATH)`;
+    both forms are collected so a new invocation cannot evade the theorem by
+    omitting either marker."""
+    sites = []
+
+    def visit(node: ast.AST, scope: tuple) -> None:
+        for child in ast.iter_child_nodes(node):
+            if isinstance(child, (ast.ClassDef, ast.FunctionDef, ast.AsyncFunctionDef)):
+                visit(child, scope + (child.name,))
+                continue
+            if isinstance(child, ast.List):
+                elts = child.elts
+                starts_with_pwsh = bool(elts) and _is_name(elts[0], "PWSH")
+                runs_launcher = any(
+                    _is_str_constant(elts[i], "-File") and _is_launcher_path_argument(elts[i + 1])
+                    for i in range(len(elts) - 1)
+                )
+                if starts_with_pwsh or runs_launcher:
+                    sites.append((".".join(scope), child))
+            visit(child, scope)
+
+    visit(ast.parse(source), ())
+    return sites
+
+
+def _launcher_site_interpreter_defects(node: ast.List) -> list:
+    """Why this command line fails to bind `-Python` to `sys.executable`
+    (empty when it binds it exactly once)."""
+    elts = node.elts
+    defects = []
+    if not (elts and _is_name(elts[0], "PWSH")):
+        defects.append("COMMAND_DOES_NOT_START_WITH_PWSH")
+    if not any(_is_str_constant(elts[i], "-File") and _is_launcher_path_argument(elts[i + 1])
+               for i in range(len(elts) - 1)):
+        defects.append("COMMAND_DOES_NOT_RUN_LAUNCHER_PATH")
+    python_flags = [i for i, elt in enumerate(elts) if _is_str_constant(elt, "-Python")]
+    if len(python_flags) != 1:
+        defects.append(f"PYTHON_FLAG_COUNT={len(python_flags)}")
+    for i in python_flags:
+        if i + 1 >= len(elts) or not _is_sys_executable(elts[i + 1]):
+            defects.append("PYTHON_FLAG_NOT_BOUND_TO_SYS_EXECUTABLE")
+    return defects
+
+
+class TestV2LauncherInterpreterPortability(unittest.TestCase):
+    """LEC-MIG-003 / LEC-MIG-004 / LEC-TEST-002: static, offline proof that
+    this module never relies on the archived launcher's default `-Python`.
+    Nothing here launches PowerShell or touches deployed N1 state."""
+
+    @classmethod
+    def setUpClass(cls) -> None:
+        cls.source = Path(__file__).read_text(encoding="utf-8")
+        cls.sites = _direct_launcher_command_sites(cls.source)
+
+    def test_direct_launcher_command_sites_are_exactly_the_three_known_sites(self) -> None:
+        self.assertEqual(
+            sorted(scope for scope, _ in self.sites),
+            sorted(EXPECTED_DIRECT_LAUNCHER_COMMAND_SITES),
+        )
+
+    def test_every_direct_launcher_command_binds_python_to_sys_executable(self) -> None:
+        self.assertEqual(len(self.sites), 3)
+        for scope, node in self.sites:
+            with self.subTest(site=scope):
+                self.assertEqual(_launcher_site_interpreter_defects(node), [])
+
+    def test_structural_proof_rejects_a_command_without_the_interpreter_binding(self) -> None:
+        """The checker itself must be able to fail: a launcher command line
+        that omits `-Python`, or binds it to anything but `sys.executable`, is
+        detected rather than silently accepted."""
+        unbound = (
+            "def run():\n"
+            "    return [PWSH, '-NoProfile', '-File', str(LAUNCHER_PATH), '-Candidate02Path', 'c']\n"
+        )
+        literal = (
+            "def run():\n"
+            "    return [PWSH, '-File', str(LAUNCHER_PATH), '-Python', 'C:\\\\x\\\\python.exe']\n"
+        )
+        for label, source, expected in (
+            ("unbound", unbound, "PYTHON_FLAG_COUNT=0"),
+            ("literal", literal, "PYTHON_FLAG_NOT_BOUND_TO_SYS_EXECUTABLE"),
+        ):
+            with self.subTest(case=label):
+                sites = _direct_launcher_command_sites(source)
+                self.assertEqual([scope for scope, _ in sites], ["run"])
+                self.assertIn(expected, _launcher_site_interpreter_defects(sites[0][1]))
+
+    def test_module_does_not_embed_the_archived_default_interpreter(self) -> None:
+        """The archived launcher's `-Python` default remains an immutable
+        historical exception (LEC-FWD-002); this module must neither repeat
+        nor depend on that literal. The literal is read from the launcher
+        itself so no user-specific path is written here."""
+        match = re.search(r'\[string\]\$Python\s*=\s*"([^"]+)"', _ps1_param_block())
+        self.assertIsNotNone(match, "launcher -Python default declaration not found")
+        archived_default = match.group(1)
+        self.assertNotIn(archived_default, self.source)
+        self.assertNotIn(archived_default.replace("\\", "\\\\"), self.source)
+
+
 def _clock_pair():
     state = {"t": datetime(2026, 9, 1, 12, 0, 0, tzinfo=timezone.utc)}
 
@@ -1093,6 +1228,7 @@ class _V2FixtureCase(unittest.TestCase):
         args = [
             PWSH, "-NoProfile", "-NonInteractive", "-ExecutionPolicy", "Bypass",
             "-File", str(LAUNCHER_PATH),
+            "-Python", sys.executable,
             "-Candidate02Path", overrides.get("candidate_path", fx["candidate_path"]),
             "-NonProductionFixtureMode",
             "-FixtureRepo", overrides.get("repo", str(REPO_ROOT)),
@@ -1278,6 +1414,7 @@ class TestV2LauncherEndToEnd(_V2FixtureCase):
         args = [
             PWSH, "-NoProfile", "-NonInteractive", "-ExecutionPolicy", "Bypass",
             "-File", str(LAUNCHER_PATH),
+            "-Python", sys.executable,
             "-Candidate02Path", fx["candidate_path"],
             "-OutputPath", str(self.tmp / "refused.json"),
             "-FixtureFillId", "00000000-0000-0000-0000-000000000000",
@@ -1809,6 +1946,7 @@ class TestV2LauncherEndToEnd(_V2FixtureCase):
         destination.parent.mkdir()
         proc = subprocess.run(
             [PWSH, "-NoProfile", "-NonInteractive", "-ExecutionPolicy", "Bypass", "-File", str(LAUNCHER_PATH),
+             "-Python", sys.executable,
              "-Candidate02Path", fx["candidate_path"], "-OutputPath", str(destination),
              "-FixtureRaceOccupyOutputBeforeCreate"],
             capture_output=True, text=True, timeout=180,

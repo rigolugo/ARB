@@ -83,6 +83,117 @@ git status --porcelain
 
 Final review artifacts are delivered under the task-resolved `$env:ARB_CODEX_ARTIFACT_ROOT`; no Codex-local absolute temp or artifact path is a shared Claude requirement.
 
+### 1.2 Machine-local execution configuration (`LocalExecutionConfigV1`)
+
+This subsection is shared/generic. It records the machine-local, non-secret execution configuration contract defined by `ARB_LOCAL_EXECUTION_CONFIG_V1_PORTABILITY_SPEC_01_CORRECTION_01`. Like the rest of this file, it describes how a local executable path is selected, not whether any activity is authorized.
+
+#### 1.2.1 Schema and minimal shape
+
+The schema identifier is exactly:
+
+```text
+ARB_LOCAL_EXECUTION_CONFIG_V1
+```
+
+A V1 config producer emits this minimal semantic shape:
+
+```json
+{
+  "schema": "ARB_LOCAL_EXECUTION_CONFIG_V1",
+  "python": {
+    "executable": "C:\\absolute\\path\\to\\python.exe"
+  }
+}
+```
+
+The V1 normative fields are exactly `schema`, `python`, and `python.executable`. No other V1 field is defined; a consumer must not infer capability, security authority, risk state, repository identity, or fallback behavior from any unrecognized field. Adding a normative field requires a later schema/specification change.
+
+- `schema` must be a JSON string exactly equal to `ARB_LOCAL_EXECUTION_CONFIG_V1`.
+- `python` must be a JSON object.
+- `python.executable` must be a non-empty JSON string naming an absolute local filesystem path to the intended Python executable; the path must exist as a file before it is selected. No executable-name suffix is proof of validity.
+
+V1 carries no economic value; floating-point, precision, and monetary-rounding semantics do not apply.
+
+#### 1.2.2 Default location, non-secret boundary, and repository exclusion
+
+The default Windows config location is exactly:
+
+```text
+%LOCALAPPDATA%\ARB\arb-local-config.json
+```
+
+The file is machine-local operational state and lives outside the canonical repository. The default config file, any explicitly selected config file, and any machine-local sample instantiated from this contract must not be committed to `rigolugo/ARB` merely because the schema exists.
+
+`LocalExecutionConfigV1` is for non-secret machine-local execution convenience values only. It must not contain API keys or API-key identifiers; private-key bytes or PEM material; passwords, bearer tokens, signatures, auth headers, cookies, or session tokens; venue authorization state; risk limits or risk-config values; scenario profile values or G selections; canonical Git commits, trees, blobs, or repository-control identities; or deployed N1 persistent-state content. Secret or capability-bearing material requires a separate contract.
+
+#### 1.2.3 Interpreter resolution for adopting consumers
+
+The resolution contract applies to a future wrapper/resolver or other consumer that explicitly adopts `LocalExecutionConfigV1`. It does not retroactively add `-ConfigPath` to the archived V2 launcher.
+
+The effective interpreter source is selected in this strict order:
+
+```text
+1. explicit -Python
+2. explicit -ConfigPath -> LocalExecutionConfigV1
+3. default %LOCALAPPDATA%\ARB\arb-local-config.json
+4. halt closed
+```
+
+A valid higher-precedence source suppresses evaluation of lower-precedence sources:
+
+- explicit `-Python` has precedence. It is resolved to an absolute path without semantic rewriting and must name an existing file, otherwise halt `PYTHON_EXECUTABLE_NOT_FOUND`. An invalid or nonexistent config path must not defeat it and need not be read.
+- with no explicit `-Python`, an explicit `-ConfigPath` is the only config read. Missing, unreadable, malformed, unsupported, or incomplete config halts closed; it never falls through to the default path.
+- with neither explicit source, the default path is derived from `%LOCALAPPDATA%`; if that variable is absent or empty, halt `LOCALAPPDATA_UNSET`. No other profile directory is searched.
+
+Prohibited implicit fallback sources:
+
+```text
+bare python
+py launcher
+PATH search
+CONDA_PREFIX
+CONDA_DEFAULT_ENV
+another Conda environment
+ARB_CODEX_PYTHON_EXE
+Codex environment metadata
+registry discovery
+network discovery
+package-manager discovery
+```
+
+Resolution is a deterministic local operation with zero automatic retries, no redirect behavior, and no network request; a resolution failure is terminal for that invocation. An implementing consumer distinguishes at least these stable failure classes, optionally followed by diagnostic detail that downstream logic need not parse:
+
+```text
+LOCALAPPDATA_UNSET
+CONFIG_NOT_FOUND
+CONFIG_READ_FAILED
+CONFIG_MALFORMED
+CONFIG_SCHEMA_UNSUPPORTED
+PYTHON_SECTION_MISSING
+PYTHON_EXECUTABLE_MISSING
+PYTHON_EXECUTABLE_NOT_FOUND
+```
+
+Successful resolution proves only that an interpreter path was selected and exists as a file. It does not prove CPython 3.12, an active `pmresearch` environment, installed dependencies, an authorized repository commit, or any venue, credential, N1, test, or write authorization; each remains a separate gate.
+
+#### 1.2.4 Relationship to the Codex interpreter contract
+
+`ARB_CODEX_PYTHON_EXE` (Section 1.1) remains a distinct Codex-specific contract. `LocalExecutionConfigV1` does not replace, migrate, or supersede it, and neither contract is a fallback for the other.
+
+#### 1.2.5 Archived V2 launcher exception and first migration
+
+The archived launcher `project_archive/r1_d07_2026_09_14/n1_fresh_read_only_state_revalidation_v2/RUN_R1-D07_N1_FRESH_READ_ONLY_STATE_REVALIDATION_02.ps1` remains byte-immutable canonical provenance. Its embedded user-specific `-Python` default is a historical, provenance-bound portability exception, not a recommended pattern or new default. The launcher already accepts an explicit `-Python`, which is the supported portability seam.
+
+The first migration uses explicit interpreter forwarding only: the V2 regression tests pass `-Python` bound to the running test interpreter's `sys.executable` on every direct launcher invocation. It adds no tracked config resolver, wrapper, CLI, dependency, or shared configuration framework, and it does not read a local JSON config. A later resolver requires its own task defining writable paths, tests, capability boundaries, and adoption scope.
+
+#### 1.2.6 Forward portability rule (LEC-FWD)
+
+**LEC-FWD-001 (mandatory):** A new canonical executable artifact MUST NOT embed a user-specific absolute path for a machine-local executable or workspace convenience path when that value can be represented by an approved machine-local configuration contract or an explicit runtime parameter. Nonconformance is `MACHINE_LOCAL_PATH_PORTABILITY_CONTRACT_VIOLATION`.
+
+**LEC-FWD-002:** Historical/provenance-bound artifacts are not mass-migrated. An immutable archive may retain a historical user-specific default only when its exact bytes are already a canonical reviewed identity, a supported explicit override exists for the affected value, and active wrappers/tests supply the portable value rather than relying on the stale default. The archived V2 launcher is the first explicit application of this exception.
+
+**LEC-FWD-003:** This rule does not automatically migrate or supersede `ARB_CODEX_PYTHON_EXE`, Codex environment settings, venue credentials, N1 deployment paths, risk configuration, profile selection, or Git/repository identities.
+
 ## 2. PowerShell-only local command rule
 
 Commands intended for Gustavo to run locally must be provided in PowerShell syntax by default.
