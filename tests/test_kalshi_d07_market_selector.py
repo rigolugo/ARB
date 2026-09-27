@@ -1120,3 +1120,312 @@ def test_selection_result_requires_exactly_one_of_success_or_halt():
             ),
             halt=selector.D07SelectionHalt(code=D07HaltCode.B1_NO_FINALISTS, phase=D07Phase.B1_TRADE_RECENCY),
         )
+
+
+# ---------------------------------------------------------------------------
+# Correction-02 (KALSHI_DEMO_R1_D07_PERMANENT_DYNAMIC_TICKER_SELECTOR_SPEC_01_
+# CORRECTION_02 Section 14): A4/C2 12-hour maximum close horizon and A4 page
+# limit 500. Expected values are literal, never derived from the constants
+# under test.
+# ---------------------------------------------------------------------------
+
+C02_ANCHOR_TS = 1798804800  # int(ANCHOR.timestamp()) for 2027-01-01T12:00:00Z
+C02_MIN_CLOSE_TS = 1798804800 + 1800
+C02_MAX_CLOSE_TS = 1798804800 + 43200
+
+
+class _StatusTransport:
+    """Returns one fixed non-200 status for every request and counts calls."""
+
+    def __init__(self, status: int) -> None:
+        self.status = status
+        self.calls = 0
+
+    def get(self, *, path, query, headers) -> HttpResponse:
+        self.calls += 1
+        return HttpResponse(status=self.status, body=b"{}")
+
+
+def _c2_orderbook_for(*tickers: str) -> dict:
+    return {
+        "orderbooks": [
+            make_orderbook_item(t, yes_levels=[["0.30", "10"]], no_levels=[["0.69", "10"]]) for t in tickers
+        ]
+    }
+
+
+def test_c02_r01_max_seconds_to_close_is_literal_12_hours():
+    assert selector.MAX_SECONDS_TO_CLOSE == 12 * 60 * 60
+    assert selector.MAX_SECONDS_TO_CLOSE == 43200
+
+
+def test_c02_r02_a4_page_limit_is_literal_500():
+    assert selector.A4_PAGE_LIMIT == 500
+
+
+def test_c02_r03_min_seconds_to_close_unchanged_literal_30_minutes():
+    assert selector.MIN_SECONDS_TO_CLOSE == 30 * 60
+    assert selector.MIN_SECONDS_TO_CLOSE == 1800
+
+
+def test_c02_r04_a4_max_pages_unchanged_literal_200():
+    assert selector.A4_MAX_PAGES == 200
+
+
+def test_c02_r05_a4_retained_count_unchanged_literal_100():
+    assert selector.A4_RETAINED_COUNT == 100
+
+
+def test_c02_anchor_literal_matches_fixture_anchor():
+    assert int(ANCHOR.timestamp()) == C02_ANCHOR_TS
+
+
+def test_c02_r06_first_a4_request_exact_query():
+    transport = FakeTransport()
+    transport.queue_markets_page({"markets": [], "cursor": ""})
+    discover_a4_candidates(transport, anchor=ANCHOR)
+    assert len(transport.calls) == 1
+    call = transport.calls[0]
+    assert call["path"] == "/trade-api/v2/markets"
+    assert call["query"] == {
+        "limit": ["500"],
+        "min_close_ts": [str(C02_MIN_CLOSE_TS)],
+        "max_close_ts": [str(C02_MAX_CLOSE_TS)],
+        "mve_filter": ["exclude"],
+    }
+
+
+def test_c02_r07_continuation_request_preserves_frozen_fields_and_adds_only_cursor():
+    transport = FakeTransport()
+    transport.queue_markets_page({"markets": [make_market("T1", "E1")], "cursor": "OPAQUE/+=CURSOR"})
+    transport.queue_markets_page({"markets": [make_market("T2", "E2")], "cursor": ""})
+    later_now = ANCHOR + timedelta(hours=3)  # proves the window is not recomputed between pages
+    rows = discover_a4_candidates(transport, anchor=ANCHOR)
+    assert later_now > ANCHOR
+    assert {r["ticker"] for r in rows} == {"T1", "T2"}
+    first, second = transport.calls[0]["query"], transport.calls[1]["query"]
+    assert second == {**first, "cursor": ["OPAQUE/+=CURSOR"]}
+    assert second["limit"] == ["500"]
+    assert second["max_close_ts"] == [str(C02_MAX_CLOSE_TS)]
+    assert second["min_close_ts"] == [str(C02_MIN_CLOSE_TS)]
+
+
+def test_c02_r08_a4_close_exactly_at_12_hours_is_in_scope_and_eligible():
+    min_ts, max_ts = C02_MIN_CLOSE_TS, C02_MAX_CLOSE_TS
+    eligible, scope, row = screen_a4_market(
+        make_market("T12H", "E1", seconds_to_close=43200), min_close_ts=min_ts, max_close_ts=max_ts
+    )
+    assert (eligible, scope) == (True, False)
+    assert row["close_ts"] == C02_MAX_CLOSE_TS
+
+    transport = FakeTransport()
+    transport.queue_markets_page({"markets": [make_market("T12H", "E1", seconds_to_close=43200)], "cursor": ""})
+    rows = discover_a4_candidates(transport, anchor=ANCHOR)
+    assert [r["ticker"] for r in rows] == ["T12H"]
+
+
+def test_c02_a4_close_exactly_at_30_minutes_is_in_scope_and_eligible():
+    transport = FakeTransport()
+    transport.queue_markets_page({"markets": [make_market("T30M", "E1", seconds_to_close=1800)], "cursor": ""})
+    rows = discover_a4_candidates(transport, anchor=ANCHOR)
+    assert [r["ticker"] for r in rows] == ["T30M"]
+
+
+@pytest.mark.parametrize("seconds_to_close", [43201, 43200 + 3600, 24 * 3600, 72 * 3600])
+def test_c02_r09_a4_close_strictly_beyond_12_hours_is_global_scope_contradiction(seconds_to_close):
+    eligible, scope, _ = screen_a4_market(
+        make_market("TLATE", "E1", seconds_to_close=seconds_to_close),
+        min_close_ts=C02_MIN_CLOSE_TS,
+        max_close_ts=C02_MAX_CLOSE_TS,
+    )
+    assert (eligible, scope) == (False, True)
+
+    transport = FakeTransport()
+    transport.queue_markets_page(
+        {
+            "markets": [
+                make_market("TOK", "E0"),
+                make_market("TLATE", "E1", seconds_to_close=seconds_to_close),
+            ],
+            "cursor": "",
+        }
+    )
+    with pytest.raises(_Halt) as excinfo:
+        discover_a4_candidates(transport, anchor=ANCHOR)
+    assert excinfo.value.code is D07HaltCode.A4_SCOPE_CONTRADICTION
+    assert excinfo.value.phase is D07Phase.A4_DISCOVERY
+    assert len(transport.calls) == 1
+
+
+def test_c02_r10_c2_finalist_exactly_at_12_hours_remains_eligible():
+    transport = FakeTransport()
+    finalists = [{"ticker": "T12H", "event_ticker": "E1"}]
+    transport.set_market_response(
+        "T12H", {"market": make_market("T12H", "E1", seconds_to_close=43200, bid="0.30", ask="0.31")}
+    )
+    transport.queue_orderbooks_response(_c2_orderbook_for("T12H"))
+    selected = revalidate_c2(transport, FakeSigner(), finalists, anchor=ANCHOR)
+    assert selected["ticker"] == "T12H"
+
+
+def test_c02_r11_c2_finalist_beyond_12_hours_is_excluded_not_a_global_halt():
+    transport = FakeTransport()
+    finalists = [{"ticker": "TLATE", "event_ticker": "E1"}, {"ticker": "TOK", "event_ticker": "E2"}]
+    transport.set_market_response(
+        "TLATE", {"market": make_market("TLATE", "E1", seconds_to_close=43201, bid="0.30", ask="0.31")}
+    )
+    transport.set_market_response(
+        "TOK", {"market": make_market("TOK", "E2", seconds_to_close=3600, bid="0.30", ask="0.31")}
+    )
+    transport.queue_orderbooks_response(_c2_orderbook_for("TLATE", "TOK"))
+    selected = revalidate_c2(transport, FakeSigner(), finalists, anchor=ANCHOR)
+    assert selected["ticker"] == "TOK"
+
+
+def test_c02_r11_c2_only_finalist_beyond_12_hours_yields_no_eligible_candidate():
+    transport = FakeTransport()
+    finalists = [{"ticker": "TLATE", "event_ticker": "E1"}]
+    transport.set_market_response(
+        "TLATE", {"market": make_market("TLATE", "E1", seconds_to_close=43201, bid="0.30", ask="0.31")}
+    )
+    transport.queue_orderbooks_response(_c2_orderbook_for("TLATE"))
+    with pytest.raises(_Halt) as excinfo:
+        revalidate_c2(transport, FakeSigner(), finalists, anchor=ANCHOR)
+    assert excinfo.value.code is D07HaltCode.C2_NO_ELIGIBLE_CANDIDATE
+    assert excinfo.value.phase is D07Phase.C2_REVALIDATION
+
+
+def test_c02_r12_single_eligible_a4_candidate_flows_to_c1_and_to_selection():
+    transport = FakeTransport()
+    transport.queue_markets_page({"markets": [make_market("SOLO-1", "SOLO")], "cursor": ""})
+    transport.queue_orderbooks_response(
+        {"orderbooks": [make_orderbook_item("SOLO-1", yes_levels=[["0.40", "500"]], no_levels=[["0.58", "500"]])]}
+    )
+    transport.queue_trades_page(
+        "SOLO-1",
+        {"trades": [make_trade("SOLO-1", count_fp="3", created_time=_iso(ANCHOR - timedelta(minutes=5)), trade_id="S")], "cursor": ""},
+    )
+    transport.set_market_response("SOLO-1", {"market": make_market("SOLO-1", "SOLO")})
+    transport.queue_orderbooks_response(
+        {"orderbooks": [make_orderbook_item("SOLO-1", yes_levels=[["0.40", "500"]], no_levels=[["0.58", "500"]])]}
+    )
+    result = select_d07_ticker(transport=transport, signer=FakeSigner(), now_utc=_clock())
+    assert result.success is not None
+    assert result.success.selected_ticker == "SOLO-1"
+    assert result.success.a4_eligible_count == 1
+    orderbooks_call = next(c for c in transport.calls if c["path"] == BASE_PATH + PATH_ORDERBOOKS)
+    assert orderbooks_call["query"]["tickers"] == ["SOLO-1"]
+
+
+def test_c02_r12_retention_is_an_upper_bound_of_100_not_a_minimum():
+    transport = FakeTransport()
+    markets = [make_market(f"SIM-{i:03d}", f"EV-{i:03d}") for i in range(105)]
+    transport.queue_markets_page({"markets": markets, "cursor": ""})
+    rows = discover_a4_candidates(transport, anchor=ANCHOR)
+    assert len(rows) == 100
+
+    transport_small = FakeTransport()
+    transport_small.queue_markets_page({"markets": markets[:7], "cursor": ""})
+    assert len(discover_a4_candidates(transport_small, anchor=ANCHOR)) == 7
+
+
+def test_c02_r13_zero_eligible_a4_candidates_fail_closed_without_credentials():
+    transport = FakeTransport()
+    transport.queue_markets_page({"markets": [make_market("TX", "E1", status="closed")], "cursor": ""})
+    result = select_d07_ticker(transport=transport, signer=FakeSigner(forbid=True), now_utc=_clock())
+    assert result.success is None
+    assert result.halt is not None
+    assert result.halt.code is D07HaltCode.A4_NO_ELIGIBLE_CANDIDATES
+    assert [c["path"] for c in transport.calls] == [BASE_PATH + PATH_MARKETS]
+
+
+@pytest.mark.parametrize("status", [500, 502, 503, 429, 301])
+def test_c02_r14_non_200_a4_page_is_fail_closed_with_exactly_one_attempt(status):
+    transport = _StatusTransport(status)
+    result = select_d07_ticker(transport=transport, signer=FakeSigner(forbid=True), now_utc=_clock())
+    assert result.halt is not None
+    assert result.halt.code is D07HaltCode.UNEXPECTED_HTTP_STATUS
+    assert result.halt.phase is D07Phase.A4_DISCOVERY
+    assert transport.calls == 1  # no retry, no alternate page size, no widened horizon
+
+
+def test_c02_r14_non_200_on_continuation_page_does_not_retry_or_widen():
+    class _SecondPageFails(FakeTransport):
+        def get(self, *, path, query, headers):
+            if len(self.calls) == 1:
+                self.calls.append({"path": path, "query": dict(query), "headers": dict(headers)})
+                return HttpResponse(status=500, body=b"{}")
+            return super().get(path=path, query=query, headers=headers)
+
+    transport = _SecondPageFails()
+    transport.queue_markets_page({"markets": [make_market("T1", "E1")], "cursor": "NEXT"})
+    with pytest.raises(_Halt) as excinfo:
+        discover_a4_candidates(transport, anchor=ANCHOR)
+    assert excinfo.value.code is D07HaltCode.UNEXPECTED_HTTP_STATUS
+    assert len(transport.calls) == 2
+
+
+def test_c02_r14_static_no_retry_backoff_pacing_alternate_limit_widening_or_status_query():
+    source = _source_text()
+    tree = ast.parse(source)
+
+    for banned in ("time.sleep", "sleep(", "backoff", "retry(", "Retry(", "status=open", '"status", '):
+        assert banned not in source, banned
+
+    assigned = {}
+    for node in ast.walk(tree):
+        if isinstance(node, ast.Assign):
+            for target in node.targets:
+                if isinstance(target, ast.Name):
+                    assigned.setdefault(target.id, []).append(node)
+    for name in ("MAX_SECONDS_TO_CLOSE", "MIN_SECONDS_TO_CLOSE", "A4_PAGE_LIMIT", "A4_MAX_PAGES", "A4_RETAINED_COUNT"):
+        assert len(assigned.get(name, [])) == 1, name
+
+    fetch_src = inspect.getsource(selector._fetch_markets_page)
+    assert '("limit", str(A4_PAGE_LIMIT))' in fetch_src
+    assert "status" not in fetch_src
+
+    for fn in (selector.discover_a4_candidates, selector.revalidate_c2):
+        fn_src = inspect.getsource(fn)
+        assert "MAX_SECONDS_TO_CLOSE" in fn_src
+        for widened in ("24 * 60 * 60", "72 * 60 * 60", "86400", "259200"):
+            assert widened not in fn_src
+
+    discover_src = inspect.getsource(selector.discover_a4_candidates)
+    assert discover_src.count("_fetch_markets_page(") == 1
+    assert "while" not in discover_src
+
+
+def test_c02_r15_correction_01_a4_integrity_halts_still_present():
+    for name in (
+        "test_a4_non_object_market_row_halts",
+        "test_a4_duplicate_ticker_in_same_page_halts",
+        "test_a4_duplicate_ticker_across_pages_halts",
+        "test_a4_close_time_scope_contradiction_halts_discovery",
+        "test_a4_mve_collection_scope_contradiction_halts_discovery",
+        "test_a4_mve_legs_scope_contradiction_halts_discovery",
+        "test_a4_ordinary_ineligibility_remains_exclusion_not_halt",
+    ):
+        assert callable(globals().get(name)), name
+
+
+def test_c02_r16_b1_is_block_trade_false_theorems_still_present():
+    for name in (
+        "test_b1_exact_query_shape_including_is_block_trade_false",
+        "test_b1_continuation_page_also_includes_is_block_trade_false",
+        "test_b1_is_block_trade_value_is_exact_lowercase_string_not_alternate_spelling",
+        "test_b1_returned_block_trade_row_still_makes_window_incomplete",
+        "test_regression_b1_queries_include_is_block_trade_false_end_to_end",
+    ):
+        assert callable(globals().get(name)), name
+
+
+def test_c02_r17_no_hardcoding_theorems_still_present():
+    for name in (
+        "test_no_hardcoded_historical_ticker_literal_in_source",
+        "test_no_frozen_candidate_payload_constants_in_source",
+        "test_cli_has_no_ticker_candidate_or_market_override",
+        "test_no_write_capable_http_method_in_source",
+        "test_no_production_host_used_to_build_a_request",
+    ):
+        assert callable(globals().get(name)), name
