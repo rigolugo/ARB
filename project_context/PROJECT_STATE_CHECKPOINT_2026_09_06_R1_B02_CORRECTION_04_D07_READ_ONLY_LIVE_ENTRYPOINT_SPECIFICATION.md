@@ -4409,3 +4409,239 @@ G.max_cleanup_cancel_sends = 0
 
 This is routing only. It does not select or recommend a G value and authorizes
 no venue or runtime activity.
+
+### A28 LocalExecutionConfigV1 portability implementation — APPROVED_AND_CANONICALLY_INSTALLED
+
+This is a documentation-only continuity overlay (task
+`ARB_LOCAL_EXECUTION_CONFIG_V1_PORTABILITY_IMPLEMENTATION_01_CANONICAL_CONTINUITY_01`).
+This candidate is prepared directly from the exact canonical base on
+`rigolugo/ARB/main`:
+
+```text
+commit = 4685aa1bdcde0256efdc043bacb32fa6f321ea71
+tree   = 5155831fd0c0524274cce48700d668a81c9aab07
+parent = 2f9dddc984c5397fdde3d0cb0bf9a48e38123404
+```
+
+This section controls current state only when this continuity candidate is
+itself later present on canonical `main`. It alters no implementation bytes and
+grants no runtime capability. It updates exactly two existing documentation
+paths (this checkpoint and `project_context/ARTIFACT_INDEX.md`); no new
+checkpoint or repository file is created, `project_context/START_HERE.md` is
+unchanged, and canonical read order is unchanged.
+
+**WHY this section exists.** The machine-local execution-configuration
+portability implementation was Marco-approved and canonically installed on
+`main`, but its specification, review, approval and installation evidence are
+external/local. This section records that milestone in the existing routed
+carrier so a fresh chat can recover it without prior-chat history.
+
+**Supersession scope (none of A1-A27).** A28 records an independent repository
+portability milestone. It does not supersede, rewrite, or reinterpret any D07
+runtime, risk, profile, release, writer, or Gate-D theorem in A1-A27. In
+particular, A27.6 current state and A27.8 `NEXT_BOUNDED_ACTION =
+RETURN_TO_MARCO_FOR_SEPARATE_G_SELECTION` remain unchanged and pending.
+A1-A27 are not rewritten.
+
+**A28.1 Installed milestone.**
+
+```text
+PORTABILITY_IMPLEMENTATION =
+APPROVED_AND_CANONICALLY_INSTALLED
+
+installation_classification =
+REMOTE_INSTALLATION_CONFIRMED
+
+installation_source_mode =
+EXACT_APPROVED_COMMIT_OBJECT
+
+installed_commit = 4685aa1bdcde0256efdc043bacb32fa6f321ea71
+installed_tree   = 5155831fd0c0524274cce48700d668a81c9aab07
+installed_parent = 2f9dddc984c5397fdde3d0cb0bf9a48e38123404
+parent_count     = 1
+```
+
+The installed commit is the exact Marco-reviewed candidate commit object (not a
+reconstruction). Exactly two repository paths changed relative to
+`2f9dddc984c5397fdde3d0cb0bf9a48e38123404`:
+
+```text
+project_context/LOCAL_EXECUTION_ENVIRONMENT.md
+  bytes  = 22713
+  sha256 = f6beeef4e783dd48c3ee3ac5017a8a6854592339b8675242624cdb4c5abb12df
+  blob   = bc0829f56735f42ccd9a9bfb6d95efdacdbc3589
+
+tests/test_r1_d07_n1_fresh_read_only_state_revalidation_v2.py
+  bytes  = 110682
+  sha256 = 3d6aa3d6b84774bc84311545e99422977cfa758edaeed404e33d22f14ba97439
+  blob   = 91d0163bc43ae2a2d7192a68da42d1463810c007
+```
+
+Substance installed: `project_context/LOCAL_EXECUTION_ENVIRONMENT.md` §1.2
+defines `ARB_LOCAL_EXECUTION_CONFIG_V1` (fields `schema`, `python`,
+`python.executable`; default `%LOCALAPPDATA%\ARB\arb-local-config.json`;
+machine-local, non-secret, repository-excluded; resolution precedence explicit
+`-Python` > explicit `-ConfigPath` > default config > halt closed; no implicit
+fallback; stable failure classes; mandatory forward rule `LEC-FWD-001`). The
+V2 regression harness now passes `-Python sys.executable` at its three direct
+launcher command sites, with a structural AST regression theorem. No tracked
+resolver or config file was added.
+
+Protected identities remained exact in the installed tree: the archived V2
+launcher (`dededbb1719e21bdc3a456818fa1f4a0d740557b`), its `.sha256` sidecar
+(`fb349f3e5201d70536a84f7c8caf1ec1fba2ffcf`), archive README
+(`796c0946ffbb56e15447dc643ee92ab1e37a6a40`), archive MANIFEST
+(`556490c06a32b5afe6594965349ba02587181b62`),
+`src/arb/venues/kalshi/d07_market_selector.py`
+(`47028082032b285b86c8ece51b864345ad707f34`), and
+`tests/test_kalshi_d07_market_selector.py`
+(`e9da2d374639c3d659c7d27f1f22ca857107bd8a`). The archived V2 launcher's
+embedded user-specific `-Python` default is retained as the first explicit
+`LEC-FWD-002` historical exception.
+
+**A28.2 Installation transport.**
+
+```text
+remote_before = 2f9dddc984c5397fdde3d0cb0bf9a48e38123404
+pre_push_fast_forward_gate = PASS
+push_intent_marker = DURABLY_RECORDED_AND_READ_BACK
+push_command = git push origin 4685aa1bdcde0256efdc043bacb32fa6f321ea71:refs/heads/main
+push_attempts = 1
+automatic_retries = 0
+force_attempts = 0
+force_with_lease_attempts = 0
+push_exit_code = 0
+remote_after = 4685aa1bdcde0256efdc043bacb32fa6f321ea71
+post_push_reconciliation = REMOTE_INSTALLATION_CONFIRMED
+remote_tags = NONE
+```
+
+Disclosed and accepted: the first remote-before gate run printed
+`REMOTE_MAIN_BASE_MISMATCH` although `ls-remote` returned the required base.
+This was an installer-script false negative. No push-intent marker had been
+written and no push had been issued before that stop. The gate was restarted
+and passed before the single authorized push.
+
+**A28.3 Controlling and evidence identities (external/local, by identity only).**
+
+```text
+ARB_LOCAL_EXECUTION_CONFIG_V1_PORTABILITY_SPEC_01_CORRECTION_01.md
+  bytes = 26673
+  sha256 = 5d524ae1647735497a318c80c6d99bff1d57b3af6648741dfeca77e215987402
+
+HANDOFF_ARB_LOCAL_EXECUTION_CONFIG_V1_PORTABILITY_SPEC_01_CORRECTION_01.md
+  bytes = 6417
+  sha256 = 99583bf0c54bd0931c3f8098a33eaff6c9112e4ff91717f83ce86cf6aecda6b8
+
+ARB_LOCAL_EXECUTION_CONFIG_V1_PORTABILITY_IMPLEMENTATION_01_MARCO_APPROVAL_HANDOFF_01.md (APPROVE)
+  bytes = 6840
+  sha256 = dd723889309c5b1512671c9a1c4dd6f7e2a3461e481ebdb281abfbbbc0266676
+
+ARB_LOCAL_EXECUTION_CONFIG_V1_PORTABILITY_IMPLEMENTATION_01_MARCO_BASELINE_FAILURE_ACCEPTANCE_HANDOFF_01.md (ACCEPT FINDING)
+  bytes = 5926
+  sha256 = 9bb922a9af72669f5dfacc2348e21bd1421da8c0ab25a764876fae83b3b33ad9
+
+ARB_LOCAL_EXECUTION_CONFIG_V1_PORTABILITY_IMPLEMENTATION_01_MARCO_REVIEW.zip
+  bytes = 46902
+  sha256 = dfb0e76c95c0cece9315aef2e2b6d43b51b658b581a53671b7961d97d4bd9424
+
+ARB_LOCAL_EXECUTION_CONFIG_V1_PORTABILITY_IMPLEMENTATION_01_MARCO_SUBMISSION_BUNDLE.zip
+  bytes = 68887
+  sha256 = d775b468baf4653938e415079a1a2c7d06bcff3abb70a19b0e3251752170f67e
+
+candidate.patch
+  bytes = 16233
+  sha256 = 678df1a1eef700b651bd21409a8fc11d96dc42c73dc0201cba1f74018c8634ba
+
+ARB_LOCAL_EXECUTION_CONFIG_V1_PORTABILITY_IMPLEMENTATION_01_CANONICAL_INSTALLATION_01_CLAUDE_DISPATCH_BUNDLE.zip
+  bytes = 2006074
+  sha256 = a7641017588eaea2c57c975128e3f574b737f37276f7d4ec9383e32bbbf3ad61
+
+ARB_LOCAL_EXECUTION_CONFIG_V1_PORTABILITY_IMPLEMENTATION_01_CANONICAL_INSTALLATION_01_EVIDENCE_BUNDLE.zip
+  bytes = 13855
+  sha256 = c3616567c3a7a29994490ed7c25397322382c6b9b5bbe74b03d045025baa1ddd
+
+ARB_LOCAL_EXECUTION_CONFIG_V1_PORTABILITY_IMPLEMENTATION_01_CANONICAL_INSTALLATION_01_MARCO_APPROVAL_HANDOFF_01.md (APPROVE)
+  bytes = 5169
+  sha256 = b157aa71b2bd375d76eebbcafd1d0b0ecc91593a4d06115ddd96465bd76d608e
+```
+
+Installation evidence ZIP members (exact):
+
+```text
+..._CANONICAL_INSTALLATION_01_RESULT.json        6528  27135adb21b53ccf2759cc36cf5b2db7982a42824e9dc31d1088659dc4d08c71
+..._CANONICAL_INSTALLATION_01_REPORT.md          4688  85a594a6b60b23c4d161e8d71a64d041c763e0cd85300c8eb1c2999747fdd43f
+..._CANONICAL_INSTALLATION_01_GIT_TRANSCRIPT.txt 8681  d954df4baa8c9eaab8b2153b2057bc26fc1b799b67c2ac19c018a0cc2192feb4
+PUSH_ATTEMPT_MARKER.json                         1679  809dace5f1d9e68191bafd7793258abfcc5108b8f324447e06ee9dd889150d96
+CONTINUITY_CANONICALIZATION_HANDOFF.md           6164  06aee783a6a6d1037fde55a18dedf6ca4213923dd44c9852d5312f3ae0b8c4ff
+INSTALLATION_DELIVERY_MANIFEST.json              2179  b3b03237278a67e47ef54c6e3259d97f81c66ebb95a4cbcab1acdecb87ad0396
+```
+
+(`...` = `ARB_LOCAL_EXECUTION_CONFIG_V1_PORTABILITY_IMPLEMENTATION_01`.)
+
+**A28.4 Accepted test truth (not upgraded).** No tests were run during
+installation.
+
+```text
+V2 end-to-end = 23 passed / 26 subtests / 0 failed
+V2 module = 71 passed / 131 subtests / 0 failed
+full suite = 1 failed / 4060 passed / 2 skipped / 1302 subtests
+full suite status = FAILED_WITH_ACCEPTED_PREEXISTING_BASELINE_FAILURE
+accepted failure =
+tests/test_kalshi_ledger_binding.py::AuthorizationConsumptionBindingTests::test_parallel_consumption_has_at_most_one_winner_and_never_retries
+classification = PREEXISTING_BASELINE_LEDGER_CONCURRENCY_LIVENESS_FAILURE
+candidate_caused = NO_EVIDENCE
+unchanged_base_reproduction = CONFIRMED
+```
+
+The full regression did not pass. The acceptance is scoped to that exact
+candidate/test evidence and is not a general waiver; the ledger-concurrency
+liveness issue remains unresolved and requires a separate bounded task.
+
+**A28.5 No-runtime-authorization theorem.** The portability specification,
+implementation, installation, and this record grant no:
+
+```text
+Kalshi/API/venue access
+credential use
+deployed-N1 access
+persistent execution-state mutation
+selector execution
+profile runtime consumption
+risk-config runtime consumption
+G selection
+restricted-session mutation
+RELEASE_ONLY
+writer-proof release
+NormalWriter
+Gate-D execution
+Demo write
+production
+```
+
+`LocalExecutionConfigV1` selects a local interpreter path only; successful
+resolution proves no environment, dependency, repository, or activity
+authorization.
+
+**A28.6 Continuity disposition.**
+
+```text
+installation_uncertainty = CLOSED
+CANONICALIZATION_PENDING (portability milestone) =
+CLOSED when this continuity candidate is separately reviewed and installed
+```
+
+**A28.7 Next bounded route (portability milestone).**
+
+```text
+NEXT_BOUNDED_ACTION_AFTER_THIS_CONTINUITY_IS_INSTALLED =
+RECONSTRUCT_AND_REDISPATCH_R1-D07_PERMANENT_DYNAMIC_TICKER_SELECTOR_IMPLEMENTATION_01_CORRECTION_02_FROM_THEN_CURRENT_CANONICAL_MAIN
+```
+
+The already-approved permanent dynamic ticker selector Correction-02
+implementation must be reconstructed and re-dispatched from the then-current
+canonical `main`. The old uncommitted selector Correction-02 candidate, its
+worktree, and any old-base candidate commit or ancestry must not be reused.
+This route is routing only, authorizes no selector execution or venue/runtime
+activity, and does not alter A27.8 (`RETURN_TO_MARCO_FOR_SEPARATE_G_SELECTION`
+remains pending and unselected).
