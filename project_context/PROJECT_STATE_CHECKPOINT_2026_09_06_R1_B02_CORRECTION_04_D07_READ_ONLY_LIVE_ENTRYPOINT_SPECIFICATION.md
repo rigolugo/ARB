@@ -4645,3 +4645,227 @@ worktree, and any old-base candidate commit or ancestry must not be reused.
 This route is routing only, authorizes no selector execution or venue/runtime
 activity, and does not alter A27.8 (`RETURN_TO_MARCO_FOR_SEPARATE_G_SELECTION`
 remains pending and unselected).
+
+### A29 R1-D07 permanent dynamic ticker selector Correction-02 implementation — APPROVED_AND_CANONICALLY_INSTALLED
+
+This is a documentation-only continuity overlay (task
+`R1-D07_PERMANENT_DYNAMIC_TICKER_SELECTOR_IMPLEMENTATION_01_CORRECTION_02_CANONICAL_CONTINUITY_01`).
+This candidate is prepared directly from the exact canonical base on
+`rigolugo/ARB/main`:
+
+```text
+commit = 70d8c6f201977987055d29664e3263897869e8c2
+tree   = 36659d374a51501711042dd5b4b870fc13f2781f
+parent = 1ae7b0851bf695d17e470980f3d663a8c99b23d7
+```
+
+This section controls current state only when this continuity candidate is
+itself later present on canonical `main`. It alters no implementation bytes and
+grants no runtime capability. It updates exactly two existing documentation
+paths (this checkpoint and `project_context/ARTIFACT_INDEX.md`); no new
+checkpoint or repository file is created, `project_context/START_HERE.md` is
+unchanged, and canonical read order is unchanged.
+
+**WHY this section exists.** The permanent dynamic ticker selector
+Correction-02 implementation was Marco-approved and canonically installed on
+`main`, but its specification, review, approval and installation evidence are
+external/local. This section records that milestone in the existing routed
+carrier so a fresh chat can recover it without prior-chat history.
+
+**Supersession scope.** A29 supersedes only earlier statements that the
+installed selector's A4/C2 maximum close horizon is 72 hours or that its A4
+`/markets` page limit is 1000; those values are historical as of this
+installation. A29 does not supersede, rewrite, or reinterpret any D07 runtime,
+risk, profile, release, writer, or Gate-D theorem. A27.6 current state and
+A27.8 `NEXT_BOUNDED_ACTION = RETURN_TO_MARCO_FOR_SEPARATE_G_SELECTION` remain
+unchanged and pending. A1-A28 are not rewritten.
+
+**A29.1 Installed milestone.**
+
+```text
+SELECTOR_CORRECTION_02_IMPLEMENTATION =
+APPROVED_AND_CANONICALLY_INSTALLED
+
+installation_classification =
+REMOTE_INSTALLATION_CONFIRMED
+
+installation_source_mode =
+EXACT_APPROVED_COMMIT_OBJECT
+
+installed_commit = 70d8c6f201977987055d29664e3263897869e8c2
+installed_tree   = 36659d374a51501711042dd5b4b870fc13f2781f
+installed_parent = 1ae7b0851bf695d17e470980f3d663a8c99b23d7
+parent_count     = 1
+```
+
+The installed commit is the exact Marco-reviewed candidate commit object (not a
+reconstruction). Exactly two repository paths changed relative to
+`1ae7b0851bf695d17e470980f3d663a8c99b23d7`:
+
+```text
+src/arb/venues/kalshi/d07_market_selector.py
+  bytes  = 51168
+  sha256 = 4a0be6b32ef7df0298f878fc104c337fb1f236ce95ccafb866f95560874c3cd6
+  blob   = 46d0e4904c3d8342a54a89fa7e685b40ede24ea4
+  base   = 47028082032b285b86c8ece51b864345ad707f34
+
+tests/test_kalshi_d07_market_selector.py
+  bytes  = 59101
+  sha256 = b52c52ab63ff798e4e3303c47a0b2c83e76171943d60b60be564fb43dda05e55
+  blob   = 02dc6a12bd8883cd7c24fd8f9e3c1fba28c74096
+  base   = e9da2d374639c3d659c7d27f1f22ca857107bd8a
+```
+
+**A29.2 Installed production delta (exact).**
+
+```text
+MAX_SECONDS_TO_CLOSE = 72 * 60 * 60  ->  12 * 60 * 60
+A4_PAGE_LIMIT        = 1000          ->  500
+MIN_SECONDS_TO_CLOSE = 30 * 60       (unchanged)
+A4_MAX_PAGES         = 200           (unchanged)
+A4_RETAINED_COUNT    = 100           (unchanged; retain up to 100)
+```
+
+No other production-source byte changed. The shared `MAX_SECONDS_TO_CLOSE`
+controls both the A4 frozen discovery window and the C2 fresh revalidation
+window, so the 12-hour maximum applies coherently to both phases. A4 keeps
+`mve_filter=exclude`, no `status` query, complete cursor pagination, zero
+retry/redirect/backoff/adaptive widening, and the Correction-01 global
+integrity halts (a parseable A4 close strictly beyond 12h is a global
+`A4_SCOPE_CONTRADICTION`). C2 keeps per-finalist exclusion
+(`C2_NO_ELIGIBLE_CANDIDATE` if none survive). B1 keeps exact
+`is_block_trade=false`. The no-hardcoded-ticker / no-frozen-candidate / no-CLI
+override theorem, Demo-only GET-only transport, and lazy secret-safe
+credential handling are preserved.
+
+**A29.3 Installation transport.**
+
+```text
+remote_before = 1ae7b0851bf695d17e470980f3d663a8c99b23d7
+remote_before_tree = 5cd4d65c9a46d268d8a1de5c2812c094d16199c9
+remote_before_parent = 4685aa1bdcde0256efdc043bacb32fa6f321ea71
+pre_push_fast_forward_gate = PASS
+push_intent_marker = DURABLY_RECORDED_AND_READ_BACK
+push_command = git push origin 70d8c6f201977987055d29664e3263897869e8c2:refs/heads/main
+push_attempts = 1
+automatic_retries = 0
+force_attempts = 0
+force_with_lease_attempts = 0
+push_exit_code = 0
+remote_after = 70d8c6f201977987055d29664e3263897869e8c2
+post_push_reconciliation = REMOTE_INSTALLATION_CONFIRMED
+remote_tags = NONE
+```
+
+**A29.4 Controlling and evidence identities (external/local, by identity only).**
+
+```text
+KALSHI_DEMO_R1_D07_PERMANENT_DYNAMIC_TICKER_SELECTOR_SPEC_01_CORRECTION_02.md
+  bytes = 16293
+  sha256 = 2f3ba3df84514ca70a415da8ae15aaf2f9414f30ca46f77f04c7c01f5b5866b1
+
+HANDOFF_KALSHI_DEMO_R1_D07_PERMANENT_DYNAMIC_TICKER_SELECTOR_SPEC_01_CORRECTION_02.md
+  bytes = 2948
+  sha256 = 04e62a98c37360db71e73cef9fe3a664d135e719912b01a00fd513422ed43913
+
+R1-D07_PERMANENT_DYNAMIC_TICKER_SELECTOR_SPEC_01_CORRECTION_02_MARCO_APPROVAL_HANDOFF_01.md (APPROVE)
+  sha256 = 3d2efda0bdf8be3600a70cb238aaa3b1246b820679f6648e09d04c4c8700417f
+
+R1-D07_PERMANENT_DYNAMIC_TICKER_SELECTOR_IMPLEMENTATION_01_CORRECTION_02_REDISPATCH_01_CLAUDE_DISPATCH_BUNDLE.zip
+  bytes = 399581
+  sha256 = 7731f5222877cbe0f06ea936ff9d921d69f237be326a206844ab409ea8ac9b8b
+
+R1-D07_PERMANENT_DYNAMIC_TICKER_SELECTOR_IMPLEMENTATION_01_CORRECTION_02_MARCO_REVIEW.zip
+  bytes = 33814
+  sha256 = f9b72101d41b8b120c9c79da20fda9bc1c4ea14077702e91bf48a05fa1f458c5
+
+R1-D07_PERMANENT_DYNAMIC_TICKER_SELECTOR_IMPLEMENTATION_01_CORRECTION_02_MARCO_SUBMISSION_BUNDLE.zip
+  bytes = 43320
+  sha256 = 277f67222e07295547196f25cc2a48183ee5d9b897fc6ddaa7ff03396822303c
+
+candidate.patch
+  bytes = 14770
+  sha256 = 131f47d08be98d6fc8c82218c7c0b8016249f96629234d3f18e6719ff14bdb83
+
+R1-D07_PERMANENT_DYNAMIC_TICKER_SELECTOR_IMPLEMENTATION_01_CORRECTION_02_MARCO_APPROVAL_HANDOFF_01.md (APPROVE)
+  bytes = 6770
+  sha256 = 7dd10487623cc2392f04246972353a59101519751ded7f7a53952b57425e7d3c
+
+R1-D07_PERMANENT_DYNAMIC_TICKER_SELECTOR_IMPLEMENTATION_01_CORRECTION_02_CANONICAL_INSTALLATION_01_CLAUDE_DISPATCH_BUNDLE.zip
+  bytes = 570128
+  sha256 = 4c6f1ba117c7153a3790835a01cd97f948da61115c5c61daf53660746a873295
+
+R1-D07_PERMANENT_DYNAMIC_TICKER_SELECTOR_IMPLEMENTATION_01_CORRECTION_02_CANONICAL_INSTALLATION_01_EVIDENCE_BUNDLE.zip
+  bytes = 10647
+  sha256 = 2af292b08959e48b09c06f32c6b7f05a7e1465fec55de4ec4d6e51fce3042455
+
+PUSH_ATTEMPT_MARKER.json
+  bytes = 1829
+  sha256 = c3aee3e388537e757bad45a9b1b6bbea651f3cded0cc6fc400be21b7e32f8bf0
+
+R1-D07_PERMANENT_DYNAMIC_TICKER_SELECTOR_IMPLEMENTATION_01_CORRECTION_02_CANONICAL_INSTALLATION_01_MARCO_APPROVAL_HANDOFF_01.md (APPROVE)
+  bytes = 3683
+  sha256 = 2d81a45afdaf00e085a04c05abf5e9b53f70d5f734b0c5cc9dcfa309bc2dd208
+```
+
+Installation evidence ZIP members (exact):
+
+```text
+..._CANONICAL_INSTALLATION_01_RESULT.json          4444  c1596ca3127d00b08f4d7e337efdff750808353410d6ac4dd5d6cf761c975c7f
+..._CANONICAL_INSTALLATION_01_REPORT.md            3189  d1315dae69428c48592cfdf9cc9671e75cb7e229dd26ba2f4709cdfd6214caca
+..._CANONICAL_INSTALLATION_01_GIT_TRANSCRIPT.txt   6130  837efef2e1808f502017f5a362768f63e9bef53187c84d6cbe062a455b3425ab
+PUSH_ATTEMPT_MARKER.json                           1829  c3aee3e388537e757bad45a9b1b6bbea651f3cded0cc6fc400be21b7e32f8bf0
+POST_INSTALL_CONTINUITY_AND_D07_ROUTE_HANDOFF.md   3607  a1770e395c70a05e087553434d617fc6cb28ef3aa3c7ada5d984c28e82981526
+INSTALLATION_DELIVERY_MANIFEST.json                2303  1187fe0e53bd6c7c03af22222a305e24b5053aedb096ac4d8de07291dd01fae7
+```
+
+(`...` = `R1-D07_PERMANENT_DYNAMIC_TICKER_SELECTOR_IMPLEMENTATION_01_CORRECTION_02`.)
+
+**A29.5 Reviewed test truth (not upgraded).**
+
+```text
+focused selector suite = 105 passed / 0 failed
+full serial repository = 4091 passed / 2 skipped / 1302 subtests / 0 failed
+ledger-concurrency waiver = NOT_USED
+non-vacuity check = old 72h/1000 values temporarily restored -> 10 new Correction-02 tests failed; source restored byte-identically
+installation tests = NONE (no tests run during installation)
+```
+
+The two skips are the pre-existing `BOOT_HOLD` not-applicable cases.
+
+**A29.6 No-runtime-authorization theorem.** The selector Correction-02
+specification, implementation, installation, and this record grant no:
+
+```text
+live selector execution
+Kalshi/API/venue access
+credential use
+deployed-N1 access
+persistent execution-state mutation
+profile runtime consumption
+risk-config runtime consumption
+G selection
+restricted-session mutation
+RELEASE_ONLY
+writer-proof release
+NormalWriter
+Gate-D execution
+Demo write
+production
+```
+
+Any selected ticker produced by a future authorized selector run remains
+freshness-bound evidence at its observation time only. Nothing here is
+profitability or arbitrage evidence.
+
+**A29.7 Next bounded route.**
+
+```text
+NEXT_BOUNDED_ACTION =
+RETURN_TO_MARCO_FOR_SEPARATE_G_SELECTION   (A27.8, unchanged)
+```
+
+This continuity task selects no G value (`G.max_ordinary_write_sends` remains
+`UNSELECTED`) and grants no runtime or venue capability. The D07 runtime route
+resumes only after this continuity candidate is separately reviewed and
+installed, and then only under separately authorized tasks.
