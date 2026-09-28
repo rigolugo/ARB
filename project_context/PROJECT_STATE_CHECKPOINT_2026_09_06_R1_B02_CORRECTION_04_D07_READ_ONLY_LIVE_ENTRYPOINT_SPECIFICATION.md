@@ -4869,3 +4869,308 @@ This continuity task selects no G value (`G.max_ordinary_write_sends` remains
 `UNSELECTED`) and grants no runtime or venue capability. The D07 runtime route
 resumes only after this continuity candidate is separately reviewed and
 installed, and then only under separately authorized tasks.
+
+### A30 R1-D07 Stage-3 freshness/completeness semantics and empirical correction — MARCO_APPROVED_PENDING_IMPLEMENTATION
+
+This is a documentation-only continuity overlay (task
+`R1-D07_STAGE3_FRESHNESS_AND_COMPLETENESS_SEMANTICS_SPEC_01_CANONICAL_CONTINUITY_01`).
+This candidate is prepared directly from the exact canonical base on
+`rigolugo/ARB/main`:
+
+```text
+required_base_commit = cf8b44a634eb7ea1761d68112cc6760f61d8fa02
+required_base_tree   = 29fb3767826ce8b4cfcd7db2025a721db2eb9863
+required_base_parent = 70d8c6f201977987055d29664e3263897869e8c2
+continuity_class     = DOCUMENTATION_ONLY
+```
+
+This section controls current state only when this continuity candidate is
+itself later present on canonical `main`. It alters no implementation bytes and
+grants no runtime capability. It updates exactly three existing documentation
+paths (this checkpoint, `project_context/START_HERE.md`, and
+`project_context/ARTIFACT_INDEX.md`); no new checkpoint or repository file is
+created and canonical read order is unchanged. A1-A29 are not rewritten.
+
+**WHY this section exists.** A separately authorized live read-only Stage-3
+execution (`EXECUTION_02`) halted on a UDT freshness gate, a bounded public
+Demo canary then falsified the absolute-age assumption behind that gate, and
+Marco approved a bounded semantic correction specification. The specification,
+approval, and empirical evidence are external/local. This section records the
+accepted theorem and exact identities in the existing routed carrier so a fresh
+chat can recover them without prior-chat history.
+
+**Supersession scope.** A30 is the latest D07 overlay. It supersedes A27.8 and
+A29.7 only as the statement of the next bounded action (see A30.9). It does not
+supersede, rewrite, or reinterpret the A27 S1 conservative-profile binding, the
+A28 portability installation, or the A29 selector installation, which remain
+accepted historical/installed milestones. It does not create Candidate-03 and
+does not replace Candidate-02.
+
+**A30.1 EXECUTION_02 historical empirical facts (consumed; no retry).**
+
+1. A separately authorized read-only `EXECUTION_02` was consumed exactly once.
+2. It passed authorization, N1 precheck, and dynamic ticker selection.
+3. Selected ticker at that observation time: `KXWTI-26SEP2814-T98.99`
+   (freshness-bound evidence at its observation time only; not a standing
+   ticker).
+4. Stage 3 was invoked exactly once and halted:
+
+   ```text
+   S3_HALTED_STAGE3_NOT_COMPLETE
+   DYNAMIC_READ_FRESHNESS_STALE
+   T1 age exceeds state_integrity.max_reconciliation_lag_ms
+   ```
+
+5. No Demo write, release, writer-proof release, NormalWriter, Gate D,
+   Stage3G+, production, retry, or repository write occurred.
+6. N1 post-run state returned to the safety-held state; the only durable local
+   mutation was the separately authorized restricted-session STARTED/ENDED
+   lifecycle.
+7. Exact live evidence ZIP:
+
+   ```text
+   r1d07_n1_cons_g1_s3_9e5476f0b3544373879fe0c9a7c89d7d_EVIDENCE.zip
+     bytes  = 15872
+     sha256 = 9bc29be53ff6ca5e47b58e3ad6325f443ccd4fa9ca2ba5c88b5b03027e52e3bf
+   ```
+
+8. Corrected Marco live evidence review:
+
+   ```text
+   R1-D07_N1_CONSERVATIVE_G1_S3_EXECUTION_02_LIVE_EVIDENCE_REVIEW_01_CORRECTION_01.md
+     bytes  = 5218
+     sha256 = fb1b95b3d5a2d8c1c609926d167bf5e410dc8c4503097489766de90329b34288
+   ```
+
+9. The live failure exposed a failure-path evidence-accounting defect:
+   serialized `network_reads_stage3=0` did not prove zero; actual Stage-3
+   network activity was `UNKNOWN_NONZERO`.
+10. The `EXECUTION_02` authorization/attempt is consumed. It must not be rerun,
+    and its one-shot attempt marker must not be deleted.
+
+**A30.2 UDT freshness canary empirical facts (consumed; no retry).**
+
+1. The bounded public exact-target Demo UDT canary was consumed exactly once.
+2. It made 8 public Demo GETs, zero credentials, zero authenticated reads,
+   zero writes, zero N1 access, zero selector/Stage-3 entry, zero retries, and
+   zero production.
+3. All 8 samples returned one unchanged
+   `as_of_time = 2026-09-28T15:10:48.011094Z`.
+4. Observed parse-age range: minimum `19080.368 ms`; median `27948.803 ms`;
+   maximum `36766.308 ms`.
+5. 8/8 exceeded 1000 ms; 3/8 exceeded 30000 ms.
+6. This falsifies heartbeat-style absolute-age use for this exact observed
+   environment/time. It does not establish a replacement threshold.
+7. The canary script crashed only after the completed result and marker-copy
+   were written, due to undefined `AUTH_NAME` during convenience ZIP assembly.
+   The empirical result was recovered offline without another network request.
+8. Recovered evidence ZIP:
+
+   ```text
+   R1-D07_UDT_FRESHNESS_CANARY_01_RECOVERED_EVIDENCE.zip
+     bytes  = 3182
+     sha256 = e01772d09c55d55a1bcfceeb84bf87d605b0dfba2f633c1d72db9d23cf7a571e
+   ```
+
+9. Marco canary evidence review:
+
+   ```text
+   R1-D07_KALSHI_DEMO_USER_DATA_TIMESTAMP_FRESHNESS_CANARY_01_MARCO_EVIDENCE_REVIEW_01.md
+     bytes  = 5444
+     sha256 = 0488976ea7a10a59b2feffe891a3286a2c3e5146cc39e725f2b0901aa570d9a3
+   ```
+
+10. The canary attempt marker is consumed. The canary must not be rerun, and
+    its marker must not be deleted.
+
+**A30.3 Manual Demo documentation observations (noncontrolling).** Recorded
+only as noncontrolling corroboration, not as exact-target runtime proof:
+
+```text
+Demo UDT docs/UI screenshot
+  bytes  = 139605
+  sha256 = e64b67db7e3a340e8966fa6818d5e00d7f64dd007521681de27ec38f768d8157
+
+Demo historical-cutoff docs/UI screenshot
+  bytes  = 235922
+  sha256 = d1082c426e0ae1ecb8b47c03a5acdc9445f788a52fc0d0f5612a5ee371c3a842
+```
+
+The accepted specification and the direct exact-target canary control the
+technical correction; these screenshots do not prove equivalence among Kalshi
+hostnames.
+
+**A30.4 G status.** The historical/current-scenario trial input used `G=1`,
+with exact trial file:
+
+```text
+R1-D07_N1_CONSERVATIVE_G1_TRIAL_INPUT_01.json
+  bytes  = 1471
+  sha256 = 35f8e4e33e1091ef78ad7bd2aa869f9b56ef42bd20e58166c8c34a7a827d7fcc
+```
+
+```text
+canonical_G_selection                 = UNSELECTED
+historical_noncanonical_trial_G       = 1
+historical_noncanonical_trial_scope   = R1_D07_N1_CONSERVATIVE_G1
+standing_G_policy_effect              = NONE
+G_canonicalization                    = NOT_PERFORMED
+```
+
+The fact that a historical authorized read-only preflight was parameterized by
+G=1 is recorded here. That does not convert G=1 into a canonical profile,
+strategy policy, future authorization, or write limit.
+
+**A30.5 Approved semantic specification (external/local, by identity only).**
+
+```text
+KALSHI_DEMO_R1_D07_STAGE3_FRESHNESS_AND_COMPLETENESS_SEMANTICS_SPEC_01.md
+  bytes  = 26875
+  sha256 = 8183d469f7f5de35cf27edc7c7594ebd2f9d63f1d40bd3422bbeacc33e32dc13
+
+HANDOFF_KALSHI_DEMO_R1_D07_STAGE3_FRESHNESS_AND_COMPLETENESS_SEMANTICS_SPEC_01.md
+  bytes  = 2171
+  sha256 = be07f5775bad93d41644a41014407e6a041f21e0516c4187b3589f7d57a3f780
+
+R1-D07_STAGE3_FRESHNESS_AND_COMPLETENESS_SEMANTICS_SPEC_01_EVIDENCE_TRACEABILITY.md
+  bytes  = 4429
+  sha256 = 055f517f778ea4e5ffa6708694530c68dabc20680b7012323c8a0e1573aa6a34
+
+R1-D07_STAGE3_FRESHNESS_AND_COMPLETENESS_SEMANTICS_SPEC_01_STATIC_CONFORMANCE_MATRIX.md
+  bytes  = 2057
+  sha256 = d0e3469a23230b54d546ab070be6605048128093c077fda1b21c607af4582f61
+
+R1-D07_STAGE3_FRESHNESS_AND_COMPLETENESS_SEMANTICS_SPEC_01_REVIEW_MANIFEST.json
+  bytes  = 3310
+  sha256 = 177d641f28a784e80459b2312de464c1a3ee25d8036b379c7229e52a7b3824ee
+
+R1-D07_STAGE3_FRESHNESS_AND_COMPLETENESS_SEMANTICS_SPEC_01_MARCO_REVIEW.zip
+  bytes  = 17114
+  sha256 = 3829148ca9d2e7f5dcb16ca40b502e855d5fd07263e82a113cccb20680cab6fe
+
+R1-D07_STAGE3_FRESHNESS_AND_COMPLETENESS_SEMANTICS_SPEC_01_MARCO_SUBMISSION_BUNDLE.zip
+  bytes  = 34037
+  sha256 = 212dc6f0e7833801a308d498949bfa4cf0493780e7a67bfc8fa0dbbfc05ce21a
+
+R1-D07_STAGE3_FRESHNESS_AND_COMPLETENESS_SEMANTICS_SPEC_01_MARCO_APPROVAL_HANDOFF_01.md
+  bytes    = 13403
+  sha256   = 185518ab0edb89d0bcef5ee7ebe2056691124839dc1742d0aba89fb2ce566d47
+  decision = APPROVE
+```
+
+Approved exact bounded technical scope:
+`KALSHI_DEMO_R1_D07_STAGE3_FRESHNESS_COMPLETENESS_AND_FAILURE_PATH_EVIDENCE_SEMANTICS_ONLY`.
+
+**A30.6 Approved semantic theorem.** Recorded without expansion; the exact
+approved specification controls on any difference:
+
+```text
+UDT `as_of_time`
+  = approximate validation/update watermark
+  != server clock
+  != request timestamp
+  != heartbeat
+  != absolute-age release SLA
+
+UDT absolute-age gate
+  = RETIRED
+  replacement threshold
+  = NONE
+
+T1 < T0
+  = fail closed
+
+T1 == T0
+  = permitted only when every independent completeness/freshness predicate passes
+
+future UDT
+  = wall-clock sanity only, bounded by accepted config; not age freshness
+
+reconciliation_read_deadline_ms = 30000
+  = trusted local monotonic Stage-3 read-window duration
+  = inclusive boundary
+
+max_reconciliation_lag_ms = 1000
+  = preserved for independent local FreshnessStampV1 reconciliation freshness
+  = NOT a UDT absolute-age limit
+
+market-data 1000-ms limits
+  = preserved independently
+
+/historical/cutoff
+  = NOT ADDED for this bounded Stage-3 theorem
+  = current live completeness + complete durable N1 history remain separate
+  = unknown required durable history fails closed
+
+Stage-3 failure-path network accounting
+  = EXACT_ZERO | EXACT_NONZERO | UNKNOWN_NONZERO
+  = zero only when no network boundary was entered
+  = result/evidence schema revision required
+```
+
+No Candidate-03 is created by this semantic correction. Candidate-02 is not
+replaced. No new UDT age threshold exists. No historical-cutoff route is added.
+
+**A30.7 Raw-retrievability status.** For future implementation/review, the
+exact approved specification bytes and the Marco approval handoff remain
+required non-repository controlling inputs.
+
+```text
+approved_spec_raw_storage = EXTERNAL_LOCAL
+approved_spec_identity = CANONICALIZED
+approved_spec_future_raw_access =
+  SUCCESSOR_BUNDLE_EMBEDDED_REQUIRED_UNTIL_REPOSITORY_RESIDENT_OR_DURABLE_ARCHIVE
+```
+
+The continuity dispatch for this section embedded and verified those exact raw
+bytes. That dispatch ZIP is not a permanent repository artifact.
+
+**A30.8 Current state.**
+
+```text
+STAGE3_FRESHNESS_AND_COMPLETENESS_SEMANTICS_SPEC_01 = MARCO_APPROVED_PENDING_IMPLEMENTATION
+implementation                                      = PENDING
+EXECUTION_02                                        = CONSUMED_NO_RETRY
+UDT_FRESHNESS_CANARY_01                             = CONSUMED_NO_RETRY
+canonical_G_selection                               = UNSELECTED
+live_stage3_retry_before_implementation             = NOT_ROUTED
+runtime_capability_created                          = NONE
+```
+
+**A30.9 Next bounded route.**
+
+```text
+NEXT_BOUNDED_ACTION =
+PREPARE_AND_REVIEW_OFFLINE_IMPLEMENTATION_OF_APPROVED_STAGE3_FRESHNESS_AND_COMPLETENESS_SEMANTICS_SPEC_01
+```
+
+Implementation must begin from then-current canonical `main`, carry the exact
+approved specification and Marco approval, freeze exact edit/function anchors,
+and freeze the exact top-level `network_reads_stage3` aggregate count
+convention.
+
+No live Stage-3 rerun occurs before that implementation is separately reviewed,
+canonically installed where required, and a new live read-only execution is
+separately authorized. This route is routing only, not an authorization.
+
+**A30.10 No-capability theorem.** This continuity milestone grants no:
+
+```text
+Kalshi/API access
+credential use
+deployed N1 access
+new restricted-session mutation
+selector execution
+risk-config runtime consumption
+Demo write
+RELEASE_ONLY
+writer-proof release
+NormalWriter
+Gate D
+Stage3G+
+production
+G canonicalization
+remote Git write
+```
+
+Nothing here is profitability or arbitrage evidence.
