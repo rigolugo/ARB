@@ -118,6 +118,7 @@ from arb.venues.kalshi.quote_lifecycle import (
 
 import arb.venues.kalshi.ledger_binding as ledger_binding
 import arb.venues.kalshi.minimal_market_maker_experiment_runner as runner
+import arb.venues.kalshi.risk_control as risk_control
 from arb.venues.kalshi.minimal_market_maker_experiment_runner import (
     ExperimentRunnerInvocationV1,
     ExperimentRunnerRuntimeV1,
@@ -6944,31 +6945,50 @@ class ActiveDynamicIndexDomainCorrection04TestCase(ActiveStage3EndToEndTestCase)
         self.assertEqual(c.exception.code, RunnerFailureCode.SUBACCOUNT_WIDE_COMPLETENESS_UNPROVEN)
 
     def test_c04_r04_future_beyond_existing_skew_fails(self) -> None:
-        # Correction 06 (BLOCK-05-04): the 30s/5s active-V2 caps are conjunctive
-        # with the stricter existing state_integrity limit
-        # (max_future_wall_clock_skew_ms=10); the precise freshness code wins.
+        # Stage-3 semantics SPEC_01 FS-UDT-007 (supersedes the Correction 06
+        # 30s/5s caps): future ordering uses ONLY the accepted
+        # state_integrity.max_future_wall_clock_skew_ms (=10 here).
         fa = runner.UserDataFreshnessWatermarkV1(response_identity_sha256=self._hx(0xf1), as_of_time_utc="2026-08-17T13:00:05.000000Z")
         read = self._dynamic_read(fa=fa)
         with self.assertRaises(RunnerError) as c:
             self._require(read, now_utc="2026-08-17T13:00:00.004000Z")
-        self.assertEqual(c.exception.code, RunnerFailureCode.DYNAMIC_READ_FRESHNESS_FUTURE_SKEW)
+        self.assertEqual(c.exception.code, RunnerFailureCode.USER_DATA_TIMESTAMP_FUTURE)
 
-    def test_c04_r04_stale_beyond_reconciliation_lag_fails(self) -> None:
+    def test_c04_r04_udt_age_beyond_reconciliation_lag_is_not_a_gate(self) -> None:
+        # Stage-3 semantics SPEC_01 FS-UDT-002 / FS-LR-001 (supersedes the
+        # former UDT absolute-age predicate): now - T0 = ~3s > 1000ms is NOT a
+        # rejection; max_reconciliation_lag_ms keeps its independent
+        # FreshnessStampV1 meaning only.
         fb = runner.UserDataFreshnessWatermarkV1(response_identity_sha256=self._hx(0xf0), as_of_time_utc="2026-08-17T12:59:57.000000Z")
         fa = runner.UserDataFreshnessWatermarkV1(response_identity_sha256=self._hx(0xf1), as_of_time_utc="2026-08-17T12:59:57.100000Z")
         read = self._dynamic_read(fb=fb, fa=fa)
-        with self.assertRaises(RunnerError) as c:
-            self._require(read, now_utc="2026-08-17T13:00:00.004000Z")  # now - T0 = ~3s > 1000ms
-        self.assertEqual(c.exception.code, RunnerFailureCode.DYNAMIC_READ_FRESHNESS_STALE)
+        cls = self._require(read, now_utc="2026-08-17T13:00:00.004000Z")
+        self.assertEqual(cls, "RETAINED_POSITION_TERMINALLY_SETTLED")
 
-    def test_c04_r04_read_window_exceeds_read_deadline_fails(self) -> None:
-        # T1 - T0 = 900ms > reconciliation_read_deadline_ms (500)
+    def test_c04_r04_udt_window_is_not_duration_local_monotonic_window_is(self) -> None:
+        # Stage-3 semantics SPEC_01 FS-RD-001..003 (supersedes the former
+        # T1 - T0 proxy): T1 - T0 = 900ms > reconciliation_read_deadline_ms
+        # (500) is NOT compared; the local monotonic read window is.
         fb = runner.UserDataFreshnessWatermarkV1(response_identity_sha256=self._hx(0xf0), as_of_time_utc="2026-08-17T12:59:59.100000Z")
         fa = runner.UserDataFreshnessWatermarkV1(response_identity_sha256=self._hx(0xf1), as_of_time_utc="2026-08-17T13:00:00.000000Z")
         read = self._dynamic_read(fb=fb, fa=fa)
+        self.assertEqual(self._require(read), "RETAINED_POSITION_TERMINALLY_SETTLED")
+
+        def _with_window(start, finish):
+            return runner.require_dynamic_index_domain_completeness(
+                read, domain_binding=self.domain_binding, active_contract=self.active_contract,
+                risk_config=self.config, accepted_evidence_contract=self._evidence_contract(),
+                current_selected_route_cutoff_sha256=read.selected_route_reconciliation_cutoff_sha256,
+                now_monotonic_ns=1_000_000, now_utc=self.NOW,
+                read_window_start_monotonic_ns=start, read_window_finish_monotonic_ns=finish)
+
+        self.assertEqual(_with_window(1_000, 1_000 + 500 * 1_000_000), "RETAINED_POSITION_TERMINALLY_SETTLED")
         with self.assertRaises(RunnerError) as c:
-            self._require(read)
-        self.assertEqual(c.exception.code, RunnerFailureCode.DYNAMIC_READ_FRESHNESS_STALE)
+            _with_window(1_000, 1_000 + 500 * 1_000_000 + 1)
+        self.assertEqual(c.exception.code, RunnerFailureCode.RECONCILIATION_READ_DEADLINE_EXCEEDED)
+        with self.assertRaises(RunnerError) as c:
+            _with_window(None, 1_000)
+        self.assertEqual(c.exception.code, RunnerFailureCode.LOCAL_READ_DURATION_UNRESOLVED)
 
     # ---- R07: P01 negative / P02 stale rows -------------------------
 
@@ -7489,7 +7509,8 @@ class Correction06LiveTrustedAcquirerTestCase(ActiveStage3EndToEndTestCase):
              succeed; a ninth unique index fails by count BEFORE the first
              per-index traversal; a changed D1 fails;
     * C06-C  the exact ATSE1 retained-position release wiring;
-    * C06-D  the 30s / 5s active-V2 freshness caps at T0 AND T1;
+    * C06-D  UDT ordering at T0 AND T1 (the former 30s / 5s caps are
+             retired by the Stage-3 semantics SPEC_01);
     * C06-E  the exact per-page commitments (distinct raw-response SHA vs
              canonical content digest), the exact page caps and cursor rules,
              request 73 impossibility, and ADRS2 mutation sensitivity.
@@ -7715,7 +7736,8 @@ class Correction06LiveTrustedAcquirerTestCase(ActiveStage3EndToEndTestCase):
         self.assertEqual(self.bootstrap.retained_position_floor_contracts, Decimal("1.00"))
         self.assertEqual(dict(ledger_binding._ATSE1_CANONICAL_OBJECT)["yes_count_fp"], "1.00")
 
-    # ---- C06-D: 30s / 5s freshness caps at T0 AND T1 -----------------
+    # ---- C06-D: UDT ordering at T0 AND T1 (the 30s / 5s caps are retired
+    # by the Stage-3 semantics SPEC_01; see the superseding tests below) ---
 
     def test_c06d_t1_equal_t0_fresh_succeeds(self):
         rt = self._v2_runtime()
@@ -7723,19 +7745,19 @@ class Correction06LiveTrustedAcquirerTestCase(ActiveStage3EndToEndTestCase):
         result = runner.run_pre_release_read_phase_v2(self._invocation(), rt)
         self.assertEqual(result.status, "READ_PHASE_COMPLETE", result.local_block_reasons)
 
-    def test_c06d_future_skew_beyond_5s_fails(self):
+    def test_c06d_future_skew_beyond_accepted_allowance_fails(self):
         rt = self._v2_runtime()
         self._script_cycle(domain=(0,), t0="2026-08-17T13:00:30.000000Z", t1="2026-08-17T13:00:30.000000Z")
         with self.assertRaises(RunnerError) as c:
             runner.run_pre_release_read_phase_v2(self._invocation(), rt)
-        self.assertEqual(c.exception.code, RunnerFailureCode.DYNAMIC_READ_FRESHNESS_FUTURE_SKEW)
+        self.assertEqual(c.exception.code, RunnerFailureCode.USER_DATA_TIMESTAMP_FUTURE)
 
-    def test_c06d_stale_beyond_30s_fails(self):
+    def test_c06d_udt_older_than_30s_is_not_rejected_for_age(self):
+        # Stage-3 semantics SPEC_01 FS-UDT-002 supersedes the former 30s cap.
         rt = self._v2_runtime()
         self._script_cycle(domain=(0,), t0="2026-08-17T12:59:00.000000Z", t1="2026-08-17T12:59:00.000000Z")
-        with self.assertRaises(RunnerError) as c:
-            runner.run_pre_release_read_phase_v2(self._invocation(), rt)
-        self.assertEqual(c.exception.code, RunnerFailureCode.DYNAMIC_READ_FRESHNESS_STALE)
+        result = runner.run_pre_release_read_phase_v2(self._invocation(), rt)
+        self.assertEqual(result.status, "READ_PHASE_COMPLETE", result.local_block_reasons)
 
     def test_c06d_t1_lt_t0_fails_regression(self):
         rt = self._v2_runtime()
@@ -7744,7 +7766,7 @@ class Correction06LiveTrustedAcquirerTestCase(ActiveStage3EndToEndTestCase):
             rt, rt.experiment_absolute_end_monotonic_ns)
         with self.assertRaises(RunnerError) as c:
             runner._run_active_v2_acquisition(rt, cap, opened=None, selected_ticker=self.TICKER)
-        self.assertEqual(c.exception.code, RunnerFailureCode.DYNAMIC_READ_FRESHNESS_REGRESSION)
+        self.assertEqual(c.exception.code, RunnerFailureCode.USER_DATA_TIMESTAMP_REGRESSION)
 
     # ---- C06-E: per-page commitments, caps, cursor rules, ADRS2 ------
 
@@ -14037,6 +14059,876 @@ class Strategy1TestParameterProfilePreflightTests(unittest.TestCase):
         with self.assertRaises(RunnerError):
             self.admit(mono=lambda: 0)
         self.assertZeroCalls()
+
+
+# ---------------------------------------------------------------------------
+# KALSHI_DEMO_R1_D07_STAGE3_FRESHNESS_AND_COMPLETENESS_SEMANTICS_SPEC_01
+# (sha256 8183d469f7f5de35cf27edc7c7594ebd2f9d63f1d40bd3422bbeacc33e32dc13)
+# -- SPEC Section 14 offline tests 1-22 + request-lifecycle invariants.
+# ---------------------------------------------------------------------------
+
+# Exact accepted Candidate-02 bytes (1722 raw bytes, no trailing newline).
+_S3SEM_CANDIDATE02_TEXT = (
+    '{"conflict_domain":"KALSHI|KALSHI_DEMO|ARB_KALSHI_DEMO_PRIMARY_ACCOUNT|SUBACCOUNT=1",'
+    '"conflict_domain_account":{"max_aggregate_exposure_usd":"1.000000","max_aggregate_working_contracts":"0.00",'
+    '"max_aggregate_working_orders":0,"max_conservative_unresolved_write_exposure_usd":"0.000000",'
+    '"max_unresolved_write_count":0},"currency":"USD","flow":{"automated_execution_max_sends":0,'
+    '"automated_execution_window_ms":1,"create_max_sends":0,"create_window_ms":1,"emergency_backoff_base_ms":1,'
+    '"emergency_backoff_max_ms":1,"emergency_cancel_max_in_flight":1,"emergency_cancel_max_sends":1,'
+    '"emergency_cancel_request_deadline_ms":1000,"emergency_cancel_window_ms":1000,'
+    '"emergency_retry_max_attempts_per_target_per_action":0,"modify_replace_max_sends":0,'
+    '"modify_replace_window_ms":1,"ordinary_cancel_max_sends":0,"ordinary_cancel_window_ms":1},'
+    '"per_market":{"max_abs_net_position_contracts":"1.00","max_authoritative_working_orders":0,'
+    '"max_gross_exposure_usd":"1.000000","max_working_contracts":"0.00","max_working_order_exposure_usd":"0.000000"},'
+    '"per_order":{"max_abs_reference_price_deviation_usd":"0.0000","max_contracts":"1.00",'
+    '"max_market_data_age_ms":1000,"max_worst_case_exposure_usd":"1.000000","price_reasonability_required":true},'
+    '"schema_version":1,"state_integrity":{"max_future_wall_clock_skew_ms":0,'
+    '"max_reconciliation_attempts_per_cycle":1,"max_reconciliation_lag_ms":1000,'
+    '"max_required_market_data_age_ms":1000,"reconciliation_backoff_base_ms":1,"reconciliation_backoff_max_ms":1,'
+    '"reconciliation_read_deadline_ms":30000},"venue_defense":{"cancel_order_on_pause_required":false,'
+    '"order_group_mode":"NOT_REQUIRED","post_only_policy":"NO_SAFETY_CREDIT","reduce_only_policy":"NO_SAFETY_CREDIT",'
+    '"required_order_group_id":null}}'
+)
+_S3SEM_CANDIDATE02_RAW_SHA256 = "4495ade7fed522bf17a202d6f5422f608765b65a4463121175695c862b3f904c"
+_S3SEM_CANDIDATE02_SEMANTIC_SHA256 = "e16c9219b495062647b82b9e8a4d5e9c1b98f3e54ce43f0044c1a85fea162bbb"
+
+# Accepted exact-target UDT canary (R1-D07_UDT_FRESHNESS_CANARY_01, evidence
+# sha256 e01772d0...): eight HTTP-200 samples, ONE unchanged ``as_of_time``,
+# post-parse wall samples (ms precision in the evidence, canonicalised to
+# microseconds here without changing the instant) and apparent ages
+# 19080.368 .. 36766.308 ms.
+_S3SEM_CANARY_AS_OF = "2026-09-28T15:10:48.011094Z"
+_S3SEM_CANARY_PARSED_AT = (
+    "2026-09-28T15:11:07.091000Z", "2026-09-28T15:11:09.651000Z", "2026-09-28T15:11:12.190000Z",
+    "2026-09-28T15:11:14.730000Z", "2026-09-28T15:11:17.188000Z", "2026-09-28T15:11:19.723000Z",
+    "2026-09-28T15:11:22.248000Z", "2026-09-28T15:11:24.777000Z",
+)
+
+# The consumed EXECUTION_02 runner failure JSON (S3_PREFLIGHT_RESULT.json
+# ``stage3.result``) and the historical wrapper's initialised false zero.
+_S3SEM_EXECUTION02_RUNNER_FAILURE = {
+    "detail": "T1 age exceeds state_integrity.max_reconciliation_lag_ms",
+    "failure": "DYNAMIC_READ_FRESHNESS_STALE",
+    "status": "LIVE_ENTRYPOINT_FAILED",
+}
+
+
+class _S3SemMonotonicJumpList(list):
+    """Scripted-response list whose ``pop(0)`` advances the deterministic
+    monotonic clock by ``jump_ns`` just before the ``trigger``-th pop (used to
+    make the local monotonic read window disagree with the UDT delta)."""
+
+    def __init__(self, items, *, inputs, trigger, jump_ns):
+        super().__init__(items)
+        self._inputs = inputs
+        self._trigger = trigger
+        self._jump_ns = jump_ns
+        self._pops = 0
+
+    def pop(self, index=-1):
+        self._pops += 1
+        if self._pops == self._trigger:
+            self._inputs.monotonic_value += self._jump_ns
+        return super().pop(index)
+
+
+class Stage3FreshnessCompletenessSemanticsSpec01TestCase(unittest.TestCase):
+    """SPEC Section 14 (1-22) + lifecycle invariants.  Scaffolding is composed
+    from ``Correction06LiveTrustedAcquirerTestCase`` (temp authority + active
+    ledger driven to SAFE_HELD, deterministic clocks, scripted synthetic
+    transports) without re-running its own test methods.  No network, no
+    credential, no Kalshi, no deployed N1, no persistent live state."""
+
+    def setUp(self) -> None:
+        self._c06 = Correction06LiveTrustedAcquirerTestCase(methodName="setUp")
+        self._c06.setUp()
+        self.addCleanup(self._c06.tearDown)
+
+    def __getattr__(self, name):
+        try:
+            c06 = self.__dict__["_c06"]
+        except KeyError:
+            raise AttributeError(name) from None
+        return getattr(c06, name)
+
+    # --- helpers ---------------------------------------------------------
+
+    def _candidate02(self):
+        raw = _S3SEM_CANDIDATE02_TEXT.encode("utf-8")
+        self.assertEqual(len(raw), 1722)
+        self.assertEqual(hashlib.sha256(raw).hexdigest(), _S3SEM_CANDIDATE02_RAW_SHA256)
+        path = Path(self.root) / "candidate02.json"
+        path.write_bytes(raw)
+        cfg = runner._load_sha_bound_risk_config(path=str(path), expected_sha256=_S3SEM_CANDIDATE02_RAW_SHA256)
+        self.assertEqual(cfg.sha256, _S3SEM_CANDIDATE02_SEMANTIC_SHA256)
+        return cfg
+
+    def _wall_minus(self, ms):
+        # the harness wall clock starts at 2026-08-17T13:00:00.000000Z
+        base = datetime(2026, 8, 17, 13, 0, 0, tzinfo=timezone.utc)
+        return (base - timedelta(microseconds=int(round(ms * 1000)))).strftime("%Y-%m-%dT%H:%M:%S.%fZ")
+
+    def _run_phase(self, rt):
+        return runner.run_pre_release_read_phase_v2(self._invocation(), rt)
+
+    def _phase_error(self, rt):
+        with self.assertRaises(RunnerError) as ctx:
+            self._run_phase(rt)
+        return ctx.exception
+
+    def _fields(self, snapshot):
+        return runner._stage3_revision2_result_fields(snapshot)
+
+    def _assert_lifecycle_invariants(self, fields):
+        lifecycle = fields["stage3_request_lifecycle"]
+        states = runner._STAGE3_REQUEST_STATES
+        ordinals = [e["ordinal"] for e in lifecycle]
+        self.assertEqual(ordinals, list(range(1, len(lifecycle) + 1)))
+        for e in lifecycle:
+            self.assertIn(e["highest_state"], states)
+            self.assertIn(e["operation"], {op.value for op in runner.ActivePreReleaseReadOperationV2})
+
+        def _count(min_state):
+            return sum(1 for e in lifecycle if states.index(e["highest_state"]) >= states.index(min_state))
+
+        self.assertEqual(fields["requests_prepared"], len(lifecycle))
+        self.assertEqual(fields["requests_boundary_entered"], _count("BOUNDARY_ENTERED"))
+        self.assertEqual(fields["requests_transport_attempted"], _count("TRANSPORT_ATTEMPTED"))
+        self.assertEqual(fields["responses_completed"], _count("RESPONSE_COMPLETED"))
+        self.assertEqual(fields["responses_accepted_parsed"], _count("ACCEPTED_PARSED"))
+        self.assertLessEqual(fields["requests_transport_attempted"], fields["requests_boundary_entered"])
+        self.assertLessEqual(fields["responses_completed"], fields["requests_transport_attempted"])
+        self.assertLessEqual(fields["responses_accepted_parsed"], fields["responses_completed"])
+        self.assertEqual(fields["pre_release_requests_consumed"], fields["requests_boundary_entered"])
+        self.assertEqual(fields["network_reads_stage3"], fields["requests_transport_attempted"])
+
+    def _entry_config(self):
+        risk_text = _d07_risk_config_to_strict_json(self.config)
+        risk_path = Path(self.root) / "risk_config.json"
+        risk_path.write_bytes(risk_text.encode("utf-8"))
+        auth_path, auth_sha = _d07_write_envelope(str(self.root), _d07_valid_envelope_dict())
+        return runner.LiveReadOnlyStage3InvocationConfigV1(
+            market_ticker=self.TICKER, authority_namespace_id="active-e2e-ns",
+            authority_namespace_root=str(self.authority_root),
+            canonical_repository_root=str(self.repository_root),
+            expected_ledger_path=str(self.ledger_path),
+            bootstrap_contract_sha256=self.bootstrap.bootstrap_contract_sha256,
+            risk_config_json_path=str(risk_path),
+            risk_config_sha256=hashlib.sha256(risk_text.encode("utf-8")).hexdigest(),
+            execution_authorization_json_path=auth_path, execution_authorization_sha256=auth_sha,
+            installed_implementation_commit="a" * 40, invocation_id="s3sem-offline")
+
+    def _run_main_with_runtime(self, rt):
+        """Drive the REAL ``main`` + REAL ``run_read_only_stage3_live_entrypoint``
+        offline: only the runtime builder / credential bridge are injected
+        (the same injection points the existing D07 offline tests use)."""
+        real_entry = runner.run_read_only_stage3_live_entrypoint
+        config = self._entry_config()
+
+        @contextlib.contextmanager
+        def _no_bridge():
+            yield
+
+        def _entry(cfg, *, confirm_live_read=False):
+            return real_entry(
+                cfg, confirm_live_read=confirm_live_read,
+                monotonic_clock_ns=self.inputs.monotonic_ns, wall_clock=self.inputs.clock,
+                uuid_factory=self.inputs.uuid, runtime_builder=lambda c, **kw: rt,
+                credential_bridge=_no_bridge)
+
+        args = [
+            "--ticker", self.TICKER, "--authority-namespace-id", "ns",
+            "--authority-namespace-root", "x", "--canonical-repository-root", "x",
+            "--ledger-path", "x", "--bootstrap-contract-sha256", "a" * 64,
+            "--risk-config-json", "x", "--risk-config-sha256", "b" * 64,
+            "--execution-authorization-json", "x", "--execution-authorization-sha256", "c" * 64,
+            "--installed-implementation-commit", "d" * 40, "--confirm-live-read",
+        ]
+        buf = io.StringIO()
+        with mock.patch.object(runner, "run_read_only_stage3_live_entrypoint", _entry), \
+             mock.patch.object(runner, "_config_from_live_entrypoint_args", lambda a: config), \
+             mock.patch("socket.socket", side_effect=AssertionError("no network")), \
+             contextlib.redirect_stdout(buf):
+            code = runner.main(args)
+        return code, json.loads(buf.getvalue()), buf.getvalue()
+
+    # --- BASE_DEFECT_REPRODUCTION theorem 1 / SPEC tests 1 + 9 ------------
+
+    def test_s3sem_01_canary_unchanged_udt_older_than_30s_not_rejected_for_age(self):
+        # Canary-shaped: T0 == T1, apparent age 36766.308 ms at T1.
+        udt = self._wall_minus(36766.308)
+        rt = self._v2_runtime()
+        self._script_cycle(domain=(0,), t0=udt, t1=udt)
+        result = self._run_phase(rt)
+        self.assertEqual(result.status, "READ_PHASE_COMPLETE", result.local_block_reasons)
+        fields = self._fields(result.stage3_evidence)
+        self.assertEqual(fields["udt_relation"], "UNCHANGED")
+        self.assertEqual(fields["udt_t0_raw"], udt)
+        self.assertEqual(fields["udt_t1_raw"], udt)
+        self.assertGreater(fields["udt_absolute_age_ms_diagnostic"], 30000)
+        self.assertEqual(fields["udt_absolute_age_gating"], "NON_GATING_DIAGNOSTIC")
+
+    def test_s3sem_01b_exact_eight_sample_canary_fixture_passes_udt_dimension(self):
+        cfg = self._candidate02()
+        max_skew = cfg.state_integrity.max_future_wall_clock_skew_ms
+        self.assertEqual(max_skew, 0)
+        ages_ms = []
+        for wall in _S3SEM_CANARY_PARSED_AT:
+            skew_us = runner._require_stage3_udt_not_future(
+                bookend="T1", as_of_utc=_S3SEM_CANARY_AS_OF, post_response_wall_utc=wall,
+                max_future_wall_clock_skew_ms=max_skew)
+            self.assertLess(skew_us, 0)
+            ages_ms.append(-skew_us / 1000)
+        self.assertAlmostEqual(ages_ms[0], 19079.906, places=3)
+        self.assertAlmostEqual(ages_ms[-1], 36765.906, places=3)
+        self.assertTrue(all(a > 1000 for a in ages_ms))
+        self.assertTrue(all(a > 30000 for a in ages_ms[5:]))
+        # the pure Stage-3 predicate over the canary bookends: T0 = sample 1,
+        # T1 = sample 8, unchanged watermark -> the UDT dimension passes.
+        fb = runner.UserDataFreshnessWatermarkV1(response_identity_sha256=self._hx(0xf0), as_of_time_utc=_S3SEM_CANARY_AS_OF)
+        fa = runner.UserDataFreshnessWatermarkV1(response_identity_sha256=self._hx(0xf1), as_of_time_utc=_S3SEM_CANARY_AS_OF)
+        cls = runner.require_dynamic_index_domain_completeness(
+            self._dynamic_read(fb=fb, fa=fa), domain_binding=self.domain_binding,
+            active_contract=self.active_contract, risk_config=self.config,
+            accepted_evidence_contract=self._evidence_contract(),
+            current_selected_route_cutoff_sha256=self._hx(0x9c07), now_monotonic_ns=1_000_000,
+            now_utc=_S3SEM_CANARY_PARSED_AT[-1],
+            t0_wall_sample_utc=_S3SEM_CANARY_PARSED_AT[0], t1_wall_sample_utc=_S3SEM_CANARY_PARSED_AT[-1],
+            read_window_start_monotonic_ns=5_000_000_000, read_window_finish_monotonic_ns=5_010_000_000)
+        self.assertEqual(cls, "RETAINED_POSITION_TERMINALLY_SETTLED")
+
+    # --- SPEC test 2: T1 == T0 --------------------------------------------
+
+    def test_s3sem_02_t1_equal_t0_permitted_when_independent_predicates_pass(self):
+        rt = self._v2_runtime()
+        self._script_cycle(domain=(0,), t0="2026-08-17T12:59:59.960000Z", t1="2026-08-17T12:59:59.960000Z")
+        result = self._run_phase(rt)
+        self.assertEqual(result.status, "READ_PHASE_COMPLETE")
+        self.assertEqual(self._fields(result.stage3_evidence)["udt_relation"], "UNCHANGED")
+
+    # --- BASE_DEFECT_REPRODUCTION theorem 2 / SPEC test 3 + FS-RD-003 ------
+
+    def test_s3sem_03_t1_advanced_far_beyond_deadline_is_not_duration_evidence(self):
+        # T1 - T0 = 59.99 s >> harness reconciliation_read_deadline_ms (500),
+        # while the LOCAL monotonic read window is only a few fake ms.
+        rt = self._v2_runtime()
+        self._script_cycle(domain=(0,), t0="2026-08-17T12:59:00.000000Z", t1="2026-08-17T12:59:59.990000Z")
+        result = self._run_phase(rt)
+        self.assertEqual(result.status, "READ_PHASE_COMPLETE", result.local_block_reasons)
+        fields = self._fields(result.stage3_evidence)
+        self.assertEqual(fields["udt_relation"], "ADVANCED")
+        self.assertLess(fields["local_read_duration_ns"], 500 * 1_000_000)
+
+    def test_s3sem_03c_udt_delta_over_deadline_with_fresh_ages_is_not_a_duration_failure(self):
+        # Both bookend ages are < 1000 ms, but T1 - T0 = 590 ms exceeds the
+        # harness reconciliation_read_deadline_ms (500): only the retired
+        # T1-T0 proxy could reject this; the local monotonic window is small.
+        rt = self._v2_runtime()
+        self._script_cycle(domain=(0,), t0="2026-08-17T12:59:59.400000Z", t1="2026-08-17T12:59:59.990000Z")
+        result = self._run_phase(rt)
+        self.assertEqual(result.status, "READ_PHASE_COMPLETE", result.local_block_reasons)
+        fields = self._fields(result.stage3_evidence)
+        self.assertEqual(fields["udt_relation"], "ADVANCED")
+        self.assertLessEqual(fields["local_read_duration_ns"], 500 * 1_000_000)
+
+    def test_s3sem_03b_unchanged_udt_but_local_monotonic_window_exceeds_deadline(self):
+        # T1 == T0 (UDT delta 0) while the local monotonic read window is
+        # > reconciliation_read_deadline_ms: the proxy cannot see it; the
+        # monotonic window must.
+        rt = self._v2_runtime()
+        self._script_cycle(domain=(0,), t0="2026-08-17T12:59:59.960000Z", t1="2026-08-17T12:59:59.960000Z")
+        udt_list = self._transport.responses[RunnerOperation.GET_USER_DATA_TIMESTAMP]
+        self._transport.responses[RunnerOperation.GET_USER_DATA_TIMESTAMP] = _S3SemMonotonicJumpList(
+            udt_list, inputs=self.inputs, trigger=2, jump_ns=600 * 1_000_000)
+        exc = self._phase_error(rt)
+        self.assertEqual(exc.code, RunnerFailureCode.RECONCILIATION_READ_DEADLINE_EXCEEDED)
+        fields = self._fields(runner._stage3_evidence_of(exc))
+        self.assertGreater(fields["local_read_duration_ns"], 500 * 1_000_000)
+        self.assertEqual(fields["udt_relation"], "UNCHANGED")
+        self.assertEqual(fields["network_reads_stage3_state"], "EXACT_NONZERO")
+
+    # --- SPEC test 4 -------------------------------------------------------
+
+    def test_s3sem_04_t1_before_t0_is_regression(self):
+        rt = self._v2_runtime()
+        self._script_cycle(domain=(0,), t0="2026-08-17T12:59:59.960000Z", t1="2026-08-17T12:59:59.500000Z")
+        exc = self._phase_error(rt)
+        self.assertEqual(exc.code, RunnerFailureCode.USER_DATA_TIMESTAMP_REGRESSION)
+        fields = self._fields(runner._stage3_evidence_of(exc))
+        self.assertEqual(fields["udt_t1_raw"], "2026-08-17T12:59:59.500000Z")
+        self.assertIsNone(fields["udt_relation"])
+
+    # --- SPEC test 5 -------------------------------------------------------
+
+    def test_s3sem_05_malformed_and_timezone_naive_udt_fail_closed(self):
+        for bad in ("2026-08-17T12:59:59.960000", "not-a-time", "2026-08-17T12:59:59.960000+00:00Z", ""):
+            for position in ("T0", "T1"):
+                with self.subTest(bad=bad, position=position):
+                    self.setUp()
+                    rt = self._v2_runtime()
+                    good = "2026-08-17T12:59:59.960000Z"
+                    self._script_cycle(domain=(0,), t0=(bad if position == "T0" else good),
+                                       t1=(bad if position == "T1" else good))
+                    exc = self._phase_error(rt)
+                    self.assertEqual(exc.code, RunnerFailureCode.USER_DATA_TIMESTAMP_MALFORMED)
+                    fields = self._fields(runner._stage3_evidence_of(exc))
+                    self.assertEqual(fields["udt_t0_raw" if position == "T0" else "udt_t1_raw"], bad)
+                    self.assertIsNone(fields["udt_t0_utc" if position == "T0" else "udt_t1_utc"])
+        rt = self._v2_runtime()
+        t = self._transport
+        t.queue(RunnerOperation.GET_EXCHANGE_STATUS, _v2_status_payload(_v2_status_rows((0,))))
+        t.queue(RunnerOperation.GET_USER_DATA_TIMESTAMP, _json_response({"as_of_time": 1790000000}))
+        exc = self._phase_error(rt)
+        self.assertEqual(exc.code, RunnerFailureCode.USER_DATA_TIMESTAMP_MALFORMED)
+
+    # --- SPEC test 6 -------------------------------------------------------
+
+    def test_s3sem_06_future_skew_exact_boundary_candidate02_zero(self):
+        cfg = self._candidate02()
+        allowed = cfg.state_integrity.max_future_wall_clock_skew_ms
+        wall = "2026-09-28T15:11:07.091000Z"
+        self.assertEqual(runner._require_stage3_udt_not_future(
+            bookend="T0", as_of_utc=wall, post_response_wall_utc=wall,
+            max_future_wall_clock_skew_ms=allowed), 0)
+        with self.assertRaises(RunnerError) as ctx:
+            runner._require_stage3_udt_not_future(
+                bookend="T0", as_of_utc="2026-09-28T15:11:07.091001Z", post_response_wall_utc=wall,
+                max_future_wall_clock_skew_ms=allowed)
+        self.assertEqual(ctx.exception.code, RunnerFailureCode.USER_DATA_TIMESTAMP_FUTURE)
+        # nonzero allowance: exact boundary passes, +1 us fails.
+        self.assertEqual(runner._require_stage3_udt_not_future(
+            bookend="T1", as_of_utc="2026-09-28T15:11:07.101000Z", post_response_wall_utc=wall,
+            max_future_wall_clock_skew_ms=10), 10_000)
+        with self.assertRaises(RunnerError) as ctx:
+            runner._require_stage3_udt_not_future(
+                bookend="T1", as_of_utc="2026-09-28T15:11:07.101001Z", post_response_wall_utc=wall,
+                max_future_wall_clock_skew_ms=10)
+        self.assertEqual(ctx.exception.code, RunnerFailureCode.USER_DATA_TIMESTAMP_FUTURE)
+        # the retired hardcoded 5000-ms allowance never overrides config: an
+        # accepted 10000-ms allowance admits a 7000-ms future watermark.
+        self.assertEqual(runner._require_stage3_udt_not_future(
+            bookend="T1", as_of_utc="2026-09-28T15:11:14.091000Z", post_response_wall_utc=wall,
+            max_future_wall_clock_skew_ms=10_000), 7_000_000)
+        self.assertFalse(hasattr(runner, "_PRE_RELEASE_FRESHNESS_FUTURE_SKEW_MAX_MS"))
+        self.assertFalse(hasattr(runner, "_PRE_RELEASE_FRESHNESS_MAX_AGE_MS"))
+        # live path: a gross future watermark fails with the precise code.
+        rt = self._v2_runtime()
+        self._script_cycle(domain=(0,), t0="2026-08-17T13:00:30.000000Z", t1="2026-08-17T13:00:30.000000Z")
+        exc = self._phase_error(rt)
+        self.assertEqual(exc.code, RunnerFailureCode.USER_DATA_TIMESTAMP_FUTURE)
+        self.assertGreater(self._fields(runner._stage3_evidence_of(exc))["udt_t0_future_skew_us"], 10_000)
+
+    # --- SPEC test 7 -------------------------------------------------------
+
+    def test_s3sem_07_local_monotonic_duration_below_equal_above_30000ms(self):
+        deadline_ms = self._candidate02().state_integrity.reconciliation_read_deadline_ms
+        self.assertEqual(deadline_ms, 30000)
+        start = 7_000_000_000
+        self.assertEqual(runner._require_stage3_local_read_duration(
+            start, start + 29_999_999_999, reconciliation_read_deadline_ms=deadline_ms), 29_999_999_999)
+        self.assertEqual(runner._require_stage3_local_read_duration(
+            start, start + 30_000_000_000, reconciliation_read_deadline_ms=deadline_ms), 30_000_000_000)
+        with self.assertRaises(RunnerError) as ctx:
+            runner._require_stage3_local_read_duration(
+                start, start + 30_000_000_001, reconciliation_read_deadline_ms=deadline_ms)
+        self.assertEqual(ctx.exception.code, RunnerFailureCode.RECONCILIATION_READ_DEADLINE_EXCEEDED)
+
+    # --- SPEC test 8 -------------------------------------------------------
+
+    def test_s3sem_08_missing_nonint_bool_regressing_monotonic_fails_closed(self):
+        for start, finish in (
+            (None, 5), (5, None), (True, 5), (5, False), (1.0, 5), (5, 6.0), (10, 9), (-1, 5), ("5", 6),
+        ):
+            with self.subTest(start=start, finish=finish):
+                with self.assertRaises(RunnerError) as ctx:
+                    runner._require_stage3_local_read_duration(start, finish, reconciliation_read_deadline_ms=30000)
+                self.assertEqual(ctx.exception.code, RunnerFailureCode.LOCAL_READ_DURATION_UNRESOLVED)
+        # clock-source mismatch between START and FINISH.
+        recorder = runner._Stage3EvidenceRecorderV2()
+        recorder.arm_read_window_start()
+        recorder.sample_read_window_start_if_armed(lambda: 100)
+        with self.assertRaises(RunnerError) as ctx:
+            recorder.sample_read_window_finish(lambda: 200)
+        self.assertEqual(ctx.exception.code, RunnerFailureCode.LOCAL_READ_DURATION_UNRESOLVED)
+        # FINISH without START.
+        with self.assertRaises(RunnerError) as ctx:
+            runner._Stage3EvidenceRecorderV2().sample_read_window_finish(lambda: 200)
+        self.assertEqual(ctx.exception.code, RunnerFailureCode.LOCAL_READ_DURATION_UNRESOLVED)
+        # the release-eligible mint refuses an acquired read without samples.
+        rt = self._v2_runtime()
+        self._script_cycle(domain=(0,))
+        cap, acquired = self._acquire(rt)
+        missing = dataclasses.replace(acquired, read_window_finish_monotonic_ns=None)
+        with self.assertRaises(RunnerError) as ctx:
+            runner._mint_release_eligible_read_set(cap, acquired=missing, opened=None)
+        self.assertEqual(ctx.exception.code, RunnerFailureCode.LOCAL_READ_DURATION_UNRESOLVED)
+        regressed = dataclasses.replace(
+            acquired, read_window_finish_monotonic_ns=acquired.read_window_start_monotonic_ns - 1)
+        with self.assertRaises(RunnerError) as ctx:
+            runner._mint_release_eligible_read_set(cap, acquired=regressed, opened=None)
+        self.assertEqual(ctx.exception.code, RunnerFailureCode.LOCAL_READ_DURATION_UNRESOLVED)
+
+    # --- SPEC test 9 -------------------------------------------------------
+
+    def test_s3sem_09_old_udt_with_complete_current_and_durable_truth_mints(self):
+        udt = self._wall_minus(19080.368)
+        rt = self._v2_runtime()
+        self._script_cycle(domain=(0, 1), t0=udt, t1=udt)
+        cap, acquired = self._acquire(rt)
+        rs = runner._mint_release_eligible_read_set(cap, acquired=acquired, opened=None)
+        self.assertTrue(rs.read_set_id.startswith("ADRS2_"))
+        self.assertEqual(rs.retained_position_classification, "RETAINED_POSITION_TERMINALLY_SETTLED")
+        self.assertEqual(rs.read_set_canonical["freshness_before"]["as_of_time"], udt)
+
+    # --- SPEC tests 10 / 19: FreshnessStampV1 local reconciliation ----------
+
+    def _stamp(self, received_ns):
+        return risk_control.FreshnessStampV1(
+            process_instance_id="proc_" + "0" * 32, received_at_utc="2026-09-28T15:00:00.000000Z",
+            received_monotonic_ns=received_ns, source_timestamp_kind="NONE",
+            source_timestamp_utc=None, snapshot_sha256="a" * 64)
+
+    def test_s3sem_10_19_freshness_stamp_1000ms_boundary_unchanged(self):
+        cfg = self._candidate02()
+        lag = cfg.state_integrity.max_reconciliation_lag_ms
+        self.assertEqual(lag, 1000)
+        received = 10_000_000_000
+        for delta_ns, fresh in ((999_000_000, True), (1_000_000_000, True), (1_000_000_001, False)):
+            with self.subTest(delta_ns=delta_ns):
+                call = lambda: risk_control.freshness_age_ms(
+                    self._stamp(received), current_process_instance_id="proc_" + "0" * 32,
+                    now_monotonic_ns=received + delta_ns, now_utc="2026-09-28T15:00:01.000000Z",
+                    max_age_ms=lag, max_future_wall_clock_skew_ms=cfg.state_integrity.max_future_wall_clock_skew_ms,
+                    stale_code=RiskControlCode.RECONCILIATION_STALE)
+                if fresh:
+                    self.assertLessEqual(call(), 1000)
+                else:
+                    with self.assertRaises(RiskControlError) as ctx:
+                        call()
+                    self.assertEqual(ctx.exception.code, RiskControlCode.RECONCILIATION_STALE)
+        # a 36-second-old UDT neither refreshes nor redefines the lag limit.
+        udt = self._wall_minus(36766.308)
+        rt = self._v2_runtime()
+        self._script_cycle(domain=(0,), t0=udt, t1=udt)
+        self.assertEqual(self._run_phase(rt).status, "READ_PHASE_COMPLETE")
+        self.assertEqual(self.config.state_integrity.max_reconciliation_lag_ms, 1000)
+        self.assertEqual(self._candidate02().sha256, _S3SEM_CANDIDATE02_SEMANTIC_SHA256)
+        src = inspect.getsource(runner.require_dynamic_index_domain_completeness)
+        self.assertNotIn("max_reconciliation_lag_ms", src)
+
+    # --- SPEC tests 11 / 20: market-data freshness ---------------------------
+
+    def test_s3sem_11_20_market_data_1000ms_boundary_unchanged(self):
+        cfg = self._candidate02()
+        limit = min(cfg.per_order.max_market_data_age_ms, cfg.state_integrity.max_required_market_data_age_ms)
+        self.assertEqual((cfg.per_order.max_market_data_age_ms, cfg.state_integrity.max_required_market_data_age_ms), (1000, 1000))
+        received = 20_000_000_000
+        for delta_ns, fresh in ((999_999_999, True), (1_000_000_000, True), (1_000_000_001, False)):
+            with self.subTest(delta_ns=delta_ns):
+                call = lambda: risk_control.freshness_age_ms(
+                    self._stamp(received), current_process_instance_id="proc_" + "0" * 32,
+                    now_monotonic_ns=received + delta_ns, now_utc="2026-09-28T15:00:01.000000Z",
+                    max_age_ms=limit, max_future_wall_clock_skew_ms=cfg.state_integrity.max_future_wall_clock_skew_ms)
+                if fresh:
+                    self.assertLessEqual(call(), 1000)
+                else:
+                    with self.assertRaises(RiskControlError) as ctx:
+                        call()
+                    self.assertEqual(ctx.exception.code, RiskControlCode.MARKET_DATA_STALE)
+        src = inspect.getsource(runner.require_dynamic_index_domain_completeness)
+        self.assertNotIn("market_data_age", src)
+
+    # --- SPEC tests 12 / 14: current live + durable history -----------------
+
+    def test_s3sem_12_14_complete_durable_plus_live_needs_no_cutoff_and_keeps_durable_fill(self):
+        rt = self._v2_runtime()
+        self._script_cycle(domain=(0,))
+        cap, acquired = self._acquire(rt)
+        rs = runner._mint_release_eligible_read_set(cap, acquired=acquired, opened=None)
+        # no historical / cutoff route exists on the closed eight-op surface.
+        paths = [binding[1] for binding in runner._ACTIVE_V2_OP_BINDING.values()]
+        self.assertEqual(len(paths), 8)
+        self.assertFalse(any("historical" in p or "cutoff" in p for p in paths))
+        self.assertEqual({str(c[0]) for c in self._transport.calls}, {
+            "GET_EXCHANGE_STATUS", "GET_USER_DATA_TIMESTAMP", "GET_MARKET",
+            "GET_ORDERS", "GET_FILLS", "GET_POSITIONS"})
+        # SPEC test 14: the retained N1 fill/position is ABSENT from every live
+        # fills/positions response, yet the durable accepted settlement stays
+        # the controlling evidence (never negated by live absence).
+        self.assertEqual(sum(len(pc.fill_rows) for pc in acquired.per_index), 0)
+        self.assertEqual(rs.retained_position_classification, "RETAINED_POSITION_TERMINALLY_SETTLED")
+        self.assertEqual(rs.accepted_terminal_settlement_id, ledger_binding.ACCEPTED_TERMINAL_SETTLEMENT_ID)
+
+    # --- SPEC tests 13 / 17: durable-history gap, proven pre-boundary zero ----
+
+    def test_s3sem_13_17_incomplete_durable_history_halts_with_exact_zero(self):
+        rt = self._v2_runtime()
+        real_read = rt.read_local_safety_state
+
+        def _incomplete():
+            opened = real_read()
+            return dataclasses.replace(opened, projection=dataclasses.replace(
+                opened.projection, history_completeness="INCOMPLETE"))
+
+        rt = dataclasses.replace(rt, read_local_safety_state=_incomplete)
+        result = self._run_phase(rt)
+        self.assertEqual(result.status, "LOCALLY_BLOCKED")
+        self.assertEqual(result.terminal_classification, "HISTORICAL_COMPLETENESS_UNRESOLVED")
+        self.assertIn("HISTORY_COMPLETENESS:INCOMPLETE", result.local_block_reasons)
+        self.assertEqual(self._transport.calls, [])
+        fields = self._fields(result.stage3_evidence)
+        self.assertEqual(fields["network_reads_stage3_state"], "EXACT_ZERO")
+        self.assertEqual(fields["network_reads_stage3"], 0)
+        self.assertEqual(fields["network_reads_stage3_lower_bound"], 0)
+        self.assertEqual(fields["pre_release_requests_consumed_state"], "EXACT_ZERO")
+        self.assertEqual(fields["pre_release_requests_consumed"], 0)
+        self.assertEqual(fields["requests_prepared"], 0)
+        self.assertEqual(fields["stage3_request_lifecycle"], [])
+
+    def test_s3sem_13b_current_live_completeness_gap_classified(self):
+        rt = self._v2_runtime()
+        three = _orders_payload([
+            _v2_order_row("o-%d" % k, ticker=self.TICKER, subaccount_number=1, exchange_index=0) for k in range(3)])
+        self._script_cycle(
+            domain=(0,), orders={0: [three]},
+            get_order=[_v2_order_payload("o-%d" % k, ticker=self.TICKER, subaccount_number=1, exchange_index=0)
+                       for k in range(2)])
+        cap, acquired = self._acquire(rt)
+        with self.assertRaises(RunnerError) as ctx:
+            runner._mint_release_eligible_read_set(cap, acquired=acquired, opened=None)
+        self.assertEqual(ctx.exception.code, RunnerFailureCode.CURRENT_VENUE_COMPLETENESS_UNRESOLVED)
+
+    # --- SPEC test 15 + BASE_DEFECT_REPRODUCTION theorem 3 --------------------
+
+    def test_s3sem_15_post_network_failure_exact_nonzero_counts(self):
+        rt = self._v2_runtime()
+        bad_pos = _json_response({"market_positions": [], "event_positions": [{"x": 1}], "cursor": ""})
+        self._script_cycle(domain=(0,), positions={0: [bad_pos]})
+        exc = self._phase_error(rt)
+        self.assertEqual(exc.code, RunnerFailureCode.DYNAMIC_READ_POSITION_EVENT_SCOPE_UNPROVEN)
+        fields = self._fields(runner._stage3_evidence_of(exc))
+        # S0, T0, MARKET, ORDERBOOK, ORDERS, FILLS, POSITIONS
+        self.assertEqual(fields["network_reads_stage3_state"], "EXACT_NONZERO")
+        self.assertEqual(fields["network_reads_stage3"], 7)
+        self.assertEqual(fields["network_reads_stage3_lower_bound"], 7)
+        self.assertEqual(fields["pre_release_requests_consumed_state"], "EXACT_NONZERO")
+        self.assertEqual(fields["pre_release_requests_consumed"], 7)
+        self.assertEqual(fields["responses_accepted_parsed"], 7)
+        self.assertEqual([e["operation"] for e in fields["stage3_request_lifecycle"]], [
+            "GET_EXCHANGE_STATUS", "GET_USER_DATA_TIMESTAMP", "GET_MARKET", "GET_MARKET_ORDERBOOK",
+            "GET_ORDERS", "GET_FILLS", "GET_POSITIONS"])
+        self._assert_lifecycle_invariants(fields)
+        self.assertEqual(fields["udt_t0_raw"], "2026-08-17T12:59:59.950000Z")
+        self.assertIsNone(fields["udt_t1_raw"])
+        self.assertIsNotNone(fields["local_read_window_start_monotonic_ns"])
+        self.assertIsNone(fields["local_read_window_finish_monotonic_ns"])
+        self.assertIsNone(fields["local_read_duration_ns"])
+
+    def test_s3sem_15b_live_cli_post_network_failure_emits_truthful_revision2_accounting(self):
+        rt = self._v2_runtime()
+        bad_pos = _json_response({"market_positions": [], "event_positions": [{"x": 1}], "cursor": ""})
+        self._script_cycle(domain=(0,), positions={0: [bad_pos]})
+        code, payload, text = self._run_main_with_runtime(rt)
+        self.assertEqual(code, 1)
+        self.assertEqual(payload["status"], "LIVE_ENTRYPOINT_FAILED")
+        self.assertEqual(payload["failure"], "DYNAMIC_READ_POSITION_EVENT_SCOPE_UNPROVEN")
+        self.assertEqual(payload["stage3_result_schema_revision"], 2)
+        self.assertEqual(payload["network_reads_stage3_state"], "EXACT_NONZERO")
+        self.assertEqual(payload["network_reads_stage3"], 7)
+        self.assertEqual(payload["pre_release_requests_consumed_state"], "EXACT_NONZERO")
+        self.assertEqual(payload["pre_release_requests_consumed"], 7)
+        self.assertEqual(payload["stage3_semantic_spec"], "KALSHI_DEMO_R1_D07_STAGE3_FRESHNESS_AND_COMPLETENESS_SEMANTICS_SPEC_01")
+        self.assertEqual(payload["stage3_semantic_spec_sha256"], "8183d469f7f5de35cf27edc7c7594ebd2f9d63f1d40bd3422bbeacc33e32dc13")
+        self._assert_lifecycle_invariants(payload)
+        self.assertNotIn("-----BEGIN", text)
+        self.assertNotIn(_D07_SENTINEL_API_KEY_ID, text)
+
+    def test_s3sem_15c_live_cli_success_is_revision2_producer(self):
+        rt = self._v2_runtime()
+        self._script_cycle(domain=(0,))
+        code, payload, _ = self._run_main_with_runtime(rt)
+        self.assertEqual(code, 0)
+        self.assertEqual(payload["status"], "READ_PHASE_COMPLETE")
+        self.assertEqual(payload["controlling_spec"],
+                         "KALSHI_DEMO_DYNAMIC_SUBACCOUNT_EXECUTION_DOMAIN_BINDING_AND_RISK_CONTROL_SPEC_01_CORRECTION_04")
+        self.assertEqual(payload["stage3_result_schema_revision"], 2)
+        self.assertEqual(payload["network_reads_stage3_state"], "EXACT_NONZERO")
+        self.assertEqual(payload["network_reads_stage3"], 9)
+        self.assertEqual(payload["pre_release_requests_consumed"], 9)
+        self.assertEqual(payload["pre_release_requests_consumed"], payload["requests_boundary_entered"])
+        self.assertEqual(payload["responses_accepted_parsed"], 9)
+        self.assertEqual(payload["udt_relation"], "ADVANCED")
+        self.assertIsInstance(payload["local_read_duration_ns"], int)
+        self._assert_lifecycle_invariants(payload)
+        parsed = runner._parse_stage3_result_accounting_v2(payload)
+        self.assertEqual(parsed["network_reads_stage3_state"], "EXACT_NONZERO")
+
+    def test_s3sem_15d_charged_before_transport_boundary_one_transport_zero(self):
+        rt = self._runtime()
+        truth = self._selected_route_truth(rt)
+        fixture = self._dynamic_read(evid=self.P01_SHA, selected_route_cutoff=runner._active_reconciliation_cutoff_sha256(truth))
+        seam_rt = self._seam_runtime(rt, fixture=fixture, selected_route_truth=truth, implied_request_count=1)
+        exc = self._phase_error(seam_rt)
+        fields = self._fields(runner._stage3_evidence_of(exc))
+        self.assertEqual(fields["pre_release_requests_consumed_state"], "EXACT_NONZERO")
+        self.assertEqual(fields["pre_release_requests_consumed"], 1)
+        self.assertEqual(fields["requests_boundary_entered"], 1)
+        self.assertEqual(fields["network_reads_stage3_state"], "EXACT_ZERO")
+        self.assertEqual(fields["network_reads_stage3"], 0)
+        self.assertEqual(fields["requests_transport_attempted"], 0)
+        self._assert_lifecycle_invariants(fields)
+
+    # --- SPEC test 16 ------------------------------------------------------
+
+    def test_s3sem_16_known_nonzero_with_exact_accounting_loss_is_unknown_nonzero(self):
+        summary = runner._summarize_stage3_request_accounting(
+            lifecycle=None, boundary_lower_bound=3, transport_lower_bound=2)
+        self.assertEqual(summary["network_reads_stage3_state"], "UNKNOWN_NONZERO")
+        self.assertIsNone(summary["network_reads_stage3"])
+        self.assertEqual(summary["network_reads_stage3_lower_bound"], 2)
+        self.assertEqual(summary["pre_release_requests_consumed_state"], "UNKNOWN_NONZERO")
+        self.assertIsNone(summary["pre_release_requests_consumed"])
+        self.assertGreaterEqual(summary["pre_release_requests_consumed_lower_bound"], 1)
+        for key in ("requests_prepared", "requests_boundary_entered", "requests_transport_attempted",
+                    "responses_completed", "responses_accepted_parsed"):
+            self.assertIsNone(summary[key])
+        # a real recorder whose lifecycle becomes internally contradictory
+        # (transport without boundary) degrades to UNKNOWN_NONZERO, never zero.
+        recorder = runner._Stage3EvidenceRecorderV2()
+        op = runner.ActivePreReleaseReadOperationV2.GET_EXCHANGE_STATUS
+        i = recorder.prepared(op)
+        recorder.enter_boundary(op)
+        recorder.advance(i, "TRANSPORT_ATTEMPTED")
+        j = recorder.prepared(op)
+        recorder.advance(j, "TRANSPORT_ATTEMPTED")  # skipped BOUNDARY_ENTERED
+        fields = self._fields(recorder.snapshot(requests_consumed=1))
+        self.assertEqual(fields["network_reads_stage3_state"], "UNKNOWN_NONZERO")
+        self.assertIsNone(fields["network_reads_stage3"])
+        self.assertGreaterEqual(fields["network_reads_stage3_lower_bound"], 1)
+        # when even the lower-bound theorem cannot be established.
+        with self.assertRaises(RunnerError) as ctx:
+            runner._summarize_stage3_request_accounting(
+                lifecycle=None, boundary_lower_bound=1, transport_lower_bound=0)
+        self.assertEqual(ctx.exception.code, RunnerFailureCode.REQUEST_ACCOUNTING_UNRESOLVED)
+
+    # --- SPEC test 18 ------------------------------------------------------
+
+    def test_s3sem_18_execution02_false_zero_is_unsupported_never_proven_zero(self):
+        for payload in (
+            dict(_S3SEM_EXECUTION02_RUNNER_FAILURE),
+            dict(_S3SEM_EXECUTION02_RUNNER_FAILURE, network_reads_stage3=0),
+            {"status": "READ_PHASE_COMPLETE", "pre_release_requests_consumed": 0},
+            dict(_S3SEM_EXECUTION02_RUNNER_FAILURE, stage3_result_schema_revision=1, network_reads_stage3=0),
+        ):
+            with self.subTest(payload=payload):
+                with self.assertRaises(RunnerError) as ctx:
+                    runner._parse_stage3_result_accounting_v2(payload)
+                self.assertEqual(ctx.exception.code, RunnerFailureCode.REQUEST_ACCOUNTING_UNRESOLVED)
+        # a revision-2 EXACT_ZERO claim that contradicts its own counters.
+        forged = {
+            "stage3_result_schema_revision": 2,
+            "network_reads_stage3_state": "EXACT_ZERO", "network_reads_stage3": 0,
+            "network_reads_stage3_lower_bound": 0,
+            "pre_release_requests_consumed_state": "EXACT_ZERO", "pre_release_requests_consumed": 0,
+            "pre_release_requests_consumed_lower_bound": 0,
+            "requests_prepared": 7, "requests_boundary_entered": 7, "requests_transport_attempted": 7,
+            "responses_completed": 7, "responses_accepted_parsed": 7, "stage3_request_lifecycle": [],
+        }
+        with self.assertRaises(RunnerError) as ctx:
+            runner._parse_stage3_result_accounting_v2(forged)
+        self.assertEqual(ctx.exception.code, RunnerFailureCode.REQUEST_ACCOUNTING_UNRESOLVED)
+
+    # --- SPEC test 21 ------------------------------------------------------
+
+    def test_s3sem_21_no_release_writer_gate_d_or_venue_write(self):
+        udt = self._wall_minus(36766.308)
+        rt = self._v2_runtime()
+        self._script_cycle(domain=(0,), t0=udt, t1=udt)
+        with mock.patch.object(runner, "_complete_stage3_active_release_and_normal_writer_v2",
+                               side_effect=AssertionError("release/normal-writer must not be reached")), \
+             mock.patch.object(runner, "acquire_active_release_only_v1",
+                               side_effect=AssertionError("RELEASE_ONLY must not be acquired")), \
+             mock.patch.object(runner, "acquire_active_normal_writer_state_v1",
+                               side_effect=AssertionError("NORMAL_WRITER must not be acquired")), \
+             mock.patch.object(runner, "run_gate_d_ordinary_decision_loop",
+                               side_effect=AssertionError("Gate D must not be entered")):
+            code, payload, _ = self._run_main_with_runtime(rt)
+        self.assertEqual(code, 0)
+        for key, value in (("write_authorization", "NO_WRITE_AUTHORIZATION"), ("stage_3g_plus", "NOT_ENTERED"),
+                           ("release_only", "NOT_ACQUIRED"), ("normal_writer", "NOT_ACQUIRED"),
+                           ("gate_d", "NOT_ENTERED")):
+            self.assertEqual(payload[key], value)
+        self.assertTrue(all(str(c[0]).startswith("GET_") for c in self._transport.calls))
+        self.assertFalse(set(str(c[0]) for c in self._transport.calls) & {op.value for op in WRITE_OPERATIONS})
+
+    # --- SPEC test 22 ------------------------------------------------------
+
+    def test_s3sem_22_no_retry_timer_reconnect_or_restart_recovery(self):
+        self.assertEqual(runner.AUTOMATIC_RETRIES, 0)
+        self.assertEqual(runner.REDIRECTS, 0)
+        rt = self._v2_runtime()
+        self._script_cycle(domain=(0,), t0="2026-08-17T12:59:59.960000Z", t1="2026-08-17T12:59:59.500000Z")
+        exc = self._phase_error(rt)
+        self.assertEqual(exc.code, RunnerFailureCode.USER_DATA_TIMESTAMP_REGRESSION)
+        fields = self._fields(runner._stage3_evidence_of(exc))
+        # exactly one transport per boundary; no automatic re-request of T1.
+        self.assertEqual(len(self._transport.calls) + 1, fields["network_reads_stage3"])  # + orderbook seam
+        self.assertEqual([str(c[0]) for c in self._transport.calls].count("GET_USER_DATA_TIMESTAMP"), 2)
+        for fn in (runner._require_stage3_udt_not_future, runner._require_stage3_local_read_duration,
+                   runner._Stage3EvidenceRecorderV2, runner._summarize_stage3_request_accounting,
+                   runner._parse_stage3_result_accounting_v2):
+            src = inspect.getsource(fn).lower()
+            for banned in ("retry(", "sleep(", "reconnect", "time.time("):
+                self.assertNotIn(banned, src)
+
+    # --- Correction 01 / BLOCK-IMPL-01: FS-UDT-003 explicit-offset parsing ---
+
+    def _udt_phase(self, t0, t1):
+        rt = self._v2_runtime()
+        self._script_cycle(domain=(0,), t0=t0, t1=t1)
+        return rt
+
+    def test_s3sem_c01_01_z_and_plus_zero_offset_accepted_and_equal(self):
+        rt = self._udt_phase("2026-08-17T12:59:59.950000Z", "2026-08-17T12:59:59.950000+00:00")
+        result = self._run_phase(rt)
+        self.assertEqual(result.status, "READ_PHASE_COMPLETE", result.local_block_reasons)
+        fields = self._fields(result.stage3_evidence)
+        self.assertEqual(fields["udt_t0_raw"], "2026-08-17T12:59:59.950000Z")
+        self.assertEqual(fields["udt_t1_raw"], "2026-08-17T12:59:59.950000+00:00")
+        self.assertEqual(fields["udt_t0_utc"], "2026-08-17T12:59:59.950000Z")
+        self.assertEqual(fields["udt_t1_utc"], "2026-08-17T12:59:59.950000Z")
+        self.assertEqual(fields["udt_relation"], "UNCHANGED")
+
+    def test_s3sem_c01_02_minus_four_equivalent_instant_is_unchanged(self):
+        rt = self._udt_phase("2026-08-17T12:59:59.950000Z", "2026-08-17T08:59:59.950000-04:00")
+        result = self._run_phase(rt)
+        self.assertEqual(result.status, "READ_PHASE_COMPLETE", result.local_block_reasons)
+        fields = self._fields(result.stage3_evidence)
+        self.assertEqual(fields["udt_t1_raw"], "2026-08-17T08:59:59.950000-04:00")
+        self.assertEqual(fields["udt_t1_utc"], "2026-08-17T12:59:59.950000Z")
+        self.assertEqual(fields["udt_relation"], "UNCHANGED")
+        # the ADRS2 freshness commitment carries the normalized instant.
+        rt = self._udt_phase("2026-08-17T12:59:59.950000Z", "2026-08-17T08:59:59.950000-04:00")
+        cap, acquired = self._acquire(rt)
+        self.assertEqual(acquired.freshness_after.as_of_time_utc, "2026-08-17T12:59:59.950000Z")
+
+    def test_s3sem_c01_03_required_normalization_table_and_date_crossing(self):
+        expect = "2026-09-28T15:10:48.011094Z"
+        for raw in ("2026-09-28T15:10:48.011094Z", "2026-09-28T15:10:48.011094+00:00",
+                    "2026-09-28T11:10:48.011094-04:00", "2026-09-28T20:40:48.011094+05:30"):
+            with self.subTest(raw=raw):
+                self.assertEqual(runner._stage3_normalize_udt(raw), expect)
+        # positive nonzero offsets crossing the UTC hour AND date boundary.
+        self.assertEqual(runner._stage3_normalize_udt("2026-09-29T02:10:48.011094+05:30"), "2026-09-28T20:40:48.011094Z")
+        self.assertEqual(runner._stage3_normalize_udt("2026-01-01T03:15:00.5+05:45"), "2025-12-31T21:30:00.500000Z")
+        self.assertEqual(runner._stage3_normalize_udt("2026-12-31T22:30:00-04:00"), "2027-01-01T02:30:00.000000Z")
+        # a date-crossing offset T1 equal to a Z T0 is UNCHANGED in the live path.
+        rt = self._udt_phase("2026-08-17T12:59:59.950000Z", "2026-08-18T00:29:59.950000+11:30")
+        fields = self._fields(self._run_phase(rt).stage3_evidence)
+        self.assertEqual(fields["udt_relation"], "UNCHANGED")
+
+    def test_s3sem_c01_04_differently_offset_later_t1_is_advanced(self):
+        # raw T1 sorts lexically BEFORE raw T0 but is the later instant.
+        rt = self._udt_phase("2026-08-17T12:59:59.900000Z", "2026-08-17T08:59:59.950000-04:00")
+        result = self._run_phase(rt)
+        self.assertEqual(result.status, "READ_PHASE_COMPLETE", result.local_block_reasons)
+        self.assertEqual(self._fields(result.stage3_evidence)["udt_relation"], "ADVANCED")
+
+    def test_s3sem_c01_05_differently_offset_earlier_t1_is_regression(self):
+        # raw T1 sorts lexically AFTER raw T0 but is the earlier instant.
+        rt = self._udt_phase("2026-08-17T12:59:59.950000Z", "2026-08-17T13:59:59.900000+01:00")
+        exc = self._phase_error(rt)
+        self.assertEqual(exc.code, RunnerFailureCode.USER_DATA_TIMESTAMP_REGRESSION)
+        fields = self._fields(runner._stage3_evidence_of(exc))
+        self.assertEqual(fields["udt_t1_raw"], "2026-08-17T13:59:59.900000+01:00")
+        self.assertEqual(fields["udt_t1_utc"], "2026-08-17T12:59:59.900000Z")
+
+    def test_s3sem_c01_06_malformed_offsets_calendar_and_types_fail_closed(self):
+        for raw in (
+            "2026-08-17T12:59:59.950000",           # timezone-naive
+            "2026-08-17T12:59:59.950000+00:00Z",    # mixed suffix
+            "2026-08-17T12:59:59.950000+24:00",     # invalid hour offset
+            "2026-08-17T12:59:59.950000+00:60",     # invalid minute offset
+            "2026-08-17T12:59:59.950000-00:00",     # RFC3339 unknown local offset
+            "2026-08-17T12:59:59.950000+0000",      # basic-format offset
+            "2026-02-30T12:00:00Z",                 # impossible calendar date
+            "2026-08-17T24:00:00Z",                 # impossible time
+            "2026-08-17T12:60:00Z",
+            "2026-08-17T12:59:60Z",
+            "2026-08-17 12:59:59Z",                 # missing T
+            "2026-08-17T12:59:59.1234567Z",         # sub-microsecond not exactly representable
+            "20260817T125959Z", "not-a-time", "", " 2026-08-17T12:59:59Z",
+        ):
+            with self.subTest(raw=raw):
+                with self.assertRaises(RunnerError) as ctx:
+                    runner._stage3_normalize_udt(raw)
+                self.assertEqual(ctx.exception.code, RunnerFailureCode.USER_DATA_TIMESTAMP_MALFORMED)
+        for value in (None, 1790000000, 1.5, True, ["2026-08-17T12:59:59Z"]):
+            with self.subTest(value=value):
+                with self.assertRaises(RunnerError) as ctx:
+                    runner._stage3_normalize_udt(value)
+                self.assertEqual(ctx.exception.code, RunnerFailureCode.USER_DATA_TIMESTAMP_MALFORMED)
+        # trailing zero sub-microsecond digits are exactly representable.
+        self.assertEqual(runner._stage3_normalize_udt("2026-08-17T12:59:59.123456000Z"), "2026-08-17T12:59:59.123456Z")
+        rt = self._udt_phase("2026-08-17T12:59:59.950000+00:60", "2026-08-17T12:59:59.950000Z")
+        exc = self._phase_error(rt)
+        self.assertEqual(exc.code, RunnerFailureCode.USER_DATA_TIMESTAMP_MALFORMED)
+        fields = self._fields(runner._stage3_evidence_of(exc))
+        self.assertEqual(fields["udt_t0_raw"], "2026-08-17T12:59:59.950000+00:60")
+        self.assertIsNone(fields["udt_t0_utc"])
+
+    def test_s3sem_c01_07_future_skew_uses_normalized_instant(self):
+        # lexically "09:00:30" < wall "13:00:00", but the instant is 13:00:30Z.
+        rt = self._udt_phase("2026-08-17T09:00:30.000000-04:00", "2026-08-17T09:00:30.000000-04:00")
+        exc = self._phase_error(rt)
+        self.assertEqual(exc.code, RunnerFailureCode.USER_DATA_TIMESTAMP_FUTURE)
+        fields = self._fields(runner._stage3_evidence_of(exc))
+        self.assertEqual(fields["udt_t0_utc"], "2026-08-17T13:00:30.000000Z")
+        self.assertGreater(fields["udt_t0_future_skew_us"], 29_000_000)
+        # lexically "13:59:59" > wall, but the instant is in the past: accepted.
+        rt = self._udt_phase("2026-08-17T13:59:59.950000+01:00", "2026-08-17T13:59:59.950000+01:00")
+        fields = self._fields(self._run_phase(rt).stage3_evidence)
+        self.assertLess(fields["udt_t0_future_skew_us"], 0)
+
+    # --- lifecycle invariants --------------------------------------------------
+
+    def test_s3sem_lifecycle_states_monotonic_and_bound_to_requests_consumed(self):
+        rt = self._v2_runtime()
+        self._script_cycle(domain=(0, 1))
+        result = self._run_phase(rt)
+        fields = self._fields(result.stage3_evidence)
+        self._assert_lifecycle_invariants(fields)
+        self.assertEqual(fields["pre_release_requests_consumed"], result.requests_consumed)
+        self.assertTrue(all(e["highest_state"] == "ACCEPTED_PARSED" for e in fields["stage3_request_lifecycle"]))
+        recorder = runner._Stage3EvidenceRecorderV2()
+        op = runner.ActivePreReleaseReadOperationV2.GET_MARKET
+        i = recorder.prepared(op)
+        recorder.enter_boundary(op)
+        recorder.advance(i, "TRANSPORT_ATTEMPTED")
+        recorder.advance(i, "RESPONSE_COMPLETED")
+        recorder.advance(i, "BOUNDARY_ENTERED")  # never regresses
+        fields = self._fields(recorder.snapshot(requests_consumed=1))
+        self.assertEqual(fields["stage3_request_lifecycle"], [
+            {"ordinal": 1, "operation": "GET_MARKET", "highest_state": "RESPONSE_COMPLETED"}])
+        self.assertEqual(fields["network_reads_stage3_state"], "EXACT_NONZERO")
+        # boundary count must equal the capability's requests_consumed.
+        self.assertEqual(self._fields(recorder.snapshot(requests_consumed=2))["pre_release_requests_consumed_state"],
+                         "UNKNOWN_NONZERO")
+
+    def test_s3sem_transport_exception_keeps_response_completed_and_consumed(self):
+        rt = self._v2_runtime()
+        t = self._transport
+        t.queue(RunnerOperation.GET_EXCHANGE_STATUS, _v2_status_payload(_v2_status_rows((0,))))
+        t.queue(RunnerOperation.GET_USER_DATA_TIMESTAMP, RunnerError(RunnerFailureCode.LIVE_READ_TRANSPORT_NON_2XX, detail="503"))
+        exc = self._phase_error(rt)
+        self.assertEqual(exc.code, RunnerFailureCode.LIVE_READ_TRANSPORT_NON_2XX)
+        fields = self._fields(runner._stage3_evidence_of(exc))
+        self.assertEqual(fields["network_reads_stage3"], 2)
+        self.assertEqual(fields["pre_release_requests_consumed"], 2)
+        self.assertEqual(fields["stage3_request_lifecycle"][-1]["highest_state"], "RESPONSE_COMPLETED")
+        self.assertEqual(fields["responses_accepted_parsed"], 1)
+        self.assertIsNone(fields["udt_t0_raw"])
+        self._assert_lifecycle_invariants(fields)
 
 
 if __name__ == "__main__":

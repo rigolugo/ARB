@@ -66,7 +66,7 @@ import time
 import uuid
 from contextlib import contextmanager
 from dataclasses import dataclass, field, fields, replace as _dataclass_replace
-from datetime import datetime, timezone
+from datetime import datetime, timedelta, timezone
 from decimal import Decimal, InvalidOperation
 from pathlib import Path
 from types import MappingProxyType
@@ -507,6 +507,19 @@ class RunnerFailureCode(enum.StrEnum):
     DYNAMIC_READ_COMPOSITE_IDENTITY_MISMATCH = "DYNAMIC_READ_COMPOSITE_IDENTITY_MISMATCH"
     STATIC_COMPLETENESS_THEOREM_NOT_ACCEPTED = "STATIC_COMPLETENESS_THEOREM_NOT_ACCEPTED"
     P02_TERMINAL_SETTLEMENT_EVIDENCE_MISMATCH = "P02_TERMINAL_SETTLEMENT_EVIDENCE_MISMATCH"
+
+    # KALSHI_DEMO_R1_D07_STAGE3_FRESHNESS_AND_COMPLETENESS_SEMANTICS_SPEC_01
+    # Section 15 -- stable active-V2 Stage-3 terminal classifications.  The
+    # existing precise transport / schema / pagination / integrity codes stay
+    # more specific and are never collapsed into these.
+    USER_DATA_TIMESTAMP_MALFORMED = "USER_DATA_TIMESTAMP_MALFORMED"
+    USER_DATA_TIMESTAMP_REGRESSION = "USER_DATA_TIMESTAMP_REGRESSION"
+    USER_DATA_TIMESTAMP_FUTURE = "USER_DATA_TIMESTAMP_FUTURE"
+    LOCAL_READ_DURATION_UNRESOLVED = "LOCAL_READ_DURATION_UNRESOLVED"
+    RECONCILIATION_READ_DEADLINE_EXCEEDED = "RECONCILIATION_READ_DEADLINE_EXCEEDED"
+    CURRENT_VENUE_COMPLETENESS_UNRESOLVED = "CURRENT_VENUE_COMPLETENESS_UNRESOLVED"
+    HISTORICAL_COMPLETENESS_UNRESOLVED = "HISTORICAL_COMPLETENESS_UNRESOLVED"
+    REQUEST_ACCOUNTING_UNRESOLVED = "REQUEST_ACCOUNTING_UNRESOLVED"
 
     # R1-D07 read-only Stage-3 live entrypoint -- launcher local preconditions
     # and the Correction-02 PATH -> temporary PEM credential compatibility
@@ -6110,6 +6123,449 @@ def _parse_dynamic_index_domain_foreign_economics(
     return tuple(working), tuple(fills)
 
 
+# ===========================================================================
+# KALSHI_DEMO_R1_D07_STAGE3_FRESHNESS_AND_COMPLETENESS_SEMANTICS_SPEC_01
+# (sha256 8183d469f7f5de35cf27edc7c7594ebd2f9d63f1d40bd3422bbeacc33e32dc13)
+# -- user_data_timestamp watermark ordering (FS-UDT), the exact local
+# monotonic Stage-3 read window (FS-RD), per-request lifecycle accounting and
+# the revision-2 Stage-3 result/evidence schema (FS-ACC).  Module-private; no
+# caller-supplied production seam; no retry / timer / reconnect recovery.
+# ===========================================================================
+
+_STAGE3_SEMANTIC_SPEC_ID = "KALSHI_DEMO_R1_D07_STAGE3_FRESHNESS_AND_COMPLETENESS_SEMANTICS_SPEC_01"
+_STAGE3_SEMANTIC_SPEC_SHA256 = "8183d469f7f5de35cf27edc7c7594ebd2f9d63f1d40bd3422bbeacc33e32dc13"
+_STAGE3_RESULT_SCHEMA_REVISION = 2
+_STAGE3_READ_WINDOW_NOT_SUPPLIED = object()
+_STAGE3_NS_PER_MS = 1_000_000
+_STAGE3_US_PER_MS = 1_000
+_STAGE3_UDT_RAW_MAX_CHARS = 64
+
+# FS-ACC-001 -- ordered per-request lifecycle; a request only advances.
+_STAGE3_REQUEST_STATES = (
+    "PREPARED", "BOUNDARY_ENTERED", "TRANSPORT_ATTEMPTED", "RESPONSE_COMPLETED", "ACCEPTED_PARSED",
+)
+_STAGE3_STATE_RANK: Mapping[str, int] = MappingProxyType({s: i for i, s in enumerate(_STAGE3_REQUEST_STATES)})
+_STAGE3_COUNT_STATES = frozenset({"EXACT_ZERO", "EXACT_NONZERO", "UNKNOWN_NONZERO"})
+_STAGE3_COUNTER_FIELDS = (
+    "requests_prepared", "requests_boundary_entered", "requests_transport_attempted",
+    "responses_completed", "responses_accepted_parsed",
+)
+# FS-UDT-008 / FS-RD -- revision-2 semantic evidence retained when observed.
+_STAGE3_SEMANTIC_FIELDS = (
+    "udt_t0_raw", "udt_t0_utc", "udt_t0_post_response_wall_utc", "udt_t0_future_skew_us",
+    "udt_t1_raw", "udt_t1_utc", "udt_t1_post_response_wall_utc", "udt_t1_future_skew_us",
+    "udt_relation", "udt_absolute_age_ms_diagnostic",
+    "local_read_window_start_monotonic_ns", "local_read_window_finish_monotonic_ns", "local_read_duration_ns",
+)
+
+
+def _stage3_udt_raw(parsed: object) -> "str | None":
+    """FS-UDT-008 -- the exact raw ``as_of_time`` string as received (public
+    watermark text, length-bounded); a non-string value is not retained."""
+    raw = parsed.get("as_of_time") if isinstance(parsed, Mapping) else None
+    return raw[:_STAGE3_UDT_RAW_MAX_CHARS] if type(raw) is str else None
+
+
+def _stage3_udt_future_skew_us(as_of_utc: str, post_response_wall_utc: str) -> int:
+    """Exact integer microseconds ``as_of_time - post-response trusted wall
+    sample`` (positive => the watermark is LATER than the local wall sample).
+    Pure integer ``timedelta`` arithmetic -- never binary floating point."""
+    delta = _parse_canonical_utc(as_of_utc) - _parse_canonical_utc(post_response_wall_utc)
+    return (delta.days * 86_400 + delta.seconds) * 1_000_000 + delta.microseconds
+
+
+def _require_stage3_udt_not_future(
+    *, bookend: str, as_of_utc: str, post_response_wall_utc: str, max_future_wall_clock_skew_ms: int,
+) -> int:
+    """FS-UDT-007 -- ordering sanity only, NOT an absolute-age freshness gate.
+    The ONLY authoritative allowance is the accepted
+    ``state_integrity.max_future_wall_clock_skew_ms`` (Candidate-02: 0); the
+    retired hardcoded 5000-ms allowance never overrides it.  Equality with the
+    allowance passes; beyond it -> ``USER_DATA_TIMESTAMP_FUTURE``.  Returns the
+    exact signed skew in microseconds."""
+    if type(max_future_wall_clock_skew_ms) is not int or max_future_wall_clock_skew_ms < 0:
+        raise RunnerError(RunnerFailureCode.USER_DATA_TIMESTAMP_FUTURE, detail=bookend + " accepted future allowance invalid")
+    skew_us = _stage3_udt_future_skew_us(as_of_utc, post_response_wall_utc)
+    if skew_us > max_future_wall_clock_skew_ms * _STAGE3_US_PER_MS:
+        raise RunnerError(
+            RunnerFailureCode.USER_DATA_TIMESTAMP_FUTURE,
+            detail=bookend + " as_of_time later than its post-response trusted wall sample beyond state_integrity.max_future_wall_clock_skew_ms")
+    return skew_us
+
+
+def _require_stage3_local_read_duration(
+    start_ns: object, finish_ns: object, *, reconciliation_read_deadline_ms: int,
+) -> int:
+    """FS-RD-001..004 -- ``state_integrity.reconciliation_read_deadline_ms`` as
+    a LOCAL MONOTONIC transaction duration in exact integer nanoseconds:
+    ``delta_ns <= deadline_ms * 1_000_000`` passes (equality accepted);
+    ``>`` -> ``RECONCILIATION_READ_DEADLINE_EXCEEDED``.  A missing / non-int /
+    bool / negative / regressing sample -> ``LOCAL_READ_DURATION_UNRESOLVED``.
+    ``T1 - T0`` is never an input."""
+    for label, value in (("START", start_ns), ("FINISH", finish_ns)):
+        if type(value) is not int or value < 0:
+            raise RunnerError(
+                RunnerFailureCode.LOCAL_READ_DURATION_UNRESOLVED,
+                detail="local read-window " + label + " sample missing/non-int/negative")
+    if type(reconciliation_read_deadline_ms) is not int or reconciliation_read_deadline_ms < 0:
+        raise RunnerError(RunnerFailureCode.LOCAL_READ_DURATION_UNRESOLVED, detail="reconciliation_read_deadline_ms invalid")
+    delta_ns = finish_ns - start_ns
+    if delta_ns < 0:
+        raise RunnerError(RunnerFailureCode.LOCAL_READ_DURATION_UNRESOLVED, detail="local read-window monotonic sample regressed")
+    if delta_ns > reconciliation_read_deadline_ms * _STAGE3_NS_PER_MS:
+        raise RunnerError(
+            RunnerFailureCode.RECONCILIATION_READ_DEADLINE_EXCEEDED,
+            detail="local monotonic Stage-3 read window exceeds state_integrity.reconciliation_read_deadline_ms")
+    return delta_ns
+
+
+@dataclass(frozen=True, slots=True)
+class _Stage3EvidenceSnapshotV2:
+    """Immutable Stage-3 accounting/semantic evidence snapshot.  ``lifecycle``
+    is ``None`` when exact per-request recovery is unavailable; the lower
+    bounds then carry only what is proven.  Secret-free by construction."""
+
+    lifecycle: "Tuple[Tuple[int, str, str], ...] | None"
+    requests_consumed: "int | None"
+    boundary_lower_bound: int
+    transport_lower_bound: int
+    semantic: Mapping[str, object]
+
+
+# Control flow proves no Stage-3 request boundary / transport occurred.
+_STAGE3_PROVEN_ZERO_SNAPSHOT = _Stage3EvidenceSnapshotV2(
+    lifecycle=(), requests_consumed=0, boundary_lower_bound=0, transport_lower_bound=0,
+    semantic=MappingProxyType({}),
+)
+
+
+class _Stage3EvidenceRecorderV2:
+    """The ONE module-private active-V2 Stage-3 request-lifecycle tracker (owned
+    by ``_TrustedDynamicPreReleaseReadCapabilityV2``).  Each request retains
+    its HIGHEST state; states only advance.  ``BOUNDARY_ENTERED`` is recorded
+    ONLY inside the capability's successful ``charge`` so the boundary count
+    stays identical to ``requests_consumed``.  A contradictory transition
+    marks exact recovery lost (never fabricates zero)."""
+
+    __slots__ = ("_entries", "_integrity_ok", "_semantic", "_window_armed", "_window_clock", "_lock")
+
+    def __init__(self) -> None:
+        self._entries: list = []  # [operation_value, rank]
+        self._integrity_ok = True
+        self._semantic: dict = {}
+        self._window_armed = False
+        self._window_clock: object = None
+        self._lock = threading.Lock()
+
+    def prepared(self, operation: "ActivePreReleaseReadOperationV2") -> int:
+        with self._lock:
+            if not isinstance(operation, ActivePreReleaseReadOperationV2):
+                self._integrity_ok = False
+            self._entries.append([str(getattr(operation, "value", operation)), 0])
+            return len(self._entries) - 1
+
+    def enter_boundary(self, operation: "ActivePreReleaseReadOperationV2", *, count: int = 1) -> None:
+        with self._lock:
+            value = str(getattr(operation, "value", operation))
+            for _ in range(count):
+                last = self._entries[-1] if self._entries else None
+                if last is not None and last[1] == 0 and last[0] == value:
+                    last[1] = 1
+                else:
+                    self._entries.append([value, 1])
+
+    def advance(self, index: int, state: str) -> None:
+        with self._lock:
+            rank = _STAGE3_STATE_RANK.get(state)
+            if type(index) is not int or not 0 <= index < len(self._entries) or rank is None:
+                self._integrity_ok = False
+                return
+            entry = self._entries[index]
+            if rank <= entry[1]:
+                return  # monotonic: never regress
+            if rank != entry[1] + 1 or rank < _STAGE3_STATE_RANK["TRANSPORT_ATTEMPTED"]:
+                self._integrity_ok = False
+            entry[1] = rank
+
+    def record(self, key: str, value: object) -> None:
+        with self._lock:
+            if key in _STAGE3_SEMANTIC_FIELDS:
+                self._semantic[key] = value
+
+    def has(self, key: str) -> bool:
+        with self._lock:
+            return key in self._semantic
+
+    def arm_read_window_start(self) -> None:
+        with self._lock:
+            self._window_armed = True
+
+    def sample_read_window_start_if_armed(self, clock: "Callable[[], int]") -> None:
+        """FS-RD-001 START -- sampled once, immediately before the first
+        post-T0 request's boundary entry; the timer never resets."""
+        with self._lock:
+            if not self._window_armed:
+                return
+            self._window_armed = False
+            self._window_clock = clock
+        value = clock()
+        self.record("local_read_window_start_monotonic_ns", value if type(value) is int else None)
+
+    def sample_read_window_finish(self, clock: "Callable[[], int]") -> "int | None":
+        """FS-RD-001 FINISH -- immediately after the T1 post-response trusted
+        wall sample, with the SAME monotonic clock source as START."""
+        with self._lock:
+            start_clock = self._window_clock
+        if start_clock is None:
+            raise RunnerError(RunnerFailureCode.LOCAL_READ_DURATION_UNRESOLVED, detail="local read-window FINISH without START")
+        if clock is not start_clock:
+            raise RunnerError(RunnerFailureCode.LOCAL_READ_DURATION_UNRESOLVED, detail="local read-window clock-source mismatch")
+        value = clock()
+        value = value if type(value) is int else None
+        self.record("local_read_window_finish_monotonic_ns", value)
+        return value
+
+    def read_window_start(self) -> object:
+        with self._lock:
+            return self._semantic.get("local_read_window_start_monotonic_ns")
+
+    def snapshot(self, *, requests_consumed: "int | None") -> _Stage3EvidenceSnapshotV2:
+        with self._lock:
+            entries = [tuple(e) for e in self._entries]
+            integrity_ok = self._integrity_ok
+            semantic = MappingProxyType(dict(self._semantic))
+        boundary_count = sum(1 for _, r in entries if r >= _STAGE3_STATE_RANK["BOUNDARY_ENTERED"])
+        transport_count = sum(1 for _, r in entries if r >= _STAGE3_STATE_RANK["TRANSPORT_ATTEMPTED"])
+        consumed_known = type(requests_consumed) is int and requests_consumed >= 0
+        exact = integrity_ok and consumed_known and boundary_count == requests_consumed
+        lifecycle = (
+            tuple((i + 1, op, _STAGE3_REQUEST_STATES[r]) for i, (op, r) in enumerate(entries))
+            if exact else None
+        )
+        return _Stage3EvidenceSnapshotV2(
+            lifecycle=lifecycle,
+            requests_consumed=requests_consumed if consumed_known else None,
+            boundary_lower_bound=requests_consumed if consumed_known else 0,
+            transport_lower_bound=transport_count,
+            semantic=semantic,
+        )
+
+
+def _stage3_lifecycle_counts(lifecycle: object) -> "dict[str, int] | None":
+    """Exact per-stage counters from an ordered lifecycle; ``None`` when the
+    lifecycle is structurally contradictory."""
+    if type(lifecycle) is not tuple:
+        return None
+    valid_ops = {op.value for op in ActivePreReleaseReadOperationV2}
+    counts = [0] * len(_STAGE3_REQUEST_STATES)
+    for expected_ordinal, entry in enumerate(lifecycle, start=1):
+        if type(entry) is not tuple or len(entry) != 3:
+            return None
+        ordinal, operation, state = entry
+        if type(ordinal) is not int or ordinal != expected_ordinal or operation not in valid_ops:
+            return None
+        rank = _STAGE3_STATE_RANK.get(state) if type(state) is str else None
+        if rank is None:
+            return None
+        for r in range(rank + 1):
+            counts[r] += 1
+    return dict(zip(_STAGE3_COUNTER_FIELDS, counts))
+
+
+def _summarize_stage3_request_accounting(
+    *, lifecycle: object, boundary_lower_bound: int, transport_lower_bound: int,
+) -> "dict[str, object]":
+    """FS-ACC-002..004 + frozen NB-03 convention (schema revision 2):
+    ``network_reads_stage3`` = exact TRANSPORT_ATTEMPTED count;
+    ``pre_release_requests_consumed`` = exact BOUNDARY_ENTERED count.  Exact
+    counts -> ``EXACT_ZERO`` / ``EXACT_NONZERO``; exact recovery unavailable
+    with a proven nonzero lower bound -> ``UNKNOWN_NONZERO`` (exact ``None``);
+    neither provable -> ``REQUEST_ACCOUNTING_UNRESOLVED``.  Never a default
+    integer zero."""
+    for lb in (boundary_lower_bound, transport_lower_bound):
+        if type(lb) is not int or lb < 0:
+            raise RunnerError(RunnerFailureCode.REQUEST_ACCOUNTING_UNRESOLVED, detail="lower bound invalid")
+    out: dict[str, object] = {}
+    counts = _stage3_lifecycle_counts(lifecycle) if lifecycle is not None else None
+    if (
+        counts is not None
+        and counts["requests_boundary_entered"] >= boundary_lower_bound
+        and counts["requests_transport_attempted"] >= transport_lower_bound
+    ):
+        out.update(counts)
+        for name, exact in (
+            ("network_reads_stage3", counts["requests_transport_attempted"]),
+            ("pre_release_requests_consumed", counts["requests_boundary_entered"]),
+        ):
+            out[name + "_state"] = "EXACT_ZERO" if exact == 0 else "EXACT_NONZERO"
+            out[name] = exact
+            out[name + "_lower_bound"] = exact
+        out["stage3_request_lifecycle"] = [
+            {"ordinal": o, "operation": op, "highest_state": st} for o, op, st in lifecycle  # type: ignore[union-attr]
+        ]
+        return out
+    for key in _STAGE3_COUNTER_FIELDS:
+        out[key] = None
+    for name, lb in (
+        ("network_reads_stage3", transport_lower_bound),
+        ("pre_release_requests_consumed", boundary_lower_bound),
+    ):
+        if lb < 1:
+            raise RunnerError(
+                RunnerFailureCode.REQUEST_ACCOUNTING_UNRESOLVED,
+                detail=name + " exact recovery unavailable and no nonzero lower bound established")
+        out[name + "_state"] = "UNKNOWN_NONZERO"
+        out[name] = None
+        out[name + "_lower_bound"] = lb
+    out["stage3_request_lifecycle"] = None
+    return out
+
+
+def _stage3_revision2_result_fields(snapshot: object) -> "dict[str, object]":
+    """The revision-2 Stage-3 result/evidence fields for BOTH success and
+    failure output.  Not-yet-observed semantic fields are ``None``; nothing is
+    fabricated.  An unresolvable accounting contradiction is reported as
+    ``REQUEST_ACCOUNTING_UNRESOLVED`` with null states (never zero)."""
+    out: dict[str, object] = {
+        "stage3_result_schema_revision": _STAGE3_RESULT_SCHEMA_REVISION,
+        "stage3_semantic_spec": _STAGE3_SEMANTIC_SPEC_ID,
+        "stage3_semantic_spec_sha256": _STAGE3_SEMANTIC_SPEC_SHA256,
+    }
+    accounting = None
+    if type(snapshot) is _Stage3EvidenceSnapshotV2:
+        try:
+            accounting = _summarize_stage3_request_accounting(
+                lifecycle=snapshot.lifecycle,
+                boundary_lower_bound=snapshot.boundary_lower_bound,
+                transport_lower_bound=snapshot.transport_lower_bound,
+            )
+        except RunnerError as exc:
+            if exc.code is not RunnerFailureCode.REQUEST_ACCOUNTING_UNRESOLVED:
+                raise
+    if accounting is None:
+        out["stage3_request_accounting_resolution"] = RunnerFailureCode.REQUEST_ACCOUNTING_UNRESOLVED.value
+        for name in ("network_reads_stage3", "pre_release_requests_consumed"):
+            out[name + "_state"] = None
+            out[name] = None
+            out[name + "_lower_bound"] = 0
+        for key in _STAGE3_COUNTER_FIELDS:
+            out[key] = None
+        out["stage3_request_lifecycle"] = None
+    else:
+        out["stage3_request_accounting_resolution"] = "RESOLVED"
+        out.update(accounting)
+    semantic = snapshot.semantic if type(snapshot) is _Stage3EvidenceSnapshotV2 else {}
+    for key in _STAGE3_SEMANTIC_FIELDS:
+        out[key] = semantic.get(key)
+    out["udt_absolute_age_gating"] = "NON_GATING_DIAGNOSTIC"
+    return out
+
+
+def _parse_stage3_result_accounting_v2(payload: object) -> "dict[str, object]":
+    """FS-ACC-005 compatibility reader.  Accepts ONLY a Stage-3 result carrying
+    ``stage3_result_schema_revision == 2`` whose state / exact / lower-bound /
+    per-stage counters / lifecycle are mutually consistent.  An absent or old
+    revision (e.g. the consumed EXECUTION_02 ``LIVE_ENTRYPOINT_FAILED`` JSON or
+    a legacy integer ``network_reads_stage3=0``) is UNSUPPORTED and never
+    promoted to a proven zero."""
+    unresolved = RunnerFailureCode.REQUEST_ACCOUNTING_UNRESOLVED
+    if not isinstance(payload, Mapping):
+        raise RunnerError(unresolved, detail="stage3 result is not an object")
+    revision = payload.get("stage3_result_schema_revision")
+    if type(revision) is not int or revision != _STAGE3_RESULT_SCHEMA_REVISION:
+        raise RunnerError(unresolved, detail="stage3 result schema revision absent/unsupported; accounting NOT_ESTABLISHED")
+    out: dict[str, object] = {"stage3_result_schema_revision": revision}
+    exact_values: dict[str, int] = {}
+    for name in ("network_reads_stage3", "pre_release_requests_consumed"):
+        state = payload.get(name + "_state")
+        exact = payload.get(name)
+        lb = payload.get(name + "_lower_bound")
+        if state not in _STAGE3_COUNT_STATES or type(lb) is not int or lb < 0:
+            raise RunnerError(unresolved, detail=name + " state/lower bound invalid")
+        if state == "EXACT_ZERO":
+            ok = type(exact) is int and exact == 0 and lb == 0
+        elif state == "EXACT_NONZERO":
+            ok = type(exact) is int and exact > 0 and lb == exact
+        else:
+            ok = exact is None and lb >= 1
+        if not ok:
+            raise RunnerError(unresolved, detail=name + " state/exact/lower-bound inconsistent")
+        if state != "UNKNOWN_NONZERO":
+            exact_values[name] = exact
+        out[name + "_state"] = state
+        out[name] = exact
+        out[name + "_lower_bound"] = lb
+    counters = {key: payload.get(key) for key in _STAGE3_COUNTER_FIELDS}
+    if exact_values:
+        if any(type(v) is not int or v < 0 for v in counters.values()):
+            raise RunnerError(unresolved, detail="exact accounting without exact per-stage counters")
+        ordered = [counters[k] for k in _STAGE3_COUNTER_FIELDS]
+        if any(ordered[i] < ordered[i + 1] for i in range(len(ordered) - 1)):
+            raise RunnerError(unresolved, detail="per-stage counters not monotone")
+        if (
+            exact_values.get("network_reads_stage3", counters["requests_transport_attempted"]) != counters["requests_transport_attempted"]
+            or exact_values.get("pre_release_requests_consumed", counters["requests_boundary_entered"]) != counters["requests_boundary_entered"]
+        ):
+            raise RunnerError(unresolved, detail="aggregate counts disagree with per-stage counters")
+        raw_lifecycle = payload.get("stage3_request_lifecycle")
+        if not isinstance(raw_lifecycle, list):
+            raise RunnerError(unresolved, detail="exact accounting without request lifecycle")
+        try:
+            lifecycle = tuple((e["ordinal"], e["operation"], e["highest_state"]) for e in raw_lifecycle)
+        except (TypeError, KeyError) as exc:
+            raise RunnerError(unresolved, detail="request lifecycle malformed") from exc
+        if _stage3_lifecycle_counts(lifecycle) != counters:
+            raise RunnerError(unresolved, detail="request lifecycle disagrees with per-stage counters")
+    out.update(counters)
+    return out
+
+
+def _record_stage3_acquired_semantics(recorder: "_Stage3EvidenceRecorderV2", acquired: object) -> None:
+    """Fill the revision-2 semantic evidence from the ONE converged acquired
+    read ONLY where the live acquirer did not already record the observation
+    (the offline fake seam executes no transport state machine)."""
+    fb = acquired.freshness_before  # type: ignore[attr-defined]
+    fa = acquired.freshness_after  # type: ignore[attr-defined]
+    t0_wall = acquired.t0_wall_sample_utc  # type: ignore[attr-defined]
+    t1_wall = acquired.t1_wall_sample_utc  # type: ignore[attr-defined]
+    start = acquired.read_window_start_monotonic_ns  # type: ignore[attr-defined]
+    finish = acquired.read_window_finish_monotonic_ns  # type: ignore[attr-defined]
+    t1_skew = _stage3_udt_future_skew_us(fa.as_of_time_utc, t1_wall)
+    values = {
+        "udt_t0_raw": fb.as_of_time_utc,
+        "udt_t0_utc": fb.as_of_time_utc,
+        "udt_t0_post_response_wall_utc": t0_wall,
+        "udt_t0_future_skew_us": _stage3_udt_future_skew_us(fb.as_of_time_utc, t0_wall),
+        "udt_t1_raw": fa.as_of_time_utc,
+        "udt_t1_utc": fa.as_of_time_utc,
+        "udt_t1_post_response_wall_utc": t1_wall,
+        "udt_t1_future_skew_us": t1_skew,
+        "udt_relation": "UNCHANGED" if fa.as_of_time_utc == fb.as_of_time_utc else "ADVANCED",
+        "udt_absolute_age_ms_diagnostic": -t1_skew // _STAGE3_US_PER_MS,
+        "local_read_window_start_monotonic_ns": start,
+        "local_read_window_finish_monotonic_ns": finish,
+        "local_read_duration_ns": finish - start,  # validated non-negative ints by the mint predicate
+    }
+    for key, value in values.items():
+        if not recorder.has(key):
+            recorder.record(key, value)
+
+
+def _attach_stage3_evidence(exc: BaseException, snapshot: _Stage3EvidenceSnapshotV2) -> None:
+    """Attach the Stage-3 evidence snapshot to an exception leaving Stage 3 (at
+    most once; the innermost, most precise snapshot wins)."""
+    if getattr(exc, "_arb_stage3_evidence_v2", None) is None:
+        try:
+            exc._arb_stage3_evidence_v2 = snapshot  # type: ignore[attr-defined]
+        except (AttributeError, TypeError):  # pragma: no cover - immutable exception type
+            pass
+
+
+def _stage3_evidence_of(exc: BaseException) -> "_Stage3EvidenceSnapshotV2 | None":
+    value = getattr(exc, "_arb_stage3_evidence_v2", None)
+    return value if type(value) is _Stage3EvidenceSnapshotV2 else None
+
+
 def require_dynamic_index_domain_completeness(
     read: "DynamicIndexDomainAccountWideReadV1", *,
     domain_binding: ExecutionDomainBindingV1,
@@ -6121,15 +6577,27 @@ def require_dynamic_index_domain_completeness(
     now_utc: str,
     t0_wall_sample_utc: "str | None" = None,
     t1_wall_sample_utc: "str | None" = None,
+    read_window_start_monotonic_ns: object = _STAGE3_READ_WINDOW_NOT_SUPPLIED,
+    read_window_finish_monotonic_ns: object = _STAGE3_READ_WINDOW_NOT_SUPPLIED,
 ) -> str:
     """Correction 04 Path A -- FAIL CLOSED (requirements 01-08).  Validates the
     fresh dynamically enumerated read set against the separately bound
     domain-scoped ``accepted_evidence_contract``, recomputes and checks the
-    composite read-set identity, applies the EXISTING risk/reconciliation
-    freshness/deadline configuration to the user_data_timestamp ordering, and
+    composite read-set identity, applies the Stage-3 semantics SPEC_01
+    user_data_timestamp ORDERING predicates (watermark only -- no absolute-age
+    gate; future ordering against the accepted
+    ``state_integrity.max_future_wall_clock_skew_ms``) and, when the trusted
+    acquisition boundary supplies them, the exact local monotonic read-window
+    duration against ``state_integrity.reconciliation_read_deadline_ms``, and
     -- when the domain has a retained bootstrap position -- requires an
     accepted settlement reconciliation with a fresh complete per-index
     positions enumeration and no live controlled position.
+
+    The release-eligible mint (``_mint_release_eligible_read_set``) ALWAYS
+    supplies both read-window samples (a missing one fails
+    ``LOCAL_READ_DURATION_UNRESOLVED``); a caller-supplied offline fixture
+    evaluated outside that boundary carries no Stage-3 read transaction and
+    therefore no read-window predicate.
 
     Returns the retained-position classification:
     ``"NO_RETAINED_BOOTSTRAP_POSITION"`` or
@@ -6180,40 +6648,45 @@ def require_dynamic_index_domain_completeness(
     if read.selected_route_reconciliation_cutoff_sha256 != current_selected_route_cutoff_sha256:
         raise RunnerError(RunnerFailureCode.SUBACCOUNT_WIDE_COMPLETENESS_UNPROVEN, detail="dynamic read selected-route cutoff stale")
 
-    # R04 / DSB-FRESH-002/003 / Correction 06 (BLOCK-05-04): freshness
-    # ORDERING + the exact 30s/5s active-V2 caps + the EXISTING authoritative
-    # RiskLimitConfigV1.state_integrity limits, all CONJUNCTIVE.  The 30s/5s
-    # caps never REPLACE a stricter existing threshold; whichever applicable
-    # predicate is stricter wins.  T1 >= T0 is required; T1 == T0 and T1 > T0
-    # are both acceptable; T1 < T0 fails; the two trusted wall-clock samples
-    # used for freshness must be nondecreasing.
+    # R04 / Stage-3 semantics SPEC_01 FS-UDT-001..008 / FS-RD-001..004:
+    # user_data_timestamp is a validation/update WATERMARK only.  T1 == T0
+    # (UNCHANGED) and T1 > T0 (ADVANCED) are both acceptable and neither is
+    # elapsed-time evidence; T1 < T0 fails; each bookend is ordered against
+    # its own post-response trusted wall sample using ONLY the accepted
+    # ``state_integrity.max_future_wall_clock_skew_ms`` (exact integer
+    # microseconds).  There is NO absolute-age predicate and NO T1 - T0
+    # duration proxy; the two trusted wall-clock samples must be
+    # nondecreasing.  Local reconciliation / market-data freshness remain
+    # governed independently by the protected ledger/risk consumers.
     lim = risk_config.state_integrity
     t0 = _parse_canonical_utc(read.freshness_before.as_of_time_utc)
     t1 = _parse_canonical_utc(read.freshness_after.as_of_time_utc)
-    t0_sample = _parse_canonical_utc(t0_wall_sample_utc if t0_wall_sample_utc is not None else now_utc)
-    t1_sample = _parse_canonical_utc(t1_wall_sample_utc if t1_wall_sample_utc is not None else now_utc)
+    t0_sample_utc = t0_wall_sample_utc if t0_wall_sample_utc is not None else now_utc
+    t1_sample_utc = t1_wall_sample_utc if t1_wall_sample_utc is not None else now_utc
+    t0_sample = _parse_canonical_utc(t0_sample_utc)
+    t1_sample = _parse_canonical_utc(t1_sample_utc)
     if type(now_monotonic_ns) is not int or now_monotonic_ns < 0:
         raise RunnerError(RunnerFailureCode.DYNAMIC_READ_CLOCK_REGRESSION, detail="freshness monotonic clock invalid")
     if t1 < t0:
-        raise RunnerError(RunnerFailureCode.DYNAMIC_READ_FRESHNESS_REGRESSION, detail="user_data_timestamp T1 < T0")
+        raise RunnerError(RunnerFailureCode.USER_DATA_TIMESTAMP_REGRESSION, detail="user_data_timestamp T1 < T0")
     if t1_sample < t0_sample:
         raise RunnerError(RunnerFailureCode.DYNAMIC_READ_CLOCK_REGRESSION, detail="trusted wall-clock freshness sample regressed between T0 and T1")
-    for bookend, as_of, sample in (("T0", t0, t0_sample), ("T1", t1, t1_sample)):
-        age_ms = (sample - as_of).total_seconds() * 1000.0
-        future_ms = (as_of - sample).total_seconds() * 1000.0
-        # Active-V2 acquisition caps (DSB-FRESH-003).
-        if age_ms > _PRE_RELEASE_FRESHNESS_MAX_AGE_MS:
-            raise RunnerError(RunnerFailureCode.DYNAMIC_READ_FRESHNESS_STALE, detail=bookend + " age exceeds pre_release_freshness_max_age_ms=30000")
-        if future_ms > _PRE_RELEASE_FRESHNESS_FUTURE_SKEW_MAX_MS:
-            raise RunnerError(RunnerFailureCode.DYNAMIC_READ_FRESHNESS_FUTURE_SKEW, detail=bookend + " future skew exceeds pre_release_freshness_future_skew_max_ms=5000")
-        # Existing authoritative state-integrity limits (stricter wins).
-        if age_ms > lim.max_reconciliation_lag_ms:
-            raise RunnerError(RunnerFailureCode.DYNAMIC_READ_FRESHNESS_STALE, detail=bookend + " age exceeds state_integrity.max_reconciliation_lag_ms")
-        if future_ms > lim.max_future_wall_clock_skew_ms:
-            raise RunnerError(RunnerFailureCode.DYNAMIC_READ_FRESHNESS_FUTURE_SKEW, detail=bookend + " future skew exceeds state_integrity.max_future_wall_clock_skew_ms")
-    window_ms = (t1 - t0).total_seconds() * 1000.0
-    if window_ms > lim.reconciliation_read_deadline_ms:
-        raise RunnerError(RunnerFailureCode.DYNAMIC_READ_FRESHNESS_STALE, detail="T0..T1 window exceeds state_integrity.reconciliation_read_deadline_ms")
+    for bookend, as_of_utc, sample_utc in (
+        ("T0", read.freshness_before.as_of_time_utc, t0_sample_utc),
+        ("T1", read.freshness_after.as_of_time_utc, t1_sample_utc),
+    ):
+        _require_stage3_udt_not_future(
+            bookend=bookend, as_of_utc=as_of_utc, post_response_wall_utc=sample_utc,
+            max_future_wall_clock_skew_ms=lim.max_future_wall_clock_skew_ms,
+        )
+    if (
+        read_window_start_monotonic_ns is not _STAGE3_READ_WINDOW_NOT_SUPPLIED
+        or read_window_finish_monotonic_ns is not _STAGE3_READ_WINDOW_NOT_SUPPLIED
+    ):
+        _require_stage3_local_read_duration(
+            read_window_start_monotonic_ns, read_window_finish_monotonic_ns,
+            reconciliation_read_deadline_ms=lim.reconciliation_read_deadline_ms,
+        )
 
     # R03: recompute the composite identity from the full object.
     expected = compute_dynamic_index_domain_read_set_identity(
@@ -6464,12 +6937,12 @@ PRE_RELEASE_READ_REQUEST_MAX_V2 = (
 )
 assert PRE_RELEASE_READ_REQUEST_MAX_V2 == 72, PRE_RELEASE_READ_REQUEST_MAX_V2
 
-# DSB-FRESH-003 -- ADDITIONAL active-V2 acquisition caps.  They are
-# conjunctive with the existing authoritative ``RiskLimitConfigV1.state_
-# integrity`` predicates and never relax them; the stricter applicable
-# predicate wins (Marco approval binding interpretation).
-_PRE_RELEASE_FRESHNESS_MAX_AGE_MS = 30000
-_PRE_RELEASE_FRESHNESS_FUTURE_SKEW_MAX_MS = 5000
+# DSB-FRESH-003's former 30000-ms UDT absolute-age cap and hardcoded 5000-ms
+# UDT future allowance are RETIRED by the Stage-3 semantics SPEC_01
+# (FS-UDT-002 / FS-UDT-007): user_data_timestamp is a watermark, not a
+# clock, and its future ordering uses ONLY the accepted
+# ``state_integrity.max_future_wall_clock_skew_ms``.  No replacement UDT-age
+# threshold exists.
 
 # DSB-READSET-005 -- the exact accepted dynamic source identity.
 _ACTIVE_DYNAMIC_SOURCE_IDENTITY: Mapping[str, object] = MappingProxyType({
@@ -6850,6 +7323,10 @@ class _ActiveV2AcquiredReadV1:
     selected_route_truth: "AuthoritativeReadTruthV1"
     t0_wall_sample_utc: str
     t1_wall_sample_utc: str
+    # Stage-3 semantics FS-RD-001: the exact local monotonic read-window
+    # samples (validated fail-closed at the mint; never part of ADRS2).
+    read_window_start_monotonic_ns: object = None
+    read_window_finish_monotonic_ns: object = None
 
     def __post_init__(self) -> None:
         if (
@@ -6948,17 +7425,29 @@ class _ActiveV2OperationAdapter:
             ticker=ticker, order_id=order_id, cursor=cursor,
             request_ordinal=ordinal, uuid_factory=self._runtime.uuid_factory,
         )
-        # All local request construction/validation is now complete.
+        # All local request construction/validation is now complete
+        # (Stage-3 semantics FS-ACC-001: PREPARED).
+        evidence = capability.stage3_evidence
+        entry = evidence.prepared(operation)
         check_deadline(deadline, self._runtime.monotonic_clock_ns(), checkpoint=DeadlineCheckpoint.AFTER_PREPARATION)
         check_deadline(deadline, self._runtime.monotonic_clock_ns(), checkpoint=DeadlineCheckpoint.AFTER_SIGNING)
-        # Charge exactly once; the next fallible action is the transport call.
+        # FS-RD-001 START (first post-T0 request only), then charge exactly
+        # once (BOUNDARY_ENTERED); the next fallible action is the transport.
+        evidence.sample_read_window_start_if_armed(self._runtime.monotonic_clock_ns)
         capability.charge(operation)
-        raw = self._runtime.send_operation_request(runner_op, prepared, deadline)
+        evidence.advance(entry, "TRANSPORT_ATTEMPTED")
+        try:
+            raw = self._runtime.send_operation_request(runner_op, prepared, deadline)
+        except RunnerError:
+            evidence.advance(entry, "RESPONSE_COMPLETED")
+            raise
+        evidence.advance(entry, "RESPONSE_COMPLETED")
         check_deadline(deadline, self._runtime.monotonic_clock_ns(), checkpoint=DeadlineCheckpoint.AFTER_TRANSPORT)
         parsed = _decode_and_validate_runner_json_response(
             runner_op, raw_response=raw, deadline=deadline,
             now_monotonic_ns=self._runtime.monotonic_clock_ns,
         )
+        evidence.advance(entry, "ACCEPTED_PARSED")
         raw_bytes = raw.body_bytes if type(raw.body_bytes) is bytes else b""
         return parsed, raw_bytes, deadline
 
@@ -7018,9 +7507,20 @@ class _ActiveV2OperationAdapter:
                 RunnerFailureCode.RESPONSE_SCHEMA_INVALID,
                 detail="orderbook prepare halt " + prepared.code.value,
             )
+        # Stage-3 semantics FS-ACC-001: PREPARED after runner-local
+        # preparation + ``seam.prepare`` succeeded.
+        evidence = capability.stage3_evidence
+        entry = evidence.prepared(ActivePreReleaseReadOperationV2.GET_MARKET_ORDERBOOK)
         check_deadline(deadline, self._runtime.monotonic_clock_ns(), checkpoint=DeadlineCheckpoint.AFTER_PREPARATION)
+        evidence.sample_read_window_start_if_armed(self._runtime.monotonic_clock_ns)
         capability.charge(ActivePreReleaseReadOperationV2.GET_MARKET_ORDERBOOK)
-        result = seam.execute(prepared, deadline)  # FIRST transport-side action
+        evidence.advance(entry, "TRANSPORT_ATTEMPTED")
+        try:
+            result = seam.execute(prepared, deadline)  # FIRST transport-side action
+        except RunnerError:
+            evidence.advance(entry, "RESPONSE_COMPLETED")
+            raise
+        evidence.advance(entry, "RESPONSE_COMPLETED")
         check_deadline(deadline, self._runtime.monotonic_clock_ns(), checkpoint=DeadlineCheckpoint.AFTER_TRANSPORT)
         if isinstance(result, OrderBookHalt):
             # DSB-OB-008: the charged unit stays consumed -- no refund, no retry.
@@ -7035,6 +7535,7 @@ class _ActiveV2OperationAdapter:
             raise RunnerError(RunnerFailureCode.RESPONSE_SCHEMA_INVALID, detail="orderbook return type")
         if result.market_ticker != ticker:
             raise RunnerError(RunnerFailureCode.MARKET_IDENTITY_INVALID, detail="orderbook ticker mismatch")
+        evidence.advance(entry, "ACCEPTED_PARSED")
         return result, deadline
 
 
@@ -7097,19 +7598,72 @@ def _active_v2_status_domain_and_content(parsed: "Mapping[str, object]") -> "Tup
 
 
 def _active_v2_as_of_time(parsed: "Mapping[str, object]") -> str:
-    """DSB-OPS-007 -- the single ARB-consumed ``as_of_time`` field: a
-    nonempty timezone-aware RFC3339 string producing a finite UTC instant.
-    Naive/invalid/duplicate-key/non-string fails closed."""
+    """DSB-OPS-007 / FS-UDT-003 -- the single ARB-consumed ``as_of_time``
+    field: a nonempty timezone-aware RFC3339 string producing a finite UTC
+    instant.  Missing / naive / invalid / duplicate-key / non-string fails
+    closed ``USER_DATA_TIMESTAMP_MALFORMED``."""
     raw = parsed.get("as_of_time")
     if type(raw) is not str or raw == "":
-        raise RunnerError(RunnerFailureCode.DYNAMIC_READ_FRESHNESS_MALFORMED, detail="as_of_time missing/non-string")
+        raise RunnerError(RunnerFailureCode.USER_DATA_TIMESTAMP_MALFORMED, detail="as_of_time missing/non-string")
+    # Correction 01 (BLOCK-IMPL-01): the raw venue value is NOT ARB
+    # canonical-storage syntax; it is parsed as an explicit-offset RFC3339
+    # date-time and deterministically normalized to canonical UTC.
+    return _stage3_normalize_udt(raw)
+
+
+# FS-UDT-003 / Correction 01 -- timezone-aware extended RFC3339 date-time with
+# an explicit ``Z`` or ``+HH:MM`` / ``-HH:MM`` offset.  ASCII digits only.
+_STAGE3_UDT_RFC3339_RE = re.compile(
+    r"([0-9]{4})-([0-9]{2})-([0-9]{2})T([0-9]{2}):([0-9]{2}):([0-9]{2})"
+    r"(?:\.([0-9]{1,9}))?"
+    r"(Z|([+-])([0-9]{2}):([0-9]{2}))",
+    re.ASCII,
+)
+
+
+def _stage3_normalize_udt(raw: object) -> str:
+    """FS-UDT-003 -- parse one raw ``as_of_time`` and return its exact instant
+    as the ARB canonical UTC string (``YYYY-MM-DDTHH:MM:SS.ffffffZ``).
+
+    Accepted: ``Z`` or a numeric ``+HH:MM`` / ``-HH:MM`` offset (hours 00-23,
+    minutes 00-59).  Rejected ``USER_DATA_TIMESTAMP_MALFORMED``: non-string,
+    timezone-naive, mixed / basic-format / out-of-range offsets, the RFC3339
+    ``-00:00`` unknown-local-offset form, impossible calendar dates or times
+    (including leap second 60), and fractional seconds not exactly
+    representable in microseconds.  Normalization is pure integer datetime
+    arithmetic; only the converted UTC output reaches the ARB canonical
+    validator."""
+    malformed = RunnerFailureCode.USER_DATA_TIMESTAMP_MALFORMED
+    if type(raw) is not str:
+        raise RunnerError(malformed, detail="as_of_time missing/non-string")
+    match = _STAGE3_UDT_RFC3339_RE.fullmatch(raw)
+    if match is None:
+        raise RunnerError(malformed, detail="as_of_time not an explicit-offset RFC3339 date-time")
+    year, month, day, hour, minute, second = (int(match.group(i)) for i in range(1, 7))
+    fraction = match.group(7) or ""
+    if len(fraction) > 6 and fraction[6:].strip("0"):
+        raise RunnerError(malformed, detail="as_of_time fractional seconds not exactly representable")
+    microsecond = int((fraction + "000000")[:6])
+    if match.group(8) == "Z":
+        offset_minutes = 0
+    else:
+        offset_hours, offset_mins = int(match.group(10)), int(match.group(11))
+        if offset_hours > 23 or offset_mins > 59:
+            raise RunnerError(malformed, detail="as_of_time timezone offset out of range")
+        if match.group(9) == "-" and offset_hours == 0 and offset_mins == 0:
+            raise RunnerError(malformed, detail="as_of_time -00:00 unknown local offset")
+        offset_minutes = offset_hours * 60 + offset_mins
+        if match.group(9) == "-":
+            offset_minutes = -offset_minutes
     try:
-        # ARB canonical UTC form (``...%f Z``): a finite timezone-aware instant.
-        # A naive / invalid / malformed-offset value fails closed here.
-        canonical = validate_canonical_timestamp(raw)
-        _parse_canonical_utc(canonical)
-    except Exception as exc:  # noqa: BLE001 - any parse failure is fail-closed
-        raise RunnerError(RunnerFailureCode.DYNAMIC_READ_FRESHNESS_MALFORMED, detail="as_of_time not a finite canonical UTC instant") from exc
+        local = datetime(
+            year, month, day, hour, minute, second, microsecond,
+            tzinfo=timezone(timedelta(minutes=offset_minutes)),
+        )
+        canonical = canonical_timestamp(local.astimezone(timezone.utc))
+        validate_canonical_timestamp(canonical)
+    except (ValueError, OverflowError, LedgerError) as exc:
+        raise RunnerError(malformed, detail="as_of_time not a valid calendar instant") from exc
     return canonical
 
 
@@ -7810,10 +8364,26 @@ def _run_active_v2_acquisition(
     )
     _final_check(s0_deadline)
 
-    # 2 -- T0 freshness-before (wall sample taken immediately after parse)
+    # 2 -- T0 freshness-before (wall sample taken immediately after parse).
+    # Stage-3 semantics FS-UDT: a watermark only -- retain raw/normalized/
+    # post-response wall/future skew; ordering sanity against the accepted
+    # ``max_future_wall_clock_skew_ms``; NO absolute-age gate.
+    evidence = capability.stage3_evidence
+    lim = runtime.risk_config.state_integrity
     t0_parsed, t0_raw, t0_deadline = _bookend(ActivePreReleaseReadOperationV2.GET_USER_DATA_TIMESTAMP, bookend="BEFORE")
+    evidence.record("udt_t0_raw", _stage3_udt_raw(t0_parsed))
     t0_as_of = _active_v2_as_of_time(t0_parsed)
     t0_wall = canonical_timestamp(runtime.wall_clock())
+    evidence.record("udt_t0_utc", t0_as_of)
+    evidence.record("udt_t0_post_response_wall_utc", t0_wall)
+    evidence.record("udt_t0_future_skew_us", _stage3_udt_future_skew_us(t0_as_of, t0_wall))
+    _require_stage3_udt_not_future(
+        bookend="T0", as_of_utc=t0_as_of, post_response_wall_utc=t0_wall,
+        max_future_wall_clock_skew_ms=lim.max_future_wall_clock_skew_ms,
+    )
+    # FS-RD-001: START is sampled immediately before the first post-T0
+    # request's boundary entry (GET_MARKET), after its local plan validation.
+    evidence.arm_read_window_start()
     freshness_before = _ActiveV2BookendCommitmentV1(
         operation=ActivePreReleaseReadOperationV2.GET_USER_DATA_TIMESTAMP.value, bookend="BEFORE",
         request_identity_sha256=_req_id(ActivePreReleaseReadOperationV2.GET_USER_DATA_TIMESTAMP),
@@ -7953,12 +8523,35 @@ def _run_active_v2_acquisition(
 
     # 7 -- T1 freshness-after
     t1_parsed, t1_raw, t1_deadline = _bookend(ActivePreReleaseReadOperationV2.GET_USER_DATA_TIMESTAMP, bookend="AFTER")
+    evidence.record("udt_t1_raw", _stage3_udt_raw(t1_parsed))
     t1_as_of = _active_v2_as_of_time(t1_parsed)
     t1_wall = canonical_timestamp(runtime.wall_clock())
+    # FS-RD-001 FINISH: immediately after the T1 post-response wall sample,
+    # same monotonic source as START, before S1 / semantic evaluation.
+    read_window_finish_ns = evidence.sample_read_window_finish(runtime.monotonic_clock_ns)
+    read_window_start_ns = evidence.read_window_start()
+    evidence.record("udt_t1_utc", t1_as_of)
+    evidence.record("udt_t1_post_response_wall_utc", t1_wall)
+    evidence.record("udt_t1_future_skew_us", _stage3_udt_future_skew_us(t1_as_of, t1_wall))
+    evidence.record("udt_absolute_age_ms_diagnostic", -_stage3_udt_future_skew_us(t1_as_of, t1_wall) // _STAGE3_US_PER_MS)
+    if (
+        type(read_window_start_ns) is int and type(read_window_finish_ns) is int
+        and read_window_finish_ns >= read_window_start_ns
+    ):
+        evidence.record("local_read_duration_ns", read_window_finish_ns - read_window_start_ns)
     if _parse_canonical_utc(t1_as_of) < _parse_canonical_utc(t0_as_of):
-        raise RunnerError(RunnerFailureCode.DYNAMIC_READ_FRESHNESS_REGRESSION, detail="T1 as_of < T0 as_of")
+        raise RunnerError(RunnerFailureCode.USER_DATA_TIMESTAMP_REGRESSION, detail="T1 as_of < T0 as_of")
+    evidence.record("udt_relation", "UNCHANGED" if t1_as_of == t0_as_of else "ADVANCED")
     if _parse_canonical_utc(t1_wall) < _parse_canonical_utc(t0_wall):
         raise RunnerError(RunnerFailureCode.DYNAMIC_READ_CLOCK_REGRESSION, detail="trusted wall-clock sample regressed T0->T1")
+    _require_stage3_udt_not_future(
+        bookend="T1", as_of_utc=t1_as_of, post_response_wall_utc=t1_wall,
+        max_future_wall_clock_skew_ms=lim.max_future_wall_clock_skew_ms,
+    )
+    _require_stage3_local_read_duration(
+        read_window_start_ns, read_window_finish_ns,
+        reconciliation_read_deadline_ms=lim.reconciliation_read_deadline_ms,
+    )
     freshness_after = _ActiveV2BookendCommitmentV1(
         operation=ActivePreReleaseReadOperationV2.GET_USER_DATA_TIMESTAMP.value, bookend="AFTER",
         request_identity_sha256=_active_v2_request_identity_sha256(
@@ -8049,6 +8642,8 @@ def _run_active_v2_acquisition(
         per_index=tuple(per_index), exact_order_supplements=tuple(supplements),
         d0=d0, d1=d1, fixture=fixture, selected_route_truth=selected_route_truth,
         t0_wall_sample_utc=t0_wall, t1_wall_sample_utc=t1_wall,
+        read_window_start_monotonic_ns=read_window_start_ns,
+        read_window_finish_monotonic_ns=read_window_finish_ns,
     )
 
 
@@ -8266,7 +8861,7 @@ class _TrustedDynamicPreReleaseReadCapabilityV2:
 
     __slots__ = (
         "_runtime", "_issuer_sentinel", "_nonce", "_absolute_invocation_deadline_ns",
-        "_consumed", "_requests_consumed", "_lock",
+        "_consumed", "_requests_consumed", "_lock", "_stage3_evidence",
     )
 
     def __init__(self, key: object, *, runtime: "ExperimentRunnerRuntimeV2", absolute_invocation_deadline_ns: int) -> None:
@@ -8286,6 +8881,8 @@ class _TrustedDynamicPreReleaseReadCapabilityV2:
         self._consumed = False
         self._requests_consumed = 0
         self._lock = threading.Lock()
+        # Stage-3 semantics FS-ACC: the ONE module-private lifecycle tracker.
+        self._stage3_evidence = _Stage3EvidenceRecorderV2()
 
     @property
     def runtime(self) -> "ExperimentRunnerRuntimeV2":
@@ -8308,6 +8905,10 @@ class _TrustedDynamicPreReleaseReadCapabilityV2:
         return self._requests_consumed
 
     @property
+    def stage3_evidence(self) -> "_Stage3EvidenceRecorderV2":
+        return self._stage3_evidence
+
+    @property
     def is_consumed(self) -> bool:
         return self._consumed
 
@@ -8327,6 +8928,9 @@ class _TrustedDynamicPreReleaseReadCapabilityV2:
             if self._requests_consumed + count > PRE_RELEASE_READ_REQUEST_MAX_V2:
                 raise RunnerError(RunnerFailureCode.DYNAMIC_READ_BUDGET_EXHAUSTED, detail="request " + str(self._requests_consumed + count) + " exceeds pre_release_read_request_max_v2=72")
             self._requests_consumed += count
+            # FS-ACC-001 BOUNDARY_ENTERED -- recorded ONLY on a successful
+            # charge, so the boundary count equals ``requests_consumed``.
+            self._stage3_evidence.enter_boundary(operation, count=count)
 
     def mark_consumed(self) -> None:
         with self._lock:
@@ -8383,8 +8987,18 @@ def _mint_release_eligible_read_set(
         raise RunnerError(RunnerFailureCode.SUBACCOUNT_WIDE_COMPLETENESS_UNPROVEN, detail="active runtime risk_config required")
     if type(selected_route_truth) is not AuthoritativeReadTruthV1:
         raise RunnerError(RunnerFailureCode.SUBACCOUNT_WIDE_COMPLETENESS_UNPROVEN, detail="selected-route truth type")
-    require_complete_active_pagination(selected_route_truth.orders_complete, detail="orders")
-    require_complete_active_pagination(selected_route_truth.fills_complete, detail="fills")
+    # Stage-3 semantics FS-COMP-001/003: an aggregate current-live
+    # completeness gap with no more precise classification (the precise
+    # pagination / cursor / scope / schema codes were already raised by the
+    # acquirer) is CURRENT_VENUE_COMPLETENESS_UNRESOLVED -- unknown, never zero.
+    for complete, detail in (
+        (selected_route_truth.orders_complete, "orders"),
+        (selected_route_truth.fills_complete, "fills"),
+    ):
+        if complete is not True:
+            raise RunnerError(
+                RunnerFailureCode.CURRENT_VENUE_COMPLETENESS_UNRESOLVED,
+                detail="current live " + detail + " completeness unproven")
     # C09-C: the domain-wide exactly-once fill-identity proof runs at this ONE
     # converged live/fake boundary, before any release-eligible mint or risk
     # acceptance consumes the accepted fill rows.
@@ -8405,7 +9019,10 @@ def _mint_release_eligible_read_set(
         now_utc=started_utc,
         t0_wall_sample_utc=acquired.t0_wall_sample_utc,
         t1_wall_sample_utc=acquired.t1_wall_sample_utc,
+        read_window_start_monotonic_ns=acquired.read_window_start_monotonic_ns,
+        read_window_finish_monotonic_ns=acquired.read_window_finish_monotonic_ns,
     )
+    _record_stage3_acquired_semantics(capability.stage3_evidence, acquired)
 
     selected_ticker_value = (
         selected_route_truth.market.get("ticker") if isinstance(selected_route_truth.market, Mapping) else ""
@@ -8738,6 +9355,11 @@ def _synthesize_active_v2_acquired(
         d0=d0, d1=d1, fixture=fixture, selected_route_truth=selected_route_truth,
         t0_wall_sample_utc=fixture.freshness_before.as_of_time_utc,
         t1_wall_sample_utc=fixture.freshness_after.as_of_time_utc,
+        # The fake seam executes no transport state machine; its synthetic
+        # read window is two consecutive samples of the SAME runtime
+        # monotonic clock, validated by the same mint predicate.
+        read_window_start_monotonic_ns=runtime.monotonic_clock_ns(),
+        read_window_finish_monotonic_ns=runtime.monotonic_clock_ns(),
     )
 
 
@@ -8911,6 +9533,10 @@ class PreReleaseReadPhaseResultV2:
     truth: object
     requests_consumed: int
     trusted_dynamic_read_set_id: str = ""
+    # Stage-3 semantics SPEC_01: exact accounting/semantic evidence snapshot
+    # and the stable terminal classification of a local halt, if any.
+    stage3_evidence: object = None
+    terminal_classification: str = ""
 
 
 def run_pre_release_read_phase_v2(
@@ -8944,49 +9570,73 @@ def run_pre_release_read_phase_v2(
 
     process_instance_id = runtime.normal_gate.process_instance_id
 
-    opened = runtime.read_local_safety_state()
-    if type(opened) is not OpenResult:
-        raise RunnerError(RunnerFailureCode.ACTIVE_GATE_ENTRY_PRECONDITION_FAILED, detail="local state type")
+    # Stage-3 semantics FS-ACC-003: every exception leaving this phase BEFORE
+    # the Stage-3D capability exists carries the control-flow-proven exact
+    # zero (no Stage-3 boundary can exist without that capability).
+    try:
+        opened = runtime.read_local_safety_state()
+        if type(opened) is not OpenResult:
+            raise RunnerError(RunnerFailureCode.ACTIVE_GATE_ENTRY_PRECONDITION_FAILED, detail="local state type")
 
-    reasons = _local_impossibility_reasons(
-        opened, writer_proof_id=runtime.active_contract.writer_proof_id,
-        allowed_completeness=_ACTIVE_LOCAL_COMPLETENESS_VALUES,
-        require_writer_proof_release_eligible=False,
-        allowed_risk_control_states=_ACTIVE_LOCAL_PRE_RELEASE_READ_RISK_STATES,
-    )
+        reasons = _local_impossibility_reasons(
+            opened, writer_proof_id=runtime.active_contract.writer_proof_id,
+            allowed_completeness=_ACTIVE_LOCAL_COMPLETENESS_VALUES,
+            require_writer_proof_release_eligible=False,
+            allowed_risk_control_states=_ACTIVE_LOCAL_PRE_RELEASE_READ_RISK_STATES,
+        )
+    except Exception as exc:
+        _attach_stage3_evidence(exc, _STAGE3_PROVEN_ZERO_SNAPSHOT)
+        raise
     if reasons:
+        # FS-COMP-004: unprovable durable history halts before any venue read.
+        historical = any(r.startswith("HISTORY_COMPLETENESS:") for r in reasons)
         return PreReleaseReadPhaseResultV2(
             status="LOCALLY_BLOCKED", process_instance_id=process_instance_id,
             local_block_reasons=reasons, active_release_state=None, truth=None,
             requests_consumed=0, trusted_dynamic_read_set_id="",
+            stage3_evidence=_STAGE3_PROVEN_ZERO_SNAPSHOT,
+            terminal_classification=(
+                RunnerFailureCode.HISTORICAL_COMPLETENESS_UNRESOLVED.value if historical else ""),
         )
 
     # Stage 3D -- one closed process-local trusted capability, receiving the
     # already-running absolute invocation deadline (no reset).
-    capability = _issue_trusted_dynamic_pre_release_read_capability_v2(
-        runtime, runtime.experiment_absolute_end_monotonic_ns,
-    )
+    try:
+        capability = _issue_trusted_dynamic_pre_release_read_capability_v2(
+            runtime, runtime.experiment_absolute_end_monotonic_ns,
+        )
+    except Exception as exc:
+        _attach_stage3_evidence(exc, _STAGE3_PROVEN_ZERO_SNAPSHOT)
+        raise
 
-    # Stage 3E -- the live trusted acquirer owns every current venue GET and
-    # returns exactly one private release-eligible read-set.
-    read_set = _acquire_release_eligible_dynamic_index_domain_read_set_v2(
-        runtime, capability, selected_ticker=invocation.market_ticker, opened=opened,
-    )
+    try:
+        # Stage 3E -- the live trusted acquirer owns every current venue GET
+        # and returns exactly one private release-eligible read-set.
+        read_set = _acquire_release_eligible_dynamic_index_domain_read_set_v2(
+            runtime, capability, selected_ticker=invocation.market_ticker, opened=opened,
+        )
 
-    truth = read_set.selected_route_truth
+        truth = read_set.selected_route_truth
 
-    # Stage 3F -- assemble ActiveReleaseEvaluationStateV1 committing to the
-    # exact private read-set identity.
-    active_release_state = assemble_active_release_evaluation_state_v1(
-        runtime, truth, opened.projection,
-        trusted_dynamic_read_set_id=read_set.read_set_id,
-    )
+        # Stage 3F -- assemble ActiveReleaseEvaluationStateV1 committing to
+        # the exact private read-set identity.
+        active_release_state = assemble_active_release_evaluation_state_v1(
+            runtime, truth, opened.projection,
+            trusted_dynamic_read_set_id=read_set.read_set_id,
+        )
+    except Exception as exc:
+        # FS-ACC-003/004: post-capability failure keeps the exact (or proven
+        # lower-bound) request accounting actually known on the error path.
+        _attach_stage3_evidence(
+            exc, capability.stage3_evidence.snapshot(requests_consumed=capability.requests_consumed))
+        raise
 
     return PreReleaseReadPhaseResultV2(
         status="READ_PHASE_COMPLETE", process_instance_id=process_instance_id,
         local_block_reasons=(), active_release_state=active_release_state, truth=truth,
         requests_consumed=read_set.pre_release_requests_consumed,
         trusted_dynamic_read_set_id=read_set.read_set_id,
+        stage3_evidence=capability.stage3_evidence.snapshot(requests_consumed=capability.requests_consumed),
     )
 
 
@@ -12637,73 +13287,100 @@ def run_read_only_stage3_live_entrypoint(
     ``*_clock*`` / ``uuid_factory`` / ``runtime_builder`` / ``credential_bridge``
     are injectable ONLY so the offline tests can drive the exact composition
     with a synthetic temp ledger, synthetic env, and synthetic transports.
+
+    Stage-3 semantics SPEC_01 (FS-ACC-002..005): the returned mapping is a
+    truthful revision-2 Stage-3 result (``stage3_result_schema_revision=2``)
+    and EVERY exception leaving this boundary carries the Stage-3 accounting
+    actually known on its error path (control-flow-proven exact zero only
+    when the Stage-3 read phase was never entered), which ``main`` serializes
+    into ``LIVE_ENTRYPOINT_FAILED``.
     """
-    if type(config) is not LiveReadOnlyStage3InvocationConfigV1:
-        raise RunnerError(RunnerFailureCode.LIVE_ENTRYPOINT_PRECONDITION_FAILED, detail="config type")
+    read_phase_entered = False
+    read_phase_result = None
+    try:
+        if type(config) is not LiveReadOnlyStage3InvocationConfigV1:
+            raise RunnerError(RunnerFailureCode.LIVE_ENTRYPOINT_PRECONDITION_FAILED, detail="config type")
 
-    # Correction 02 BLOCK-02 / DSB-LIVE-AUTH-007: fail closed unless the live
-    # confirmation is EXACTLY True (identity, not truthiness), BEFORE any clock
-    # sample, file read, runtime/credential/lifecycle/venue activity.
-    if confirm_live_read is not True:
-        raise RunnerError(
-            RunnerFailureCode.LIVE_ENTRYPOINT_PRECONDITION_FAILED,
-            detail="live execution boundary requires confirm_live_read is exactly True",
+        # Correction 02 BLOCK-02 / DSB-LIVE-AUTH-007: fail closed unless the
+        # live confirmation is EXACTLY True (identity, not truthiness), BEFORE
+        # any clock sample, file read, runtime/credential/lifecycle/venue
+        # activity.
+        if confirm_live_read is not True:
+            raise RunnerError(
+                RunnerFailureCode.LIVE_ENTRYPOINT_PRECONDITION_FAILED,
+                detail="live execution boundary requires confirm_live_read is exactly True",
+            )
+
+        # DSB-LIVE-DEADLINE-001: resolve the monotonic callable and sample it
+        # ONCE, at the very top of the live execution boundary, BEFORE any
+        # file I/O.
+        mono = time.monotonic_ns if monotonic_clock_ns is None else monotonic_clock_ns
+        invocation_start_monotonic_ns = mono()
+        if type(invocation_start_monotonic_ns) is not int or type(invocation_start_monotonic_ns) is bool:
+            raise RunnerError(
+                RunnerFailureCode.LIVE_ENTRYPOINT_PRECONDITION_FAILED,
+                detail="monotonic clock did not return an exact int",
+            )
+        experiment_absolute_end_monotonic_ns = (
+            invocation_start_monotonic_ns
+            + _D07_ABSOLUTE_EXPERIMENT_DEADLINE_SECONDS * 1_000_000_000
         )
 
-    # DSB-LIVE-DEADLINE-001: resolve the monotonic callable and sample it ONCE,
-    # at the very top of the live execution boundary, BEFORE any file I/O.
-    mono = time.monotonic_ns if monotonic_clock_ns is None else monotonic_clock_ns
-    invocation_start_monotonic_ns = mono()
-    if type(invocation_start_monotonic_ns) is not int or type(invocation_start_monotonic_ns) is bool:
-        raise RunnerError(
-            RunnerFailureCode.LIVE_ENTRYPOINT_PRECONDITION_FAILED,
-            detail="monotonic clock did not return an exact int",
+        wall = (lambda: datetime.now(timezone.utc)) if wall_clock is None else wall_clock
+        make_uuid = uuid.uuid4 if uuid_factory is None else uuid_factory
+        builder = _build_read_only_stage3_live_runtime if runtime_builder is None else runtime_builder
+        bridge = _demo_path_to_pem_credential_bridge if credential_bridge is None else credential_bridge
+
+        # DSB-LIVE-AUTH-002/003 -- verified BEFORE runtime construction /
+        # credentials.
+        authorization_envelope = _d07_load_external_execution_authorization(
+            path=config.execution_authorization_json_path,
+            expected_sha256=config.execution_authorization_sha256,
         )
-    experiment_absolute_end_monotonic_ns = (
-        invocation_start_monotonic_ns
-        + _D07_ABSOLUTE_EXPERIMENT_DEADLINE_SECONDS * 1_000_000_000
-    )
 
-    wall = (lambda: datetime.now(timezone.utc)) if wall_clock is None else wall_clock
-    make_uuid = uuid.uuid4 if uuid_factory is None else uuid_factory
-    builder = _build_read_only_stage3_live_runtime if runtime_builder is None else runtime_builder
-    bridge = _demo_path_to_pem_credential_bridge if credential_bridge is None else credential_bridge
-
-    # DSB-LIVE-AUTH-002/003 -- verified BEFORE runtime construction / credentials.
-    authorization_envelope = _d07_load_external_execution_authorization(
-        path=config.execution_authorization_json_path,
-        expected_sha256=config.execution_authorization_sha256,
-    )
-
-    runtime = builder(
-        config,
-        monotonic_clock_ns=mono,
-        wall_clock=wall,
-        uuid_factory=make_uuid,
-        experiment_absolute_end_monotonic_ns=experiment_absolute_end_monotonic_ns,
-        authorization_envelope=authorization_envelope,
-        installed_implementation_commit=config.installed_implementation_commit,
-    )
-    invocation = ExperimentRunnerInvocationV2(
-        invocation_id=config.invocation_id or ("d07_" + make_uuid().hex),
-        market_ticker=config.market_ticker,
-    )
-    with bridge():
-        result = run_pre_release_read_phase_v2(invocation, runtime)
-
-    if result.status not in ("LOCALLY_BLOCKED", "READ_PHASE_COMPLETE"):
-        raise RunnerError(
-            RunnerFailureCode.LIVE_ENTRYPOINT_PRECONDITION_FAILED,
-            detail="unexpected read-phase status",
+        runtime = builder(
+            config,
+            monotonic_clock_ns=mono,
+            wall_clock=wall,
+            uuid_factory=make_uuid,
+            experiment_absolute_end_monotonic_ns=experiment_absolute_end_monotonic_ns,
+            authorization_envelope=authorization_envelope,
+            installed_implementation_commit=config.installed_implementation_commit,
         )
-    return {
+        invocation = ExperimentRunnerInvocationV2(
+            invocation_id=config.invocation_id or ("d07_" + make_uuid().hex),
+            market_ticker=config.market_ticker,
+        )
+        with bridge():
+            read_phase_entered = True
+            result = run_pre_release_read_phase_v2(invocation, runtime)
+            read_phase_result = result
+
+        if result.status not in ("LOCALLY_BLOCKED", "READ_PHASE_COMPLETE"):
+            raise RunnerError(
+                RunnerFailureCode.LIVE_ENTRYPOINT_PRECONDITION_FAILED,
+                detail="unexpected read-phase status",
+            )
+        stage3_fields = _stage3_revision2_result_fields(result.stage3_evidence)
+        if stage3_fields["stage3_request_accounting_resolution"] != "RESOLVED":
+            raise RunnerError(
+                RunnerFailureCode.REQUEST_ACCOUNTING_UNRESOLVED,
+                detail="read-phase result request accounting unresolved",
+            )
+    except Exception as exc:
+        if read_phase_result is not None:
+            _attach_stage3_evidence(exc, read_phase_result.stage3_evidence)
+        elif not read_phase_entered:
+            _attach_stage3_evidence(exc, _STAGE3_PROVEN_ZERO_SNAPSHOT)
+        raise
+    output = {
         "task_id": _D07_TASK_ID,
         "controlling_spec": "KALSHI_DEMO_DYNAMIC_SUBACCOUNT_EXECUTION_DOMAIN_BINDING_AND_RISK_CONTROL_SPEC_01_CORRECTION_04",
         "stage": "STAGE_3A_3F_READ_ONLY",
         "status": result.status,
         "process_instance_id": result.process_instance_id,
         "local_block_reasons": list(result.local_block_reasons),
-        "pre_release_requests_consumed": result.requests_consumed,
+        "stage3_terminal_classification": result.terminal_classification or None,
         "trusted_dynamic_read_set_id": result.trusted_dynamic_read_set_id,
         "execution_authorization_id": authorization_envelope.authorization_id,
         "installed_implementation_commit": config.installed_implementation_commit,
@@ -12713,6 +13390,11 @@ def run_read_only_stage3_live_entrypoint(
         "normal_writer": "NOT_ACQUIRED",
         "gate_d": "NOT_ENTERED",
     }
+    # Revision-2 accounting: ``pre_release_requests_consumed`` is the exact
+    # BOUNDARY_ENTERED count (== the capability's requests_consumed) and
+    # ``network_reads_stage3`` the exact TRANSPORT_ATTEMPTED count.
+    output.update(stage3_fields)
+    return output
 
 
 # ---------------------------------------------------------------------------
@@ -12966,10 +13648,12 @@ def main(argv: "Sequence[str] | None" = None) -> int:
             config, confirm_live_read=args.confirm_live_read is True,
         )
     except RunnerError as exc:
-        print(json.dumps(
-            {"status": "LIVE_ENTRYPOINT_FAILED", "failure": exc.code.value, "detail": exc.detail},
-            sort_keys=True,
-        ))
+        # Stage-3 semantics FS-ACC-002/003: the failure JSON is a revision-2
+        # Stage-3 result carrying the accounting/semantic evidence actually
+        # known on the error path -- never an initialised false zero.
+        failure = {"status": "LIVE_ENTRYPOINT_FAILED", "failure": exc.code.value, "detail": exc.detail}
+        failure.update(_stage3_revision2_result_fields(_stage3_evidence_of(exc)))
+        print(json.dumps(failure, sort_keys=True))
         return 1
     print(json.dumps(result, sort_keys=True))
     return 0
