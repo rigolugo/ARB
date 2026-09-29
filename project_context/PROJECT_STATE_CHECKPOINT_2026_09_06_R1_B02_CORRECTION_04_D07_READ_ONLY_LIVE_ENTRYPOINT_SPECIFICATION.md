@@ -5174,3 +5174,359 @@ remote Git write
 ```
 
 Nothing here is profitability or arbitrage evidence.
+
+### A31 R1-D07 Stage-3 freshness/completeness semantics implementation Correction-01 — APPROVED_AND_CANONICALLY_INSTALLED
+
+This is a documentation-only continuity overlay (task
+`R1-D07_STAGE3_FRESHNESS_AND_COMPLETENESS_SEMANTICS_IMPLEMENTATION_01_CORRECTION_01_CANONICAL_CONTINUITY_01`).
+This candidate is prepared directly from the exact canonical base on
+`rigolugo/ARB/main`:
+
+```text
+required_base_commit = a6c51f0d8f5797ca4a4d86d844d3a55abf7645da
+required_base_tree   = 8fdd1238f9c615d29a5eec3451717ca63666f4ba
+required_base_parent = 803c5c35bd98b41d3c9396a0b521c21f173d929f
+continuity_class     = DOCUMENTATION_ONLY
+```
+
+This section controls current state only when this continuity candidate is
+itself later present on canonical `main`. It alters no implementation bytes and
+grants no runtime capability. It updates exactly three existing documentation
+paths (this checkpoint, `project_context/START_HERE.md`, and
+`project_context/ARTIFACT_INDEX.md`); no new checkpoint or repository file is
+created and canonical read order is unchanged. A1-A30 are not rewritten.
+
+**Provenance distinction.** The source implementation was already installed on
+canonical `main` as commit `a6c51f0d8f5797ca4a4d86d844d3a55abf7645da` by a
+separately authorized remote installation task, completed before this
+continuity task. This continuity candidate is documentation-only: one local
+commit, no remote Git write, no project test or runtime, and no live Stage-3
+run. It did not install or execute the implementation.
+
+**A31.1 Installation identity.**
+
+```text
+STAGE3_FRESHNESS_AND_COMPLETENESS_SEMANTICS_IMPLEMENTATION_01_CORRECTION_01
+  = APPROVED_AND_CANONICALLY_INSTALLED
+
+installation_classification = REMOTE_INSTALLATION_CONFIRMED
+installation_source_mode    = EXACT_APPROVED_COMMIT_OBJECT
+
+installed_commit =
+a6c51f0d8f5797ca4a4d86d844d3a55abf7645da
+
+installed_tree =
+8fdd1238f9c615d29a5eec3451717ca63666f4ba
+
+installed_sole_parent =
+803c5c35bd98b41d3c9396a0b521c21f173d929f
+```
+
+Installed files:
+
+```text
+src/arb/venues/kalshi/minimal_market_maker_experiment_runner.py
+  bytes  = 724036
+  sha256 = 59eedb699d6ccad5470502cdfad7724d6a892e2e8c4f7021a3cf1ed2842adc5f
+  blob   = 975f6fe3b079b809c2021a6361e4c94eee05cbea
+
+tests/test_kalshi_minimal_market_maker_experiment_runner.py
+  bytes  = 855571
+  sha256 = 4e6fcf7e5fbcc333bed75e24c4c6ec1fcca3d2470ce63ab2105c94e1b355f011
+  blob   = 9f20e10ca3a17fb16d172a4c08edc58a1003fa04
+```
+
+Exactly these two paths changed from parent
+`803c5c35bd98b41d3c9396a0b521c21f173d929f`.
+
+Installation push: exactly one non-force fast-forward push
+(`git push --porcelain origin a6c51f0d8f5797ca4a4d86d844d3a55abf7645da:refs/heads/main`),
+one attempt, zero retries, no force, no force-with-lease, exit 0, remote-before
+`803c5c35bd98b41d3c9396a0b521c21f173d929f`, remote-after
+`a6c51f0d8f5797ca4a4d86d844d3a55abf7645da`. Authoritative remote readback
+confirmed the exact commit, tree, sole parent, and both installed blobs. No
+tests were run during installation.
+
+**A31.2 Blocked predecessor and correction lineage.**
+
+```text
+blocked_initial_candidate =
+b7f36339890c06c68439fc4bb153d8e5a7d69aba
+
+blocked_initial_tree =
+704194b86895ba8a0eaf28a0cee0bc001620c58f
+
+blocked_initial_parent =
+803c5c35bd98b41d3c9396a0b521c21f173d929f
+
+blocked_initial_candidate_status =
+MARCO_BLOCKED_NONCANONICAL_NEVER_INSTALL
+```
+
+Marco block handoff:
+
+```text
+R1-D07_STAGE3_FRESHNESS_AND_COMPLETENESS_SEMANTICS_IMPLEMENTATION_01_MARCO_BLOCK_HANDOFF_01.md
+  bytes  = 7375
+  sha256 = 967f867992155e7ca78cf70d7625cdae94a883d22e3490798979b189916a231e
+```
+
+Material blockers were:
+
+- `BLOCK-IMPL-01`: FS-UDT-003 valid explicit-offset parsing / deterministic
+  UTC normalization;
+- `BLOCK-IMPL-02`: incomplete revision-2 external-wrapper migration seed.
+
+Correction-01 closed both. The blocked candidate is not in canonical ancestry.
+
+**A31.3 Installed semantic implementation theorem.** Recorded without
+expansion beyond the approved SPEC (A30.5/A30.6) and the accepted review; the
+exact approved specification controls on any difference:
+
+```text
+UDT input:
+  valid timezone-aware RFC3339/ISO-8601 explicit Z or numeric offset accepted
+  raw venue text preserved separately
+  instant normalized deterministically to UTC
+  T0/T1 relation and future-skew use normalized instants
+  malformed/timezone-naive/invalid values fail closed
+
+UDT absolute-age gate = RETIRED
+hardcoded active-V2 5000-ms future allowance = RETIRED
+replacement UDT age threshold = NONE
+
+reconciliation_read_deadline_ms = 30000
+  = local monotonic Stage-3 read-window duration
+  = integer nanosecond comparison
+  = inclusive deadline boundary
+
+max_reconciliation_lag_ms = 1000
+  = preserved local FreshnessStampV1 reconciliation freshness
+  != UDT age limit
+
+market-data 1000-ms limits = PRESERVED
+
+Stage-3 request accounting:
+  result schema revision = 2
+  network_reads_stage3 = TRANSPORT_ATTEMPTED count
+  pre_release_requests_consumed = BOUNDARY_ENTERED count
+  exact/unknown state = EXACT_ZERO | EXACT_NONZERO | UNKNOWN_NONZERO
+  request lifecycle =
+    PREPARED -> BOUNDARY_ENTERED -> TRANSPORT_ATTEMPTED ->
+    RESPONSE_COMPLETED -> ACCEPTED_PARSED
+
+/historical/cutoff = NOT_ADDED
+historical portfolio route = NOT_ADDED
+Candidate-03 = NONE
+Candidate-02 = PRESERVED
+ADRS2/private read-set schema = PRESERVED
+```
+
+No theorem here implies that a live read-only Stage-3 rerun has occurred after
+installation.
+
+**A31.4 Offline review/test truth.** Reviewed test truth (not upgraded; no
+test was run by this continuity task):
+
+```text
+focused Stage-3 semantic class:
+  34 passed
+  52 subtests
+
+full runner test file:
+  1559 passed
+  2 skipped
+  252 subtests
+  0 failed
+
+protected dependency regression:
+  690 passed
+  265 subtests
+  0 failed
+
+full suite:
+  4124 passed
+  2 skipped
+  1354 subtests
+  1 failure
+```
+
+The sole full-suite failure is:
+
+```text
+AuthorizationConsumptionBindingTests::
+test_parallel_consumption_has_at_most_one_winner_and_never_retries
+
+observed shape:
+  consumer 1 = UNAVAILABLE / LEDGER_BUSY
+  consumer 2 = UNAVAILABLE / LEDGER_BUSY
+  winner count = 0
+  double consumption = NO
+```
+
+Canonical classification:
+
+```text
+PROTECTED_LEDGER_PARALLEL_CONSUMPTION_FLAKE =
+PREEXISTING_FAIL_CLOSED_NONBLOCKING_FOR_THIS_IMPLEMENTATION_REVIEW_ONLY
+
+FIXED = NO
+OPEN_SEPARATE_LIVENESS_TEST_ISSUE = YES
+```
+
+The full suite was not fully green. The flake remains OPEN and not fixed.
+
+**A31.5 External wrapper migration evidence (review-only, non-repository).**
+
+```text
+R1-D07_STAGE3_RESULT_SCHEMA_V2_EXTERNAL_WRAPPER_MIGRATION_01.md
+  bytes  = 4972
+  sha256 = de12e1a9dc0f33fe3e20482210f9914d35fe890f53f493220a55fcd609e9ad90
+
+R1-D07_STAGE3_RESULT_SCHEMA_V2_EXTERNAL_WRAPPER_MIGRATION_01.patch
+  bytes  = 8631
+  sha256 = 210886ccefb130ff456e93a303dc1a0f86b1613f6587f67bf50e26a94b3cb18b
+
+classification =
+NONEXECUTABLE_COMPATIBILITY_SEED
+```
+
+Accepted migration theorem:
+
+- a future wrapper requires `stage3_result_schema_revision == 2`;
+- a future wrapper requires `stage3_request_accounting_resolution == RESOLVED`;
+- it validates all revision-2 aggregate/lifecycle fields;
+- it checks aggregate ordering and exact identity relations;
+- it validates lifecycle ordinals/states/derived counts;
+- an old/absent revision or unresolved accounting never proves zero.
+
+These artifacts are not a live execution package and grant no authorization.
+
+**A31.6 Exact accepted review/install evidence identities.**
+
+```text
+initial blocked implementation submission:
+  R1-D07_STAGE3_FRESHNESS_AND_COMPLETENESS_SEMANTICS_IMPLEMENTATION_01_MARCO_SUBMISSION_BUNDLE.zip
+  bytes  = 393627
+  sha256 = f2ef1592e62b0d4f57200c29e86e26370e883a4478981dadd2db171400bb83af
+
+Marco BLOCK:
+  R1-D07_STAGE3_FRESHNESS_AND_COMPLETENESS_SEMANTICS_IMPLEMENTATION_01_MARCO_BLOCK_HANDOFF_01.md
+  bytes  = 7375
+  sha256 = 967f867992155e7ca78cf70d7625cdae94a883d22e3490798979b189916a231e
+
+Correction-01 submission:
+  R1-D07_STAGE3_FRESHNESS_AND_COMPLETENESS_SEMANTICS_IMPLEMENTATION_01_CORRECTION_01_MARCO_SUBMISSION_BUNDLE.zip
+  bytes  = 388351
+  sha256 = 4c111820e7db27bd1c85ca362f9ffde274c03bb36a66318c0415aee06fc07a02
+
+Correction-01 review ZIP:
+  R1-D07_STAGE3_FRESHNESS_AND_COMPLETENESS_SEMANTICS_IMPLEMENTATION_01_CORRECTION_01_MARCO_REVIEW.zip
+  bytes  = 379609
+  sha256 = 97de81c50f8500b1f49970cf80ba03c0bf9c0772f3ab4752686f7eda78ce689b
+
+Correction-01 candidate.patch:
+  bytes  = 130040
+  sha256 = a8ac0bf70f8af40bd122484fc0aee1b274f5300a878fe0a4febfe8040bcd116d
+
+Correction-01 Marco approval:
+  R1-D07_STAGE3_FRESHNESS_AND_COMPLETENESS_SEMANTICS_IMPLEMENTATION_01_CORRECTION_01_MARCO_APPROVAL_HANDOFF_01.md
+  bytes    = 9106
+  sha256   = 194379b288fc7e6b27feb7337c4d938019e179b09429b38ad795c47d8e64811e
+  decision = APPROVE
+
+Canonical installation evidence:
+  R1-D07_STAGE3_FRESHNESS_AND_COMPLETENESS_SEMANTICS_IMPLEMENTATION_01_CORRECTION_01_CANONICAL_INSTALLATION_01_EVIDENCE_BUNDLE.zip
+  bytes  = 7558
+  sha256 = c722145da051677654d6205dbfebd09f8542eae609e02a65b01a2d014310ded7
+
+Canonical installation Marco approval:
+  R1-D07_STAGE3_FRESHNESS_AND_COMPLETENESS_SEMANTICS_IMPLEMENTATION_01_CORRECTION_01_CANONICAL_INSTALLATION_01_MARCO_APPROVAL_HANDOFF_01.md
+  bytes    = 5657
+  sha256   = d6ea20786ea14c4c953fdbcc4ff87865862ccde138ad0fcdc6ac00eba49e16bf
+  decision = APPROVE (REMOTE_INSTALLATION_CONFIRMED)
+```
+
+Installation evidence members (compact): `..._RESULT.json` 3875 /
+`bef897ac8ff86afe2bde395216f6c2bc565b2103239ef79d7e445e56e0ccc6fe`;
+`..._REPORT.md` 1984 /
+`81e56b29d16985121dca018a11679f5c7ca1f01dec096315900032c4b480694d`;
+`..._GIT_TRANSCRIPT.txt` 4929 /
+`379ea3d25301749d2265c59a3310e3c7f07b203915831bae8e2ca0d4cd5ba219`;
+`PUSH_ATTEMPT_MARKER.json` 1280 /
+`b4abbd449df9c729f161a145e5d781fec0b7d5f95ad2e44809ced17d27a4fc35`;
+`POST_INSTALL_CONTINUITY_HANDOFF.md` 1083 /
+`ff50d0017c899fc17a2fcc21c686240cb17a0d150635f471faa4f3f2f08f9417`.
+
+Raw artifacts remain external/local and are not repository-resident. Exact
+identities are canonicalized here and in `ARTIFACT_INDEX.md` ART-0144.
+
+**A31.7 G and runtime status.**
+
+```text
+canonical_G_selection               = UNSELECTED
+historical_noncanonical_trial_G     = 1
+standing_G_policy_effect            = NONE
+G_canonicalization                  = NOT_PERFORMED
+
+post_install_live_stage3_revalidation = NOT_RUN
+live_stage3_execution_authorization   = NONE
+runtime_capability_created             = NONE
+```
+
+The installed implementation does not convert historical G=1 into a standing
+selection or policy.
+
+**A31.8 Supersession scope.** A31 becomes the latest D07 overlay only when this
+continuity candidate is itself reviewed and installed on canonical `main`.
+
+It supersedes A30.8/A30.9 only for:
+
+- implementation status (`PENDING` -> installed);
+- the next bounded route.
+
+A30 remains controlling historical provenance for the `EXECUTION_02` empirical
+facts, the UDT canary facts, the semantic SPEC identity, the approved semantic
+theorem, and the G historical/noncanonical status. A31 does not rewrite A30 or
+claim the empirical observations changed.
+
+**A31.9 Next bounded route.**
+
+```text
+NEXT_BOUNDED_ACTION =
+RETURN_TO_MARCO_FOR_SEPARATELY_AUTHORIZED_FRESH_READ_ONLY_STAGE3_REVALIDATION_PLANNING
+```
+
+Interpretation:
+
+- this is routing/planning only;
+- no live request is authorized by continuity installation;
+- any actual fresh read-only Stage-3 revalidation requires a separate explicit
+  user authorization and a task-current preflight/package;
+- canonical G remains `UNSELECTED`;
+- no higher-risk promotion occurs merely because the implementation is
+  installed.
+
+**A31.10 No-capability theorem.** This continuity milestone grants no:
+
+```text
+Kalshi/API access
+credential use
+deployed N1 access
+persistent runtime-state access
+new restricted-session mutation
+selector execution
+fresh Stage-3 execution
+risk-config runtime consumption
+Demo write
+RELEASE_ONLY
+writer-proof release
+NormalWriter
+Gate D
+Stage3G+
+production
+G canonicalization
+remote Git write
+```
+
+Nothing here is profitability or arbitrage evidence.
