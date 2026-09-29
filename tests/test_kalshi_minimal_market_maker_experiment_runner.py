@@ -14931,5 +14931,467 @@ class Stage3FreshnessCompletenessSemanticsSpec01TestCase(unittest.TestCase):
         self._assert_lifecycle_invariants(fields)
 
 
+# ---------------------------------------------------------------------------
+# R1-D07_FRESH_READ_ONLY_STAGE3_REVALIDATION_EXECUTION_PACKAGE_01_CORRECTION_01
+# (Marco BLOCK-EXEC-PKG-01): the additive, secret-free Stage-3 evidence
+# surface -- per-request identity / status / exception / timing, request ->
+# aggregate reconciliation, completeness-predicate outcomes, and non-gating
+# FreshnessStampV1 / market-data freshness evidence.  Offline only: scripted
+# synthetic transports, the fake orderbook seam, a temp authority/ledger, a
+# patched evidence clock, and socket construction forbidden.
+# ---------------------------------------------------------------------------
+
+
+class _C01EvidenceClock:
+    """Deterministic evidence clock: +10 ns per sample."""
+
+    def __init__(self, start: int = 1_000) -> None:
+        self.value = start
+
+    def __call__(self) -> int:
+        self.value += 10
+        return self.value
+
+
+class ExecPkg01Correction01EvidenceSurfaceTestCase(unittest.TestCase):
+    """Scaffolding composed from ``Stage3FreshnessCompletenessSemanticsSpec01TestCase``
+    (itself composed from ``Correction06LiveTrustedAcquirerTestCase``) so the
+    PRODUCTION live acquirer runs against deterministic scripted transports."""
+
+    STATIC_BINDING = {
+        "GET_EXCHANGE_STATUS": ("GET", "/trade-api/v2/exchange/status", "PUBLIC_NO_AUTH"),
+        "GET_USER_DATA_TIMESTAMP": ("GET", "/trade-api/v2/exchange/user_data_timestamp", "PUBLIC_NO_AUTH"),
+        "GET_MARKET": ("GET", "/trade-api/v2/markets/{ticker}", "PUBLIC_NO_AUTH"),
+        "GET_MARKET_ORDERBOOK": ("GET", "/trade-api/v2/markets/{ticker}/orderbook", "DEMO_SIGNED_PRIVATE_READ"),
+        "GET_ORDERS": ("GET", "/trade-api/v2/portfolio/orders", "DEMO_SIGNED_PRIVATE_READ"),
+        "GET_ORDER": ("GET", "/trade-api/v2/portfolio/orders/{order_id}", "DEMO_SIGNED_PRIVATE_READ"),
+        "GET_FILLS": ("GET", "/trade-api/v2/portfolio/fills", "DEMO_SIGNED_PRIVATE_READ"),
+        "GET_POSITIONS": ("GET", "/trade-api/v2/portfolio/positions", "DEMO_SIGNED_PRIVATE_READ"),
+    }
+
+    def setUp(self) -> None:
+        self._s3 = Stage3FreshnessCompletenessSemanticsSpec01TestCase(methodName="setUp")
+        self._s3.setUp()
+        self.addCleanup(self._s3.doCleanups)
+        self.clock = _C01EvidenceClock()
+        for target, patcher in (
+            ("_stage3_evidence_clock_ns", mock.patch.object(runner, "_stage3_evidence_clock_ns", self.clock)),
+            ("socket", mock.patch("socket.socket", side_effect=AssertionError("no network in offline tests"))),
+            ("create_connection", mock.patch("socket.create_connection",
+                                             side_effect=AssertionError("no network in offline tests"))),
+        ):
+            patcher.start()
+            self.addCleanup(patcher.stop)
+
+    def __getattr__(self, name):
+        try:
+            s3 = self.__dict__["_s3"]
+        except KeyError:
+            raise AttributeError(name) from None
+        return getattr(s3, name)
+
+    # --- helpers ---------------------------------------------------------
+
+    def _assert_rows_consistent(self, fields):
+        rows = fields["stage3_request_evidence"]
+        self.assertIsInstance(rows, list)
+        self.assertEqual([r["ordinal"] for r in rows], list(range(1, len(rows) + 1)))
+        self.assertEqual([(r["ordinal"], r["operation"], r["highest_state"]) for r in rows],
+                         [(e["ordinal"], e["operation"], e["highest_state"]) for e in fields["stage3_request_lifecycle"]])
+        for r in rows:
+            self.assertEqual((r["method"], r["route_template"], r["auth_class"]), self.STATIC_BINDING[r["operation"]])
+            if r["transport_attempted"]:
+                self.assertIsInstance(r["boundary_entered_evidence_ns"], int)
+            if r["response_completed"]:
+                self.assertIsInstance(r["response_end_evidence_ns"], int)
+                self.assertGreaterEqual(r["transport_duration_ns"], 0)
+        self.assertEqual(sum(r["contributes_pre_release_requests_consumed"] for r in rows),
+                         fields["pre_release_requests_consumed"])
+        self.assertEqual(sum(r["contributes_network_reads_stage3"] for r in rows), fields["network_reads_stage3"])
+        self.assertEqual(fields["stage3_request_evidence_reconciliation"], "RECONCILED")
+        self.assertEqual(fields["stage3_request_evidence_clock_source"], "time.monotonic_ns")
+
+    @staticmethod
+    def _predicates(fields):
+        return [(p["predicate"], p["outcome"]) for p in fields["stage3_completeness_evidence"]["predicates"]]
+
+    # --- EV01: success-shaped path through the REAL main() -----------------
+
+    def test_ev01_success_emits_complete_request_completeness_and_freshness_evidence(self):
+        rt = self._v2_runtime()
+        self._script_cycle(domain=(0,))
+        code, payload, text = self._run_main_with_runtime(rt)
+        self.assertEqual(code, 0)
+        self.assertEqual(payload["status"], "READ_PHASE_COMPLETE")
+        self.assertEqual(payload["stage3_result_schema_revision"], 2)
+        # instrumentation added NO request: same 9 as the pre-correction path.
+        self.assertEqual(payload["pre_release_requests_consumed"], 9)
+        self.assertEqual(len(self._transport.calls), 8)
+        self._assert_rows_consistent(payload)
+        rows = payload["stage3_request_evidence"]
+        self.assertTrue(all(r["outcome_class"] == "ACCEPTED_PARSED" for r in rows))
+        self.assertTrue(all(r["http_status"] == 200 for r in rows))
+        ob = [r for r in rows if r["operation"] == "GET_MARKET_ORDERBOOK"]
+        self.assertEqual(len(ob), 1)
+        self.assertEqual(ob[0]["http_status_source"], "CANONICAL_ORDERBOOK_ACCEPTS_ONLY_200")
+        self.assertTrue(all(r["http_status_source"] == "RAW_OPERATION_RESPONSE"
+                            for r in rows if r["operation"] != "GET_MARKET_ORDERBOOK"))
+        self.assertEqual([r["exchange_index"] for r in rows if r["operation"] in ("GET_ORDERS", "GET_FILLS", "GET_POSITIONS")],
+                         [0, 0, 0])
+        # deterministic ordering of evidence timing
+        ends = [r["response_end_evidence_ns"] for r in rows]
+        self.assertEqual(ends, sorted(ends))
+        comp = payload["stage3_completeness_evidence"]
+        self.assertEqual(comp["terminal_completeness_classification"], "COMPLETE")
+        self.assertEqual(comp["not_evaluated"], [])
+        self.assertIsNone(comp["failed_predicate"])
+        self.assertTrue(all(o == "PASS" for _, o in self._predicates(payload)))
+        per_index = [p for p in comp["predicates"] if p["predicate"] == "PER_INDEX_SURFACE_TRAVERSAL"]
+        self.assertEqual([(p["facts"]["surface"], p["facts"]["exchange_index"], p["facts"]["pages"]) for p in per_index],
+                         [("GET_ORDERS", 0, 1), ("GET_FILLS", 0, 1), ("GET_POSITIONS", 0, 1)])
+        fresh = payload["stage3_freshness_evidence"]
+        self.assertEqual(fresh["status"], "EVALUATED")
+        self.assertEqual(fresh["evaluation_class"], "NON_GATING_EVIDENCE_AT_STAGE3_RESULT_EMISSION")
+        for key in ("market_data_freshness", "reconciliation_freshness_stamp_v1"):
+            entry = fresh[key]
+            self.assertTrue(entry["snapshot_matches_committed_snapshot"])
+            self.assertIn(entry["predicate"], ("PASS", "FAIL"))
+            self.assertGreaterEqual(entry["stamp_to_evaluation_ns"], 0)
+        self.assertEqual(fresh["reconciliation_freshness_stamp_v1"]["max_reconciliation_lag_ms"],
+                         self.config.state_integrity.max_reconciliation_lag_ms)
+        self.assertEqual(fresh["market_data_freshness"]["max_age_ms"], min(
+            self.config.per_order.max_market_data_age_ms, self.config.state_integrity.max_required_market_data_age_ms))
+        self.assertIsNotNone(fresh["market_data_freshness"]["market_data_snapshot"])
+        # secret-safe
+        for banned in ("-----BEGIN", "KALSHI-ACCESS", _D07_SENTINEL_API_KEY_ID, "PRIVATE KEY"):
+            self.assertNotIn(banned, text)
+
+    # --- EV02: fail-closed post-network path -------------------------------
+
+    def test_ev02_fail_closed_identifies_failed_predicate_and_member(self):
+        rt = self._v2_runtime()
+        bad_pos = _json_response({"market_positions": [], "event_positions": [{"x": 1}], "cursor": ""})
+        self._script_cycle(domain=(0,), positions={0: [bad_pos]})
+        code, payload, text = self._run_main_with_runtime(rt)
+        self.assertEqual(code, 1)
+        self.assertEqual(payload["failure"], "DYNAMIC_READ_POSITION_EVENT_SCOPE_UNPROVEN")
+        self._assert_rows_consistent(payload)
+        self.assertEqual(payload["network_reads_stage3"], 7)
+        comp = payload["stage3_completeness_evidence"]
+        self.assertEqual(comp["terminal_completeness_classification"], "FAILED")
+        self.assertEqual(comp["failed_predicate"], "PER_INDEX_SURFACE_TRAVERSAL")
+        self.assertEqual(comp["failed_member"], {"surface": "GET_POSITIONS", "exchange_index": 0})
+        self.assertEqual(comp["failure_code"], "DYNAMIC_READ_POSITION_EVENT_SCOPE_UNPROVEN")
+        self.assertEqual(self._predicates(payload)[:4], [
+            ("S0_STATUS_DOMAIN_CONTAINS_SELECTED_INDEX", "PASS"), ("T0_USER_DATA_TIMESTAMP_ORDERING", "PASS"),
+            ("SELECTED_MARKET_IDENTITY", "PASS"), ("SELECTED_ORDERBOOK_IDENTITY", "PASS")])
+        self.assertIn("S1_STATUS_DOMAIN_EQUALS_D0", comp["not_evaluated"])
+        self.assertIn("STAGE3F_DURABLE_COHERENCE_AND_TRUSTED_MATCH", comp["not_evaluated"])
+        self.assertEqual(payload["stage3_freshness_evidence"]["status"], "NOT_REACHED")
+
+    # --- EV03: HTTP response classification ---------------------------------
+
+    def test_ev03_non_200_response_status_and_rejection_recorded(self):
+        rt = self._v2_runtime()
+        t = self._transport
+        t.queue(RunnerOperation.GET_EXCHANGE_STATUS, _v2_status_payload(_v2_status_rows((0,))))
+        t.queue(RunnerOperation.GET_USER_DATA_TIMESTAMP, _v2_udt_payload("2026-08-17T12:59:59.950000Z"))
+        t.queue(RunnerOperation.GET_MARKET, RawOperationResponseV1(
+            http_status=503, content_type="application/json", body_bytes=b"{}"))
+        exc = self._phase_error(rt)
+        self.assertEqual(exc.code, RunnerFailureCode.RESPONSE_SCHEMA_INVALID)
+        fields = runner._stage3_revision2_result_fields(
+            runner._stage3_evidence_of(exc), failure_code=exc.code.value, failure_detail=exc.detail)
+        self._assert_rows_consistent(fields)
+        market = fields["stage3_request_evidence"][-1]
+        self.assertEqual((market["operation"], market["http_status"], market["outcome_class"],
+                          market["rejection_code"], market["highest_state"]),
+                         ("GET_MARKET", 503, "RESPONSE_REJECTED", "RESPONSE_SCHEMA_INVALID", "RESPONSE_COMPLETED"))
+        self.assertTrue(market["transport_attempted"])
+        self.assertFalse(market["accepted_parsed"])
+        self.assertEqual(fields["stage3_completeness_evidence"]["failed_predicate"], "SELECTED_MARKET_IDENTITY")
+
+    def test_ev03b_malformed_body_rejection_recorded(self):
+        rt = self._v2_runtime()
+        t = self._transport
+        t.queue(RunnerOperation.GET_EXCHANGE_STATUS, _v2_status_payload(_v2_status_rows((0,))))
+        t.queue(RunnerOperation.GET_USER_DATA_TIMESTAMP, _v2_udt_payload("2026-08-17T12:59:59.950000Z"))
+        t.queue(RunnerOperation.GET_MARKET, RawOperationResponseV1(
+            http_status=200, content_type="application/json", body_bytes=b"{not json"))
+        exc = self._phase_error(rt)
+        fields = runner._stage3_revision2_result_fields(runner._stage3_evidence_of(exc), failure_code=exc.code.value)
+        market = fields["stage3_request_evidence"][-1]
+        self.assertEqual((market["http_status"], market["rejection_code"]), (200, "RESPONSE_JSON_INVALID"))
+
+    # --- EV04: transport exception classification ----------------------------
+
+    def test_ev04_transport_exception_with_and_without_terminal_status(self):
+        for status in (429, None):
+            with self.subTest(status=status):
+                rt = self._v2_runtime()
+                self.clock.value = 1_000
+                err = RunnerError(
+                    RunnerFailureCode.LIVE_READ_TRANSPORT_NON_2XX if status else RunnerFailureCode.LIVE_READ_TRANSPORT_DNS_FAILED,
+                    detail="synthetic")
+                if status is not None:
+                    err._arb_http_status = status
+                self._transport.queue(RunnerOperation.GET_EXCHANGE_STATUS, err)
+                exc = self._phase_error(rt)
+                fields = runner._stage3_revision2_result_fields(
+                    runner._stage3_evidence_of(exc), failure_code=exc.code.value)
+                self._assert_rows_consistent(fields)
+                row = fields["stage3_request_evidence"][0]
+                self.assertEqual(row["outcome_class"], "TRANSPORT_EXCEPTION")
+                self.assertEqual(row["exception_code"], exc.code.value)
+                self.assertEqual(row["http_status"], status)
+                self.assertEqual(row["http_status_source"], "TRANSPORT_TERMINAL_STATUS" if status else None)
+                self.assertEqual(row["highest_state"], "RESPONSE_COMPLETED")
+                self.assertEqual(fields["network_reads_stage3"], 1)
+                self.assertEqual(fields["stage3_completeness_evidence"]["failed_predicate"],
+                                 "S0_STATUS_DOMAIN_CONTAINS_SELECTED_INDEX")
+
+    def test_ev04b_orderbook_halt_status_recorded(self):
+        rt = self._v2_runtime()
+        halt = OrderBookHalt(code=OrderBookHaltCode.UNEXPECTED_HTTP_STATUS, stage=OrderBookStage.RESPONSE_HEADERS_RECEIVED,
+                             expected="200", observed="502", response_definitively_received=True)
+        rt = dataclasses.replace(rt, fetch_orderbook=runner._TestOnlyActiveV2OrderbookSeam(lambda ticker, deadline: halt))
+        self._script_cycle(domain=(0,))
+        exc = self._phase_error(rt)
+        self.assertEqual(exc.code, RunnerFailureCode.ORDERBOOK_ACTIVE_EXECUTION_HALTED)
+        fields = runner._stage3_revision2_result_fields(runner._stage3_evidence_of(exc), failure_code=exc.code.value)
+        row = fields["stage3_request_evidence"][-1]
+        self.assertEqual((row["operation"], row["outcome_class"], row["orderbook_halt_code"], row["http_status"],
+                          row["http_status_source"], row["orderbook_response_definitively_received"]),
+                         ("GET_MARKET_ORDERBOOK", "ORDERBOOK_HALT", "UNEXPECTED_HTTP_STATUS", 502,
+                          "ORDERBOOK_HALT_OBSERVED_STATUS", True))
+        self.assertEqual(fields["stage3_completeness_evidence"]["failed_predicate"], "SELECTED_ORDERBOOK_IDENTITY")
+
+    # --- EV05: boundary entered but transport not attempted / refused --------
+
+    def test_ev05_boundary_entered_without_transport_and_refused_boundary(self):
+        recorder = runner._Stage3EvidenceRecorderV2()
+        op = runner.ActivePreReleaseReadOperationV2.GET_MARKET
+        i = recorder.prepared(op)
+        recorder.detail(i, prepared_evidence_ns=5)
+        recorder.enter_boundary(op)
+        recorder.detail(i, boundary_entered_evidence_ns=7)
+        fields = runner._stage3_revision2_result_fields(recorder.snapshot(requests_consumed=1))
+        row = fields["stage3_request_evidence"][0]
+        self.assertEqual(row["highest_state"], "BOUNDARY_ENTERED")
+        self.assertEqual(row["outcome_class"], "BOUNDARY_ENTERED_TRANSPORT_NOT_ATTEMPTED")
+        self.assertTrue(row["contributes_pre_release_requests_consumed"])
+        self.assertFalse(row["contributes_network_reads_stage3"])
+        self.assertEqual((fields["pre_release_requests_consumed"], fields["network_reads_stage3"]), (1, 0))
+        self.assertEqual(fields["network_reads_stage3_state"], "EXACT_ZERO")
+        self.assertEqual(fields["stage3_request_evidence_reconciliation"], "RECONCILED")
+        refused = runner._Stage3EvidenceRecorderV2()
+        j = refused.prepared(op)
+        refused.detail(j, boundary_refused_code="DYNAMIC_READ_BUDGET_EXHAUSTED")
+        fields = runner._stage3_revision2_result_fields(refused.snapshot(requests_consumed=0))
+        row = fields["stage3_request_evidence"][0]
+        self.assertEqual((row["outcome_class"], row["boundary_refused_code"], row["boundary_entered"]),
+                         ("BOUNDARY_REFUSED", "DYNAMIC_READ_BUDGET_EXHAUSTED", False))
+        self.assertEqual(fields["pre_release_requests_consumed_state"], "EXACT_ZERO")
+
+    def test_ev05b_live_budget_refusal_is_recorded_and_stays_uncharged(self):
+        rt = self._v2_runtime()
+        self._script_cycle(domain=(0,))
+        cap = runner._issue_trusted_dynamic_pre_release_read_capability_v2(rt, rt.experiment_absolute_end_monotonic_ns)
+        cap._requests_consumed = runner.PRE_RELEASE_READ_REQUEST_MAX_V2  # synthetic exhausted budget
+        with self.assertRaises(RunnerError) as ctx:
+            runner._run_active_v2_acquisition(rt, cap, opened=None, selected_ticker=self.TICKER)
+        self.assertEqual(ctx.exception.code, RunnerFailureCode.DYNAMIC_READ_BUDGET_EXHAUSTED)
+        self.assertEqual(self._transport.calls, [])
+        detail = cap.stage3_evidence.snapshot(requests_consumed=None).request_details[0]
+        self.assertEqual(detail["boundary_refused_code"], "DYNAMIC_READ_BUDGET_EXHAUSTED")
+
+    # --- EV06: malformed / missing / contradictory evidence ------------------
+
+    def test_ev06_missing_or_contradictory_evidence_never_fabricates_zero(self):
+        missing = runner._stage3_revision2_result_fields(None)
+        self.assertIsNone(missing["stage3_request_evidence"])
+        self.assertEqual(missing["stage3_request_evidence_reconciliation"], "EXACT_REQUEST_EVIDENCE_UNAVAILABLE")
+        self.assertEqual(missing["stage3_completeness_evidence"]["terminal_completeness_classification"], "NOT_ENTERED")
+        self.assertIsNone(missing["network_reads_stage3"])
+        recorder = runner._Stage3EvidenceRecorderV2()
+        op = runner.ActivePreReleaseReadOperationV2.GET_MARKET
+        i = recorder.prepared(op)
+        recorder.enter_boundary(op)
+        recorder.advance(i, "TRANSPORT_ATTEMPTED")
+        recorder.advance(i, "ACCEPTED_PARSED")  # skips RESPONSE_COMPLETED -> integrity lost
+        fields = runner._stage3_revision2_result_fields(recorder.snapshot(requests_consumed=1))
+        self.assertIsNone(fields["stage3_request_evidence"])
+        self.assertEqual(fields["stage3_request_evidence_reconciliation"], "EXACT_REQUEST_EVIDENCE_UNAVAILABLE")
+        self.assertEqual(fields["network_reads_stage3_state"], "UNKNOWN_NONZERO")
+
+    def test_ev06b_request_evidence_aggregate_mismatch_fails_closed(self):
+        rt = self._v2_runtime()
+        self._script_cycle(domain=(0,))
+        result = self._run_phase(rt)
+        real_rows = runner._stage3_request_evidence_rows
+
+        def _drop_one(snapshot):
+            rows = real_rows(snapshot)
+            rows[0]["contributes_network_reads_stage3"] = False
+            return rows
+
+        with mock.patch.object(runner, "_stage3_request_evidence_rows", _drop_one):
+            fields = runner._stage3_revision2_result_fields(result.stage3_evidence)
+        self.assertEqual(fields["stage3_request_evidence_reconciliation"],
+                         "FAIL_CLOSED_REQUEST_EVIDENCE_AGGREGATE_MISMATCH")
+
+    def test_ev06c_detail_rejects_non_scalar_and_unknown_keys(self):
+        recorder = runner._Stage3EvidenceRecorderV2()
+        i = recorder.prepared(runner.ActivePreReleaseReadOperationV2.GET_MARKET)
+        recorder.detail(i, http_status=200, headers={"KALSHI-ACCESS-SIGNATURE": "x"}, exception_code=object())
+        recorder.detail(99, http_status=500)  # out of range: ignored
+        detail = recorder.snapshot(requests_consumed=0).request_details[0]
+        self.assertEqual(dict(detail), {"http_status": 200})
+
+    # --- EV07: completeness at the mint / locally-blocked / no-entry ---------
+
+    def test_ev07_mint_level_current_live_gap_is_the_failed_predicate(self):
+        rt = self._v2_runtime()
+        three = _orders_payload([
+            _v2_order_row("o-%d" % k, ticker=self.TICKER, subaccount_number=1, exchange_index=0) for k in range(3)])
+        self._script_cycle(
+            domain=(0,), orders={0: [three]},
+            get_order=[_v2_order_payload("o-%d" % k, ticker=self.TICKER, subaccount_number=1, exchange_index=0)
+                       for k in range(2)])
+        cap, acquired = self._acquire(rt)
+        with self.assertRaises(RunnerError) as ctx:
+            runner._mint_release_eligible_read_set(cap, acquired=acquired, opened=None)
+        fields = runner._stage3_revision2_result_fields(
+            cap.stage3_evidence.snapshot(requests_consumed=cap.requests_consumed),
+            failure_code=ctx.exception.code.value, failure_detail=ctx.exception.detail)
+        comp = fields["stage3_completeness_evidence"]
+        self.assertEqual(comp["failed_predicate"], "CURRENT_LIVE_ORDERS_FILLS_COMPLETE")
+        self.assertEqual(comp["failed_member"], {"orders_complete": False, "fills_complete": True})
+        self.assertEqual(comp["failure_code"], "CURRENT_VENUE_COMPLETENESS_UNRESOLVED")
+        supplements = [p for p in comp["predicates"] if p["predicate"] == "EXACT_ORDER_SUPPLEMENTS"][0]
+        self.assertEqual((supplements["outcome"], supplements["facts"]["selected_order_count"],
+                          supplements["facts"]["bound_count"]), ("PASS", 3, 2))
+
+    def test_ev07b_locally_blocked_is_not_entered_with_exact_zero(self):
+        rt = self._v2_runtime()
+        real_read = rt.read_local_safety_state
+
+        def _incomplete():
+            opened = real_read()
+            return dataclasses.replace(opened, projection=dataclasses.replace(
+                opened.projection, history_completeness="INCOMPLETE"))
+
+        rt = dataclasses.replace(rt, read_local_safety_state=_incomplete)
+        code, payload, _ = self._run_main_with_runtime(rt)
+        self.assertEqual((code, payload["status"]), (0, "LOCALLY_BLOCKED"))
+        self.assertEqual(payload["stage3_request_evidence"], [])
+        self.assertEqual(payload["stage3_request_evidence_reconciliation"], "RECONCILED")
+        self.assertEqual(payload["stage3_completeness_evidence"]["terminal_completeness_classification"], "NOT_ENTERED")
+        self.assertEqual(payload["stage3_freshness_evidence"]["status"], "NOT_REACHED")
+        self.assertEqual(self._transport.calls, [])
+
+    # --- EV08: FreshnessStampV1 / market-data evidence at exact boundaries ---
+
+    def test_ev08_freshness_evidence_boundaries_use_canonical_predicate(self):
+        cfg = self._candidate02()
+        proc = "proc_" + "0" * 32
+        received = 10_000_000_000
+
+        def _stamp(sha):
+            return risk_control.FreshnessStampV1(
+                process_instance_id=proc, received_at_utc="2026-09-28T15:00:00.000000Z",
+                received_monotonic_ns=received, source_timestamp_kind="NONE",
+                source_timestamp_utc=None, snapshot_sha256=sha)
+
+        state = mock.Mock(
+            inner=None, market_freshness=_stamp("a" * 64), reconciliation_freshness=_stamp("b" * 64),
+            risk_snapshot=mock.Mock(market_data_sha256="a" * 64, market_data_snapshot={"best_yes_bid": Decimal("0.45")}),
+            reconciliation_snapshot=mock.Mock(sha256="b" * 64))
+        orderbook = mock.Mock(request_started_monotonic_ns=received - 300_000_000,
+                              request_completed_monotonic_ns=received - 200_000_000)
+        result = mock.Mock(status="READ_PHASE_COMPLETE", active_release_state=state,
+                           process_instance_id=proc, truth=mock.Mock(orderbook=orderbook))
+        for delta_ns, expected, market_code, recon_code in (
+            (999_000_000, "PASS", None, None),
+            (1_000_000_000, "PASS", None, None),
+            (1_000_000_001, "FAIL", "MARKET_DATA_STALE", "RECONCILIATION_STALE"),
+        ):
+            with self.subTest(delta_ns=delta_ns):
+                ev = runner._stage3_freshness_evidence(
+                    result, risk_config=cfg, now_monotonic_ns=received + delta_ns,
+                    now_utc="2026-09-28T15:00:01.000000Z")
+                market, recon = ev["market_data_freshness"], ev["reconciliation_freshness_stamp_v1"]
+                self.assertEqual((market["predicate"], recon["predicate"]), (expected, expected))
+                self.assertEqual((market.get("failure_code"), recon.get("failure_code")), (market_code, recon_code))
+                self.assertEqual((market["max_age_ms"], recon["max_reconciliation_lag_ms"]), (1000, 1000))
+                self.assertEqual(market["max_future_wall_clock_skew_ms"], 0)
+                self.assertEqual(market["orderbook_response_to_stamp_ns"], 200_000_000)
+                self.assertEqual(market["orderbook_response_to_evaluation_ns"], 200_000_000 + delta_ns)
+                if expected == "PASS":
+                    self.assertLessEqual(market["age_ms"], 1000)
+        # snapshot identity mismatch is surfaced, never hidden.
+        state.market_freshness = _stamp("c" * 64)
+        ev = runner._stage3_freshness_evidence(result, risk_config=cfg, now_monotonic_ns=received,
+                                               now_utc="2026-09-28T15:00:00.000000Z")
+        self.assertFalse(ev["market_data_freshness"]["snapshot_matches_committed_snapshot"])
+        # not reached
+        blocked = runner._stage3_freshness_evidence(mock.Mock(status="LOCALLY_BLOCKED", active_release_state=None),
+                                                    risk_config=cfg, now_monotonic_ns=1, now_utc="x")
+        self.assertEqual(blocked["status"], "NOT_REACHED")
+
+    def test_ev08b_freshness_evidence_is_non_gating(self):
+        rt = self._v2_runtime()
+        self._script_cycle(domain=(0,))
+        with mock.patch.object(runner, "_stage3_freshness_evidence",
+                               return_value={"status": "EVALUATED", "market_data_freshness": {"predicate": "FAIL"}}):
+            code, payload, _ = self._run_main_with_runtime(rt)
+        self.assertEqual((code, payload["status"]), (0, "READ_PHASE_COMPLETE"))
+        src = inspect.getsource(runner._stage3_freshness_evidence)
+        self.assertNotIn("raise RunnerError", src)
+
+    # --- EV09: static no-new-topology proofs --------------------------------
+
+    def test_ev09_instrumentation_adds_no_request_surface_or_runtime_clock_sample(self):
+        self.assertEqual(runner.PRE_RELEASE_READ_REQUEST_MAX_V2, 72)
+        self.assertEqual(len(runner._ACTIVE_V2_OP_BINDING), 8)
+        for name, (method, route, auth) in self.STATIC_BINDING.items():
+            binding = runner._ACTIVE_V2_OP_BINDING[runner.ActivePreReleaseReadOperationV2(name)]
+            self.assertEqual((binding[0], binding[1], binding[2].value), (method, route, auth))
+        src = inspect.getsource(runner._ActiveV2OperationAdapter)
+        # evidence timing only ever samples the dedicated evidence clock
+        for line in src.splitlines():
+            if "_evidence_ns=" in line:
+                self.assertIn("_stage3_evidence_clock_ns()", line)
+        self.assertNotIn("monotonic_clock_ns", inspect.getsource(runner._Stage3EvidenceRecorderV2.detail))
+
+
+class ExecPkg01Correction01TransportStatusTestCase(unittest.TestCase):
+    """The live signed transport attaches the exact terminal status integer to
+    its unchanged 3xx / non-2xx classification (fake socket stack; no network)."""
+
+    def setUp(self) -> None:
+        self._t = D07SignedTransportTests(methodName="setUp")
+        self._t.setUp()
+        self.addCleanup(self._t.doCleanups)
+
+    def test_ev10_terminal_status_attached_to_unchanged_classification(self):
+        for status, expect in (
+            (301, RunnerFailureCode.LIVE_READ_TRANSPORT_REDIRECT_NOT_FOLLOWED),
+            (404, RunnerFailureCode.LIVE_READ_TRANSPORT_NON_2XX),
+            (429, RunnerFailureCode.LIVE_READ_TRANSPORT_NON_2XX),
+            (503, RunnerFailureCode.LIVE_READ_TRANSPORT_NON_2XX),
+        ):
+            with self.subTest(status=status):
+                with self._t._stack(status=status) as stack:
+                    with self.assertRaises(RunnerError) as ctx:
+                        self._t.transport._perform_get(
+                            "external-api.demo.kalshi.co", "/trade-api/v2/portfolio/orders",
+                            {"Accept": "application/json"}, self._t._deadline())
+                self.assertEqual(ctx.exception.code, expect)
+                self.assertEqual(ctx.exception._arb_http_status, status)
+                self.assertEqual(stack.connect_calls, 1)
+                self.assertNotIn(str(status), ctx.exception.detail or "")
+
+
 if __name__ == "__main__":
     unittest.main()

@@ -6158,6 +6158,43 @@ _STAGE3_SEMANTIC_FIELDS = (
     "local_read_window_start_monotonic_ns", "local_read_window_finish_monotonic_ns", "local_read_duration_ns",
 )
 
+# EXECUTION_PACKAGE_01_CORRECTION_01 -- additive, secret-free per-request
+# evidence.  Timing uses a DEDICATED evidence clock (never the runtime clock)
+# so recording can never perturb deadline checks, read-window samples, or any
+# other Stage-3 control flow.  In production the runtime clock is also
+# ``time.monotonic_ns`` (``run_read_only_stage3_live_entrypoint`` default), so
+# the two are the same OS source and directly comparable.
+_STAGE3_EVIDENCE_CLOCK_SOURCE = "time.monotonic_ns"
+_STAGE3_REQUEST_DETAIL_FIELDS = frozenset({
+    "exchange_index", "cursor_present", "prepared_evidence_ns", "boundary_entered_evidence_ns",
+    "response_end_evidence_ns", "boundary_refused_code", "outcome_class", "http_status",
+    "http_status_source", "exception_code", "exception_class", "rejection_code", "orderbook_halt_code",
+    "orderbook_response_definitively_received", "transport_unknown",
+})
+# Ordered Stage-3 completeness/read-set predicate vocabulary (evidence only;
+# the predicates themselves are unchanged and still raise their own codes).
+_STAGE3_COMPLETENESS_PREDICATES = (
+    "S0_STATUS_DOMAIN_CONTAINS_SELECTED_INDEX",
+    "T0_USER_DATA_TIMESTAMP_ORDERING",
+    "SELECTED_MARKET_IDENTITY",
+    "SELECTED_ORDERBOOK_IDENTITY",
+    "PER_INDEX_SURFACE_TRAVERSAL",
+    "EXACT_ORDER_SUPPLEMENTS",
+    "T1_USER_DATA_TIMESTAMP_ORDERING_AND_LOCAL_READ_WINDOW",
+    "S1_STATUS_DOMAIN_EQUALS_D0",
+    "CURRENT_LIVE_ORDERS_FILLS_COMPLETE",
+    "DOMAIN_WIDE_FILL_IDENTITY",
+    "DYNAMIC_INDEX_DOMAIN_COMPLETENESS",
+    "RETAINED_BOOTSTRAP_FLOOR_RECONCILIATION",
+    "READ_SET_MINT_WITHIN_ABSOLUTE_DEADLINE",
+    "STAGE3F_DURABLE_COHERENCE_AND_TRUSTED_MATCH",
+)
+
+
+def _stage3_evidence_clock_ns() -> int:
+    """The dedicated evidence clock (patchable in offline tests)."""
+    return time.monotonic_ns()
+
 
 def _stage3_udt_raw(parsed: object) -> "str | None":
     """FS-UDT-008 -- the exact raw ``as_of_time`` string as received (public
@@ -6230,6 +6267,11 @@ class _Stage3EvidenceSnapshotV2:
     boundary_lower_bound: int
     transport_lower_bound: int
     semantic: Mapping[str, object]
+    # CORRECTION_01 additive evidence: one secret-free detail mapping per
+    # recorded request (same order as the recorder entries) and the ordered
+    # completeness-predicate trace ``(name, "BEGIN"|"PASS", facts)``.
+    request_details: "Tuple[Mapping[str, object], ...]" = ()
+    predicates: "Tuple[Tuple[str, str, Mapping[str, object]], ...]" = ()
 
 
 # Control flow proves no Stage-3 request boundary / transport occurred.
@@ -6247,7 +6289,10 @@ class _Stage3EvidenceRecorderV2:
     stays identical to ``requests_consumed``.  A contradictory transition
     marks exact recovery lost (never fabricates zero)."""
 
-    __slots__ = ("_entries", "_integrity_ok", "_semantic", "_window_armed", "_window_clock", "_lock")
+    __slots__ = (
+        "_entries", "_integrity_ok", "_semantic", "_window_armed", "_window_clock", "_lock",
+        "_details", "_predicates",
+    )
 
     def __init__(self) -> None:
         self._entries: list = []  # [operation_value, rank]
@@ -6256,12 +6301,15 @@ class _Stage3EvidenceRecorderV2:
         self._window_armed = False
         self._window_clock: object = None
         self._lock = threading.Lock()
+        self._details: list = []  # one dict per entry (CORRECTION_01 evidence only)
+        self._predicates: list = []  # [(name, "BEGIN"|"PASS", facts)]
 
     def prepared(self, operation: "ActivePreReleaseReadOperationV2") -> int:
         with self._lock:
             if not isinstance(operation, ActivePreReleaseReadOperationV2):
                 self._integrity_ok = False
             self._entries.append([str(getattr(operation, "value", operation)), 0])
+            self._details.append({})
             return len(self._entries) - 1
 
     def enter_boundary(self, operation: "ActivePreReleaseReadOperationV2", *, count: int = 1) -> None:
@@ -6273,6 +6321,27 @@ class _Stage3EvidenceRecorderV2:
                     last[1] = 1
                 else:
                     self._entries.append([value, 1])
+                    self._details.append({})
+
+    def detail(self, index: int, **facts: object) -> None:
+        """CORRECTION_01 -- attach secret-free request evidence (closed key
+        set; scalar str/int/bool/None values only).  Evidence-only: never
+        affects lifecycle integrity, counters, or control flow."""
+        with self._lock:
+            if type(index) is not int or not 0 <= index < len(self._details):
+                return
+            target = self._details[index]
+            for key, value in facts.items():
+                if key in _STAGE3_REQUEST_DETAIL_FIELDS and (value is None or type(value) in (str, int, bool)):
+                    target[key] = value
+
+    def predicate(self, name: str, phase: str, **facts: object) -> None:
+        """CORRECTION_01 -- ordered completeness-predicate trace (evidence
+        only).  ``phase`` is ``BEGIN`` (predicate entered) or ``PASS``."""
+        with self._lock:
+            if phase in ("BEGIN", "PASS") and type(name) is str:
+                clean = {k: v for k, v in facts.items() if v is None or type(v) in (str, int, bool)}
+                self._predicates.append((name, phase, MappingProxyType(clean)))
 
     def advance(self, index: int, state: str) -> None:
         with self._lock:
@@ -6334,6 +6403,8 @@ class _Stage3EvidenceRecorderV2:
             entries = [tuple(e) for e in self._entries]
             integrity_ok = self._integrity_ok
             semantic = MappingProxyType(dict(self._semantic))
+            details = tuple(MappingProxyType(dict(d)) for d in self._details)
+            predicates = tuple(self._predicates)
         boundary_count = sum(1 for _, r in entries if r >= _STAGE3_STATE_RANK["BOUNDARY_ENTERED"])
         transport_count = sum(1 for _, r in entries if r >= _STAGE3_STATE_RANK["TRANSPORT_ATTEMPTED"])
         consumed_known = type(requests_consumed) is int and requests_consumed >= 0
@@ -6348,6 +6419,8 @@ class _Stage3EvidenceRecorderV2:
             boundary_lower_bound=requests_consumed if consumed_known else 0,
             transport_lower_bound=transport_count,
             semantic=semantic,
+            request_details=details,
+            predicates=predicates,
         )
 
 
@@ -6421,11 +6494,128 @@ def _summarize_stage3_request_accounting(
     return out
 
 
-def _stage3_revision2_result_fields(snapshot: object) -> "dict[str, object]":
+def _stage3_request_evidence_rows(snapshot: "_Stage3EvidenceSnapshotV2") -> "list[dict[str, object]] | None":
+    """CORRECTION_01 -- one secret-free row per recorded Stage-3 request, in
+    deterministic ordinal order, joining the exact lifecycle with the static
+    ``_ACTIVE_V2_OP_BINDING`` method/route/auth class and the recorded
+    outcome/timing facts.  ``None`` when the exact lifecycle is unavailable
+    (the accounting is then ``UNKNOWN_NONZERO`` / unresolved, never zero)."""
+    lifecycle = snapshot.lifecycle
+    details = snapshot.request_details
+    if lifecycle is None or len(details) != len(lifecycle):
+        return None
+    rows: "list[dict[str, object]]" = []
+    occurrence: "dict[tuple, int]" = {}
+    for (ordinal, operation, state), facts in zip(lifecycle, details):
+        rank = _STAGE3_STATE_RANK[state]
+        method, route, auth = _ACTIVE_V2_OP_BINDING[ActivePreReleaseReadOperationV2(operation)]
+        key = (operation, facts.get("exchange_index"))
+        occurrence[key] = occurrence.get(key, 0) + 1
+        begin = facts.get("boundary_entered_evidence_ns")
+        end = facts.get("response_end_evidence_ns")
+        outcome = facts.get("outcome_class")
+        if outcome is None:
+            outcome = (
+                "BOUNDARY_REFUSED" if facts.get("boundary_refused_code") is not None
+                else ("NOT_BOUNDARY_ENTERED", "BOUNDARY_ENTERED_TRANSPORT_NOT_ATTEMPTED",
+                      "TRANSPORT_ATTEMPTED_NO_RESPONSE_RECORDED", "RESPONSE_COMPLETED",
+                      "ACCEPTED_PARSED")[rank]
+            )
+        rows.append({
+            "ordinal": ordinal,
+            "operation": operation,
+            "method": method,
+            "route_template": route,
+            "auth_class": auth.value,
+            "exchange_index": facts.get("exchange_index"),
+            "occurrence_within_operation_and_index": occurrence[key],
+            "cursor_present": facts.get("cursor_present"),
+            "highest_state": state,
+            "boundary_entered": rank >= _STAGE3_STATE_RANK["BOUNDARY_ENTERED"],
+            "transport_attempted": rank >= _STAGE3_STATE_RANK["TRANSPORT_ATTEMPTED"],
+            "response_completed": rank >= _STAGE3_STATE_RANK["RESPONSE_COMPLETED"],
+            "accepted_parsed": rank >= _STAGE3_STATE_RANK["ACCEPTED_PARSED"],
+            "contributes_pre_release_requests_consumed": rank >= _STAGE3_STATE_RANK["BOUNDARY_ENTERED"],
+            "contributes_network_reads_stage3": rank >= _STAGE3_STATE_RANK["TRANSPORT_ATTEMPTED"],
+            "outcome_class": outcome,
+            "http_status": facts.get("http_status"),
+            "http_status_source": facts.get("http_status_source"),
+            "exception_code": facts.get("exception_code"),
+            "exception_class": facts.get("exception_class"),
+            "rejection_code": facts.get("rejection_code"),
+            "orderbook_halt_code": facts.get("orderbook_halt_code"),
+            "orderbook_response_definitively_received": facts.get("orderbook_response_definitively_received"),
+            "transport_unknown": facts.get("transport_unknown"),
+            "boundary_refused_code": facts.get("boundary_refused_code"),
+            "prepared_evidence_ns": facts.get("prepared_evidence_ns"),
+            "boundary_entered_evidence_ns": begin,
+            "response_end_evidence_ns": end,
+            "transport_duration_ns": (
+                end - begin if type(begin) is int and type(end) is int and end >= begin else None),
+        })
+    return rows
+
+
+def _stage3_completeness_evidence(
+    snapshot: object, *, failure_code: "str | None", failure_detail: "str | None",
+) -> "dict[str, object]":
+    """CORRECTION_01 -- ordered completeness/read-set predicate outcomes from
+    the evidence trace.  A predicate entered but not passed is the failing
+    predicate when a terminal failure is known; predicates never entered are
+    listed ``NOT_EVALUATED``.  Evidence only -- it re-evaluates nothing."""
+    trace = snapshot.predicates if type(snapshot) is _Stage3EvidenceSnapshotV2 else ()
+    items: "list[dict[str, object]]" = []
+    for name, phase, facts in trace:
+        if phase == "BEGIN":
+            items.append({"ordinal": len(items) + 1, "predicate": name, "outcome": "IN_PROGRESS", "facts": dict(facts)})
+            continue
+        for item in reversed(items):
+            if item["predicate"] == name and item["outcome"] == "IN_PROGRESS":
+                item["outcome"] = "PASS"
+                item["facts"].update(dict(facts))
+                break
+    failed = None
+    for item in items:
+        if item["outcome"] == "IN_PROGRESS":
+            if failure_code is not None:
+                item["outcome"] = "FAIL"
+                item["failure_code"] = failure_code
+                item["failure_detail"] = failure_detail
+                failed = item
+            else:
+                item["outcome"] = "INCOMPLETE_NO_TERMINAL_FAILURE_RECORDED"
+    entered = {item["predicate"] for item in items}
+    not_evaluated = [name for name in _STAGE3_COMPLETENESS_PREDICATES if name not in entered]
+    if failure_code is not None:
+        terminal = "FAILED" if items else "NOT_ENTERED"
+    elif not items:
+        terminal = "NOT_ENTERED"
+    elif not not_evaluated and all(item["outcome"] == "PASS" for item in items):
+        terminal = "COMPLETE"
+    else:
+        terminal = "INCOMPLETE"
+    return {
+        "terminal_completeness_classification": terminal,
+        "predicates": items,
+        "not_evaluated": not_evaluated,
+        "failed_predicate": failed["predicate"] if failed is not None else None,
+        "failed_member": dict(failed["facts"]) if failed is not None else None,
+        "failure_code": failure_code,
+        "failure_detail": failure_detail,
+    }
+
+
+def _stage3_revision2_result_fields(
+    snapshot: object, *, failure_code: "str | None" = None, failure_detail: "str | None" = None,
+) -> "dict[str, object]":
     """The revision-2 Stage-3 result/evidence fields for BOTH success and
     failure output.  Not-yet-observed semantic fields are ``None``; nothing is
     fabricated.  An unresolvable accounting contradiction is reported as
-    ``REQUEST_ACCOUNTING_UNRESOLVED`` with null states (never zero)."""
+    ``REQUEST_ACCOUNTING_UNRESOLVED`` with null states (never zero).
+
+    CORRECTION_01 adds (additively; schema revision and accounting semantics
+    unchanged) the per-request evidence rows, their reconciliation against the
+    aggregate counters, and the completeness-predicate trace."""
     out: dict[str, object] = {
         "stage3_result_schema_revision": _STAGE3_RESULT_SCHEMA_REVISION,
         "stage3_semantic_spec": _STAGE3_SEMANTIC_SPEC_ID,
@@ -6458,6 +6648,24 @@ def _stage3_revision2_result_fields(snapshot: object) -> "dict[str, object]":
     for key in _STAGE3_SEMANTIC_FIELDS:
         out[key] = semantic.get(key)
     out["udt_absolute_age_gating"] = "NON_GATING_DIAGNOSTIC"
+
+    rows = _stage3_request_evidence_rows(snapshot) if type(snapshot) is _Stage3EvidenceSnapshotV2 else None
+    out["stage3_request_evidence_clock_source"] = _STAGE3_EVIDENCE_CLOCK_SOURCE
+    out["stage3_request_evidence"] = rows
+    if rows is None:
+        out["stage3_request_evidence_reconciliation"] = "EXACT_REQUEST_EVIDENCE_UNAVAILABLE"
+    elif out.get("stage3_request_accounting_resolution") != "RESOLVED" or out.get("network_reads_stage3") is None:
+        out["stage3_request_evidence_reconciliation"] = "AGGREGATE_NOT_EXACT"
+    elif (
+        sum(1 for r in rows if r["contributes_pre_release_requests_consumed"]) == out["pre_release_requests_consumed"]
+        and sum(1 for r in rows if r["contributes_network_reads_stage3"]) == out["network_reads_stage3"]
+        and len(rows) == out["requests_prepared"]
+    ):
+        out["stage3_request_evidence_reconciliation"] = "RECONCILED"
+    else:
+        out["stage3_request_evidence_reconciliation"] = "FAIL_CLOSED_REQUEST_EVIDENCE_AGGREGATE_MISMATCH"
+    out["stage3_completeness_evidence"] = _stage3_completeness_evidence(
+        snapshot, failure_code=failure_code, failure_detail=failure_detail)
     return out
 
 
@@ -7429,24 +7637,61 @@ class _ActiveV2OperationAdapter:
         # (Stage-3 semantics FS-ACC-001: PREPARED).
         evidence = capability.stage3_evidence
         entry = evidence.prepared(operation)
+        # CORRECTION_01 evidence (dedicated evidence clock; no control effect).
+        evidence.detail(
+            entry, exchange_index=exchange_index, cursor_present=bool(cursor),
+            prepared_evidence_ns=_stage3_evidence_clock_ns(),
+        )
         check_deadline(deadline, self._runtime.monotonic_clock_ns(), checkpoint=DeadlineCheckpoint.AFTER_PREPARATION)
         check_deadline(deadline, self._runtime.monotonic_clock_ns(), checkpoint=DeadlineCheckpoint.AFTER_SIGNING)
         # FS-RD-001 START (first post-T0 request only), then charge exactly
         # once (BOUNDARY_ENTERED); the next fallible action is the transport.
         evidence.sample_read_window_start_if_armed(self._runtime.monotonic_clock_ns)
-        capability.charge(operation)
+        try:
+            capability.charge(operation)
+        except RunnerError as exc:
+            evidence.detail(entry, boundary_refused_code=exc.code.value)
+            raise
+        evidence.detail(entry, boundary_entered_evidence_ns=_stage3_evidence_clock_ns())
         evidence.advance(entry, "TRANSPORT_ATTEMPTED")
         try:
             raw = self._runtime.send_operation_request(runner_op, prepared, deadline)
-        except RunnerError:
+        except RunnerError as exc:
+            evidence.detail(
+                entry, response_end_evidence_ns=_stage3_evidence_clock_ns(),
+                outcome_class="TRANSPORT_EXCEPTION", exception_code=exc.code.value,
+                http_status=getattr(exc, "_arb_http_status", None),
+                http_status_source=("TRANSPORT_TERMINAL_STATUS"
+                                    if getattr(exc, "_arb_http_status", None) is not None else None),
+            )
             evidence.advance(entry, "RESPONSE_COMPLETED")
             raise
-        evidence.advance(entry, "RESPONSE_COMPLETED")
-        check_deadline(deadline, self._runtime.monotonic_clock_ns(), checkpoint=DeadlineCheckpoint.AFTER_TRANSPORT)
-        parsed = _decode_and_validate_runner_json_response(
-            runner_op, raw_response=raw, deadline=deadline,
-            now_monotonic_ns=self._runtime.monotonic_clock_ns,
+        except BaseException as exc:
+            evidence.detail(
+                entry, response_end_evidence_ns=_stage3_evidence_clock_ns(),
+                outcome_class="TRANSPORT_UNCLASSIFIED_EXCEPTION", exception_class=type(exc).__name__,
+            )
+            raise
+        evidence.detail(
+            entry, response_end_evidence_ns=_stage3_evidence_clock_ns(),
+            outcome_class="RESPONSE_COMPLETED",
+            http_status=(raw.http_status if type(raw) is RawOperationResponseV1
+                         and type(raw.http_status) is int else None),
+            http_status_source=("RAW_OPERATION_RESPONSE" if type(raw) is RawOperationResponseV1 else None),
+            transport_unknown=(raw.transport_unknown if type(raw) is RawOperationResponseV1
+                               and type(raw.transport_unknown) is bool else None),
         )
+        evidence.advance(entry, "RESPONSE_COMPLETED")
+        try:
+            check_deadline(deadline, self._runtime.monotonic_clock_ns(), checkpoint=DeadlineCheckpoint.AFTER_TRANSPORT)
+            parsed = _decode_and_validate_runner_json_response(
+                runner_op, raw_response=raw, deadline=deadline,
+                now_monotonic_ns=self._runtime.monotonic_clock_ns,
+            )
+        except RunnerError as exc:
+            evidence.detail(entry, outcome_class="RESPONSE_REJECTED", rejection_code=exc.code.value)
+            raise
+        evidence.detail(entry, outcome_class="ACCEPTED_PARSED")
         evidence.advance(entry, "ACCEPTED_PARSED")
         raw_bytes = raw.body_bytes if type(raw.body_bytes) is bytes else b""
         return parsed, raw_bytes, deadline
@@ -7511,15 +7756,51 @@ class _ActiveV2OperationAdapter:
         # preparation + ``seam.prepare`` succeeded.
         evidence = capability.stage3_evidence
         entry = evidence.prepared(ActivePreReleaseReadOperationV2.GET_MARKET_ORDERBOOK)
+        evidence.detail(entry, cursor_present=False, prepared_evidence_ns=_stage3_evidence_clock_ns())
         check_deadline(deadline, self._runtime.monotonic_clock_ns(), checkpoint=DeadlineCheckpoint.AFTER_PREPARATION)
         evidence.sample_read_window_start_if_armed(self._runtime.monotonic_clock_ns)
-        capability.charge(ActivePreReleaseReadOperationV2.GET_MARKET_ORDERBOOK)
+        try:
+            capability.charge(ActivePreReleaseReadOperationV2.GET_MARKET_ORDERBOOK)
+        except RunnerError as exc:
+            evidence.detail(entry, boundary_refused_code=exc.code.value)
+            raise
+        evidence.detail(entry, boundary_entered_evidence_ns=_stage3_evidence_clock_ns())
         evidence.advance(entry, "TRANSPORT_ATTEMPTED")
         try:
             result = seam.execute(prepared, deadline)  # FIRST transport-side action
-        except RunnerError:
+        except RunnerError as exc:
+            evidence.detail(
+                entry, response_end_evidence_ns=_stage3_evidence_clock_ns(),
+                outcome_class="TRANSPORT_EXCEPTION", exception_code=exc.code.value,
+            )
             evidence.advance(entry, "RESPONSE_COMPLETED")
             raise
+        except BaseException as exc:
+            evidence.detail(
+                entry, response_end_evidence_ns=_stage3_evidence_clock_ns(),
+                outcome_class="TRANSPORT_UNCLASSIFIED_EXCEPTION", exception_class=type(exc).__name__,
+            )
+            raise
+        if isinstance(result, OrderBookHalt):
+            observed = result.observed if result.code is OrderBookHaltCode.UNEXPECTED_HTTP_STATUS else None
+            evidence.detail(
+                entry, response_end_evidence_ns=_stage3_evidence_clock_ns(), outcome_class="ORDERBOOK_HALT",
+                orderbook_halt_code=result.code.value,
+                orderbook_response_definitively_received=bool(result.response_definitively_received),
+                http_status=(int(observed) if type(observed) is str and observed.isdigit() else None),
+                http_status_source=("ORDERBOOK_HALT_OBSERVED_STATUS"
+                                    if type(observed) is str and observed.isdigit() else None),
+            )
+        else:
+            # The canonical orderbook boundary accepts ONLY HTTP 200 (a
+            # non-200 status is an UNEXPECTED_HTTP_STATUS halt), so a returned
+            # snapshot proves a 200 terminal status.
+            evidence.detail(
+                entry, response_end_evidence_ns=_stage3_evidence_clock_ns(), outcome_class="RESPONSE_COMPLETED",
+                http_status=(200 if type(result) is KalshiNativeOrderBookSnapshot else None),
+                http_status_source=("CANONICAL_ORDERBOOK_ACCEPTS_ONLY_200"
+                                    if type(result) is KalshiNativeOrderBookSnapshot else None),
+            )
         evidence.advance(entry, "RESPONSE_COMPLETED")
         check_deadline(deadline, self._runtime.monotonic_clock_ns(), checkpoint=DeadlineCheckpoint.AFTER_TRANSPORT)
         if isinstance(result, OrderBookHalt):
@@ -7532,9 +7813,14 @@ class _ActiveV2OperationAdapter:
                 RunnerFailureCode.ORDERBOOK_ACTIVE_EXECUTION_HALTED, detail=result.code.value,
             )
         if type(result) is not KalshiNativeOrderBookSnapshot:
+            evidence.detail(entry, outcome_class="RESPONSE_REJECTED",
+                            rejection_code=RunnerFailureCode.RESPONSE_SCHEMA_INVALID.value)
             raise RunnerError(RunnerFailureCode.RESPONSE_SCHEMA_INVALID, detail="orderbook return type")
         if result.market_ticker != ticker:
+            evidence.detail(entry, outcome_class="RESPONSE_REJECTED",
+                            rejection_code=RunnerFailureCode.MARKET_IDENTITY_INVALID.value)
             raise RunnerError(RunnerFailureCode.MARKET_IDENTITY_INVALID, detail="orderbook ticker mismatch")
+        evidence.detail(entry, outcome_class="ACCEPTED_PARSED")
         evidence.advance(entry, "ACCEPTED_PARSED")
         return result, deadline
 
@@ -8351,7 +8637,11 @@ def _run_active_v2_acquisition(
             exchange_index=exchange_index, page_ordinal=1, ticker=ticker, order_id=order_id,
         )
 
+    # CORRECTION_01: evidence-only predicate trace (BEGIN/PASS markers).
+    trace = capability.stage3_evidence.predicate
+
     # 1 -- S0 status-before -> D0
+    trace("S0_STATUS_DOMAIN_CONTAINS_SELECTED_INDEX", "BEGIN")
     s0_parsed, s0_raw, s0_deadline = _bookend(ActivePreReleaseReadOperationV2.GET_EXCHANGE_STATUS, bookend="BEFORE")
     d0, s0_content = _active_v2_status_domain_and_content(s0_parsed)
     if binding.exchange_index not in d0:
@@ -8363,6 +8653,7 @@ def _run_active_v2_acquisition(
         exact_sorted_domain=d0,
     )
     _final_check(s0_deadline)
+    trace("S0_STATUS_DOMAIN_CONTAINS_SELECTED_INDEX", "PASS", domain_size=len(d0))
 
     # 2 -- T0 freshness-before (wall sample taken immediately after parse).
     # Stage-3 semantics FS-UDT: a watermark only -- retain raw/normalized/
@@ -8370,6 +8661,7 @@ def _run_active_v2_acquisition(
     # ``max_future_wall_clock_skew_ms``; NO absolute-age gate.
     evidence = capability.stage3_evidence
     lim = runtime.risk_config.state_integrity
+    trace("T0_USER_DATA_TIMESTAMP_ORDERING", "BEGIN")
     t0_parsed, t0_raw, t0_deadline = _bookend(ActivePreReleaseReadOperationV2.GET_USER_DATA_TIMESTAMP, bookend="BEFORE")
     evidence.record("udt_t0_raw", _stage3_udt_raw(t0_parsed))
     t0_as_of = _active_v2_as_of_time(t0_parsed)
@@ -8393,8 +8685,10 @@ def _run_active_v2_acquisition(
         as_of_time_utc=t0_as_of, wall_sample_utc=t0_wall,
     )
     _final_check(t0_deadline)
+    trace("T0_USER_DATA_TIMESTAMP_ORDERING", "PASS")
 
     # 3 -- selected GET_MARKET
+    trace("SELECTED_MARKET_IDENTITY", "BEGIN")
     ordinal_box[0] += 1
     m_parsed, m_raw, m_deadline = adapter.issue_json(
         capability, ActivePreReleaseReadOperationV2.GET_MARKET, ordinal=ordinal_box[0],
@@ -8411,8 +8705,10 @@ def _run_active_v2_acquisition(
         })),
     )
     _final_check(m_deadline)
+    trace("SELECTED_MARKET_IDENTITY", "PASS")
 
     # 4 -- selected GET_MARKET_ORDERBOOK (inherited accepted fetch_orderbook)
+    trace("SELECTED_ORDERBOOK_IDENTITY", "BEGIN")
     ordinal_box[0] += 1
     orderbook, ob_deadline = adapter.issue_orderbook(capability, ordinal=ordinal_box[0], ticker=selected_ticker)
     ob_identity = orderbook.with_canonical_identity().canonical_snapshot_sha256
@@ -8429,6 +8725,7 @@ def _run_active_v2_acquisition(
         })),
     )
     _final_check(ob_deadline)
+    trace("SELECTED_ORDERBOOK_IDENTITY", "PASS")
 
     # 5 -- per-index all-member traversal (ascending D0).  Every accepted row
     # (every ticker) is retained by ``_active_v2_paginate_surface`` and enters
@@ -8440,21 +8737,28 @@ def _run_active_v2_acquisition(
     sel_position_rows: "Tuple[Mapping[str, object], ...]" = ()
     fixture_traversals: list[PerIndexTraversalV1] = []
     for i in d0:
+        member = {"exchange_index": i}
+        trace("PER_INDEX_SURFACE_TRAVERSAL", "BEGIN", surface="GET_ORDERS", **member)
         orders_surface, orders_rows = _active_v2_paginate_surface(
             adapter, capability, ActivePreReleaseReadOperationV2.GET_ORDERS,
             ordinal_box=ordinal_box, subaccount=binding.subaccount, exchange_index=i,
             selected_ticker=selected_ticker, retained_ticker=retained_ticker,
         )
+        trace("PER_INDEX_SURFACE_TRAVERSAL", "PASS", pages=len(orders_surface.pages), rows=len(orders_rows))
+        trace("PER_INDEX_SURFACE_TRAVERSAL", "BEGIN", surface="GET_FILLS", **member)
         fills_surface, fills_rows = _active_v2_paginate_surface(
             adapter, capability, ActivePreReleaseReadOperationV2.GET_FILLS,
             ordinal_box=ordinal_box, subaccount=binding.subaccount, exchange_index=i,
             selected_ticker=selected_ticker, retained_ticker=retained_ticker,
         )
+        trace("PER_INDEX_SURFACE_TRAVERSAL", "PASS", pages=len(fills_surface.pages), rows=len(fills_rows))
+        trace("PER_INDEX_SURFACE_TRAVERSAL", "BEGIN", surface="GET_POSITIONS", **member)
         positions_surface, positions_rows = _active_v2_paginate_surface(
             adapter, capability, ActivePreReleaseReadOperationV2.GET_POSITIONS,
             ordinal_box=ordinal_box, subaccount=binding.subaccount, exchange_index=i,
             selected_ticker=selected_ticker, retained_ticker=retained_ticker,
         )
+        trace("PER_INDEX_SURFACE_TRAVERSAL", "PASS", pages=len(positions_surface.pages), rows=len(positions_rows))
         per_index.append(_ActiveV2PerIndexCommitmentV1(
             exchange_index=i, orders=orders_surface, fills=fills_surface, positions=positions_surface,
             order_rows=orders_rows, fill_rows=fills_rows, position_rows=positions_rows,
@@ -8492,6 +8796,7 @@ def _run_active_v2_acquisition(
     bound_ids = tuple(selected_order_ids[:_ACTIVE_V2_ORDER_REQUEST_MAX])
     orders_complete = len(selected_order_ids) <= _ACTIVE_V2_ORDER_REQUEST_MAX
     supplements: list[_ActiveV2OrderSupplementCommitmentV1] = []
+    trace("EXACT_ORDER_SUPPLEMENTS", "BEGIN", selected_order_count=len(selected_order_ids), bound_count=len(bound_ids))
     for oid in bound_ids:
         ordinal_box[0] += 1
         o_parsed, o_raw, o_deadline = adapter.issue_json(
@@ -8520,8 +8825,10 @@ def _run_active_v2_acquisition(
             })),
         ))
         _final_check(o_deadline)
+    trace("EXACT_ORDER_SUPPLEMENTS", "PASS", orders_complete=orders_complete)
 
     # 7 -- T1 freshness-after
+    trace("T1_USER_DATA_TIMESTAMP_ORDERING_AND_LOCAL_READ_WINDOW", "BEGIN")
     t1_parsed, t1_raw, t1_deadline = _bookend(ActivePreReleaseReadOperationV2.GET_USER_DATA_TIMESTAMP, bookend="AFTER")
     evidence.record("udt_t1_raw", _stage3_udt_raw(t1_parsed))
     t1_as_of = _active_v2_as_of_time(t1_parsed)
@@ -8564,8 +8871,10 @@ def _run_active_v2_acquisition(
         as_of_time_utc=t1_as_of, wall_sample_utc=t1_wall,
     )
     _final_check(t1_deadline)
+    trace("T1_USER_DATA_TIMESTAMP_ORDERING_AND_LOCAL_READ_WINDOW", "PASS")
 
     # 8 -- S1 status-after -> D1 == D0
+    trace("S1_STATUS_DOMAIN_EQUALS_D0", "BEGIN")
     s1_parsed, s1_raw, s1_deadline = _bookend(ActivePreReleaseReadOperationV2.GET_EXCHANGE_STATUS, bookend="AFTER")
     d1, s1_content = _active_v2_status_domain_and_content(s1_parsed)
     if d1 != d0:
@@ -8579,6 +8888,7 @@ def _run_active_v2_acquisition(
         response_sha256=sha256_hex(s1_raw), canonical_content_sha256=s1_content, exact_sorted_domain=d1,
     )
     _final_check(s1_deadline)
+    trace("S1_STATUS_DOMAIN_EQUALS_D0", "PASS")
 
     # 9 -- build the selected-route truth + the completeness fixture, then the
     # converged acquired-read (final composite validation happens in the mint,
@@ -8987,10 +9297,15 @@ def _mint_release_eligible_read_set(
         raise RunnerError(RunnerFailureCode.SUBACCOUNT_WIDE_COMPLETENESS_UNPROVEN, detail="active runtime risk_config required")
     if type(selected_route_truth) is not AuthoritativeReadTruthV1:
         raise RunnerError(RunnerFailureCode.SUBACCOUNT_WIDE_COMPLETENESS_UNPROVEN, detail="selected-route truth type")
+    # CORRECTION_01: evidence-only predicate trace (BEGIN/PASS markers).
+    trace = capability.stage3_evidence.predicate
     # Stage-3 semantics FS-COMP-001/003: an aggregate current-live
     # completeness gap with no more precise classification (the precise
     # pagination / cursor / scope / schema codes were already raised by the
     # acquirer) is CURRENT_VENUE_COMPLETENESS_UNRESOLVED -- unknown, never zero.
+    trace("CURRENT_LIVE_ORDERS_FILLS_COMPLETE", "BEGIN",
+          orders_complete=selected_route_truth.orders_complete is True,
+          fills_complete=selected_route_truth.fills_complete is True)
     for complete, detail in (
         (selected_route_truth.orders_complete, "orders"),
         (selected_route_truth.fills_complete, "fills"),
@@ -8999,15 +9314,19 @@ def _mint_release_eligible_read_set(
             raise RunnerError(
                 RunnerFailureCode.CURRENT_VENUE_COMPLETENESS_UNRESOLVED,
                 detail="current live " + detail + " completeness unproven")
+    trace("CURRENT_LIVE_ORDERS_FILLS_COMPLETE", "PASS")
     # C09-C: the domain-wide exactly-once fill-identity proof runs at this ONE
     # converged live/fake boundary, before any release-eligible mint or risk
     # acceptance consumes the accepted fill rows.
+    trace("DOMAIN_WIDE_FILL_IDENTITY", "BEGIN")
     _validate_active_v2_domain_wide_fill_identity(fixture, subaccount=binding.subaccount)
+    trace("DOMAIN_WIDE_FILL_IDENTITY", "PASS")
 
     now_monotonic_ns = runtime.monotonic_clock_ns()
     started_utc = canonical_timestamp(runtime.wall_clock())
     current_cutoff = _active_reconciliation_cutoff_sha256(selected_route_truth)
 
+    trace("DYNAMIC_INDEX_DOMAIN_COMPLETENESS", "BEGIN")
     retained_classification = require_dynamic_index_domain_completeness(
         fixture,
         domain_binding=binding,
@@ -9022,6 +9341,7 @@ def _mint_release_eligible_read_set(
         read_window_start_monotonic_ns=acquired.read_window_start_monotonic_ns,
         read_window_finish_monotonic_ns=acquired.read_window_finish_monotonic_ns,
     )
+    trace("DYNAMIC_INDEX_DOMAIN_COMPLETENESS", "PASS", retained_position_classification=retained_classification)
     _record_stage3_acquired_semantics(capability.stage3_evidence, acquired)
 
     selected_ticker_value = (
@@ -9043,6 +9363,7 @@ def _mint_release_eligible_read_set(
     # BLOCK-05-03 -- the ACTUAL retained-position release authority.
     controlled_live = Decimal("0")
     accepted_atse1_id = ""
+    trace("RETAINED_BOOTSTRAP_FLOOR_RECONCILIATION", "BEGIN", retained_position_present=rbp is not None)
     if rbp is not None:
         controlled_live = _dynamic_read_controlled_live_position_contracts(
             fixture, ticker=rbp["ticker"], subaccount=binding.subaccount,
@@ -9090,7 +9411,9 @@ def _mint_release_eligible_read_set(
                 detail="retained bootstrap floor not reconciled: " + exc.code.value,
             ) from exc
         accepted_atse1_id = ACCEPTED_TERMINAL_SETTLEMENT_ID
+    trace("RETAINED_BOOTSTRAP_FLOOR_RECONCILIATION", "PASS", retained_position_classification=retained_classification)
 
+    trace("READ_SET_MINT_WITHIN_ABSOLUTE_DEADLINE", "BEGIN")
     completed_utc = canonical_timestamp(runtime.wall_clock())
     if runtime.monotonic_clock_ns() >= capability.absolute_invocation_deadline_ns:
         raise RunnerError(RunnerFailureCode.DYNAMIC_READ_DEADLINE_EXHAUSTED, detail="absolute invocation deadline expired during final read-set construction")
@@ -9131,6 +9454,7 @@ def _mint_release_eligible_read_set(
         pre_release_requests_consumed=capability.requests_consumed,
         absolute_invocation_deadline_ns=capability.absolute_invocation_deadline_ns,
     )
+    trace("READ_SET_MINT_WITHIN_ABSOLUTE_DEADLINE", "PASS")
     capability.mark_consumed()
     return read_set
 
@@ -9620,10 +9944,12 @@ def run_pre_release_read_phase_v2(
 
         # Stage 3F -- assemble ActiveReleaseEvaluationStateV1 committing to
         # the exact private read-set identity.
+        capability.stage3_evidence.predicate("STAGE3F_DURABLE_COHERENCE_AND_TRUSTED_MATCH", "BEGIN")
         active_release_state = assemble_active_release_evaluation_state_v1(
             runtime, truth, opened.projection,
             trusted_dynamic_read_set_id=read_set.read_set_id,
         )
+        capability.stage3_evidence.predicate("STAGE3F_DURABLE_COHERENCE_AND_TRUSTED_MATCH", "PASS")
     except Exception as exc:
         # FS-ACC-003/004: post-capability failure keeps the exact (or proven
         # lower-bound) request accounting actually known on the error path.
@@ -12362,16 +12688,22 @@ class _LiveDemoSignedReadTransport:
             # DSB-LIVE-TRANSPORT-002: 3xx is terminal and non-followed; other
             # non-2xx is a fixed terminal classification.  Zero redirects
             # followed, zero automatic retries.
+            # CORRECTION_01: the exact terminal status integer (secret-free)
+            # rides on the unchanged classification as request evidence.
             if 300 <= status < 400:
-                raise RunnerError(
+                terminal = RunnerError(
                     RunnerFailureCode.LIVE_READ_TRANSPORT_REDIRECT_NOT_FOLLOWED,
                     detail="3xx redirect not followed",
                 )
+                terminal._arb_http_status = status  # type: ignore[attr-defined]
+                raise terminal
             if not (200 <= status < 300):
-                raise RunnerError(
+                terminal = RunnerError(
                     RunnerFailureCode.LIVE_READ_TRANSPORT_NON_2XX,
                     detail="non-2xx terminal status",
                 )
+                terminal._arb_http_status = status  # type: ignore[attr-defined]
+                raise terminal
             body = response.read(MAX_RESPONSE_BODY_BYTES + 1)
             content_type = response.getheader("Content-Type", "") or ""
             if type(body) is not bytes:
@@ -13236,6 +13568,116 @@ def _build_read_only_stage3_live_runtime(
     )
 
 
+_STAGE3_FRESHNESS_EVIDENCE_CLASS = "NON_GATING_EVIDENCE_AT_STAGE3_RESULT_EMISSION"
+
+
+def _stage3_freshness_evidence(
+    result: object, *, risk_config: object, now_monotonic_ns: object, now_utc: object,
+) -> "dict[str, object]":
+    """CORRECTION_01 -- secret-free FreshnessStampV1 / market-data freshness
+    evidence.  Stage 3A-3F only CONSTRUCTS the two 3F stamps; their gating
+    consumer is the Stage-3G release evaluator, which this read-only
+    entrypoint never enters.  This helper therefore evaluates the UNCHANGED
+    canonical ``risk_control.freshness_age_ms`` predicate once, at result
+    emission, purely as evidence: market data against
+    ``min(per_order.max_market_data_age_ms,
+    state_integrity.max_required_market_data_age_ms)``; reconciliation
+    against ``state_integrity.max_reconciliation_lag_ms`` only.  It never
+    gates, retries, or alters the Stage-3 result."""
+    from arb.venues.kalshi.risk_control import RiskControlCode, freshness_age_ms as _freshness_age_ms
+
+    out: "dict[str, object]" = {
+        "evaluation_class": _STAGE3_FRESHNESS_EVIDENCE_CLASS,
+        "gating_consumer": "STAGE_3G_RELEASE_EVALUATION_NOT_ENTERED",
+        "evaluation_monotonic_ns": now_monotonic_ns if type(now_monotonic_ns) is int else None,
+        "evaluation_utc": now_utc if type(now_utc) is str else None,
+        "monotonic_clock_source": "RUNTIME_MONOTONIC_CLOCK",
+    }
+    state = getattr(result, "active_release_state", None)
+    if getattr(result, "status", None) != "READ_PHASE_COMPLETE" or state is None:
+        out["status"] = "NOT_REACHED"
+        out["reason"] = "STAGE_3F_NOT_COMPLETED"
+        return out
+    if type(risk_config) is not RiskLimitConfigV1 or type(now_monotonic_ns) is not int or type(now_utc) is not str:
+        out["status"] = "EVIDENCE_INPUT_UNAVAILABLE"
+        return out
+    si = risk_config.state_integrity
+    process_instance_id = getattr(result, "process_instance_id", None)
+
+    def _evaluate(stamp: object, *, expected_sha256: object, max_age_ms: int, stale_code: object) -> "dict[str, object]":
+        if type(stamp) is not FreshnessStampV1:
+            return {"predicate": "STAMP_UNAVAILABLE"}
+        entry: "dict[str, object]" = {
+            "received_at_utc": stamp.received_at_utc,
+            "received_monotonic_ns": stamp.received_monotonic_ns,
+            "source_timestamp_kind": stamp.source_timestamp_kind,
+            "source_timestamp_utc": stamp.source_timestamp_utc,
+            "snapshot_sha256": stamp.snapshot_sha256,
+            "snapshot_matches_committed_snapshot": stamp.snapshot_sha256 == expected_sha256,
+            "max_age_ms": max_age_ms,
+            "max_future_wall_clock_skew_ms": si.max_future_wall_clock_skew_ms,
+            "stamp_to_evaluation_ns": now_monotonic_ns - stamp.received_monotonic_ns,
+        }
+        try:
+            age = _freshness_age_ms(
+                stamp, current_process_instance_id=process_instance_id,
+                now_monotonic_ns=now_monotonic_ns, now_utc=now_utc, max_age_ms=max_age_ms,
+                max_future_wall_clock_skew_ms=si.max_future_wall_clock_skew_ms, stale_code=stale_code,
+            )
+        except RiskControlError as exc:
+            entry["age_ms"] = None
+            entry["predicate"] = "FAIL"
+            entry["failure_code"] = exc.code.value
+        else:
+            entry["age_ms"] = age
+            entry["predicate"] = "PASS"
+        return entry
+
+    # The active release state is opaque; read its 3F inputs through the same
+    # read-only ``inner._snapshot()`` accessor Stage 3F itself uses
+    # (``assemble_active_release_evaluation_state_v1``).
+    snapshot_fn = getattr(getattr(state, "inner", None), "_snapshot", None)
+    if callable(snapshot_fn):
+        snap = snapshot_fn()
+        risk_snapshot, reconciliation_snapshot, market_stamp, reconciliation_stamp = snap[6], snap[7], snap[8], snap[9]
+    else:
+        risk_snapshot = getattr(state, "risk_snapshot", None)
+        reconciliation_snapshot = getattr(state, "reconciliation_snapshot", None)
+        market_stamp = getattr(state, "market_freshness", None)
+        reconciliation_stamp = getattr(state, "reconciliation_freshness", None)
+    market_limit = min(risk_config.per_order.max_market_data_age_ms, si.max_required_market_data_age_ms)
+    market = _evaluate(
+        market_stamp,
+        expected_sha256=getattr(risk_snapshot, "market_data_sha256", None),
+        max_age_ms=market_limit, stale_code=RiskControlCode.MARKET_DATA_STALE,
+    )
+    market["per_order_max_market_data_age_ms"] = risk_config.per_order.max_market_data_age_ms
+    market["state_integrity_max_required_market_data_age_ms"] = si.max_required_market_data_age_ms
+    snapshot_values = getattr(risk_snapshot, "market_data_snapshot", None)
+    market["market_data_snapshot"] = (
+        {str(k): str(v) for k, v in snapshot_values.items()} if isinstance(snapshot_values, Mapping) else None)
+    orderbook = getattr(getattr(result, "truth", None), "orderbook", None)
+    started = getattr(orderbook, "request_started_monotonic_ns", None)
+    completed = getattr(orderbook, "request_completed_monotonic_ns", None)
+    market["orderbook_request_started_monotonic_ns"] = started if type(started) is int else None
+    market["orderbook_request_completed_monotonic_ns"] = completed if type(completed) is int else None
+    stamp_ns = market.get("received_monotonic_ns")
+    market["orderbook_response_to_stamp_ns"] = (
+        stamp_ns - completed if type(completed) is int and type(stamp_ns) is int else None)
+    market["orderbook_response_to_evaluation_ns"] = (
+        now_monotonic_ns - completed if type(completed) is int else None)
+    reconciliation = _evaluate(
+        reconciliation_stamp,
+        expected_sha256=getattr(reconciliation_snapshot, "sha256", None),
+        max_age_ms=si.max_reconciliation_lag_ms, stale_code=RiskControlCode.RECONCILIATION_STALE,
+    )
+    reconciliation["max_reconciliation_lag_ms"] = si.max_reconciliation_lag_ms
+    out["status"] = "EVALUATED"
+    out["market_data_freshness"] = market
+    out["reconciliation_freshness_stamp_v1"] = reconciliation
+    return out
+
+
 def run_read_only_stage3_live_entrypoint(
     config: "LiveReadOnlyStage3InvocationConfigV1",
     *,
@@ -13394,6 +13836,19 @@ def run_read_only_stage3_live_entrypoint(
     # BOUNDARY_ENTERED count (== the capability's requests_consumed) and
     # ``network_reads_stage3`` the exact TRANSPORT_ATTEMPTED count.
     output.update(stage3_fields)
+    # CORRECTION_01: non-gating freshness evidence at result emission (one
+    # runtime clock sample, AFTER the Stage-3 phase completed).  Evidence
+    # construction can never convert or fail the completed result.
+    try:
+        output["stage3_freshness_evidence"] = _stage3_freshness_evidence(
+            result, risk_config=getattr(runtime, "risk_config", None),
+            now_monotonic_ns=mono(), now_utc=canonical_timestamp(wall()),
+        )
+    except Exception as exc:  # pragma: no cover - defensive evidence-only path
+        output["stage3_freshness_evidence"] = {
+            "evaluation_class": _STAGE3_FRESHNESS_EVIDENCE_CLASS,
+            "status": "EVIDENCE_CONSTRUCTION_FAILED", "exception_class": type(exc).__name__,
+        }
     return output
 
 
@@ -13652,7 +14107,12 @@ def main(argv: "Sequence[str] | None" = None) -> int:
         # Stage-3 result carrying the accounting/semantic evidence actually
         # known on the error path -- never an initialised false zero.
         failure = {"status": "LIVE_ENTRYPOINT_FAILED", "failure": exc.code.value, "detail": exc.detail}
-        failure.update(_stage3_revision2_result_fields(_stage3_evidence_of(exc)))
+        failure.update(_stage3_revision2_result_fields(
+            _stage3_evidence_of(exc), failure_code=exc.code.value, failure_detail=exc.detail))
+        failure["stage3_freshness_evidence"] = {
+            "evaluation_class": _STAGE3_FRESHNESS_EVIDENCE_CLASS,
+            "status": "NOT_REACHED", "reason": "LIVE_ENTRYPOINT_FAILED_BEFORE_RESULT_EMISSION",
+        }
         print(json.dumps(failure, sort_keys=True))
         return 1
     print(json.dumps(result, sort_keys=True))
