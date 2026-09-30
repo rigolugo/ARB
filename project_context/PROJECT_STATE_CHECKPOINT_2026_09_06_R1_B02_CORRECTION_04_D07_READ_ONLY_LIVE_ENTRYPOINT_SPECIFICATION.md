@@ -5530,3 +5530,164 @@ remote Git write
 ```
 
 Nothing here is profitability or arbitrage evidence.
+
+### A32 R1-D07 fresh read-only Stage-3 revalidation execution-package Correction-01 (Stage-3 evidence instrumentation) — APPROVED_AND_CANONICALLY_INSTALLED
+
+This is a documentation-only continuity overlay (task
+`R1-D07_STAGE3_REVALIDATION_INSTALLATION_CONTINUITY_AND_OPERATOR_REPIN_PREPARATION_01`,
+Phase A). This candidate is prepared directly from the exact canonical base on
+`rigolugo/ARB/main`:
+
+```text
+required_base_commit = cb26c85adff6d4545bd1d748293e27a7fd97fe50
+required_base_tree   = 93cc19ae11c4c5ef75c959e20349ab8249e397eb
+required_base_parent = fa154fd8eb56bd05e6e969c1597e223c8ca081be
+continuity_class     = DOCUMENTATION_ONLY
+```
+
+This section controls current state only when this continuity candidate is
+itself later present on canonical `main`. It alters no implementation bytes and
+grants no runtime capability. It updates exactly three existing documentation
+paths (this checkpoint, `project_context/START_HERE.md`, and
+`project_context/ARTIFACT_INDEX.md`); no new checkpoint or repository file is
+created and canonical read order is unchanged. A1-A31 are not rewritten.
+
+**Provenance distinction.** The implementation was already installed on
+canonical `main` as commit `cb26c85adff6d4545bd1d748293e27a7fd97fe50` by the
+separately authorized task
+`R1-D07_FRESH_READ_ONLY_STAGE3_REVALIDATION_EXECUTION_PACKAGE_01_CORRECTION_01_CANONICAL_INSTALLATION_01`,
+completed before this continuity task. This continuity candidate is
+documentation-only: one local commit, no remote Git write, no project test or
+runtime, and no live Stage-3 run.
+
+**A32.1 Installation identity.**
+
+```text
+R1-D07_FRESH_READ_ONLY_STAGE3_REVALIDATION_EXECUTION_PACKAGE_01_CORRECTION_01
+  = APPROVED_AND_CANONICALLY_INSTALLED
+
+installation_classification = REMOTE_INSTALLATION_CONFIRMED
+installation_source_mode    = EXACT_APPROVED_COMMIT_OBJECT
+
+installed_commit      = cb26c85adff6d4545bd1d748293e27a7fd97fe50
+installed_tree        = 93cc19ae11c4c5ef75c959e20349ab8249e397eb
+installed_sole_parent = fa154fd8eb56bd05e6e969c1597e223c8ca081be
+compare_from_parent   = ahead 1, behind 0, merge base fa154fd8eb56bd05e6e969c1597e223c8ca081be
+```
+
+Installed files (exactly these two paths changed from the parent):
+
+```text
+src/arb/venues/kalshi/minimal_market_maker_experiment_runner.py
+  bytes  = 750048
+  sha256 = f1cdcd916abddbf4231240bb376323dea9768fbd26c70790a9b23ce363bc4ebe
+  blob   = 60a69bb91a989d691996b2d967ef0269a147b0e5
+
+tests/test_kalshi_minimal_market_maker_experiment_runner.py
+  bytes  = 884207
+  sha256 = 47c349e417383b4483e5f798385ad997ca4efddf5a507afa8cd1a3dc4584e9ee
+  blob   = c347ee1fb6e1e31b99b2cc2a41d145bfcb746fb8
+```
+
+Installation push: exactly one non-force fast-forward push
+(`git push origin cb26c85adff6d4545bd1d748293e27a7fd97fe50:refs/heads/main`),
+one attempt, zero retries, no force, exit 0, remote-before
+`fa154fd8eb56bd05e6e969c1597e223c8ca081be`, remote-after
+`cb26c85adff6d4545bd1d748293e27a7fd97fe50`. All 16 pre-write gates passed in
+the same session; authoritative remote readback confirmed the exact commit,
+tree, sole parent, two changed paths, and both installed blobs. No tests were
+run during installation.
+
+**A32.2 Review lineage.** Marco BLOCK `MARCO_BLOCK_REVIEW_01`
+(BLOCK-EXEC-PKG-01 material evidence incompleteness; BLOCK-EXEC-PKG-02 launcher
+not behaviourally exercised) on the predecessor execution package (never
+executed; noncanonical); both closed by Correction-01. Marco `APPROVE` of the
+exact Correction-01 candidate; Marco `APPROVE` of the canonical installation
+after independent remote verification.
+
+**A32.3 Installed theorem.** The Stage-3 read-only entrypoint result now also
+carries additive, secret-free, non-gating evidence without changing Stage-3
+behaviour or request topology: per-request rows (method/route/auth class from
+the closed static binding, lifecycle flags, terminal HTTP status or bounded
+exception/rejection/orderbook-halt/refusal class, dedicated `time.monotonic_ns`
+evidence-clock timing) reconciled to the unchanged revision-2 aggregate
+counters; the ordered 14-predicate completeness/read-set trace with failed
+predicate and member; and FreshnessStampV1 / market-data freshness evidence
+evaluated once by the unchanged canonical `freshness_age_ms` at result emission
+(`NON_GATING_EVIDENCE_AT_STAGE3_RESULT_EMISSION`; the gating consumer remains
+Stage 3G, which the read-only entrypoint never enters). The live transport
+attaches the exact terminal status integer to its unchanged 3xx/non-2xx
+classification. Unchanged: Stage-3 result schema revision 2 and its
+`EXACT_ZERO` / `EXACT_NONZERO` / `UNKNOWN_NONZERO` accounting,
+`PRE_RELEASE_READ_REQUEST_MAX_V2 = 72`, the A31 UDT/read-window/lag/market-data
+theorem, Candidate-02 and ADRS2/private read-set schema; no `/historical/cutoff`,
+no Candidate-03, no new threshold.
+
+Reviewed test truth (not upgraded): targeted 17 passed / 9 subtests; runner
+file 1576 passed / 2 skipped / 261 subtests; full suite on the candidate 4142
+passed / 2 skipped / 1363 subtests / 0 failed. An earlier pre-commit full run
+hit the A31 protected-ledger parallel-consumption flake once (isolated reruns
+3/3 passed); that flake remains OPEN / not fixed.
+
+**A32.4 Installation-review provenance qualification.** The first build of the
+installation-review ZIP was invalid: a PowerShell variable-name collision
+(case-insensitive `$b` overwriting `$B`) wrote byte dumps into three evidence
+documents. That build was quarantined locally and is not accepted evidence. The
+accepted installation-review ZIP was rebuilt and verified:
+
+```text
+R1-D07_FRESH_READ_ONLY_STAGE3_REVALIDATION_EXECUTION_PACKAGE_01_CORRECTION_01_CANONICAL_INSTALLATION_01_MARCO_INSTALLATION_REVIEW.zip
+  bytes  = 5973
+  sha256 = 82c29c968d55b3bdbe5eca3f34b2f7acdbfe388e317983b5b92fc1ad1203e438
+```
+
+The rebuild performed one additional read-only post-install
+`git fetch origin main` + `git ls-remote origin refs/heads/main` readback beyond
+the activity attestation inside that ZIP. It did not change repository state.
+This is a provenance correction only.
+
+**A32.5 Operator execution package status.** The Correction-01 operator-local
+PowerShell execution package was approved as a review artifact only with its
+canonical pins deliberately `UNRESOLVED_REPIN_REQUIRED_AFTER_CORRECTION_01_CANONICAL_INSTALLATION`.
+It remains `NOT_AUTHORIZED_FOR_EXECUTION` and requires a post-install repin to
+the installed implementation `cb26c85adff6d4545bd1d748293e27a7fd97fe50` plus
+separate Marco review before any execution authorization can be requested.
+`max_future_wall_clock_skew_ms` continues to come only from the SHA-bound
+Candidate-02 parse.
+
+**A32.6 G and runtime status.**
+
+```text
+canonical_G_selection                 = UNSELECTED
+historical_noncanonical_trial_G       = 1
+G_canonicalization                    = NOT_PERFORMED
+post_install_live_stage3_revalidation = NOT_RUN
+live_stage3_attempt_consumed          = NONE
+live_stage3_execution_authorization   = NONE
+runtime_capability_created            = NONE
+```
+
+**A32.7 Supersession scope.** A32 becomes the latest D07 overlay only when this
+continuity candidate is itself reviewed and installed on canonical `main`. It
+supersedes A31 only for the installed-implementation identity and the next
+bounded route; A31 remains controlling historical provenance for the Stage-3
+semantics implementation it records.
+
+**A32.8 Next bounded route.**
+
+```text
+NEXT_BOUNDED_ACTION =
+MARCO_REVIEW_OF_POST_INSTALL_REPINNED_OPERATOR_EXECUTION_PACKAGE
+```
+
+Routing only; not an authorization. A later live fresh read-only Stage-3
+revalidation still requires the reviewed repinned package plus a separate
+explicit Gustavo execution authorization.
+
+**A32.9 No-capability theorem.** This continuity milestone grants no Kalshi/API
+access, credential use, deployed-N1 or persistent runtime-state access, new
+restricted-session mutation, selector execution, Stage-3 execution, risk-config
+runtime consumption, operator Preflight/Execute, Demo write, RELEASE_ONLY,
+writer-proof release, NormalWriter, Gate D, Stage3G+, production activity, G
+selection or canonicalization, or remote Git write. Nothing here is
+profitability or arbitrage evidence.
