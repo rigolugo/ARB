@@ -5691,3 +5691,97 @@ runtime consumption, operator Preflight/Execute, Demo write, RELEASE_ONLY,
 writer-proof release, NormalWriter, Gate D, Stage3G+, production activity, G
 selection or canonicalization, or remote Git write. Nothing here is
 profitability or arbitrage evidence.
+
+### A33 R1-D07 fresh read-only Stage-3 revalidation — CONSUMED / LIVE_ENTRYPOINT_FAILED / EVIDENCE_COMPLETE
+
+This documentation-only continuity overlay records the accepted direct empirical observation from the consumed one-shot attempt `r1d07reval_20260930T171554Z_af760003`. It is prepared from canonical `rigolugo/ARB/main` commit `2ac05ce12a905c048ec6133ffe852a5f77e734bf` (tree `01b8d13b5d6096e8d9ed058e6899e4abb5e8063a`, sole parent `cb26c85adff6d4545bd1d748293e27a7fd97fe50`). It changes documentation only and grants no runtime capability. A1-A32 remain historical provenance and are not rewritten.
+
+**A33.1 Raw evidence identity and provenance.**
+
+```text
+execution_attempt_id = r1d07reval_20260930T171554Z_af760003
+raw_evidence_filename = r1d07reval_20260930T171554Z_af760003_EVIDENCE.zip
+raw_evidence_bytes = 11365
+raw_evidence_sha256 = 98037e92fae41caacbcb10e7ea19059f645ba20b7305db15c82cdc9ce65c1bb5
+evidence_class = DIRECT_EMPIRICAL_OBSERVATION
+raw_storage = LOCAL_ONLY
+one_shot_attempt = CONSUMED
+retry = PROHIBITED
+```
+
+The detached sidecar, ZIP CRC, internal manifest, and all six member byte/SHA-256 identities were verified before authoring. The raw ZIP is not repository-resident; only its sanitized theorem and exact identity are canonicalized.
+
+**A33.2 Terminal empirical result.**
+
+```text
+launcher_status = READY_FOR_MARCO_EVIDENCE_REVIEW
+launcher_exit_code = 0
+terminal_state = LIVE_ENTRYPOINT_FAILED
+evidence_completeness = EVIDENCE_COMPLETE
+evidence_gap_count = 1
+material_evidence_gap_count = 0
+
+selector_executed = true
+selector_status = SUCCEEDED
+selected_ticker = KXNASDAQ100U-26SEP30H1600-T30819.99
+event_ticker = KXNASDAQ100U-26SEP30H1600
+historical_ticker_reused = false
+
+stage3_runner_executed = true
+stage3_complete = false
+failure_code = USER_DATA_TIMESTAMP_FUTURE
+failed_predicate = T0_USER_DATA_TIMESTAMP_ORDERING
+
+T0_raw = 2026-09-30T17:19:27.802044Z
+T0_utc = 2026-09-30T17:19:27.802044Z
+T0_post_response_wall_utc = 2026-09-30T17:19:27.058931Z
+observed_T0_future_skew_us = 743113
+observed_T0_future_skew_ms = 743.113
+
+Candidate-02_raw_sha256 = 4495ade7fed522bf17a202d6f5422f608765b65a4463121175695c862b3f904c
+Candidate-02_semantic_sha256 = e16c9219b495062647b82b9e8a4d5e9c1b98f3e54ce43f0044c1a85fea162bbb
+max_future_wall_clock_skew_ms_parsed_controlling = 0
+
+stage3_request_accounting = RECONCILED
+prepared/boundary/transport/completed/accepted-parsed = 2/2/2/2/2
+S0_STABLE_SELECTED_INDEX_DOMAIN = PASS
+all_predicates_after_T0_ordering = NOT_EVALUATED
+freshness = NOT_REACHED
+trusted_dynamic_read_set_id = NONE
+```
+
+Both Stage-3 requests were public GETs, completed HTTP 200, and parsed. The implementation then failed closed at the T0 ordering predicate because the returned T0 instant was 743.113 ms later than its captured post-response trusted local wall-clock sample while Candidate-02's controlling parsed allowance was exactly 0 ms.
+
+**A33.3 Evidence qualification.**
+
+The evidence records `persistent_state_identity_reads = NOT_AUTHORIZED`. Therefore this package does not establish independent before/after persistent-state identity hashes. The restricted-session lifecycle was authorized and recorded as expected, but persistent before/after identity hashing was outside that execution capability envelope. This is the sole evidence gap and is non-material to the terminal Stage-3 theorem above.
+
+**A33.4 Bounded interpretation.**
+
+This exact observation proves only that, for this Demo/account/runtime/attempt, selector discovery succeeded, Stage-3 entered, two public reads completed and reconciled, S0 passed, and the T0 ordering check failed closed under the controlling 0-ms future-wall-clock-skew allowance.
+
+It does **not** establish that 743.113 ms, 1000 ms, or any other value is an acceptable future-skew threshold; whether the venue clock or local clock was wrong; the causal source of the offset; equivalence in production, another account, host, or time; Stage-3 success; a trusted read set; release or writer eligibility; Gate-D or Stage3G+ eligibility; G selection/canonicalization; profitability; or arbitrage. No Candidate-03 is created and Candidate-02 is unchanged.
+
+**A33.5 No-escalation state.**
+
+```text
+Demo writes = 0 / not authorized
+production activity = 0 / not authorized
+release = NOT_REACHED / NOT_GRANTED
+writer admission = NOT_REACHED / NOT_GRANTED
+Gate-D = NOT_REACHED / NOT_GRANTED
+Stage3G+ = NOT_REACHED / NOT_GRANTED
+G canonicalization = NOT_PERFORMED
+canonical_G_selection = UNSELECTED
+```
+
+**A33.6 Supersession and next bounded route.**
+
+A33 supersedes A32 only for the live-revalidation attempt status and the next bounded route. A32 remains controlling historical provenance for the installed execution package and instrumentation.
+
+```text
+NEXT_BOUNDED_ACTION =
+R1-D07_T0_UDT_FUTURE_SKEW_SEMANTICS_RESOLUTION
+```
+
+The next route is static semantic/source analysis first: combine existing canonical empirical evidence, this accepted direct empirical observation, and already-preserved official-source/UDT evidence to identify the unresolved clock-comparison semantic and determine whether any new external assumption remains. Only after that analysis may a separately bounded probe or specification correction be considered. This route does not authorize another live attempt and does not select a replacement threshold.

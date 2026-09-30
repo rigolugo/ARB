@@ -148,3 +148,7 @@ Before obtaining fresh evidence, the continuity workflow requires inspection of 
 ## Fail-closed rule
 
 If any governance record is stale, conflicting, ambiguous, identity-mismatched, or insufficient for a capability the task requires, use the more restrictive interpretation and halt the affected activity. Do not infer authority from technical capability, prior tasks, old candidates, repository state, historical source hashes, or missing log entries.
+
+## Current R1-D07 routing overlay
+
+The routed checkpoint `project_context/PROJECT_STATE_CHECKPOINT_2026_09_06_R1_B02_CORRECTION_04_D07_READ_ONLY_LIVE_ENTRYPOINT_SPECIFICATION.md` now carries A33 as the current R1-D07 overlay. A33 records the consumed one-shot fresh Stage-3 revalidation result (`LIVE_ENTRYPOINT_FAILED`, `USER_DATA_TIMESTAMP_FUTURE`, `T0_USER_DATA_TIMESTAMP_ORDERING`, observed future skew 743.113 ms under Candidate-02's controlling 0-ms allowance), preserves the exact local-only raw-evidence identity, and routes next to `R1-D07_T0_UDT_FUTURE_SKEW_SEMANTICS_RESOLUTION`. A32 remains historical installation/instrumentation provenance. No replacement threshold, Candidate-03, G selection/canonicalization, release, writer admission, Gate-D, Stage3G+, venue write, or production capability is created by this routing update.
