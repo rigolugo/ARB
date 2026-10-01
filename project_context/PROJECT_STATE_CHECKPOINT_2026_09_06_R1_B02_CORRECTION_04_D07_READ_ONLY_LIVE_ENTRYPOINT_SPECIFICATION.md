@@ -6058,3 +6058,152 @@ route_class = SPEC_ONLY (routing only; not an authorization)
 ```
 
 The next route is specification-only: it must design the correction of the T0/T1 UDT-to-client-wall comparison from the accepted theorem above without choosing a larger timestamp tolerance by guesswork, and it must not convert any observed value into a threshold or a dynamic correction. Per the approved static-analysis handoff (provenance), successor semantic-spec authoring requires the exact predecessor raw bytes of `KALSHI_DEMO_R1_D07_STAGE3_FRESHNESS_AND_COMPLETENESS_SEMANTICS_SPEC_01.md` (26875 bytes / sha256 `8183d469f7f5de35cf27edc7c7594ebd2f9d63f1d40bd3422bbeacc33e32dc13`). This route authorizes no implementation, no Stage-3 or live attempt, no diagnostic execution, no host-clock change, and no threshold selection.
+
+### A35 R1-D07 T0 UDT/client-wall corrective semantic SPEC_01 — MARCO APPROVED / SPEC_ONLY / IMPLEMENTATION PENDING
+
+This documentation-only continuity overlay records the Marco-approved corrective semantic specification that answers the A34 next route, prepared by `R1-D07_T0_UDT_CLIENT_WALL_COMPARISON_CORRECTIVE_SPEC_01_CANONICALIZATION_01` from canonical `rigolugo/ARB/main` commit `6c4752d17904f4085b0a6ab60756f83a858ec97e` (tree `44569c7e6ca2aef7d2f7e614556d899d05752b06`, sole parent `84fc5bbc2438070c6c61123dd2c7c167cdcb35e1`). It records an approved SPECIFICATION milestone, not an implementation result. It changes documentation only and grants no runtime capability. A1-A34 remain historical provenance and are not rewritten.
+
+**A35.1 Milestone disposition — specification versus installed runtime.**
+
+```text
+CORRECTIVE_SPEC_01 = MARCO_APPROVED_SPEC_ONLY (APPROVED_AND_CANONICALLY_RECORDED by identity)
+APPROVED_CONTROLLING_SPEC (for future Stage-3 UDT/client-wall implementation) = CORRECTIVE_SPEC_01
+CORRECTIVE_IMPLEMENTATION = NOT_YET_PERFORMED
+INSTALLED_IMPLEMENTATION_CONFORMS_TO_CORRECTIVE_SPEC = NO / NOT YET
+CURRENT_INSTALLED_RUNTIME = PREDECESSOR_CROSS_CLOCK_BEHAVIOR_STILL_PRESENT_PENDING_IMPLEMENTATION
+```
+
+At this base the installed Stage-3 runner `src/arb/venues/kalshi/minimal_market_maker_experiment_runner.py` (blob `60a69bb91a989d691996b2d967ef0269a147b0e5`) still binds the predecessor semantic-spec identity (`KALSHI_DEMO_R1_D07_STAGE3_FRESHNESS_AND_COMPLETENESS_SEMANTICS_SPEC_01` / `8183d469…dc13`) and still calls the predecessor cross-clock gate `_require_stage3_udt_not_future` from `require_dynamic_index_domain_completeness(...)` and from the live T0 and T1 bookends of `_run_active_v2_acquisition(...)`. Any Stage-3 execution of the installed code would therefore still apply the predecessor UDT-versus-client-wall future-skew comparison under Candidate-02's 0-ms allowance. The approved specification changes the controlling contract for FUTURE implementation only; runtime behaviour changes only after a separately dispatched, Marco-reviewed, and canonically installed implementation.
+
+**A35.2 Exact approved artifact identities (external/local; not repository-resident).**
+
+```text
+spec = KALSHI_DEMO_R1_D07_T0_UDT_CLIENT_WALL_COMPARISON_CORRECTIVE_SPEC_01.md
+spec_bytes = 40969
+spec_sha256 = e9145be31466e7de30552519cb2f294d9aab5d53923d917fb908eae5055cf453
+spec_artifact_class = TECHNICAL_SPECIFICATION; task_class = SPEC_ONLY; risk_tier = HIGH
+
+handoff = HANDOFF_KALSHI_DEMO_R1_D07_T0_UDT_CLIENT_WALL_COMPARISON_CORRECTIVE_SPEC_01.md
+handoff_bytes = 7162
+handoff_sha256 = ab52d65a327ef5f787acede085758026301679b5cca8649fd6c5d28667fb81dc
+
+marco_approval = R1-D07_T0_UDT_CLIENT_WALL_COMPARISON_CORRECTIVE_SPEC_01_MARCO_APPROVAL_HANDOFF_01.md
+marco_approval_bytes = 5606
+marco_approval_sha256 = 07bc6e8476b7d315751fd7c81476ec75b9dab272ab7ea43e4efeb28e34edad3e
+marco_decision = APPROVE (2026-10-01)
+
+submission_bundle = R1-D07_T0_UDT_CLIENT_WALL_COMPARISON_CORRECTIVE_SPEC_01_MARCO_SUBMISSION_BUNDLE.zip
+submission_bundle_bytes = 51978
+submission_bundle_sha256 = 3c363e3782b8c0a5e2171f8766ddbb2a2031ea916d6e9d2292b7d51446c1db12
+inner_review_zip_bytes = 26057
+inner_review_zip_sha256 = 189840e1f3686f96009cf875c0100418e6261fcb7ee480af9eaea5e6637a461e
+evidence_traceability_bytes = 8331
+evidence_traceability_sha256 = 3810eb67859bf63509f67d72b71dbb003d3b3b9dae37667a8f1b48ccd2d89546
+static_conformance_matrix_bytes = 4088
+static_conformance_matrix_sha256 = 47117e58787bba39889776c561836c0b4f517659ac2e5e05efeda7c933970e2f
+
+controlling_predecessor_spec = KALSHI_DEMO_R1_D07_STAGE3_FRESHNESS_AND_COMPLETENESS_SEMANTICS_SPEC_01.md
+controlling_predecessor_spec_bytes = 26875
+controlling_predecessor_spec_sha256 = 8183d469f7f5de35cf27edc7c7594ebd2f9d63f1d40bd3422bbeacc33e32dc13
+(predecessor identity already canonical in A30 / ART-0141; its exact raw bytes were re-verified in this task's dispatch bundle)
+```
+
+The specification also records, as its own consumed provenance, the A34 canonical-installation Marco approval handoff (4051 bytes / sha256 `9e4f827c336ec280a873b11ec30fb12b43de6795b0a1937256b335f1b0105df7`) and installation review ZIP (9053 bytes / sha256 `ef19df8eac219faed83e531772c3d9a066f36e5331c2b649a2aca93153167c45`) for the A34 installation at the base above; those identities are referenced here only as recorded by the approved specification.
+
+**A35.3 Supersession boundary.**
+
+The corrective specification is a bounded semantic successor/overlay to the predecessor semantic SPEC_01. For the future implementation contract it:
+
+- supersedes predecessor `FS-UDT-007` (future watermark) in full for Stage-3 UDT/client-wall gating;
+- refines predecessor `FS-UDT-008` (recorded evidence) only to classify retained UDT/client-wall deltas as cross-clock, diagnostic, and non-gating;
+- refines the Candidate-02 disposition only to state that `state_integrity.max_future_wall_clock_skew_ms` has no UDT-path role after corrective implementation;
+- refines the directly dependent UDT failure-code, predicate-trace, serializer-compatibility, test, and traceability semantics; and
+- does not supersede `FS-UDT-001` through `FS-UDT-006`, `FS-RD-*`, `FS-LR-*`, `FS-MD-*`, `FS-COMP-*`, `FS-SAFE-*`, or `FS-ACC-*`, which remain controlling.
+
+The predecessor remains historical technical provenance and remains the semantic identity of the currently installed runtime (A35.1). Historical execution evidence, including A33's `USER_DATA_TIMESTAMP_FUTURE`, is not rewritten or reclassified.
+
+**A35.4 Approved bounded theorem (future implementation contract).**
+
+1. Predecessor `FS-UDT-007` is superseded as the controlling requirement for Stage-3 UDT/client-wall gating.
+2. A future conforming implementation MUST stop using UDT `as_of_time` versus post-response client wall time as a pass/fail future-ordering predicate.
+3. The correction is semantic removal of the unsupported cross-clock gate, not selection of a larger tolerance.
+4. Replacement future-skew threshold = `NONE`.
+5. Dynamic clock correction = `NONE`.
+6. Windows/NTP `Phase Offset`, WebSocket timing, RTT/2, or learned offsets are not correction quantities.
+7. UDT explicit-timezone parsing and deterministic UTC normalization remain fail-closed (`USER_DATA_TIMESTAMP_MALFORMED`).
+8. UDT same-series ordering remains: `T1 < T0` -> fail closed (`USER_DATA_TIMESTAMP_REGRESSION`); `T1 == T0` -> permitted (`UNCHANGED`); `T1 > T0` -> permitted (`ADVANCED`); subject to independent predicates.
+9. The same-client-wall `T1 wall < T0 wall` integrity check (`DYNAMIC_READ_CLOCK_REGRESSION`) remains independent and controlling.
+10. Local monotonic Stage-3 read-window semantics (`reconciliation_read_deadline_ms = 30000`), local reconciliation freshness, market-data freshness, completeness, request accounting, and no-escalation requirements remain controlling.
+11. Candidate-02 bytes/semantic identity are unchanged (raw sha256 `4495ade7fed522bf17a202d6f5422f608765b65a4463121175695c862b3f904c`; `RiskLimitConfigV1.sha256` `e16c9219b495062647b82b9e8a4d5e9c1b98f3e54ce43f0044c1a85fea162bbb`; `max_future_wall_clock_skew_ms = 0`).
+12. Candidate-03 = `NONE`.
+13. The shared `state_integrity.max_future_wall_clock_skew_ms` leaf is removed only from the UDT gating role; protected non-UDT consumers (`risk_control.py`, `ledger_binding.py`, `minimal_market_maker.py`) remain unchanged.
+14. Retained UDT/client-wall signed deltas, if present, are diagnostic, cross-clock, non-gating observations, not exact clock-offset estimates.
+15. `stage3_result_schema_revision` remains `2`.
+16. Future corrected outputs bind semantics using `stage3_semantic_spec = KALSHI_DEMO_R1_D07_T0_UDT_CLIENT_WALL_COMPARISON_CORRECTIVE_SPEC_01` and `stage3_semantic_spec_sha256 = e9145be31466e7de30552519cb2f294d9aab5d53923d917fb908eae5055cf453`.
+17. Historical revision-2 outputs with the predecessor semantic-spec ID/SHA retain their historical meaning.
+18. No retry, timer, reconnect, restart recovery, or runtime-capability expansion is added.
+
+After corrective implementation, `USER_DATA_TIMESTAMP_FUTURE` must not be emitted by the corrected Stage-3 UDT path solely from any UDT/client-wall delta (the symbol may remain for historical decoding). The approved specification records `EMPIRICAL_ASSUMPTION_REQUIRES_PROBE = NO`: the A34 theorem suffices for removing the unsupported gate, and the unresolved exact one-way clock relation is not needed because nothing estimates or compensates for it.
+
+**A35.5 Result-schema / semantic-discriminator decision.**
+
+`stage3_result_schema_revision` remains `2`; wire fields, types, request-accounting semantics, and the signed diagnostic-delta arithmetic remain unchanged. The semantic compatibility discriminator is the existing `stage3_semantic_spec` + `stage3_semantic_spec_sha256` pair: a consumer interpreting UDT predicate/evidence semantics must bind that pair, and revision `2` alone is insufficient to claim corrected UDT semantics. Retained predicate labels `T0_USER_DATA_TIMESTAMP_ORDERING` and `T1_USER_DATA_TIMESTAMP_ORDERING_AND_LOCAL_READ_WINDOW` take the corrected meaning only under the successor identity. A future implementation that cannot preserve the revision-2 field set/types and exact diagnostic definitions must halt as `RESULT_SCHEMA_COMPATIBILITY_UNRESOLVED`; the Marco approval names this as an implementation-review focus, not a SPEC blocker.
+
+**A35.6 Future implementation path envelope (routing context only; grants nothing).**
+
+```text
+writable (future bounded implementation only):
+  src/arb/venues/kalshi/minimal_market_maker_experiment_runner.py   (base blob 60a69bb91a989d691996b2d967ef0269a147b0e5)
+  tests/test_kalshi_minimal_market_maker_experiment_runner.py       (base blob c347ee1fb6e1e31b99b2cc2a41d145bfcb746fb8)
+
+readable / protected:
+  src/arb/venues/kalshi/risk_control.py                 (111685c8c1dc7735a53b45830d93844c329f23e3)
+  src/arb/venues/kalshi/ledger_binding.py               (fac56b5555b48ee04da1753a4042b1f11debaf97)
+  src/arb/venues/kalshi/write_result_reconciliation.py  (a26985c64c62fd7288724be52f050212d0fea97f)
+  src/arb/venues/kalshi/minimal_market_maker.py         (be1bbfa31c7d814d48751f9b2399ef62c866d36e)
+  project_context/ARTIFACT_INDEX.md
+  project_context/PROJECT_STATE_CHECKPOINT_2026_09_06_R1_B02_CORRECTION_04_D07_READ_ONLY_LIVE_ENTRYPOINT_SPECIFICATION.md
+  project_context/START_HERE.md
+  Candidate-02 (exact identity input; not writable)
+```
+
+All other repository paths are protected for that future implementation unless a separately reviewed correction changes the envelope; any required protected-path change must halt for separate review. The future implementation must evidence TEST-CW-001 through TEST-CW-017 of the approved specification, including the exact `+743113 us`, `+55989 us`, and `-25023 us` cross-clock fixtures as regression evidence only (no observed value becomes policy). Because this task re-verified the canonical base above as the new `main` after A34 installation, the specification's pinned base and source blobs equal current canonical state.
+
+**A35.7 Raw-artifact storage and retrieval classification.**
+
+The corrective spec, handoff, Marco approval, submission bundle (with its inner review ZIP, evidence traceability, and static conformance matrix), and the predecessor semantic SPEC_01 bytes are external/local (`LOCAL_ONLY`) and are not repository-resident; they MUST NOT be committed by this record. The canonical repository stores their exact identities and this bounded theorem only. Raw bytes were embedded and verified in this continuity task's dispatch bundle, which is not a permanent repository artifact; permanent repository raw retrievability is not claimed.
+
+The exact raw corrective spec and handoff bytes are FUTURE-REQUIRED (the implementation binds the spec SHA-256 and must be reviewed against the spec text). The successor implementation dispatch therefore MUST embed and verify those exact raw bytes (`SUCCESSOR_BUNDLE_EMBEDDED_REQUIRED_BEFORE_IMPLEMENTATION_DISPATCH`), together with any predecessor raw bytes needed for protected-semantic review; identity-only reference is insufficient for that successor task.
+
+**A35.8 No-escalation state.**
+
+```text
+Candidate-02 = UNCHANGED
+Candidate-03 = NONE
+replacement_future_skew_threshold = NONE
+dynamic_clock_correction = NONE
+canonical_G_selection = UNSELECTED
+Stage-3 = NOT_RE-RUN
+trusted_read_set = NONE
+release = NOT_GRANTED
+writer_admission = NOT_GRANTED
+Gate-D = NOT_GRANTED
+Stage3G+ = NOT_GRANTED
+Demo_write = NOT_AUTHORIZED
+production = NOT_AUTHORIZED
+corrective_implementation = NOT_PERFORMED / NOT_AUTHORIZED_BY_THIS_RECORD
+```
+
+No implementation, Kalshi, credential, Stage-3, selector, N1/deployed-state, host-clock, empirical-probe, release, writer, Gate-D, Stage3G+, Demo-write, or production capability is created. Nothing here is profitability or arbitrage evidence.
+
+**A35.9 Supersession and next bounded route.**
+
+A35 supersedes A34 only for the next bounded route: A34's route `R1-D07_T0_UDT_CLIENT_WALL_COMPARISON_CORRECTIVE_SPEC_01` is completed by the Marco-approved specification recorded above. A34 remains controlling historical empirical provenance for the clock-relation theorem and its evidence identities. A30/A31 remain the historical controlling identity of the currently installed Stage-3 semantics until a corrective implementation is installed.
+
+```text
+NEXT_BOUNDED_ACTION =
+R1-D07_T0_UDT_CLIENT_WALL_COMPARISON_CORRECTIVE_IMPLEMENTATION_01
+route_class = OFFLINE_IMPLEMENTATION_ONLY (routing only; not an authorization)
+```
+
+That route must be separately dispatched with the exact approved spec/handoff raw bytes, any predecessor semantics required for protected behaviour, the exact canonical base, implementation anchors, required offline tests, and the exact-candidate Marco review-package requirements. This record authorizes no implementation, no repository source/test change, no Stage-3 or live attempt, and no threshold selection.
