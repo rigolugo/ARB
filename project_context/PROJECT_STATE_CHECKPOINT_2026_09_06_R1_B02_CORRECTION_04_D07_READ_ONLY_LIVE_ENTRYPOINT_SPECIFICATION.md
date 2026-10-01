@@ -5785,3 +5785,276 @@ R1-D07_T0_UDT_FUTURE_SKEW_SEMANTICS_RESOLUTION
 ```
 
 The next route is static semantic/source analysis first: combine existing canonical empirical evidence, this accepted direct empirical observation, and already-preserved official-source/UDT evidence to identify the unresolved clock-comparison semantic and determine whether any new external assumption remains. Only after that analysis may a separately bounded probe or specification correction be considered. This route does not authorize another live attempt and does not select a replacement threshold.
+
+### A34 R1-D07 UDT/client-wall clock-relation empirical result — EMPIRICAL_SEQUENCE_COMPLETE / ACCEPT FINDING / CLOCK_RELATION_NOT_FULLY_CHARACTERIZED
+
+This documentation-only continuity overlay records the accepted empirical resolution of the A33 UDT-versus-client-wall observation, prepared by `R1-D07_UDT_CLOCK_RELATION_EMPIRICAL_RESULT_CANONICALIZATION_01` from canonical `rigolugo/ARB/main` commit `84fc5bbc2438070c6c61123dd2c7c167cdcb35e1` (tree `de007b9dfcdf48499da6d12666f64609d28f014d`, sole parent `2ac05ce12a905c048ec6133ffe852a5f77e734bf`). Canonicalization was deliberately deferred by the user until empirical testing was complete; that condition is satisfied by A33 + EXECUTION_01 + corrected EXECUTION_02 + comparative EXECUTION_03, with EXECUTION_02 and EXECUTION_03 Marco-reviewed `ACCEPT FINDING`. It canonicalizes the accepted empirical result, not the earlier static theory. It changes documentation only and grants no runtime capability. A1-A33 remain historical provenance and are not rewritten.
+
+**A34.1 Route lineage and provenance (identities only; raw artifacts external/local).**
+
+The A33 next route `R1-D07_T0_UDT_FUTURE_SKEW_SEMANTICS_RESOLUTION` was executed as bounded static analysis and then the bounded Demo clock-relation diagnostic it required:
+
+```text
+static_semantic_analysis_task = R1-D07_T0_UDT_FUTURE_SKEW_SEMANTICS_RESOLUTION_01_CORRECTION_01
+static_semantic_analysis_decision = Marco APPROVE (2026-09-30)
+static_semantic_analysis_main_resolution = R1-D07_T0_UDT_FUTURE_SKEW_SEMANTICS_RESOLUTION_01_CORRECTION_01.md
+static_semantic_analysis_main_resolution_bytes = 15060
+static_semantic_analysis_main_resolution_sha256 = ff782a27e695e6072c675472d4eca9e04a35b7c57ac739db7c427e0578d85be8
+static_semantic_analysis_approval_handoff_bytes = 3115
+static_semantic_analysis_approval_handoff_sha256 = f9ae9144906ff1469efaee6ad2717ace666b86f9070300726b35edde07959c45
+static_semantic_analysis_authority = APPROVED_ANALYSIS_NONCANONICAL
+static_semantic_analysis_result = CROSS_CLOCK_SEMANTIC_UNSUPPORTED_AND_RUNTIME_CLOCK_RELATION_UNRESOLVED
+diagnostic_requirements = PROPOSED_R1-D07_KALSHI_DEMO_UDT_CLOCK_RELATION_DIAGNOSTIC_01_REQUIREMENTS.md
+diagnostic_requirements_bytes = 14351
+diagnostic_requirements_sha256 = 7de04bea07efb6baaa1d161547927dfea0ae66c43aad440e7320a33067997fe6
+
+external_research_memo = R1-D07_STAGE3_CLOCK_SEMANTICS_EXTERNAL_RESEARCH_MEMO_01.md
+external_research_memo_bytes = 30412
+external_research_memo_sha256 = 625b1a91e5a2d69208f62570b9ed95462abbc92f5c423f019d3739bc2dba6c56
+external_research_memo_authority = NONCONTROLLING_EXTERNAL_RESEARCH_NONCANONICAL
+
+diagnostic_task = R1-D07_KALSHI_DEMO_UDT_CLOCK_RELATION_DIAGNOSTIC_01
+predecessor_operator_package = R1-D07_KALSHI_DEMO_UDT_CLOCK_RELATION_DIAGNOSTIC_01_PREPARATION_01_OPERATOR_PACKAGE.zip
+predecessor_operator_package_bytes = 38565
+predecessor_operator_package_sha256 = fffe76b3968bdf85370242cc81535f219c19d6406087ea8afe7834168c0b8f72
+predecessor_runner_sha256 = 1b5a57d0b00a289dee2dc2bc7bce7030ab91d9baa1758c86f2213f049eff9239
+
+corrected_package_task = R1-D07_KALSHI_DEMO_UDT_CLOCK_RELATION_DIAGNOSTIC_01_PREPARATION_01_CORRECTION_01
+corrected_package_decision = Marco APPROVE (2026-10-01)
+corrected_package_approval_handoff_bytes = 4312
+corrected_package_approval_handoff_sha256 = d6dbf771a90d5600b2cd3df71d996e40d1c8dad6337b90f07b86b8af80995a5e
+corrected_package_submission_bundle_bytes = 157029
+corrected_package_submission_bundle_sha256 = a179d285bbdbb965ce3f7e4ac72103b3581f5b12cbff59035466185c442a07b4
+corrected_package_inner_review_zip_bytes = 106225
+corrected_package_inner_review_zip_sha256 = 70751cacf38ceb88feecc1c0470ec92aa85f06c1b9d152bbefb9eb4d7ed4ee4e
+corrected_operator_package_bytes = 39864
+corrected_operator_package_sha256 = 145cb30a03cbb4c70300225149796d68f106620e717b7a5396fe5612d0b45969
+corrected_runner_sha256 = 5239b78eadc474960ed036a2d05fbc701ee8f24f98928033180c7749669c7f88
+wrapper_sha256 = ebd2f1d66eac250dd5d6ed60b3746a0834b743e0c65e788d501cb694c9a3512a
+source_binding_sha256 = fc4fca132037598d18579ba05d2b370b1ed7b5a55c23861e082f19b43b080f7e
+authorization_schema_sha256 = cd7efd36cf74f6a28faa1e0023aedf8708e58da8b1d5304ba92f37cdbce6a54b
+evidence_schema_sha256 = 699f1a92d16604fc624fbebc776c5aabb3cf6ac108a06c4d150287be382b7226
+corrected_package_offline_tests = 207 passed, 0 failed
+```
+
+The static semantic analysis and its approval remain provenance only (`APPROVED_ANALYSIS_NONCANONICAL`) except where confirmed by the accepted empirical sequence below. The external research memo remains noncontrolling and creates no ARB requirement. Recording these identities closes their `CANONICALIZATION_PENDING` continuity item by identity reference only; it does not promote either artifact to controlling authority.
+
+**A34.2 EXECUTION_01 — consumed diagnostic attempt; host-capture implementation defect; no network.**
+
+```text
+execution_task_id = R1-D07_KALSHI_DEMO_UDT_CLOCK_RELATION_DIAGNOSTIC_01_EXECUTION_01
+attempt_id = r1d07clk_20261001T112555Z_613d8269
+authorization_id = R1D07CLK-20261001T112132Z-01
+authorization_bytes = 2168
+authorization_sha256 = ee1b2a367d0222208ba6bea2820f72e1d351c2263a009945a100f4b6f232201b
+authorization_window_utc = 2026-10-01T11:21:32Z .. 2026-10-01T11:51:32Z
+runner_bound = 1b5a57d0b00a289dee2dc2bc7bce7030ab91d9baa1758c86f2213f049eff9239 (predecessor runner)
+raw_evidence_filename = r1d07clk_20261001T112555Z_613d8269_EVIDENCE.zip
+raw_evidence_bytes = 4624
+raw_evidence_sha256 = acaabee4c7866350aa8d23fd304c5bf5c655151275801a8a08e9357e27efb98a
+evidence_record_bytes = 12262
+evidence_record_sha256 = 3efa2f09809df07be044991f1cd1a56b00a680d32e62571541037aecab453cd7
+terminal_code = HOST_CLOCK_BEFORE_CAPTURE_FAILED_NO_NETWORK_ATTEMPTED
+evidence_completeness = EVIDENCE_INCOMPLETE
+host_clock_before = FAILED:COMMAND_NONZERO_EXIT
+  primary read-only status query exit_code = 0
+  supplemental read-only source query exit_code = 2147942405
+  parsed status fields retained = none (all NOT_EXPOSED)
+rest_requests_attempted = 0
+ws_connections_attempted = 0
+subscribe_commands_sent = 0
+automatic_retries = 0
+one_shot_attempt = CONSUMED
+retry = PROHIBITED
+```
+
+EXECUTION_01 is empirical implementation-defect evidence only: the predecessor runner required both read-only host-clock queries to succeed before accepting any primary status field, so a nonzero supplemental exit discarded otherwise-successful primary fields and halted before any network or credential activity. It produced no clock-relation observation. CORRECTION_01 (A34.1) corrected only that capture behaviour (required primary status capture; one-shot nonfatal supplemental source fallback; Phase Offset observation-only); the EXECUTION_01 authorization binds the predecessor runner and is permanently consumed.
+
+**A34.3 EXECUTION_02 and EXECUTION_03 — accepted diagnostic evidence identities.**
+
+```text
+EXECUTION_02:
+execution_task_id = R1-D07_KALSHI_DEMO_UDT_CLOCK_RELATION_DIAGNOSTIC_01_EXECUTION_02
+attempt_id = r1d07clk_20261001T123238Z_9c01223a
+authorization_id = R1D07CLK-20261001T122903Z-02
+authorization_bytes = 2177
+authorization_sha256 = 7f01e0976ec69b2744881a90ee17f7a39d9d9e7c29b527b63ab46ccf87371902
+raw_evidence_filename = r1d07clk_20261001T123238Z_9c01223a_EVIDENCE.zip
+raw_evidence_bytes = 5300
+raw_evidence_sha256 = e319cd7a4c3f5f8fcc7fd314a267245ff02f10757afa92321cc49c6276127ef0
+evidence_record_bytes = 14295
+evidence_record_sha256 = a5ca9674349645573e953c42504711bb516f2770a7ed73ac8bf8ac3e830bd747
+marco_review = R1-D07_KALSHI_DEMO_UDT_CLOCK_RELATION_DIAGNOSTIC_01_EXECUTION_02_MARCO_EVIDENCE_REVIEW_01.md
+marco_review_bytes = 5035
+marco_review_sha256 = 7e1b33c20941d93c317cd3c9e43edcab50028cf123b271d0ae875356f9434f29
+marco_decision = ACCEPT FINDING
+
+EXECUTION_03:
+execution_task_id = R1-D07_KALSHI_DEMO_UDT_CLOCK_RELATION_DIAGNOSTIC_01_EXECUTION_03
+attempt_id = r1d07clk_20261001T131230Z_210cb7a4
+authorization_id = R1D07CLK-20261001T130258Z-03
+authorization_bytes = 2177
+authorization_sha256 = 80666ea066b9d95a3414f13ff46b6ac5a7318db8353b36e8822426234151eaf7
+raw_evidence_filename = r1d07clk_20261001T131230Z_210cb7a4_EVIDENCE.zip
+raw_evidence_bytes = 5289
+raw_evidence_sha256 = 3eceb2ae8329a5626f04a6c71ad44297b763839fc8b4f68628ef20ecb1c6b3a5
+evidence_record_bytes = 14256
+evidence_record_sha256 = e957e14dedaf70a9297d276928e32f5b0a2bba14bf624e6f9e6e0432a40a77a6
+marco_review = R1-D07_KALSHI_DEMO_UDT_CLOCK_RELATION_DIAGNOSTIC_01_EXECUTION_03_MARCO_EVIDENCE_REVIEW_01.md
+marco_review_bytes = 7357
+marco_review_sha256 = 6ebd3a65c0e2f5df1d41e9f8a9c09f2e9183c18479919cd72918c826bdea48c5
+marco_decision = ACCEPT FINDING
+
+evidence_class = DIRECT_EMPIRICAL_OBSERVATION
+raw_storage = LOCAL_ONLY (external/local; not repository-resident)
+runner_bound (both) = 5239b78eadc474960ed036a2d05fbc701ee8f24f98928033180c7749669c7f88 (corrected runner)
+terminal_code (both) = OBSERVATIONS_RECORDED_PENDING_MARCO_ADJUDICATION
+evidence_completeness (both) = EVIDENCE_COMPLETE
+one_shot_attempts = CONSUMED; retry = PROHIBITED
+```
+
+Both executions ran the same bounded topology under their own one-shot authorization: exactly one Demo public REST `GET /trade-api/v2/exchange/user_data_timestamp` at `external-api.demo.kalshi.co`, exactly one Demo WebSocket connection to `external-api-ws.demo.kalshi.co` `/trade-api/ws/v2` (credential use limited to the WebSocket handshake), exactly one public `ticker` channel subscribe with no market specification, zero ticker records retained (the subscribe ACK exposed `sending_ts_ms`), one client close frame, zero automatic retries, read-only host clock-discipline capture before and after, monotonic order check `NON_DECREASING`, no leg failures, and secret-safety audit `PASS`. Neither execution performed a Demo write, production activity, N1/deployed-state access, Stage-3, or selector execution, and neither applied a dynamic offset correction or mutated the host clock. Between EXECUTION_02 and EXECUTION_03 the user changed the Windows time-source configuration outside any ARB diagnostic; each execution is described below by its own exact run-time host evidence, not by any earlier preparation snapshot.
+
+**A34.4 Exact clock observations.**
+
+```text
+A33 (attempt r1d07reval_20260930T171554Z_af760003):
+host condition label = unsynchronized Local CMOS condition (Marco EXECUTION_03 review label;
+  A33's own evidence package did not capture host clock-discipline state)
+UDT_minus_post_response_client_wall = +743.113 ms
+
+EXECUTION_02 (Windows-reported host state, before = after):
+Source = time.google.com,0x9
+Stratum = 2; Leap Indicator = 0 (no warning); State Machine = 1 (Hold)
+Last Sync Error = 2 (stale time data)
+Phase Offset = 0.2409984 s (+240.9984 ms)
+REST request-boundary client wall = 2026-10-01T12:32:38.671030Z
+UDT as_of_time                    = 2026-10-01T12:32:38.959951Z
+REST post-response client wall    = 2026-10-01T12:32:38.903962Z
+UDT_minus_request_boundary_client_wall = +288.921 ms
+UDT_minus_post_response_client_wall    = +55.989 ms
+REST_monotonic_window = 232.2637 ms
+WS subscribe-ACK sending_ts   = 2026-10-01T12:32:39.979000Z
+WS ACK client receive wall    = 2026-10-01T12:32:39.793222Z
+WS_sending_ts_minus_client_receive_wall = +185.778 ms
+UDT_minus_WS_sending_ts = -1019.049 ms (different events; not a same-event offset estimator)
+whole-diagnostic client wall elapsed / monotonic elapsed = 1694.889 ms / 1695.925 ms (difference -1.036 ms)
+
+EXECUTION_03 (Windows-reported host state, before = after):
+Source = 0.pool.ntp.org,0x8
+Stratum = 3; Leap Indicator = 0 (no warning); State Machine = 1 (Hold)
+Last Sync Error = 2 (stale time data)
+Phase Offset = 0.1596376 s (+159.6376 ms)
+REST request-boundary client wall = 2026-10-01T13:12:30.758851Z
+UDT as_of_time                    = 2026-10-01T13:12:30.959577Z
+REST post-response client wall    = 2026-10-01T13:12:30.984600Z
+UDT_minus_request_boundary_client_wall = +200.726 ms
+UDT_minus_post_response_client_wall    = -25.023 ms
+REST_monotonic_window = 218.0797 ms
+WS subscribe-ACK sending_ts   = 2026-10-01T13:12:31.953000Z
+WS ACK client receive wall    = 2026-10-01T13:12:31.873645Z
+WS_sending_ts_minus_client_receive_wall = +79.355 ms
+UDT_minus_WS_sending_ts = -993.423 ms (different events; not a same-event offset estimator)
+whole-diagnostic client wall elapsed / monotonic elapsed = 1606.784 ms / 1604.5864 ms (difference +2.1976 ms)
+```
+
+No hundreds-of-milliseconds client wall-clock step occurred within either bounded diagnostic interval.
+
+**A34.5 Three-condition comparison.**
+
+```text
+UDT_minus_post_response_client_wall:
+A33          = +743.113 ms
+EXECUTION_02 = +55.989 ms
+EXECUTION_03 = -25.023 ms
+
+A33 -> EXECUTION_02 change = -687.124 ms
+A33 -> EXECUTION_03 change = -768.136 ms
+
+EXECUTION_02 -> EXECUTION_03:
+Windows-reported Phase Offset magnitude change = -81.3608 ms
+UDT/post-response-wall change                 = -81.012 ms
+absolute difference between those changes     = 0.3488 ms
+WS sending_ts/client-receive-wall change      = -106.423 ms
+```
+
+**A34.6 Accepted bounded empirical theorem.**
+
+For the exact observed Kalshi Demo environment, account, host, runtime, and observation times only (not production, not a vendor contract):
+
+1. A33's `+743.113 ms` UDT-versus-post-response-client-wall observation was not a stable UDT semantic offset.
+2. On the exact observed Kalshi Demo host/runtime sequence, client wall-clock state/discipline materially affected the observed UDT-to-client-wall relationship. Materially affected does not mean sole cause.
+3. The same comparison moved from `+743.113 ms` (A33) to `+55.989 ms` (EXECUTION_02) to `-25.023 ms` (EXECUTION_03) across materially different host clock states.
+4. EXECUTION_02 -> EXECUTION_03: Windows-reported Phase Offset magnitude change `-81.3608 ms`; UDT/post-response-wall change `-81.012 ms`; absolute difference `0.3488 ms`. This is strong correlation for these exact observations. It is NOT proof that Windows `Phase Offset` is a direct correction quantity.
+5. The independent WebSocket queue-timestamp/client-receive relationship moved in the same direction (`+185.778 ms` in EXECUTION_02; `+79.355 ms` in EXECUTION_03). Because the queue timestamp precedes client receipt, these observations support a changing client/server wall-clock relationship; network transit prevents treating them as exact one-way clock offsets.
+6. UDT `as_of_time` and WebSocket `sending_ts_ms` are semantically different timestamps describing different events. This record does NOT claim that they use different physical clocks.
+7. The exact clock relation is still not fully characterized: the exact one-way server/client offset is unresolved because the network path delay is unknown and UDT is not a server-current-time sample.
+8. `Candidate-02 = UNCHANGED`.
+9. `Candidate-03 = NONE`.
+10. Replacement future-skew threshold = `NONE`.
+11. Dynamic clock-offset correction = `NONE`.
+12. No observed offset becomes policy merely because it was measured.
+
+Accepted Marco adjudication labels (EXECUTION_02 and EXECUTION_03 reviews):
+
+```text
+CLIENT_CLOCK_DISCIPLINE_OR_OFFSET_MATERIALLY_RELEVANT = ACCEPTED_STRONGLY
+A33_743MS_OBSERVATION_WAS_NOT_A_STABLE_UDT_SEMANTIC_OFFSET = ACCEPTED
+CLIENT_CLOCK_RELATION_MATERIALLY_DRIVES_OBSERVED_UDT_WALL_SKEW = ACCEPTED_FOR_EXACT_OBSERVED_DEMO_HOST (not sole cause)
+KALSHI_WS_SEND_VS_CLIENT_WALL_RELATION_ALSO_MOVES_WITH_HOST_CLOCK_STATE = ACCEPTED_FOR_EXECUTION_02_VS_03
+KALSHI_SEND_AND_UDT_SIMILARLY_OFFSET_FROM_CLIENT_WALL = NOT_ESTABLISHED
+WINDOWS_PHASE_OFFSET_IS_A_DIRECT_KALSHI_CORRECTION = NOT_ESTABLISHED
+UDT_DISTINCT_FROM_NETWORK_SEND_TIMESTAMP = ACCEPTED_SEMANTICALLY (distinct events/semantics; not distinct physical clocks)
+CLOCK_RELATION_CHARACTERIZED_FOR_EXACT_DEMO_OBSERVATION = PARTIAL_ONLY
+CLOCK_RELATION_FULLY_CHARACTERIZED = NO
+EMPIRICAL_TEST_SEQUENCE_COMPLETE = YES
+```
+
+**A34.7 Explicitly not established.**
+
+This record does NOT establish, and must not be read as establishing, that: `743.113 ms`, `55.989 ms`, `25.023 ms`, `79.355 ms`, `159.6376 ms`, `185.778 ms`, `240.9984 ms`, `1000 ms`, or any other number is an acceptable future-skew threshold; Windows `Phase Offset` should be subtracted from UDT or applied as any correction; the client clock was the sole cause; the exact Kalshi/client one-way clock offset is known; UDT and `sending_ts_ms` use different physical clocks; Demo evidence establishes production equivalence; Stage-3 is now successful; a trusted read set exists; release, writer, Gate-D, Stage3G+, or G-selection eligibility follows; or profitability or arbitrage is established.
+
+**A34.8 Authority classification.**
+
+```text
+A33 raw evidence = controlling canonical predecessor empirical evidence (DIRECT_EMPIRICAL_OBSERVATION; LOCAL_ONLY; A33 / ART-0148)
+EXECUTION_01 / 02 / 03 raw diagnostic evidence = accepted DIRECT_EMPIRICAL_OBSERVATION; external/local; canonically referenced by identity in A34 / ART-0150
+EXECUTION_02 / 03 Marco evidence reviews = accepted review/adjudication (ACCEPT FINDING)
+CORRECTION_01 diagnostic-package approval = accepted review provenance (APPROVE)
+static semantic analysis CORRECTION_01 = APPROVED_ANALYSIS_NONCANONICAL (provenance only except where empirically confirmed above)
+external research memo = NONCONTROLLING_EXTERNAL_RESEARCH_NONCANONICAL
+```
+
+All raw evidence ZIPs, authorization JSONs, reviews, approval handoffs, packages, and the analysis/research memos named in A34 remain external/local and are not repository-resident; they MUST NOT be committed. The canonical repository stores their exact identities and this sanitized theorem only. Raw bytes were embedded and verified in this continuity task's dispatch bundle, which is not a permanent repository artifact; permanent repository raw retrievability is not claimed.
+
+**A34.9 No-escalation state.**
+
+```text
+Candidate-02 = UNCHANGED
+Candidate-03 = NONE
+replacement_future_skew_threshold = NONE
+dynamic_clock_correction = NONE
+canonical_G_selection = UNSELECTED
+Stage-3 = NOT_RE-RUN / NOT_SUCCESSFUL / no trusted read set
+release = NOT_GRANTED
+writer admission = NOT_GRANTED
+Gate-D = NOT_GRANTED
+Stage3G+ = NOT_GRANTED
+Demo writes = 0 / not authorized
+production activity = 0 / not authorized
+further diagnostic execution = NOT_AUTHORIZED
+```
+
+No release, writer, Gate-D, Stage3G+, Demo-write, production, credential, Kalshi, N1/deployed-state, selector, or further diagnostic capability is created. Nothing here is profitability or arbitrage evidence.
+
+**A34.10 Supersession and next bounded route.**
+
+A34 supersedes A33 only for the next bounded route and for the interpretation status of the 743.113 ms observation: A33.4's statement that the causal source of the offset was not established is refined, without being rewritten, by the accepted finding that client wall-clock state/discipline materially affected the observed relation on the exact host sequence; the sole cause, which clock was in error, and the exact one-way offset remain unestablished. A33 remains controlling historical provenance for its exact consumed observation and evidence identity. A33's route `R1-D07_T0_UDT_FUTURE_SKEW_SEMANTICS_RESOLUTION` is completed by the static analysis and empirical diagnostic sequence recorded in A34.
+
+```text
+NEXT_BOUNDED_ACTION =
+R1-D07_T0_UDT_CLIENT_WALL_COMPARISON_CORRECTIVE_SPEC_01
+route_class = SPEC_ONLY (routing only; not an authorization)
+```
+
+The next route is specification-only: it must design the correction of the T0/T1 UDT-to-client-wall comparison from the accepted theorem above without choosing a larger timestamp tolerance by guesswork, and it must not convert any observed value into a threshold or a dynamic correction. Per the approved static-analysis handoff (provenance), successor semantic-spec authoring requires the exact predecessor raw bytes of `KALSHI_DEMO_R1_D07_STAGE3_FRESHNESS_AND_COMPLETENESS_SEMANTICS_SPEC_01.md` (26875 bytes / sha256 `8183d469f7f5de35cf27edc7c7594ebd2f9d63f1d40bd3422bbeacc33e32dc13`). This route authorizes no implementation, no Stage-3 or live attempt, no diagnostic execution, no host-clock change, and no threshold selection.
