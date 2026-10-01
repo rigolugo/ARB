@@ -6944,15 +6944,16 @@ class ActiveDynamicIndexDomainCorrection04TestCase(ActiveStage3EndToEndTestCase)
             self._dynamic_read(fb=fb, fa=fa)  # __post_init__ rejects T1 < T0
         self.assertEqual(c.exception.code, RunnerFailureCode.SUBACCOUNT_WIDE_COMPLETENESS_UNPROVEN)
 
-    def test_c04_r04_future_beyond_existing_skew_fails(self) -> None:
-        # Stage-3 semantics SPEC_01 FS-UDT-007 (supersedes the Correction 06
-        # 30s/5s caps): future ordering uses ONLY the accepted
-        # state_integrity.max_future_wall_clock_skew_ms (=10 here).
+    def test_c04_r04_udt_later_than_wall_is_not_a_cross_clock_gate(self) -> None:
+        # T0_UDT_CLIENT_WALL_COMPARISON_CORRECTIVE_SPEC_01 CW-UDT-001 supersedes
+        # the predecessor FS-UDT-007 future-ordering gate: a T1 watermark ~5s
+        # later than the local wall sample (far beyond the harness
+        # state_integrity.max_future_wall_clock_skew_ms=10) is NOT rejected.
+        self.assertEqual(self.config.state_integrity.max_future_wall_clock_skew_ms, 10)
         fa = runner.UserDataFreshnessWatermarkV1(response_identity_sha256=self._hx(0xf1), as_of_time_utc="2026-08-17T13:00:05.000000Z")
         read = self._dynamic_read(fa=fa)
-        with self.assertRaises(RunnerError) as c:
-            self._require(read, now_utc="2026-08-17T13:00:00.004000Z")
-        self.assertEqual(c.exception.code, RunnerFailureCode.USER_DATA_TIMESTAMP_FUTURE)
+        cls = self._require(read, now_utc="2026-08-17T13:00:00.004000Z")
+        self.assertEqual(cls, "RETAINED_POSITION_TERMINALLY_SETTLED")
 
     def test_c04_r04_udt_age_beyond_reconciliation_lag_is_not_a_gate(self) -> None:
         # Stage-3 semantics SPEC_01 FS-UDT-002 / FS-LR-001 (supersedes the
@@ -7745,12 +7746,13 @@ class Correction06LiveTrustedAcquirerTestCase(ActiveStage3EndToEndTestCase):
         result = runner.run_pre_release_read_phase_v2(self._invocation(), rt)
         self.assertEqual(result.status, "READ_PHASE_COMPLETE", result.local_block_reasons)
 
-    def test_c06d_future_skew_beyond_accepted_allowance_fails(self):
+    def test_c06d_udt_later_than_wall_is_not_a_cross_clock_gate(self):
+        # T0_UDT_CLIENT_WALL_COMPARISON_CORRECTIVE_SPEC_01 CW-UDT-001 supersedes
+        # the predecessor FS-UDT-007 future-ordering gate at live T0 and T1.
         rt = self._v2_runtime()
         self._script_cycle(domain=(0,), t0="2026-08-17T13:00:30.000000Z", t1="2026-08-17T13:00:30.000000Z")
-        with self.assertRaises(RunnerError) as c:
-            runner.run_pre_release_read_phase_v2(self._invocation(), rt)
-        self.assertEqual(c.exception.code, RunnerFailureCode.USER_DATA_TIMESTAMP_FUTURE)
+        result = runner.run_pre_release_read_phase_v2(self._invocation(), rt)
+        self.assertEqual(result.status, "READ_PHASE_COMPLETE", result.local_block_reasons)
 
     def test_c06d_udt_older_than_30s_is_not_rejected_for_age(self):
         # Stage-3 semantics SPEC_01 FS-UDT-002 supersedes the former 30s cap.
@@ -14274,9 +14276,8 @@ class Stage3FreshnessCompletenessSemanticsSpec01TestCase(unittest.TestCase):
         self.assertEqual(max_skew, 0)
         ages_ms = []
         for wall in _S3SEM_CANARY_PARSED_AT:
-            skew_us = runner._require_stage3_udt_not_future(
-                bookend="T1", as_of_utc=_S3SEM_CANARY_AS_OF, post_response_wall_utc=wall,
-                max_future_wall_clock_skew_ms=max_skew)
+            # CW-UDT-006: the signed delta is a non-gating diagnostic only.
+            skew_us = runner._stage3_udt_future_skew_us(_S3SEM_CANARY_AS_OF, wall)
             self.assertLess(skew_us, 0)
             ages_ms.append(-skew_us / 1000)
         self.assertAlmostEqual(ages_ms[0], 19079.906, places=3)
@@ -14383,40 +14384,31 @@ class Stage3FreshnessCompletenessSemanticsSpec01TestCase(unittest.TestCase):
 
     # --- SPEC test 6 -------------------------------------------------------
 
-    def test_s3sem_06_future_skew_exact_boundary_candidate02_zero(self):
+    def test_s3sem_06_udt_client_wall_delta_is_exact_and_non_gating(self):
+        # Predecessor SPEC test 6 (future-skew boundary) is SUPERSEDED by
+        # T0_UDT_CLIENT_WALL_COMPARISON_CORRECTIVE_SPEC_01 CW-UDT-001/006/008:
+        # the exact signed integer-microsecond delta is retained as a
+        # diagnostic; Candidate-02 stays at 0 ms and is not a UDT gate.
         cfg = self._candidate02()
-        allowed = cfg.state_integrity.max_future_wall_clock_skew_ms
+        self.assertEqual(cfg.state_integrity.max_future_wall_clock_skew_ms, 0)
         wall = "2026-09-28T15:11:07.091000Z"
-        self.assertEqual(runner._require_stage3_udt_not_future(
-            bookend="T0", as_of_utc=wall, post_response_wall_utc=wall,
-            max_future_wall_clock_skew_ms=allowed), 0)
-        with self.assertRaises(RunnerError) as ctx:
-            runner._require_stage3_udt_not_future(
-                bookend="T0", as_of_utc="2026-09-28T15:11:07.091001Z", post_response_wall_utc=wall,
-                max_future_wall_clock_skew_ms=allowed)
-        self.assertEqual(ctx.exception.code, RunnerFailureCode.USER_DATA_TIMESTAMP_FUTURE)
-        # nonzero allowance: exact boundary passes, +1 us fails.
-        self.assertEqual(runner._require_stage3_udt_not_future(
-            bookend="T1", as_of_utc="2026-09-28T15:11:07.101000Z", post_response_wall_utc=wall,
-            max_future_wall_clock_skew_ms=10), 10_000)
-        with self.assertRaises(RunnerError) as ctx:
-            runner._require_stage3_udt_not_future(
-                bookend="T1", as_of_utc="2026-09-28T15:11:07.101001Z", post_response_wall_utc=wall,
-                max_future_wall_clock_skew_ms=10)
-        self.assertEqual(ctx.exception.code, RunnerFailureCode.USER_DATA_TIMESTAMP_FUTURE)
-        # the retired hardcoded 5000-ms allowance never overrides config: an
-        # accepted 10000-ms allowance admits a 7000-ms future watermark.
-        self.assertEqual(runner._require_stage3_udt_not_future(
-            bookend="T1", as_of_utc="2026-09-28T15:11:14.091000Z", post_response_wall_utc=wall,
-            max_future_wall_clock_skew_ms=10_000), 7_000_000)
+        self.assertEqual(runner._stage3_udt_future_skew_us(wall, wall), 0)
+        self.assertEqual(runner._stage3_udt_future_skew_us("2026-09-28T15:11:07.091001Z", wall), 1)
+        self.assertEqual(runner._stage3_udt_future_skew_us("2026-09-28T15:11:07.101001Z", wall), 10_001)
+        self.assertEqual(runner._stage3_udt_future_skew_us("2026-09-28T15:11:14.091000Z", wall), 7_000_000)
+        self.assertFalse(hasattr(runner, "_require_stage3_udt_not_future"))
         self.assertFalse(hasattr(runner, "_PRE_RELEASE_FRESHNESS_FUTURE_SKEW_MAX_MS"))
         self.assertFalse(hasattr(runner, "_PRE_RELEASE_FRESHNESS_MAX_AGE_MS"))
-        # live path: a gross future watermark fails with the precise code.
+        # live path: a gross later-than-wall watermark is NOT a UDT failure;
+        # the exact signed delta is still recorded.
         rt = self._v2_runtime()
         self._script_cycle(domain=(0,), t0="2026-08-17T13:00:30.000000Z", t1="2026-08-17T13:00:30.000000Z")
-        exc = self._phase_error(rt)
-        self.assertEqual(exc.code, RunnerFailureCode.USER_DATA_TIMESTAMP_FUTURE)
-        self.assertGreater(self._fields(runner._stage3_evidence_of(exc))["udt_t0_future_skew_us"], 10_000)
+        result = self._run_phase(rt)
+        self.assertEqual(result.status, "READ_PHASE_COMPLETE", result.local_block_reasons)
+        fields = self._fields(result.stage3_evidence)
+        self.assertEqual(fields["udt_t0_future_skew_us"], runner._stage3_udt_future_skew_us(
+            "2026-08-17T13:00:30.000000Z", fields["udt_t0_post_response_wall_utc"]))
+        self.assertGreater(fields["udt_t0_future_skew_us"], 10_000)
 
     # --- SPEC test 7 -------------------------------------------------------
 
@@ -14637,8 +14629,9 @@ class Stage3FreshnessCompletenessSemanticsSpec01TestCase(unittest.TestCase):
         self.assertEqual(payload["network_reads_stage3"], 7)
         self.assertEqual(payload["pre_release_requests_consumed_state"], "EXACT_NONZERO")
         self.assertEqual(payload["pre_release_requests_consumed"], 7)
-        self.assertEqual(payload["stage3_semantic_spec"], "KALSHI_DEMO_R1_D07_STAGE3_FRESHNESS_AND_COMPLETENESS_SEMANTICS_SPEC_01")
-        self.assertEqual(payload["stage3_semantic_spec_sha256"], "8183d469f7f5de35cf27edc7c7594ebd2f9d63f1d40bd3422bbeacc33e32dc13")
+        # CW-UDT-012: new outputs bind the successor semantic-spec identity.
+        self.assertEqual(payload["stage3_semantic_spec"], "KALSHI_DEMO_R1_D07_T0_UDT_CLIENT_WALL_COMPARISON_CORRECTIVE_SPEC_01")
+        self.assertEqual(payload["stage3_semantic_spec_sha256"], "e9145be31466e7de30552519cb2f294d9aab5d53923d917fb908eae5055cf453")
         self._assert_lifecycle_invariants(payload)
         self.assertNotIn("-----BEGIN", text)
         self.assertNotIn(_D07_SENTINEL_API_KEY_ID, text)
@@ -14774,7 +14767,7 @@ class Stage3FreshnessCompletenessSemanticsSpec01TestCase(unittest.TestCase):
         # exactly one transport per boundary; no automatic re-request of T1.
         self.assertEqual(len(self._transport.calls) + 1, fields["network_reads_stage3"])  # + orderbook seam
         self.assertEqual([str(c[0]) for c in self._transport.calls].count("GET_USER_DATA_TIMESTAMP"), 2)
-        for fn in (runner._require_stage3_udt_not_future, runner._require_stage3_local_read_duration,
+        for fn in (runner._stage3_udt_future_skew_us, runner._require_stage3_local_read_duration,
                    runner._Stage3EvidenceRecorderV2, runner._summarize_stage3_request_accounting,
                    runner._parse_stage3_result_accounting_v2):
             src = inspect.getsource(fn).lower()
@@ -14878,11 +14871,13 @@ class Stage3FreshnessCompletenessSemanticsSpec01TestCase(unittest.TestCase):
         self.assertIsNone(fields["udt_t0_utc"])
 
     def test_s3sem_c01_07_future_skew_uses_normalized_instant(self):
-        # lexically "09:00:30" < wall "13:00:00", but the instant is 13:00:30Z.
+        # lexically "09:00:30" < wall "13:00:00", but the instant is 13:00:30Z;
+        # the diagnostic delta uses the normalized instant.  Under CW-UDT-001
+        # the positive cross-clock delta is NOT a UDT failure.
         rt = self._udt_phase("2026-08-17T09:00:30.000000-04:00", "2026-08-17T09:00:30.000000-04:00")
-        exc = self._phase_error(rt)
-        self.assertEqual(exc.code, RunnerFailureCode.USER_DATA_TIMESTAMP_FUTURE)
-        fields = self._fields(runner._stage3_evidence_of(exc))
+        result = self._run_phase(rt)
+        self.assertEqual(result.status, "READ_PHASE_COMPLETE", result.local_block_reasons)
+        fields = self._fields(result.stage3_evidence)
         self.assertEqual(fields["udt_t0_utc"], "2026-08-17T13:00:30.000000Z")
         self.assertGreater(fields["udt_t0_future_skew_us"], 29_000_000)
         # lexically "13:59:59" > wall, but the instant is in the past: accepted.
@@ -15391,6 +15386,674 @@ class ExecPkg01Correction01TransportStatusTestCase(unittest.TestCase):
                 self.assertEqual(ctx.exception._arb_http_status, status)
                 self.assertEqual(stack.connect_calls, 1)
                 self.assertNotIn(str(status), ctx.exception.detail or "")
+
+
+# ---------------------------------------------------------------------------
+# KALSHI_DEMO_R1_D07_T0_UDT_CLIENT_WALL_COMPARISON_CORRECTIVE_SPEC_01
+# (sha256 e9145be31466e7de30552519cb2f294d9aab5d53923d917fb908eae5055cf453)
+# -- SPEC Section 10 TEST-CW-001..017.  The UDT-versus-client-wall cross-clock
+# gate (predecessor FS-UDT-007) is retired from BOTH the live active-V2
+# acquisition path and ``require_dynamic_index_domain_completeness``; the
+# signed integer-microsecond deltas stay as non-gating diagnostics.  Offline
+# only: scripted synthetic transports, the fake orderbook seam, a temp
+# authority/ledger, deterministic clocks, and socket construction forbidden.
+# ---------------------------------------------------------------------------
+
+_CW_SPEC_ID = "KALSHI_DEMO_R1_D07_T0_UDT_CLIENT_WALL_COMPARISON_CORRECTIVE_SPEC_01"
+_CW_SPEC_SHA256 = "e9145be31466e7de30552519cb2f294d9aab5d53923d917fb908eae5055cf453"
+_CW_PREDECESSOR_SPEC_ID = "KALSHI_DEMO_R1_D07_STAGE3_FRESHNESS_AND_COMPLETENESS_SEMANTICS_SPEC_01"
+_CW_PREDECESSOR_SPEC_SHA256 = "8183d469f7f5de35cf27edc7c7594ebd2f9d63f1d40bd3422bbeacc33e32dc13"
+
+# Accepted empirical regression FIXTURES (never thresholds -- CW-UDT-002/019):
+# exact signed ``normalized UDT - post-response client wall`` microseconds.
+_CW_A33_DELTA_US = 743_113          # A33 (ART-0147/ART-0148)
+_CW_EXECUTION02_DELTA_US = 55_989   # EXECUTION_02 accepted review
+_CW_EXECUTION03_DELTA_US = -25_023  # EXECUTION_03 accepted review
+_CW_FIXTURES = (
+    ("A33", _CW_A33_DELTA_US),
+    ("EXECUTION_02", _CW_EXECUTION02_DELTA_US),
+    ("EXECUTION_03", _CW_EXECUTION03_DELTA_US),
+)
+
+# General-path local wall samples (deterministic; same client wall clock).
+_CW_W0 = "2026-09-28T15:11:07.091000Z"
+_CW_W1 = "2026-09-28T15:11:09.651000Z"
+
+# The exact predecessor revision-2 semantic field set (CW-UDT-006/011).
+_CW_REVISION2_SEMANTIC_FIELDS = (
+    "udt_t0_raw", "udt_t0_utc", "udt_t0_post_response_wall_utc", "udt_t0_future_skew_us",
+    "udt_t1_raw", "udt_t1_utc", "udt_t1_post_response_wall_utc", "udt_t1_future_skew_us",
+    "udt_relation", "udt_absolute_age_ms_diagnostic",
+    "local_read_window_start_monotonic_ns", "local_read_window_finish_monotonic_ns", "local_read_duration_ns",
+)
+_CW_REVISION2_PREDICATES = (
+    "S0_STATUS_DOMAIN_CONTAINS_SELECTED_INDEX",
+    "T0_USER_DATA_TIMESTAMP_ORDERING",
+    "SELECTED_MARKET_IDENTITY",
+    "SELECTED_ORDERBOOK_IDENTITY",
+    "PER_INDEX_SURFACE_TRAVERSAL",
+    "EXACT_ORDER_SUPPLEMENTS",
+    "T1_USER_DATA_TIMESTAMP_ORDERING_AND_LOCAL_READ_WINDOW",
+    "S1_STATUS_DOMAIN_EQUALS_D0",
+    "CURRENT_LIVE_ORDERS_FILLS_COMPLETE",
+    "DOMAIN_WIDE_FILL_IDENTITY",
+    "DYNAMIC_INDEX_DOMAIN_COMPLETENESS",
+    "RETAINED_BOOTSTRAP_FLOOR_RECONCILIATION",
+    "READ_SET_MINT_WITHIN_ABSOLUTE_DEADLINE",
+    "STAGE3F_DURABLE_COHERENCE_AND_TRUSTED_MATCH",
+)
+_CW_UDT_DECISION_FUNCTIONS = ("_run_active_v2_acquisition", "require_dynamic_index_domain_completeness")
+
+
+def _cw_shift(ts: str, delta_us: int) -> str:
+    base = datetime.strptime(ts, "%Y-%m-%dT%H:%M:%S.%fZ").replace(tzinfo=timezone.utc)
+    return (base + timedelta(microseconds=delta_us)).strftime("%Y-%m-%dT%H:%M:%S.%fZ")
+
+
+class _CwSkewLeafReadRecorder:
+    """Test-only instrumentation: records the CALLING function of every read of
+    ``risk_control.StateIntegrityLimits.max_future_wall_clock_skew_ms`` while
+    installed (the protected source is not modified; the slot descriptor is
+    wrapped, values are returned unchanged, and the original is restored)."""
+
+    _NAME = "max_future_wall_clock_skew_ms"
+
+    def __init__(self) -> None:
+        self.callers: list = []
+
+    @contextlib.contextmanager
+    def installed(self):
+        cls = risk_control.StateIntegrityLimits
+        original = cls.__dict__[self._NAME]
+        callers = self.callers
+
+        def _get(inst):
+            callers.append(inspect.currentframe().f_back.f_code.co_name)
+            return original.__get__(inst, cls)
+
+        def _set(inst, value):
+            original.__set__(inst, value)
+
+        with mock.patch.object(cls, self._NAME, property(_get, _set)):
+            yield self
+
+
+class _CwWallRewindList(list):
+    """Scripted-response list whose ``pop(0)`` rewinds the deterministic WALL
+    clock by ``rewind`` just before the ``trigger``-th pop (makes the local T1
+    wall sample precede the local T0 wall sample)."""
+
+    def __init__(self, items, *, inputs, trigger, rewind):
+        super().__init__(items)
+        self._inputs = inputs
+        self._trigger = trigger
+        self._rewind = rewind
+        self._pops = 0
+
+    def pop(self, index=-1):
+        self._pops += 1
+        if self._pops == self._trigger:
+            self._inputs.instant -= self._rewind
+        return super().pop(index)
+
+
+class UdtClientWallCorrectiveSpec01TestCase(unittest.TestCase):
+    """TEST-CW-001..017.  Scaffolding composed from
+    ``Stage3FreshnessCompletenessSemanticsSpec01TestCase`` (itself composed
+    from ``Correction06LiveTrustedAcquirerTestCase``) so the PRODUCTION live
+    acquirer runs against deterministic scripted transports, and
+    ``require_dynamic_index_domain_completeness`` is exercised directly with
+    exact Candidate-02.  No network, credential, Kalshi, deployed N1, or host
+    clock access."""
+
+    def setUp(self) -> None:
+        self._fresh()
+        for patcher in (
+            mock.patch("socket.socket", side_effect=AssertionError("no network in offline tests")),
+            mock.patch("socket.create_connection", side_effect=AssertionError("no network in offline tests")),
+        ):
+            patcher.start()
+            self.addCleanup(patcher.stop)
+
+    def _fresh(self) -> None:
+        s3 = Stage3FreshnessCompletenessSemanticsSpec01TestCase(methodName="setUp")
+        s3.setUp()
+        self.addCleanup(s3.doCleanups)
+        self.__dict__["_s3"] = s3
+
+    def __getattr__(self, name):
+        try:
+            s3 = self.__dict__["_s3"]
+        except KeyError:
+            raise AttributeError(name) from None
+        return getattr(s3, name)
+
+    # --- helpers ---------------------------------------------------------
+
+    def _live_walls(self, *, via_main=False):
+        """Probe the deterministic post-response local wall samples of a
+        baseline cycle, then reset the harness (identical replay)."""
+        rt = self._v2_runtime()
+        self._script_cycle(domain=(0,))
+        if via_main:
+            code, fields, _ = self._run_main_with_runtime(rt)
+            self.assertEqual(code, 0)
+        else:
+            fields = self._fields(self._run_phase(rt).stage3_evidence)
+        walls = (fields["udt_t0_post_response_wall_utc"], fields["udt_t1_post_response_wall_utc"])
+        self._fresh()
+        return walls
+
+    def _live_udts(self, *, t0_delta_us, t1_delta_us=None, via_main=False):
+        """T0 = w0 + t0_delta; T1 = T0 (UNCHANGED) when ``t1_delta_us`` is
+        None, else T1 = w1 + t1_delta."""
+        w0, w1 = self._live_walls(via_main=via_main)
+        t0 = _cw_shift(w0, t0_delta_us)
+        t1 = t0 if t1_delta_us is None else _cw_shift(w1, t1_delta_us)
+        return w0, w1, t0, t1
+
+    def _live_run(self, *, t0_delta_us, t1_delta_us=None, recorder=None):
+        w0, w1, t0, t1 = self._live_udts(t0_delta_us=t0_delta_us, t1_delta_us=t1_delta_us)
+        rt = self._v2_runtime()
+        self._script_cycle(domain=(0,), t0=t0, t1=t1)
+        with (recorder.installed() if recorder is not None else contextlib.nullcontext()):
+            result = self._run_phase(rt)
+        self.assertEqual(result.status, "READ_PHASE_COMPLETE", result.local_block_reasons)
+        fields = self._fields(result.stage3_evidence)
+        # deterministic replay: the probed wall samples are the observed ones.
+        self.assertEqual(fields["udt_t0_post_response_wall_utc"], w0)
+        self.assertEqual(fields["udt_t1_post_response_wall_utc"], w1)
+        return result, fields, (w0, w1, t0, t1)
+
+    def _general(self, *, t0, t1, w0=_CW_W0, w1=_CW_W1, start=5_000_000_000, finish=5_010_000_000, cfg=None):
+        cfg = cfg if cfg is not None else self._candidate02()
+        fb = runner.UserDataFreshnessWatermarkV1(response_identity_sha256=self._hx(0xf0), as_of_time_utc=t0)
+        fa = runner.UserDataFreshnessWatermarkV1(response_identity_sha256=self._hx(0xf1), as_of_time_utc=t1)
+        read = self._dynamic_read(fb=fb, fa=fa, risk_config=cfg)
+        return runner.require_dynamic_index_domain_completeness(
+            read, domain_binding=self.domain_binding, active_contract=self.active_contract,
+            risk_config=cfg, accepted_evidence_contract=self._evidence_contract(),
+            current_selected_route_cutoff_sha256=self._hx(0x9c07), now_monotonic_ns=1_000_000,
+            now_utc=w1, t0_wall_sample_utc=w0, t1_wall_sample_utc=w1,
+            read_window_start_monotonic_ns=start, read_window_finish_monotonic_ns=finish)
+
+    def _assert_no_udt_leaf_read(self, recorder):
+        self.assertFalse(set(recorder.callers) & set(_CW_UDT_DECISION_FUNCTIONS), recorder.callers)
+
+    def _predicate_outcomes(self, fields):
+        return [(p["predicate"], p["outcome"]) for p in fields["stage3_completeness_evidence"]["predicates"]]
+
+    def _assert_fixture_non_gating(self, delta_us):
+        """Live T0-positive/negative (T1 == T0), live T1 (T1 = w1 + delta),
+        and the general completeness path with exact Candidate-02 (leaf 0):
+        the UDT dimension passes regardless of the delta's sign/magnitude and
+        the exact signed delta is retained."""
+        cfg = self._candidate02()
+        self.assertEqual(cfg.state_integrity.max_future_wall_clock_skew_ms, 0)
+        # live T0 bookend (T1 == T0 -> UNCHANGED)
+        recorder = _CwSkewLeafReadRecorder()
+        _, fields, (w0, w1, t0, t1) = self._live_run(t0_delta_us=delta_us, recorder=recorder)
+        self._assert_no_udt_leaf_read(recorder)
+        self.assertEqual(fields["udt_t0_future_skew_us"], delta_us)
+        self.assertEqual(fields["udt_relation"], "UNCHANGED")
+        self.assertEqual(fields["udt_t1_future_skew_us"],
+                         delta_us - runner._stage3_udt_future_skew_us(w1, w0))
+        self.assertEqual(fields["stage3_completeness_evidence"]["terminal_completeness_classification"], "COMPLETE")
+        # live T1 bookend (T0 well before the wall; T1 = w1 + delta -> ADVANCED)
+        self._fresh()
+        _, fields, _ = self._live_run(t0_delta_us=-200_000, t1_delta_us=delta_us)
+        self.assertEqual(fields["udt_t1_future_skew_us"], delta_us)
+        self.assertEqual(fields["udt_relation"], "ADVANCED")
+        # general completeness path with exact Candidate-02 (zero-ms leaf)
+        self._fresh()
+        recorder = _CwSkewLeafReadRecorder()
+        with recorder.installed():
+            t0 = _cw_shift(_CW_W0, delta_us)
+            self.assertEqual(self._general(t0=t0, t1=t0), "RETAINED_POSITION_TERMINALLY_SETTLED")
+            self.assertEqual(self._general(t0=_cw_shift(_CW_W0, -200_000), t1=_cw_shift(_CW_W1, delta_us)),
+                             "RETAINED_POSITION_TERMINALLY_SETTLED")
+        self._assert_no_udt_leaf_read(recorder)
+        self.assertEqual(runner._stage3_udt_future_skew_us(t0, _CW_W0), delta_us)
+
+    # --- TEST-CW-001 / 002 / 003 ------------------------------------------
+
+    def test_cw_001_a33_positive_cross_clock_delta_is_not_a_udt_failure(self):
+        self._assert_fixture_non_gating(_CW_A33_DELTA_US)
+
+    def test_cw_002_execution02_positive_delta_with_candidate02_zero_leaf(self):
+        self._assert_fixture_non_gating(_CW_EXECUTION02_DELTA_US)
+
+    def test_cw_003_execution03_negative_delta_proves_nothing_by_itself(self):
+        self._assert_fixture_non_gating(_CW_EXECUTION03_DELTA_US)
+        # a negative delta never rescues an independent failing predicate.
+        self._fresh()
+        t0 = _cw_shift(_CW_W0, _CW_EXECUTION03_DELTA_US)
+        with self.assertRaises(RunnerError) as ctx:
+            self._general(t0=t0, t1=t0, start=7_000_000_000, finish=7_000_000_000 + 30_000_000_001)
+        self.assertEqual(ctx.exception.code, RunnerFailureCode.RECONCILIATION_READ_DEADLINE_EXCEEDED)
+        with self.assertRaises(RunnerError) as ctx:
+            self._general(t0=t0, t1=t0, w0=_CW_W1, w1=_CW_W0)
+        self.assertEqual(ctx.exception.code, RunnerFailureCode.DYNAMIC_READ_CLOCK_REGRESSION)
+        w0, w1, t0, _ = self._live_udts(t0_delta_us=_CW_EXECUTION03_DELTA_US)
+        rt = self._v2_runtime()
+        self._script_cycle(domain=(0,), t0=t0, t1=_cw_shift(t0, -1))
+        exc = self._phase_error(rt)
+        self.assertEqual(exc.code, RunnerFailureCode.USER_DATA_TIMESTAMP_REGRESSION)
+        # the evidence asserts no synchronization / freshness / offset theorem.
+        fields = self._fields(runner._stage3_evidence_of(exc))
+        self.assertEqual(fields["udt_t0_future_skew_us"], _CW_EXECUTION03_DELTA_US)
+        self.assertEqual(fields["udt_absolute_age_gating"], "NON_GATING_DIAGNOSTIC")
+        udt_keys = {k for k in fields if k.startswith("udt_")}
+        self.assertEqual(udt_keys, {k for k in _CW_REVISION2_SEMANTIC_FIELDS if k.startswith("udt_")}
+                         | {"udt_absolute_age_gating"})
+
+    # --- TEST-CW-004 ------------------------------------------------------
+
+    def test_cw_004_malformed_naive_and_unrepresentable_udt_still_fail_closed(self):
+        bad_strings = (
+            "2026-08-17T12:59:59.950000",          # timezone-naive
+            "2026-08-17T12:59:59.950000+00:00Z",   # malformed suffix
+            "2026-08-17T12:59:59.950000+24:00",    # unsupported offset
+            "2026-08-17T12:59:59.950000-00:00",    # unknown local offset
+            "2026-02-30T12:00:00Z",                # impossible date
+            "2026-08-17T24:00:00Z",                # impossible time
+            "2026-08-17T12:59:59.1234567Z",        # not exactly representable
+            "not-a-time", "",
+        )
+        for bad in bad_strings:
+            for position in ("T0", "T1"):
+                with self.subTest(bad=bad, position=position):
+                    self._fresh()
+                    rt = self._v2_runtime()
+                    good = "2026-08-17T12:59:59.960000Z"
+                    self._script_cycle(domain=(0,), t0=(bad if position == "T0" else good),
+                                       t1=(bad if position == "T1" else good))
+                    exc = self._phase_error(rt)
+                    self.assertEqual(exc.code, RunnerFailureCode.USER_DATA_TIMESTAMP_MALFORMED)
+                    fields = self._fields(runner._stage3_evidence_of(exc))
+                    self.assertIsNone(fields["udt_t0_utc" if position == "T0" else "udt_t1_utc"])
+                    self.assertIsNone(fields["udt_t0_future_skew_us" if position == "T0" else "udt_t1_future_skew_us"])
+        # missing and non-string as_of_time at T0
+        for body in ({}, {"as_of_time": 1790000000}, {"as_of_time": None}):
+            with self.subTest(body=body):
+                self._fresh()
+                rt = self._v2_runtime()
+                t = self._transport
+                t.queue(RunnerOperation.GET_EXCHANGE_STATUS, _v2_status_payload(_v2_status_rows((0,))))
+                t.queue(RunnerOperation.GET_USER_DATA_TIMESTAMP, _json_response(body))
+                exc = self._phase_error(rt)
+                self.assertEqual(exc.code, RunnerFailureCode.USER_DATA_TIMESTAMP_MALFORMED)
+        for bad in bad_strings + (None, 1790000000, True):
+            with self.subTest(normalize=bad):
+                with self.assertRaises(RunnerError) as ctx:
+                    runner._stage3_normalize_udt(bad)
+                self.assertEqual(ctx.exception.code, RunnerFailureCode.USER_DATA_TIMESTAMP_MALFORMED)
+
+    # --- TEST-CW-005 ------------------------------------------------------
+
+    def test_cw_005_same_series_t1_before_t0_is_regression_without_retry(self):
+        # both bookends LATER than their wall samples (positive deltas): the
+        # same-series regression still fails, exactly once, no re-request.
+        w0, w1, t0, _ = self._live_udts(t0_delta_us=_CW_A33_DELTA_US)
+        rt = self._v2_runtime()
+        self._script_cycle(domain=(0,), t0=t0, t1=_cw_shift(t0, -1))
+        exc = self._phase_error(rt)
+        self.assertEqual(exc.code, RunnerFailureCode.USER_DATA_TIMESTAMP_REGRESSION)
+        ops = [str(c[0]) for c in self._transport.calls]
+        self.assertEqual(ops.count("GET_USER_DATA_TIMESTAMP"), 2)
+        self.assertEqual(ops[-1], "GET_USER_DATA_TIMESTAMP")
+        fields = self._fields(runner._stage3_evidence_of(exc))
+        self.assertIsNone(fields["udt_relation"])
+        self.assertEqual(fields["udt_t0_future_skew_us"], _CW_A33_DELTA_US)
+        self.assertEqual(runner.AUTOMATIC_RETRIES, 0)
+        # the general-path fixture type itself rejects T1 < T0.
+        fb = runner.UserDataFreshnessWatermarkV1(response_identity_sha256=self._hx(0xf0), as_of_time_utc=t0)
+        fa = runner.UserDataFreshnessWatermarkV1(response_identity_sha256=self._hx(0xf1), as_of_time_utc=_cw_shift(t0, -1))
+        with self.assertRaises(RunnerError):
+            self._dynamic_read(fb=fb, fa=fa)
+
+    # --- TEST-CW-006 ------------------------------------------------------
+
+    def test_cw_006_equality_and_advancement_are_permitted(self):
+        _, fields, _ = self._live_run(t0_delta_us=_CW_A33_DELTA_US)
+        self.assertEqual(fields["udt_relation"], "UNCHANGED")
+        self._fresh()
+        _, fields, _ = self._live_run(t0_delta_us=_CW_EXECUTION02_DELTA_US, t1_delta_us=_CW_A33_DELTA_US)
+        self.assertEqual(fields["udt_relation"], "ADVANCED")
+        self._fresh()
+        t0 = _cw_shift(_CW_W0, _CW_A33_DELTA_US)
+        self.assertEqual(self._general(t0=t0, t1=t0), "RETAINED_POSITION_TERMINALLY_SETTLED")
+        self.assertEqual(self._general(t0=t0, t1=_cw_shift(t0, 1)), "RETAINED_POSITION_TERMINALLY_SETTLED")
+
+    # --- TEST-CW-007 ------------------------------------------------------
+
+    def _udt_decision_sources(self):
+        return {name: inspect.getsource(getattr(runner, name)) for name in _CW_UDT_DECISION_FUNCTIONS}
+
+    def test_cw_007_udt_paths_do_not_consume_shared_skew_leaf(self):
+        import ast
+        import textwrap
+        self.assertFalse(hasattr(runner, "_require_stage3_udt_not_future"))
+        for name, src in self._udt_decision_sources().items():
+            with self.subTest(function=name):
+                for banned in ("max_future_wall_clock_skew_ms", "_require_stage3_udt_not_future",
+                               "USER_DATA_TIMESTAMP_FUTURE", "_STAGE3_US_PER_MS *"):
+                    self.assertNotIn(banned, src)
+                # every diagnostic-delta computation flows ONLY into evidence
+                # recording (no comparison / branch consumes it).
+                tree = ast.parse(textwrap.dedent(src))
+                parents = {}
+                for node in ast.walk(tree):
+                    for child in ast.iter_child_nodes(node):
+                        parents[child] = node
+                calls = [n for n in ast.walk(tree) if isinstance(n, ast.Call)
+                         and isinstance(n.func, ast.Name) and n.func.id == "_stage3_udt_future_skew_us"]
+                for call in calls:
+                    node, recorded = call, False
+                    while node in parents:
+                        node = parents[node]
+                        if isinstance(node, (ast.Compare, ast.If, ast.IfExp, ast.Assert, ast.While, ast.BoolOp)):
+                            break
+                        if (isinstance(node, ast.Call) and isinstance(node.func, ast.Attribute)
+                                and node.func.attr == "record"):
+                            recorded = True
+                            break
+                    self.assertTrue(recorded, ast.dump(call))
+        self.assertNotIn("_stage3_udt_future_skew_us",
+                         self._udt_decision_sources()["require_dynamic_index_domain_completeness"])
+        # instrumented: neither UDT decision function reads the leaf, on the
+        # general path (exact Candidate-02) or the live path (harness leaf 10).
+        recorder = _CwSkewLeafReadRecorder()
+        with recorder.installed():
+            t0 = _cw_shift(_CW_W0, _CW_A33_DELTA_US)
+            self.assertEqual(self._general(t0=t0, t1=t0), "RETAINED_POSITION_TERMINALLY_SETTLED")
+        self._assert_no_udt_leaf_read(recorder)
+        recorder = _CwSkewLeafReadRecorder()
+        self._fresh()
+        self._live_run(t0_delta_us=_CW_A33_DELTA_US, recorder=recorder)
+        self._assert_no_udt_leaf_read(recorder)
+
+    # --- TEST-CW-008 ------------------------------------------------------
+
+    def test_cw_008_protected_non_udt_skew_consumers_remain_active(self):
+        import arb.venues.kalshi.minimal_market_maker as protected_mmm
+        cfg = self._candidate02()
+        self.assertEqual(cfg.sha256, _S3SEM_CANDIDATE02_SEMANTIC_SHA256)
+        self.assertEqual(cfg.state_integrity.max_future_wall_clock_skew_ms, 0)
+        self.assertIn("max_future_wall_clock_skew_ms",
+                      {f.name for f in dataclasses.fields(risk_control.StateIntegrityLimits)})
+        for module in (risk_control, ledger_binding, protected_mmm):
+            with self.subTest(module=module.__name__):
+                self.assertIn("max_future_wall_clock_skew_ms", inspect.getsource(module))
+        # the protected risk_control contract still enforces the unchanged
+        # zero-ms leaf: a received stamp 1 us in the future of now fails.
+        stamp = risk_control.FreshnessStampV1(
+            process_instance_id="proc_" + "0" * 32, received_at_utc="2026-09-28T15:00:00.000001Z",
+            received_monotonic_ns=10, source_timestamp_kind="NONE", source_timestamp_utc=None,
+            snapshot_sha256="a" * 64)
+        recorder = _CwSkewLeafReadRecorder()
+        with recorder.installed():
+            leaf = cfg.state_integrity.max_future_wall_clock_skew_ms
+        self.assertEqual(recorder.callers, ["test_cw_008_protected_non_udt_skew_consumers_remain_active"])
+        for stale_code, expected in ((RiskControlCode.MARKET_DATA_STALE, RiskControlCode.MARKET_DATA_UNUSABLE),
+                                     (RiskControlCode.RECONCILIATION_STALE, RiskControlCode.RECONCILIATION_STALE)):
+            with self.subTest(stale_code=stale_code):
+                with self.assertRaises(RiskControlError) as ctx:
+                    risk_control.freshness_age_ms(
+                        stamp, current_process_instance_id="proc_" + "0" * 32, now_monotonic_ns=20,
+                        now_utc="2026-09-28T15:00:00.000000Z", max_age_ms=1000,
+                        max_future_wall_clock_skew_ms=leaf, stale_code=stale_code)
+                self.assertEqual(ctx.exception.code, expected)
+        # equal instant passes the same protected check.
+        same = dataclasses.replace(stamp, received_at_utc="2026-09-28T15:00:00.000000Z")
+        self.assertEqual(risk_control.freshness_age_ms(
+            same, current_process_instance_id="proc_" + "0" * 32, now_monotonic_ns=20,
+            now_utc="2026-09-28T15:00:00.000000Z", max_age_ms=1000, max_future_wall_clock_skew_ms=leaf), 1)
+
+    # --- TEST-CW-009 ------------------------------------------------------
+
+    def test_cw_009_local_monotonic_deadline_unchanged(self):
+        cfg = self._candidate02()
+        self.assertEqual(cfg.state_integrity.reconciliation_read_deadline_ms, 30000)
+        start = 7_000_000_000
+        # T1 - T0 = 60 s and positive cross-clock deltas are NOT the elapsed-time
+        # source: below / equal pass, above fails on the monotonic window only.
+        t0 = _cw_shift(_CW_W0, _CW_A33_DELTA_US)
+        t1 = _cw_shift(t0, 60_000_000)
+        for finish_delta, ok in ((29_999_999_999, True), (30_000_000_000, True), (30_000_000_001, False)):
+            with self.subTest(finish_delta=finish_delta):
+                if ok:
+                    self.assertEqual(self._general(t0=t0, t1=t1, start=start, finish=start + finish_delta, cfg=cfg),
+                                     "RETAINED_POSITION_TERMINALLY_SETTLED")
+                else:
+                    with self.assertRaises(RunnerError) as ctx:
+                        self._general(t0=t0, t1=t0, start=start, finish=start + finish_delta, cfg=cfg)
+                    self.assertEqual(ctx.exception.code, RunnerFailureCode.RECONCILIATION_READ_DEADLINE_EXCEEDED)
+        for s, f in ((None, start), (start, start - 1)):
+            with self.subTest(start=s, finish=f):
+                with self.assertRaises(RunnerError) as ctx:
+                    self._general(t0=t0, t1=t0, start=s, finish=f, cfg=cfg)
+                self.assertEqual(ctx.exception.code, RunnerFailureCode.LOCAL_READ_DURATION_UNRESOLVED)
+        # live: UNCHANGED positive-delta UDT, monotonic window beyond the
+        # harness deadline (500 ms) -> RECONCILIATION_READ_DEADLINE_EXCEEDED.
+        self._fresh()
+        w0, w1, t0, t1 = self._live_udts(t0_delta_us=_CW_A33_DELTA_US)
+        rt = self._v2_runtime()
+        self._script_cycle(domain=(0,), t0=t0, t1=t1)
+        udt_list = self._transport.responses[RunnerOperation.GET_USER_DATA_TIMESTAMP]
+        self._transport.responses[RunnerOperation.GET_USER_DATA_TIMESTAMP] = _S3SemMonotonicJumpList(
+            udt_list, inputs=self.inputs, trigger=2, jump_ns=600 * 1_000_000)
+        exc = self._phase_error(rt)
+        self.assertEqual(exc.code, RunnerFailureCode.RECONCILIATION_READ_DEADLINE_EXCEEDED)
+        fields = self._fields(runner._stage3_evidence_of(exc))
+        self.assertGreater(fields["local_read_duration_ns"], 500 * 1_000_000)
+        self.assertEqual(fields["udt_t0_future_skew_us"], _CW_A33_DELTA_US)
+
+    # --- TEST-CW-010 ------------------------------------------------------
+
+    def test_cw_010_local_wall_regression_unchanged(self):
+        t0 = _cw_shift(_CW_W0, -200_000)
+        with self.assertRaises(RunnerError) as ctx:
+            self._general(t0=t0, t1=t0, w0=_CW_W1, w1=_CW_W0)
+        self.assertEqual(ctx.exception.code, RunnerFailureCode.DYNAMIC_READ_CLOCK_REGRESSION)
+        # live: valid UNCHANGED UDT, local wall rewound 1 s before the T1 pop.
+        w0, w1, t0, t1 = self._live_udts(t0_delta_us=-200_000)
+        rt = self._v2_runtime()
+        self._script_cycle(domain=(0,), t0=t0, t1=t1)
+        udt_list = self._transport.responses[RunnerOperation.GET_USER_DATA_TIMESTAMP]
+        self._transport.responses[RunnerOperation.GET_USER_DATA_TIMESTAMP] = _CwWallRewindList(
+            udt_list, inputs=self.inputs, trigger=2, rewind=timedelta(seconds=1))
+        exc = self._phase_error(rt)
+        self.assertEqual(exc.code, RunnerFailureCode.DYNAMIC_READ_CLOCK_REGRESSION)
+        fields = self._fields(runner._stage3_evidence_of(exc))
+        self.assertLess(fields["udt_t1_post_response_wall_utc"], fields["udt_t0_post_response_wall_utc"])
+        self.assertEqual(fields["udt_relation"], "UNCHANGED")
+
+    # --- TEST-CW-011 ------------------------------------------------------
+
+    def test_cw_011_diagnostic_evidence_exact_and_non_gating(self):
+        baseline = None
+        for name, delta in (("ZERO", 0),) + _CW_FIXTURES:
+            with self.subTest(fixture=name):
+                self._fresh()
+                result, fields, (w0, w1, t0, t1) = self._live_run(t0_delta_us=delta)
+                self.assertEqual(result.status, "READ_PHASE_COMPLETE")
+                self.assertEqual(fields["udt_t0_future_skew_us"], delta)
+                t1_skew = delta - runner._stage3_udt_future_skew_us(w1, w0)
+                self.assertEqual(fields["udt_t1_future_skew_us"], t1_skew)
+                self.assertEqual(fields["udt_absolute_age_ms_diagnostic"], -t1_skew // 1000)
+                for key in _CW_REVISION2_SEMANTIC_FIELDS:
+                    self.assertIsNotNone(fields[key], key)
+                for key in ("udt_t0_future_skew_us", "udt_t1_future_skew_us", "udt_absolute_age_ms_diagnostic",
+                            "local_read_window_start_monotonic_ns", "local_read_window_finish_monotonic_ns",
+                            "local_read_duration_ns"):
+                    self.assertIs(type(fields[key]), int, key)
+                outcome = (result.status, self._predicate_outcomes(fields),
+                           fields["stage3_completeness_evidence"]["terminal_completeness_classification"])
+                if baseline is None:
+                    baseline = outcome
+                self.assertEqual(outcome, baseline)
+
+    # --- TEST-CW-012 ------------------------------------------------------
+
+    def test_cw_012_revision2_semantic_identity_compatibility(self):
+        self.assertEqual(runner._STAGE3_RESULT_SCHEMA_REVISION, 2)
+        self.assertEqual(runner._STAGE3_SEMANTIC_SPEC_ID, _CW_SPEC_ID)
+        self.assertEqual(runner._STAGE3_SEMANTIC_SPEC_SHA256, _CW_SPEC_SHA256)
+        self.assertEqual(runner._STAGE3_SEMANTIC_FIELDS, _CW_REVISION2_SEMANTIC_FIELDS)
+        self.assertEqual(runner._STAGE3_COMPLETENESS_PREDICATES, _CW_REVISION2_PREDICATES)
+        w0, w1, t0, t1 = self._live_udts(t0_delta_us=_CW_A33_DELTA_US, via_main=True)
+        rt = self._v2_runtime()
+        self._script_cycle(domain=(0,), t0=t0, t1=t1)
+        code, payload, _ = self._run_main_with_runtime(rt)
+        self.assertEqual(code, 0)
+        self.assertEqual(payload["status"], "READ_PHASE_COMPLETE")
+        self.assertEqual(payload["stage3_result_schema_revision"], 2)
+        self.assertEqual(payload["stage3_semantic_spec"], _CW_SPEC_ID)
+        self.assertEqual(payload["stage3_semantic_spec_sha256"], _CW_SPEC_SHA256)
+        self.assertEqual(payload["udt_t0_future_skew_us"], _CW_A33_DELTA_US)
+        for key in _CW_REVISION2_SEMANTIC_FIELDS:
+            self.assertIn(key, payload)
+        self.assertEqual([p["predicate"] for p in payload["stage3_completeness_evidence"]["predicates"]
+                          if p["predicate"].startswith(("T0_", "T1_"))],
+                         ["T0_USER_DATA_TIMESTAMP_ORDERING", "T1_USER_DATA_TIMESTAMP_ORDERING_AND_LOCAL_READ_WINDOW"])
+        # a historical revision-2 payload keeps the predecessor identity; the
+        # accounting parser accepts both identically, and a semantic consumer
+        # must bind the (ID, SHA-256) pair -- revision 2 alone is insufficient.
+        historical = dict(payload, stage3_semantic_spec=_CW_PREDECESSOR_SPEC_ID,
+                          stage3_semantic_spec_sha256=_CW_PREDECESSOR_SPEC_SHA256)
+        self.assertEqual(runner._parse_stage3_result_accounting_v2(historical),
+                         runner._parse_stage3_result_accounting_v2(payload))
+
+        def _udt_semantics(p):
+            return {
+                (_CW_PREDECESSOR_SPEC_ID, _CW_PREDECESSOR_SPEC_SHA256): "FS-UDT-007_CROSS_CLOCK_GATED",
+                (_CW_SPEC_ID, _CW_SPEC_SHA256): "CW-UDT_CROSS_CLOCK_DIAGNOSTIC_NON_GATING",
+            }[(p["stage3_semantic_spec"], p["stage3_semantic_spec_sha256"])]
+
+        self.assertEqual(historical["stage3_result_schema_revision"], payload["stage3_result_schema_revision"])
+        self.assertNotEqual(_udt_semantics(historical), _udt_semantics(payload))
+        with self.assertRaises(KeyError):
+            _udt_semantics(dict(payload, stage3_semantic_spec_sha256=_CW_PREDECESSOR_SPEC_SHA256))
+
+    # --- TEST-CW-013 ------------------------------------------------------
+
+    def test_cw_013_user_data_timestamp_future_is_not_emitted_by_udt_path(self):
+        self.assertEqual(RunnerFailureCode.USER_DATA_TIMESTAMP_FUTURE.value, "USER_DATA_TIMESTAMP_FUTURE")
+        self.assertIs(RunnerFailureCode("USER_DATA_TIMESTAMP_FUTURE"), RunnerFailureCode.USER_DATA_TIMESTAMP_FUTURE)
+        module_src = inspect.getsource(runner)
+        self.assertNotIn("RunnerFailureCode.USER_DATA_TIMESTAMP_FUTURE", module_src)
+        self.assertEqual(module_src.count("USER_DATA_TIMESTAMP_FUTURE"), 2)  # enum name + value only
+        # a gross positive delta (+1 h) at T0 and T1 emits no UDT failure.
+        _, fields, _ = self._live_run(t0_delta_us=3_600_000_000)
+        self.assertEqual(fields["udt_t0_future_skew_us"], 3_600_000_000)
+        self.assertGreater(fields["udt_t1_future_skew_us"], 3_599_000_000)
+
+    # --- TEST-CW-014 ------------------------------------------------------
+
+    def test_cw_014_no_dynamic_offset_or_clock_correction_mechanism(self):
+        sources = dict(self._udt_decision_sources())
+        sources["_stage3_udt_future_skew_us"] = inspect.getsource(runner._stage3_udt_future_skew_us)
+        sources["_record_stage3_acquired_semantics"] = inspect.getsource(runner._record_stage3_acquired_semantics)
+        for name, src in sources.items():
+            code_only = "\n".join(line.split("#", 1)[0] for line in src.splitlines()).lower()
+            with self.subTest(function=name):
+                for banned in ("phase_offset", "phaseoffset", "w32tm", "ntp", "rtt", "websocket", "sending_ts",
+                               "clock_offset", "learned", "subprocess", "settimeofday", "setsystemtime",
+                               "// 2", "/ 2", "* 0.5"):
+                    self.assertNotIn(banned, code_only)
+        # the recorded deltas are the raw normalized difference -- no adjustment.
+        _, fields, (w0, w1, t0, t1) = self._live_run(t0_delta_us=_CW_A33_DELTA_US)
+        self.assertEqual(fields["udt_t0_utc"], t0)
+        self.assertEqual(fields["udt_t0_future_skew_us"], runner._stage3_udt_future_skew_us(t0, w0))
+        self.assertEqual(fields["udt_t1_future_skew_us"], runner._stage3_udt_future_skew_us(t1, w1))
+        self.assertFalse(any(isinstance(v, float) for k, v in fields.items() if k.startswith("udt_")))
+
+    # --- TEST-CW-015 ------------------------------------------------------
+
+    def test_cw_015_no_request_count_order_or_retry_change(self):
+        self.assertEqual((runner.AUTOMATIC_RETRIES, runner.REDIRECTS), (0, 0))
+        self.assertEqual(runner.PRE_RELEASE_READ_REQUEST_MAX_V2, 72)
+        shapes = set()
+        for name, delta in (("ZERO", 0),) + _CW_FIXTURES:
+            with self.subTest(fixture=name):
+                self._fresh()
+                _, fields, _ = self._live_run(t0_delta_us=delta)
+                shapes.add((
+                    tuple((e["ordinal"], e["operation"], e["highest_state"]) for e in fields["stage3_request_lifecycle"]),
+                    fields["pre_release_requests_consumed"], fields["network_reads_stage3"],
+                    tuple(str(c[0]) for c in self._transport.calls),
+                ))
+                self.assertEqual(fields["pre_release_requests_consumed"], 9)
+                self._assert_lifecycle_invariants(fields)
+        self.assertEqual(len(shapes), 1)
+        for name, src in self._udt_decision_sources().items():
+            code_only = "\n".join(line.split("#", 1)[0] for line in src.splitlines()).lower()
+            with self.subTest(function=name):
+                for banned in ("retry(", "sleep(", "reconnect(", "time.time(", "threading", "timer(", "for attempt"):
+                    self.assertNotIn(banned, code_only)
+
+    # --- TEST-CW-016 ------------------------------------------------------
+
+    def test_cw_016_no_release_writer_gate_d_or_write_escalation(self):
+        w0, w1, t0, t1 = self._live_udts(t0_delta_us=_CW_A33_DELTA_US, via_main=True)
+        rt = self._v2_runtime()
+        self._script_cycle(domain=(0,), t0=t0, t1=t1)
+        with mock.patch.object(runner, "_complete_stage3_active_release_and_normal_writer_v2",
+                               side_effect=AssertionError("release/normal-writer must not be reached")), \
+             mock.patch.object(runner, "acquire_active_release_only_v1",
+                               side_effect=AssertionError("RELEASE_ONLY must not be acquired")), \
+             mock.patch.object(runner, "acquire_active_normal_writer_state_v1",
+                               side_effect=AssertionError("NORMAL_WRITER must not be acquired")), \
+             mock.patch.object(runner, "run_gate_d_ordinary_decision_loop",
+                               side_effect=AssertionError("Gate D must not be entered")):
+            code, payload, _ = self._run_main_with_runtime(rt)
+        self.assertEqual(code, 0)
+        self.assertEqual(payload["udt_t0_future_skew_us"], _CW_A33_DELTA_US)
+        for key, value in (("write_authorization", "NO_WRITE_AUTHORIZATION"), ("stage_3g_plus", "NOT_ENTERED"),
+                           ("release_only", "NOT_ACQUIRED"), ("normal_writer", "NOT_ACQUIRED"),
+                           ("gate_d", "NOT_ENTERED")):
+            self.assertEqual(payload[key], value)
+        self.assertTrue(all(str(c[0]).startswith("GET_") for c in self._transport.calls))
+        self.assertFalse(set(str(c[0]) for c in self._transport.calls) & {op.value for op in WRITE_OPERATIONS})
+        for name, src in self._udt_decision_sources().items():
+            with self.subTest(function=name):
+                for banned in ("acquire_active_release_only", "acquire_active_normal_writer", "gate_d",
+                               "NormalWriterPermit", "_complete_stage3_active_release"):
+                    self.assertNotIn(banned, src)
+
+    # --- TEST-CW-017 ------------------------------------------------------
+
+    _CW_PROTECTED_REGRESSION_TESTS = (
+        # local reconciliation FreshnessStampV1 / market-data freshness
+        ("Stage3FreshnessCompletenessSemanticsSpec01TestCase", "test_s3sem_10_19_freshness_stamp_1000ms_boundary_unchanged"),
+        ("Stage3FreshnessCompletenessSemanticsSpec01TestCase", "test_s3sem_11_20_market_data_1000ms_boundary_unchanged"),
+        ("ExecPkg01Correction01EvidenceSurfaceTestCase", "test_ev01_success_emits_complete_request_completeness_and_freshness_evidence"),
+        # current / durable completeness
+        ("Stage3FreshnessCompletenessSemanticsSpec01TestCase", "test_s3sem_09_old_udt_with_complete_current_and_durable_truth_mints"),
+        ("Stage3FreshnessCompletenessSemanticsSpec01TestCase", "test_s3sem_12_14_complete_durable_plus_live_needs_no_cutoff_and_keeps_durable_fill"),
+        ("Stage3FreshnessCompletenessSemanticsSpec01TestCase", "test_s3sem_13_17_incomplete_durable_history_halts_with_exact_zero"),
+        ("Stage3FreshnessCompletenessSemanticsSpec01TestCase", "test_s3sem_13b_current_live_completeness_gap_classified"),
+        # request / evidence accounting
+        ("Stage3FreshnessCompletenessSemanticsSpec01TestCase", "test_s3sem_15_post_network_failure_exact_nonzero_counts"),
+        ("Stage3FreshnessCompletenessSemanticsSpec01TestCase", "test_s3sem_15c_live_cli_success_is_revision2_producer"),
+        ("Stage3FreshnessCompletenessSemanticsSpec01TestCase", "test_s3sem_16_known_nonzero_with_exact_accounting_loss_is_unknown_nonzero"),
+        ("Stage3FreshnessCompletenessSemanticsSpec01TestCase", "test_s3sem_18_execution02_false_zero_is_unsupported_never_proven_zero"),
+        ("Stage3FreshnessCompletenessSemanticsSpec01TestCase", "test_s3sem_lifecycle_states_monotonic_and_bound_to_requests_consumed"),
+        # no escalation / no recovery
+        ("Stage3FreshnessCompletenessSemanticsSpec01TestCase", "test_s3sem_21_no_release_writer_gate_d_or_venue_write"),
+        ("Stage3FreshnessCompletenessSemanticsSpec01TestCase", "test_s3sem_22_no_retry_timer_reconnect_or_restart_recovery"),
+    )
+
+    def test_cw_017_protected_freshness_completeness_regression_suite(self):
+        suite = unittest.TestSuite()
+        for cls_name, method in self._CW_PROTECTED_REGRESSION_TESTS:
+            suite.addTest(globals()[cls_name](methodName=method))
+        stream = io.StringIO()
+        outcome = unittest.TextTestRunner(stream=stream, verbosity=0).run(suite)
+        self.assertEqual(outcome.testsRun, len(self._CW_PROTECTED_REGRESSION_TESTS))
+        self.assertTrue(outcome.wasSuccessful(), stream.getvalue())
+        self.assertEqual((len(outcome.failures), len(outcome.errors), len(outcome.skipped)), (0, 0, 0))
 
 
 if __name__ == "__main__":

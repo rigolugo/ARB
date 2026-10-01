@@ -514,6 +514,9 @@ class RunnerFailureCode(enum.StrEnum):
     # more specific and are never collapsed into these.
     USER_DATA_TIMESTAMP_MALFORMED = "USER_DATA_TIMESTAMP_MALFORMED"
     USER_DATA_TIMESTAMP_REGRESSION = "USER_DATA_TIMESTAMP_REGRESSION"
+    # Historical/decode-only (CW-UDT-009): retired as a Stage-3 UDT emitter by
+    # T0_UDT_CLIENT_WALL_COMPARISON_CORRECTIVE_SPEC_01; A33 evidence carrying it
+    # keeps its predecessor meaning.
     USER_DATA_TIMESTAMP_FUTURE = "USER_DATA_TIMESTAMP_FUTURE"
     LOCAL_READ_DURATION_UNRESOLVED = "LOCAL_READ_DURATION_UNRESOLVED"
     RECONCILIATION_READ_DEADLINE_EXCEEDED = "RECONCILIATION_READ_DEADLINE_EXCEEDED"
@@ -6130,10 +6133,22 @@ def _parse_dynamic_index_domain_foreign_economics(
 # monotonic Stage-3 read window (FS-RD), per-request lifecycle accounting and
 # the revision-2 Stage-3 result/evidence schema (FS-ACC).  Module-private; no
 # caller-supplied production seam; no retry / timer / reconnect recovery.
+#
+# Semantic successor/overlay:
+# KALSHI_DEMO_R1_D07_T0_UDT_CLIENT_WALL_COMPARISON_CORRECTIVE_SPEC_01
+# (sha256 e9145be31466e7de30552519cb2f294d9aab5d53923d917fb908eae5055cf453)
+# -- supersedes FS-UDT-007 (CW-UDT-001..020): a UDT ``as_of_time`` is NEVER
+# compared against a local post-response wall sample as a pass/fail
+# predicate.  The signed UDT/client-wall deltas remain serialized as
+# cross-clock DIAGNOSTICS only; no replacement threshold, no dynamic clock
+# correction, and no UDT-path use of the shared
+# ``state_integrity.max_future_wall_clock_skew_ms`` leaf (which stays
+# unchanged for its protected non-UDT consumers).  Result schema revision
+# stays 2; the corrected meaning is bound by the semantic-spec ID/SHA below.
 # ===========================================================================
 
-_STAGE3_SEMANTIC_SPEC_ID = "KALSHI_DEMO_R1_D07_STAGE3_FRESHNESS_AND_COMPLETENESS_SEMANTICS_SPEC_01"
-_STAGE3_SEMANTIC_SPEC_SHA256 = "8183d469f7f5de35cf27edc7c7594ebd2f9d63f1d40bd3422bbeacc33e32dc13"
+_STAGE3_SEMANTIC_SPEC_ID = "KALSHI_DEMO_R1_D07_T0_UDT_CLIENT_WALL_COMPARISON_CORRECTIVE_SPEC_01"
+_STAGE3_SEMANTIC_SPEC_SHA256 = "e9145be31466e7de30552519cb2f294d9aab5d53923d917fb908eae5055cf453"
 _STAGE3_RESULT_SCHEMA_REVISION = 2
 _STAGE3_READ_WINDOW_NOT_SUPPLIED = object()
 _STAGE3_NS_PER_MS = 1_000_000
@@ -6204,30 +6219,18 @@ def _stage3_udt_raw(parsed: object) -> "str | None":
 
 
 def _stage3_udt_future_skew_us(as_of_utc: str, post_response_wall_utc: str) -> int:
-    """Exact integer microseconds ``as_of_time - post-response trusted wall
-    sample`` (positive => the watermark is LATER than the local wall sample).
-    Pure integer ``timedelta`` arithmetic -- never binary floating point."""
+    """Exact integer microseconds ``as_of_time - post-response local wall
+    sample`` (positive => the watermark is numerically LATER than the local
+    wall sample).  Pure integer ``timedelta`` arithmetic -- never binary
+    floating point.
+
+    CW-UDT-006 / CW-UDT-019: a CROSS-CLOCK DIAGNOSTIC only.  The legacy
+    ``future_skew`` name is retained for revision-2 wire compatibility; the
+    value establishes no "future", age, offset, or clock fault and is never
+    consumed by any Stage-3 pass/fail decision.  (The predecessor FS-UDT-007
+    UDT/client-wall gate helper is retired and removed.)"""
     delta = _parse_canonical_utc(as_of_utc) - _parse_canonical_utc(post_response_wall_utc)
     return (delta.days * 86_400 + delta.seconds) * 1_000_000 + delta.microseconds
-
-
-def _require_stage3_udt_not_future(
-    *, bookend: str, as_of_utc: str, post_response_wall_utc: str, max_future_wall_clock_skew_ms: int,
-) -> int:
-    """FS-UDT-007 -- ordering sanity only, NOT an absolute-age freshness gate.
-    The ONLY authoritative allowance is the accepted
-    ``state_integrity.max_future_wall_clock_skew_ms`` (Candidate-02: 0); the
-    retired hardcoded 5000-ms allowance never overrides it.  Equality with the
-    allowance passes; beyond it -> ``USER_DATA_TIMESTAMP_FUTURE``.  Returns the
-    exact signed skew in microseconds."""
-    if type(max_future_wall_clock_skew_ms) is not int or max_future_wall_clock_skew_ms < 0:
-        raise RunnerError(RunnerFailureCode.USER_DATA_TIMESTAMP_FUTURE, detail=bookend + " accepted future allowance invalid")
-    skew_us = _stage3_udt_future_skew_us(as_of_utc, post_response_wall_utc)
-    if skew_us > max_future_wall_clock_skew_ms * _STAGE3_US_PER_MS:
-        raise RunnerError(
-            RunnerFailureCode.USER_DATA_TIMESTAMP_FUTURE,
-            detail=bookend + " as_of_time later than its post-response trusted wall sample beyond state_integrity.max_future_wall_clock_skew_ms")
-    return skew_us
 
 
 def _require_stage3_local_read_duration(
@@ -6792,9 +6795,9 @@ def require_dynamic_index_domain_completeness(
     fresh dynamically enumerated read set against the separately bound
     domain-scoped ``accepted_evidence_contract``, recomputes and checks the
     composite read-set identity, applies the Stage-3 semantics SPEC_01
-    user_data_timestamp ORDERING predicates (watermark only -- no absolute-age
-    gate; future ordering against the accepted
-    ``state_integrity.max_future_wall_clock_skew_ms``) and, when the trusted
+    user_data_timestamp same-series ORDERING predicate (watermark only -- no
+    absolute-age gate; no UDT-versus-client-wall comparison per the
+    T0_UDT_CLIENT_WALL_COMPARISON_CORRECTIVE_SPEC_01) and, when the trusted
     acquisition boundary supplies them, the exact local monotonic read-window
     duration against ``state_integrity.reconciliation_read_deadline_ms``, and
     -- when the domain has a retained bootstrap position -- requires an
@@ -6856,15 +6859,17 @@ def require_dynamic_index_domain_completeness(
     if read.selected_route_reconciliation_cutoff_sha256 != current_selected_route_cutoff_sha256:
         raise RunnerError(RunnerFailureCode.SUBACCOUNT_WIDE_COMPLETENESS_UNPROVEN, detail="dynamic read selected-route cutoff stale")
 
-    # R04 / Stage-3 semantics SPEC_01 FS-UDT-001..008 / FS-RD-001..004:
-    # user_data_timestamp is a validation/update WATERMARK only.  T1 == T0
-    # (UNCHANGED) and T1 > T0 (ADVANCED) are both acceptable and neither is
-    # elapsed-time evidence; T1 < T0 fails; each bookend is ordered against
-    # its own post-response trusted wall sample using ONLY the accepted
-    # ``state_integrity.max_future_wall_clock_skew_ms`` (exact integer
-    # microseconds).  There is NO absolute-age predicate and NO T1 - T0
-    # duration proxy; the two trusted wall-clock samples must be
-    # nondecreasing.  Local reconciliation / market-data freshness remain
+    # R04 / Stage-3 semantics SPEC_01 FS-UDT-001..006 / FS-RD-001..004, as
+    # overlaid by T0_UDT_CLIENT_WALL_COMPARISON_CORRECTIVE_SPEC_01
+    # CW-UDT-001..008: user_data_timestamp is a validation/update WATERMARK
+    # only.  T1 == T0 (UNCHANGED) and T1 > T0 (ADVANCED) are both acceptable
+    # and neither is elapsed-time evidence; T1 < T0 fails.  A UDT bookend is
+    # NOT compared against any local wall sample (CW-UDT-001: the cross-clock
+    # gate is retired, no replacement threshold, no clock correction, and the
+    # shared state_integrity future-wall-clock-skew leaf is not read here).
+    # There is NO absolute-age predicate and NO T1 - T0 duration proxy.  The
+    # two LOCAL wall-clock samples (same client clock) must be nondecreasing
+    # (CW-UDT-007).  Local reconciliation / market-data freshness remain
     # governed independently by the protected ledger/risk consumers.
     lim = risk_config.state_integrity
     t0 = _parse_canonical_utc(read.freshness_before.as_of_time_utc)
@@ -6879,14 +6884,6 @@ def require_dynamic_index_domain_completeness(
         raise RunnerError(RunnerFailureCode.USER_DATA_TIMESTAMP_REGRESSION, detail="user_data_timestamp T1 < T0")
     if t1_sample < t0_sample:
         raise RunnerError(RunnerFailureCode.DYNAMIC_READ_CLOCK_REGRESSION, detail="trusted wall-clock freshness sample regressed between T0 and T1")
-    for bookend, as_of_utc, sample_utc in (
-        ("T0", read.freshness_before.as_of_time_utc, t0_sample_utc),
-        ("T1", read.freshness_after.as_of_time_utc, t1_sample_utc),
-    ):
-        _require_stage3_udt_not_future(
-            bookend=bookend, as_of_utc=as_of_utc, post_response_wall_utc=sample_utc,
-            max_future_wall_clock_skew_ms=lim.max_future_wall_clock_skew_ms,
-        )
     if (
         read_window_start_monotonic_ns is not _STAGE3_READ_WINDOW_NOT_SUPPLIED
         or read_window_finish_monotonic_ns is not _STAGE3_READ_WINDOW_NOT_SUPPLIED
@@ -7148,9 +7145,9 @@ assert PRE_RELEASE_READ_REQUEST_MAX_V2 == 72, PRE_RELEASE_READ_REQUEST_MAX_V2
 # DSB-FRESH-003's former 30000-ms UDT absolute-age cap and hardcoded 5000-ms
 # UDT future allowance are RETIRED by the Stage-3 semantics SPEC_01
 # (FS-UDT-002 / FS-UDT-007): user_data_timestamp is a watermark, not a
-# clock, and its future ordering uses ONLY the accepted
-# ``state_integrity.max_future_wall_clock_skew_ms``.  No replacement UDT-age
-# threshold exists.
+# clock.  The successor T0_UDT_CLIENT_WALL_COMPARISON_CORRECTIVE_SPEC_01
+# (CW-UDT-001..003) further retires the FS-UDT-007 UDT-versus-client-wall
+# gate: no UDT-age, UDT future-skew, or clock-offset threshold exists.
 
 # DSB-READSET-005 -- the exact accepted dynamic source identity.
 _ACTIVE_DYNAMIC_SOURCE_IDENTITY: Mapping[str, object] = MappingProxyType({
@@ -8657,8 +8654,9 @@ def _run_active_v2_acquisition(
 
     # 2 -- T0 freshness-before (wall sample taken immediately after parse).
     # Stage-3 semantics FS-UDT: a watermark only -- retain raw/normalized/
-    # post-response wall/future skew; ordering sanity against the accepted
-    # ``max_future_wall_clock_skew_ms``; NO absolute-age gate.
+    # post-response wall and the signed UDT/client-wall delta as a
+    # NON-GATING cross-clock diagnostic (CW-UDT-001/006: no UDT-versus-wall
+    # pass/fail, no threshold, no clock correction); NO absolute-age gate.
     evidence = capability.stage3_evidence
     lim = runtime.risk_config.state_integrity
     trace("T0_USER_DATA_TIMESTAMP_ORDERING", "BEGIN")
@@ -8669,10 +8667,6 @@ def _run_active_v2_acquisition(
     evidence.record("udt_t0_utc", t0_as_of)
     evidence.record("udt_t0_post_response_wall_utc", t0_wall)
     evidence.record("udt_t0_future_skew_us", _stage3_udt_future_skew_us(t0_as_of, t0_wall))
-    _require_stage3_udt_not_future(
-        bookend="T0", as_of_utc=t0_as_of, post_response_wall_utc=t0_wall,
-        max_future_wall_clock_skew_ms=lim.max_future_wall_clock_skew_ms,
-    )
     # FS-RD-001: START is sampled immediately before the first post-T0
     # request's boundary entry (GET_MARKET), after its local plan validation.
     evidence.arm_read_window_start()
@@ -8849,12 +8843,11 @@ def _run_active_v2_acquisition(
     if _parse_canonical_utc(t1_as_of) < _parse_canonical_utc(t0_as_of):
         raise RunnerError(RunnerFailureCode.USER_DATA_TIMESTAMP_REGRESSION, detail="T1 as_of < T0 as_of")
     evidence.record("udt_relation", "UNCHANGED" if t1_as_of == t0_as_of else "ADVANCED")
+    # CW-UDT-007: same-client-wall integrity (NOT a UDT comparison).
     if _parse_canonical_utc(t1_wall) < _parse_canonical_utc(t0_wall):
         raise RunnerError(RunnerFailureCode.DYNAMIC_READ_CLOCK_REGRESSION, detail="trusted wall-clock sample regressed T0->T1")
-    _require_stage3_udt_not_future(
-        bookend="T1", as_of_utc=t1_as_of, post_response_wall_utc=t1_wall,
-        max_future_wall_clock_skew_ms=lim.max_future_wall_clock_skew_ms,
-    )
+    # CW-UDT-001: no T1-versus-client-wall gate (the T1 delta above is a
+    # non-gating diagnostic only).
     _require_stage3_local_read_duration(
         read_window_start_ns, read_window_finish_ns,
         reconciliation_read_deadline_ms=lim.reconciliation_read_deadline_ms,
