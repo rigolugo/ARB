@@ -6207,3 +6207,159 @@ route_class = OFFLINE_IMPLEMENTATION_ONLY (routing only; not an authorization)
 ```
 
 That route must be separately dispatched with the exact approved spec/handoff raw bytes, any predecessor semantics required for protected behaviour, the exact canonical base, implementation anchors, required offline tests, and the exact-candidate Marco review-package requirements. This record authorizes no implementation, no repository source/test change, no Stage-3 or live attempt, and no threshold selection.
+
+### A36 R1-D07 T0 UDT/client-wall corrective implementation — MARCO APPROVED / INSTALLED (REMOTE + LOCAL CONFIRMED) / POST-CORRECTION STAGE-3 NOT RUN
+
+This documentation-only continuity overlay records the installed implementation of the A35 corrective semantic contract. It was prepared by `R1-D07_T0_UDT_CLIENT_WALL_COMPARISON_CORRECTIVE_IMPLEMENTATION_01_INSTALLATION_CANONICALIZATION_01` from canonical `rigolugo/ARB/main` commit `d09d91aef76cb1ff1e605b66df60e31c9ef814a6` (tree `2cd6bce6b643463744fda31327b3802131b1c27b`, sole parent `1bca29e5d260bb4fca2cab43975a53c3ec53ae04`). It records an installed-code milestone, not a live execution result. It changes documentation only and grants no runtime capability. A1-A35 remain historical provenance and are not rewritten.
+
+**A36.1 Current-status transition (supersedes only A35's current-status claims).**
+
+```text
+A35 historical (unchanged as provenance):
+  CORRECTIVE_IMPLEMENTATION = NOT_YET_PERFORMED
+  installed runner = predecessor cross-clock behavior (blob 60a69bb91a989d691996b2d967ef0269a147b0e5)
+  next route = R1-D07_T0_UDT_CLIENT_WALL_COMPARISON_CORRECTIVE_IMPLEMENTATION_01
+
+A36 current:
+  CORRECTIVE_SPEC_01 = APPROVED_AND_CANONICALLY_RECORDED (A35 / ART-0151 / ART-0152)
+  CORRECTIVE_IMPLEMENTATION_01 = APPROVED_AND_INSTALLED
+  installed runner = corrective; UDT/client-wall cross-clock gate removed
+  INSTALLED_IMPLEMENTATION_CONFORMS_TO_CORRECTIVE_SPEC = YES (Marco implementation review APPROVE)
+  remote_installation = CONFIRMED
+  local_installation = CONFIRMED
+```
+
+A36 supersedes exactly three A35 current-status statements: (1) that the corrective implementation is pending/not yet performed; (2) that the installed runner still carries the predecessor cross-clock UDT gate; and (3) that the next bounded route is the offline implementation task. All other A35 content (approved spec identities, supersession boundary, approved theorem, schema decision, raw-artifact classification) remains controlling provenance.
+
+**A36.2 Exact installed identity.**
+
+```text
+installed commit = d09d91aef76cb1ff1e605b66df60e31c9ef814a6
+tree             = 2cd6bce6b643463744fda31327b3802131b1c27b
+sole parent      = 1bca29e5d260bb4fca2cab43975a53c3ec53ae04 (A35 installation commit)
+commit_count_above_parent = 1
+changed paths (exactly two):
+
+src/arb/venues/kalshi/minimal_market_maker_experiment_runner.py
+  bytes = 749918
+  sha256 = a1d22350358115281350f747ba241ad8b3366b2074540d18565469592d48c417
+  git_blob = 7bf1fc5bf5685337ce5e4cfc28d05ea4bdf14912
+  (predecessor blob 60a69bb91a989d691996b2d967ef0269a147b0e5, 750048 bytes)
+
+tests/test_kalshi_minimal_market_maker_experiment_runner.py
+  bytes = 923872
+  sha256 = ff57118d86f92550b50a1924ce2ad398e63ce352e1b60a6ace7cc1e14534899d
+  git_blob = 746fae6cf51dc6e6a7f8c0b7a9f7ecb43c668d21
+  (predecessor blob c347ee1fb6e1e31b99b2cc2a41d145bfcb746fb8, 884207 bytes)
+
+candidate.patch = 64406 bytes / sha256 9ee41115d99b5157f9811d7fa9f4ef1ec896f1c5c8480170d2c821935e6a1e84
+implementer = CLAUDE_CODE
+```
+
+Protected paths (`risk_control.py`, `ledger_binding.py`, `write_result_reconciliation.py`, `minimal_market_maker.py`, and the three project-context carriers) were byte-identical between parent and installed commit.
+
+**A36.3 Implementation review and installation evidence identities (external/local; not repository-resident).**
+
+```text
+implementation submission bundle =
+  R1-D07_T0_UDT_CLIENT_WALL_COMPARISON_CORRECTIVE_IMPLEMENTATION_01_MARCO_SUBMISSION_BUNDLE.zip
+  419175 bytes / sha256 8b0b59c2cdc9ee9e7bac9a44f1999c75ef3589e462fb2dd1432e7efe7834042d
+  inner review ZIP 372653 bytes / sha256 5f925185c1da4798a63f17b90f743ce745ec7707480a8f7a76156c0a9a3ea9e1
+implementation Marco approval =
+  R1-D07_T0_UDT_CLIENT_WALL_COMPARISON_CORRECTIVE_IMPLEMENTATION_01_MARCO_APPROVAL_HANDOFF_01.md
+  8237 bytes / sha256 5335ff625294d4ec70cd6c112f6cae2a8d6159bacecebe85d41a4ab8b5a95715 (APPROVE, 2026-10-01)
+installation review ZIP =
+  R1-D07_T0_UDT_CLIENT_WALL_COMPARISON_CORRECTIVE_IMPLEMENTATION_01_CANONICAL_INSTALLATION_01_MARCO_INSTALLATION_REVIEW.zip
+  27244 bytes / sha256 4a93d8b8c3ba5d338304aef6fe0afcc91c80ce75242ffaaf30a8dac95affbe12
+installation Marco approval =
+  R1-D07_T0_UDT_CLIENT_WALL_COMPARISON_CORRECTIVE_IMPLEMENTATION_01_CANONICAL_INSTALLATION_01_MARCO_APPROVAL_HANDOFF_01.md
+  6536 bytes / sha256 4f4c4e4af8c99ea77f1b2cec54fdefe5ef176e5e09cfd6017ca8639167d87290 (APPROVE, 2026-10-01)
+controlling spec / handoff = as A35.2 (40969 / e9145be3...; 7162 / ab52d65a...)
+```
+
+**A36.4 Installation facts.**
+
+```text
+initial prewrite halt = INSTALL_HALT_LOCAL_CANONICAL_DIRTY (two untracked local files; no remote write attempted; 0 push attempts consumed; files removed by the operator, not inspected/moved/deleted by the implementer; evidence preserved as halt_attempt_1)
+rerun prewrite gates = 24/24 PASS ; immediate prewrite recheck = 2/2 PASS
+push = git push origin d09d91aef76cb1ff1e605b66df60e31c9ef814a6:refs/heads/main (non-force), exit 0
+remote main = 1bca29e5d260bb4fca2cab43975a53c3ec53ae04 -> d09d91aef76cb1ff1e605b66df60e31c9ef814a6 (fast-forward)
+push_attempts = 1 ; push_retries = 0 ; force_push = false ; remote_push_after_continuation = 0
+implementer_remote_readback = BLOCKED_BY_PERMISSION_CLASSIFIER_NOT_RETRIED (no workaround attempted)
+Marco_independent_remote_readback = PASS (main d09d91ae..., tree 2cd6bce6..., sole parent 1bca29e5..., both blobs exact; other three remote branches unchanged at 029117361f08316a87fee808074ced1257dc0d66)
+local canonical C:\b1\kals\ARB: pre-ff gates 6/6 PASS ; one `git merge --ff-only d09d91ae...` exit 0 ; post-install readback 8/8 PASS
+local final = branch main, HEAD d09d91aef76cb1ff1e605b66df60e31c9ef814a6, tree 2cd6bce6..., clean including untracked, both blobs exact
+installation activity = 1 remote Git write; 0 new commits/amend/rebase/cherry-pick/merge commits/reset/force/content edits/git-config changes; 0 tests/runtime/imports; 0 Kalshi/credentials/Stage-3/selector/N1/Demo-write/production
+```
+
+**A36.5 Corrected runtime theorem (installed code; not a live result).**
+
+1. The UDT/client-wall pass/fail gate is removed from both the general Stage-3 completeness path (`require_dynamic_index_domain_completeness`) and live T0/T1 acquisition (`_run_active_v2_acquisition`); the helper `_require_stage3_udt_not_future` is deleted.
+2. No replacement threshold is added.
+3. No dynamic or static clock correction is added (no Phase Offset, NTP, WebSocket, RTT, or learned offset).
+4. Signed integer-microsecond UDT/client-wall deltas (`udt_t0_future_skew_us`, `udt_t1_future_skew_us`) are retained as non-gating cross-clock diagnostics with unchanged numeric definitions.
+5. Explicit-timezone UDT parsing and deterministic UTC normalization are preserved (`USER_DATA_TIMESTAMP_MALFORMED`).
+6. `T1 < T0` same-series ordering remains fail-closed (`USER_DATA_TIMESTAMP_REGRESSION`).
+7. `T1 == T0` (`UNCHANGED`) and `T1 > T0` (`ADVANCED`) remain permitted subject to independent predicates.
+8. The same-client-wall regression integrity check (`DYNAMIC_READ_CLOCK_REGRESSION`) is preserved.
+9. The 30000-ms local monotonic read-window semantics are preserved.
+10. Local reconciliation freshness, market-data freshness, completeness, request accounting, and no-escalation behavior are preserved.
+11. Protected non-UDT uses of `max_future_wall_clock_skew_ms` are preserved; the corrected UDT decision paths do not read it.
+12. `stage3_result_schema_revision = 2` is kept.
+13. Corrected outputs bind `stage3_semantic_spec = KALSHI_DEMO_R1_D07_T0_UDT_CLIENT_WALL_COMPARISON_CORRECTIVE_SPEC_01` and `stage3_semantic_spec_sha256 = e9145be31466e7de30552519cb2f294d9aab5d53923d917fb908eae5055cf453`.
+14. Historical predecessor revision-2 outputs (including A33's `USER_DATA_TIMESTAMP_FUTURE`) retain their historical meaning; the enum symbol remains for decoding only and is not emitted by the corrected UDT path.
+15. No request, retry, reconnect, timer, restart recovery, or capability escalation is added.
+
+**A36.6 Test evidence (offline; recorded by the approved implementation review).**
+
+```text
+TEST-CW-001 through TEST-CW-017 = PASS
+focused corrective selection = 27 passed
+runner regression file = 1593 passed, 2 skipped, 0 failed
+full offline suite = 4159 passed, 2 skipped, 0 failed
+negative control vs exact predecessor runner = 13 corrective tests FAIL as expected; 4 preservation tests PASS
+```
+
+**A36.7 Protected-ledger flake (carried forward; not closed).**
+
+```text
+test = tests/test_kalshi_ledger_binding.py::AuthorizationConsumptionBindingTests::test_parallel_consumption_has_at_most_one_winner_and_never_retries
+PROTECTED_LEDGER_PARALLEL_CONSUMPTION_FLAKE = OPEN_PREEXISTING_FAIL_CLOSED_NONBLOCKING_FOR_THIS_IMPLEMENTATION_REVIEW_ONLY
+FIXED = NO
+failure shape = both processes UNAVAILABLE / LEDGER_BUSY; zero winners; never two winners; no retry
+isolated reruns = candidate 11 pass / 4 fail ; exact base 9 pass / 6 fail
+```
+
+**A36.8 Raw-artifact storage and retrieval classification.**
+
+The implementation submission bundle, implementation approval, installation review ZIP, and installation approval are external/local (`LOCAL_ONLY`) and are not repository-resident; they MUST NOT be committed by this record. The installed source/test bytes themselves are repository-resident at the installed commit and are canonically retrievable by blob ID. Raw review/installation bytes were embedded and verified in this continuity task's dispatch bundle, which is not a permanent repository artifact; permanent repository raw retrievability of those review artifacts is not claimed.
+
+**A36.9 No-escalation state.**
+
+```text
+Candidate-02 = UNCHANGED
+Candidate-03 = NONE
+replacement_future_skew_threshold = NONE
+dynamic_clock_correction = NONE
+canonical_G_selection = UNSELECTED
+post_correction_live_Stage3_revalidation = NOT_RUN
+trusted_read_set = NONE
+release = NOT_GRANTED
+writer_admission = NOT_GRANTED
+Gate-D = NOT_GRANTED
+Stage3G+ = NOT_GRANTED
+Demo_write = NOT_AUTHORIZED
+production = NOT_AUTHORIZED
+```
+
+The installation establishes corrected installed code only. It does NOT establish Stage-3 success, a trusted read set, G selection/canonicalization, release/writer/Gate-D/Stage3G+ eligibility, Demo-write or production authority, profitability, or arbitrage. No Kalshi, credential, Stage-3, selector, N1/deployed-state, host-clock, empirical-probe, release, writer, Gate-D, Stage3G+, Demo-write, or production capability is created.
+
+**A36.10 Next bounded route.**
+
+```text
+NEXT_BOUNDED_ACTION =
+RETURN_TO_MARCO_FOR_SEPARATELY_AUTHORIZED_FRESH_READ_ONLY_STAGE3_REVALIDATION_PLANNING
+(routing only; not an authorization)
+```
+
+That route authorizes no Kalshi, credential, selector, N1, Stage-3, release, writer, write, or production activity; any post-correction live Stage-3 revalidation requires its own separately dispatched and authorized task.
