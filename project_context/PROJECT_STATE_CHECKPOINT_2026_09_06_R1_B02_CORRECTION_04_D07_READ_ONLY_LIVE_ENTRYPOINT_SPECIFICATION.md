@@ -6363,3 +6363,202 @@ RETURN_TO_MARCO_FOR_SEPARATELY_AUTHORIZED_FRESH_READ_ONLY_STAGE3_REVALIDATION_PL
 ```
 
 That route authorizes no Kalshi, credential, selector, N1, Stage-3, release, writer, write, or production activity; any post-correction live Stage-3 revalidation requires its own separately dispatched and authorized task.
+
+### A37 R1-D07 post-correction fresh read-only Stage-3 revalidation — ACCEPTED / READ_PHASE_COMPLETE / TRUSTED READ SET MINTED
+
+This documentation-only continuity overlay records the Marco-accepted result of the consumed one-shot post-correction fresh read-only Stage-3 revalidation. It was prepared by `R1-D07_POST_CORRECTION_FRESH_READ_ONLY_STAGE3_REVALIDATION_EXECUTION_01_CANONICALIZATION_01` as a documentation-only continuity candidate from canonical `rigolugo/ARB/main` commit `8d9a0daee1f940058ccce1358a2787faa7da6d64` (tree `bf673f55a913b45d56a17a4fb2e54df4ac4ba8e1`, sole parent `d09d91aef76cb1ff1e605b66df60e31c9ef814a6`). It changes documentation only and grants no runtime capability. A1-A36 remain historical provenance and are not rewritten.
+
+**A37.1 Supersession scope (supersedes A36 only for three current-status claims).**
+
+```text
+A36 historical (unchanged as provenance):
+  post_correction_live_Stage3_revalidation = NOT_RUN
+  trusted_read_set = NONE
+  next route = RETURN_TO_MARCO_FOR_SEPARATELY_AUTHORIZED_FRESH_READ_ONLY_STAGE3_REVALIDATION_PLANNING
+
+A37 current:
+  post_correction_live_Stage3_revalidation = ACCEPTED_READ_PHASE_COMPLETE
+  trusted_read_set = MINTED
+  next route = RETURN_TO_MARCO_FOR_SEPARATE_G_SELECTION
+```
+
+A37 supersedes A36 ONLY for (1) `post_correction_live_Stage3_revalidation = NOT_RUN`; (2) `trusted_read_set = NONE`; and (3) A36's next route back to Stage-3 revalidation planning (that route is completed). A36's installed-code theorem, the UDT semantic correction, Candidate-02 unchanged status, Candidate-03 NONE, the protected-ledger flake, and all no-escalation boundaries remain preserved.
+
+**A37.2 Exact empirical identity (external/local; not repository-resident).**
+
+```text
+execution task =
+R1-D07_POST_CORRECTION_FRESH_READ_ONLY_STAGE3_REVALIDATION_EXECUTION_01
+
+attempt id =
+r1d07pcreval_20261002T110838Z_4b593dde
+
+raw evidence =
+r1d07pcreval_20261002T110838Z_4b593dde_EVIDENCE.zip
+bytes = 13814
+sha256 = 1e97d1567d4ac9784f5627639e334e4b5240f23929a26a92b1a6ec086aa07d3b
+storage = LOCAL_ONLY
+raw bytes committed = NO
+
+operator ZIP =
+R1-D07_POST_CORRECTION_FRESH_READ_ONLY_STAGE3_REVALIDATION_EXECUTION_PACKAGE_01.zip
+bytes = 30125
+sha256 = 2be673631b2996bb6880aa2ddf3198141522ed3b3925fb8fb0ba1d9de4ad592d
+
+authorization id =
+R1D07_POST_CORRECTION_STAGE3_REVALIDATION_20261002_AUTH_01
+
+authorization JSON =
+R1-D07_POST_CORRECTION_FRESH_READ_ONLY_STAGE3_REVALIDATION_EXECUTION_01_AUTHORIZATION_01.json
+bytes = 925
+sha256 = 39804dc796e34b812baa783e931504dc79ff5d718a829ca4d6f0ea4964dbb7da
+
+Marco accepted review =
+MARCO_ACCEPTED_EXECUTION_EVIDENCE_REVIEW_01.md
+bytes = 4751
+sha256 = 617ef61697858b116741e3353adf67d3aec6d8e1614d49f34abd1c159419a561
+decision = APPROVE (2026-10-02)
+
+sanitized projection =
+MARCO_SANITIZED_STAGE3_PROJECTION_01.json
+bytes = 5833
+sha256 = 780976bfd80a9ce53bc91cc417fbe8e1b8145ee2a729cfbb0f083fd21ccd2747
+
+installed implementation commit = d09d91aef76cb1ff1e605b66df60e31c9ef814a6
+runner blob = 7bf1fc5bf5685337ce5e4cfc28d05ea4bdf14912
+
+one-shot attempt consumed = YES
+selector invocations = 1
+Stage-3 invocations = 1
+automatic retries = 0
+```
+
+The raw evidence ZIP, authorization JSON, Marco accepted review, and sanitized projection are supporting `LOCAL_ONLY` inputs and are NOT added to Git by this record.
+
+**A37.3 Selector result.**
+
+```text
+selector = SUCCEEDED
+selected ticker = KXPAYROLLS-26SEP-T50000
+selected event = KXPAYROLLS-26SEP
+discovery anchor UTC = 2026-10-02T11:08:38.467553Z
+A4 eligible = 100
+C1 shortlist = 8
+B1 finalists = 5
+final spread dollars = 0.0050
+selector elapsed ms = 230723
+historical ticker reuse = false
+```
+
+The selected ticker is freshness-bound evidence for this consumed attempt only and has no standing ticker or strategy-policy effect.
+
+**A37.4 Stage-3 theorem.**
+
+```text
+Stage-3 status = READ_PHASE_COMPLETE
+Stage-3 elapsed ms = 26807
+local read duration ns = 21641000000
+
+stage3_result_schema_revision = 2
+stage3_semantic_spec =
+  KALSHI_DEMO_R1_D07_T0_UDT_CLIENT_WALL_COMPARISON_CORRECTIVE_SPEC_01
+stage3_semantic_spec_sha256 =
+  e9145be31466e7de30552519cb2f294d9aab5d53923d917fb908eae5055cf453
+
+request accounting = RESOLVED
+request evidence reconciliation = RECONCILED
+
+prepared = 18
+boundary entered = 18
+transport attempted = 18
+responses completed = 18
+responses accepted/parsed = 18
+network reads = 18
+
+completeness = COMPLETE
+predicates = 25 PASS
+failed predicate = NONE
+not evaluated = NONE
+
+trusted dynamic read set =
+ADRS2_f8198073852dc29c5cbbdb51d4e777a414b89c9cd00f631551aea9c4062b4892
+```
+
+The local Stage-3 read window (21641.000 ms) was within the controlling 30000-ms bound.
+
+**A37.5 Safe structural facts.**
+
+```text
+dynamic exchange-index domain size = 4
+index 0 = 1 order row / 1 fill row / 0 current position rows
+indices 1-3 = 0 order / 0 fill / 0 current position rows each
+retained position classification = RETAINED_POSITION_TERMINALLY_SETTLED
+```
+
+No raw order ID, fill ID, raw account row, credential value, private-key material, signature, or authentication header is recorded in the repository.
+
+**A37.6 UDT diagnostic result.**
+
+```text
+T0 UDT = 2026-10-02T11:12:31.789097Z
+T0 post-response client wall = 2026-10-02T11:12:32.613759Z
+T0 signed delta us = -824662
+
+T1 UDT = 2026-10-02T11:12:53.389365Z
+T1 post-response client wall = 2026-10-02T11:12:54.240875Z
+T1 signed delta us = -851510
+
+UDT relation = ADVANCED
+absolute-age diagnostic ms = 851
+cross-clock gating = NON_GATING_DIAGNOSTIC
+```
+
+This run did NOT reproduce A33's positive-future-skew case because both observed deltas were negative. It therefore does not prove that positive skew cannot recur. It does prove that the corrected runtime completed the accepted read-only Stage-3 path under this exact current Demo observation while treating the cross-clock delta as a non-gating diagnostic and while all independent predicates passed. The exact cross-clock relation is NOT claimed to be fully characterized; A34's bounded clock theorem is preserved unchanged.
+
+**A37.7 No-escalation state.**
+
+```text
+Candidate-02 = UNCHANGED
+Candidate-03 = NONE
+replacement_future_skew_threshold = NONE
+dynamic_clock_correction = NONE
+canonical_G_selection = UNSELECTED
+
+post_correction_live_Stage3_revalidation = ACCEPTED_READ_PHASE_COMPLETE
+trusted_read_set = MINTED
+trusted_read_set_id =
+ADRS2_f8198073852dc29c5cbbdb51d4e777a414b89c9cd00f631551aea9c4062b4892
+
+release = NOT_GRANTED
+writer_admission = NOT_GRANTED
+Gate-D = NOT_GRANTED
+Stage3G+ = NOT_GRANTED
+Demo_write = NOT_AUTHORIZED / observed count 0
+production = NOT_AUTHORIZED / observed activity NONE
+
+protected-ledger parallel-consumption flake = OPEN
+FIXED = NO
+```
+
+The standalone trusted read set is accepted evidence for this consumed attempt only. It is NOT standing release authority and does not satisfy or waive any later same-process, freshness, or reconciliation requirement of a future release, writer, or Gate-D execution. This record establishes no G selection, no standing ticker, no clock-offset correction, no positive-skew impossibility, no release/writer/Gate-D/Stage3G+ authority, no production equivalence, no profitability theorem, and no arbitrage theorem.
+
+**A37.8 Raw-artifact storage and retrieval classification.**
+
+```text
+raw evidence repository-resident = NO
+raw evidence storage = LOCAL_ONLY
+raw bytes future-required for immediate next route = NO
+permanent repository raw-byte retrievability claimed = NO
+```
+
+If a later task specifically reopens or re-derives this empirical execution, it must reacquire the exact raw evidence ZIP and verify its SHA-256 before doing so.
+
+**A37.9 Next bounded route.**
+
+```text
+NEXT_BOUNDED_ACTION =
+RETURN_TO_MARCO_FOR_SEPARATE_G_SELECTION
+(routing only; not an authorization)
+```
+
+This route is inherited from the still-unresolved current scenario state in A27. The conservative current-scenario profile and its approved S1 technical binding remain historical/current technical provenance as already recorded; G remains unselected. This record does not select or recommend a G value and does not prepare or authorize release, writer, Gate-D, or write execution.
