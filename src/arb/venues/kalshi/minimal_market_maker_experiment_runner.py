@@ -13393,8 +13393,11 @@ class _LiveDemoSignedReadTransport:
         ``DEADLINE_EXCEEDED`` before the named stage's I/O.  ``stage`` is a
         fixed classification-only label (``pre-sign`` / ``post-sign`` /
         ``pre-dns-start`` / ``dns-wait`` / ``pre-connect`` / ``pre-tls-wrap`` /
-        ``pre-handshake`` / ``pre-send`` / ``response-read``) -- never a
-        secret / URL / header value.  Correction 04: this delegates to the ONE
+        ``pre-handshake`` / ``pre-send`` / ``response-read`` /
+        ``response-complete``) -- never a secret / URL / header value.
+        ``response-complete`` is the successful-2xx post-read check that
+        precedes the body cap and residual fixed-length guards; it performs no
+        I/O and grants no new budget.  Correction 04: this delegates to the ONE
         canonical module-level rule that the DNS helper's post-``Thread.start``
         recomputation also uses, so no phase can acquire a different (or
         floored) budget rule."""
@@ -13513,16 +13516,33 @@ class _LiveDemoSignedReadTransport:
             content_type = response.getheader("Content-Type", "") or ""
             if type(body) is not bytes:
                 body = bytes(body)
+            # RT-007 C / RT-008: the completed read is re-checked against the
+            # SAME absolute OperationDeadlineV1 + SAME bound runtime clock; a
+            # non-positive remainder is DEADLINE_EXCEEDED and wins over the
+            # cap / residual-framing failures below (RT-009).
+            _remaining("response-complete")
             if len(body) > MAX_RESPONSE_BODY_BYTES:
                 raise RunnerError(
                     RunnerFailureCode.RESPONSE_BODY_TOO_LARGE, detail="live read body cap",
+                )
+            # RT-007 E / RT-010: ``HTTPResponse.read(amt)`` returns a short
+            # body without raising when the peer closes before the parsed
+            # Content-Length; any still-unread declared byte means the
+            # successful response is INCOMPLETE and must never be returned.
+            # ``None`` (chunked / EOF-delimited) and ``0`` (fully consumed)
+            # are the only continuing states -- no header text is re-parsed.
+            if getattr(response, "length", None) not in (None, 0):
+                raise RunnerError(
+                    RunnerFailureCode.LIVE_READ_TRANSPORT_PROTOCOL_FAILED,
+                    detail="incomplete response body",
                 )
             return RawOperationResponseV1(
                 http_status=status, content_type=content_type, body_bytes=body,
             )
         except RunnerError:
             # deterministic classification already decided (3xx / non-2xx /
-            # DEADLINE_EXCEEDED / body cap / dns-wait) -- propagate unchanged.
+            # DEADLINE_EXCEEDED / body cap / incomplete body / dns-wait) --
+            # propagate unchanged.
             raise
         except ssl.SSLError:
             raise RunnerError(

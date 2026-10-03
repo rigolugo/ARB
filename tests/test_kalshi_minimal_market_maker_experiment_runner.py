@@ -18589,5 +18589,741 @@ class G1TestMatrixTests(unittest.TestCase):
                     self.assertTrue(callable(getattr(cls, method, None)), (cls_name, method))
 
 
+# ---------------------------------------------------------------------------
+# KALSHI_DEMO_R1_D07_G1_READ_TRANSPORT_INCOMPLETE_CONTENT_LENGTH_CORRECTIVE_SPEC_01
+# (sha256 467e99013bfd8e425fe9c9325497ffca70bc6fe4c53d134415f30d4b5919d360)
+# -- RT-018 R01..R16.  Every case drives the REAL
+# ``_LiveDemoSignedReadTransport._perform_get`` (and, where named, the full
+# ``__call__`` / Gate-D path) over standard ``http.client.HTTPResponse``
+# parsing fed by the deterministic fake socket/TLS stack and the injected
+# runtime clock.  Offline only: no DNS, no socket, no venue, synthetic keys.
+# ---------------------------------------------------------------------------
+
+_ICL_SPEC_ID = "KALSHI_DEMO_R1_D07_G1_READ_TRANSPORT_INCOMPLETE_CONTENT_LENGTH_CORRECTIVE_SPEC_01"
+_ICL_SPEC_SHA256 = "467e99013bfd8e425fe9c9325497ffca70bc6fe4c53d134415f30d4b5919d360"
+# sha256 of ``inspect.getsource(_DemoNormalWriteTransport)`` at the required
+# base a290f1757068017fea306ea1da05a00632bfdff7 (RT-017: precedent only).
+_ICL_BASE_WRITE_TRANSPORT_SOURCE_SHA256 = "8a08e7dbe03a16a4b20422b06f67e235db565bf5d8d82a0a16e87dee3212d14c"
+_ICL_SECRET = "ICL-SECRET-MARKER-5d1e"
+
+
+def _icl_raw_fixed(body, *, declared, status=200, extra_headers=None):
+    """Raw HTTP/1.1 bytes whose parsed Content-Length is ``declared`` while
+    exactly ``body`` follows the header block (``declared > len(body)`` is a
+    short fixed-length response)."""
+    headers = {"Content-Length": str(declared)}
+    headers.update(extra_headers or {})
+    return _http_response_bytes(status, headers, body)
+
+
+def _icl_raw_chunked(*chunks, terminator=True, status=200):
+    head = (f"HTTP/1.1 {status} {_HTTP_REASONS.get(status, 'Status')}\r\n"
+            "Content-Type: application/json\r\nTransfer-Encoding: chunked\r\n"
+            "Connection: close\r\n\r\n").encode("ascii")
+    payload = b"".join(f"{len(c):x}\r\n".encode("ascii") + c + b"\r\n" for c in chunks)
+    return head + payload + (b"0\r\n\r\n" if terminator else b"")
+
+
+class _ICLRawResponseStack(_LowLevelPhaseStack):
+    """``_LowLevelPhaseStack`` serving EXACT raw response bytes: the header
+    block is one underlying read and the body follows in ``recv_chunk``
+    pieces, so ``recv_body`` counts only true body reads.  ``on_recv(stack,
+    n)`` runs after every underlying read (``n == 0`` is EOF), letting a test
+    advance the SAME injected clock after the final bytes or raise there."""
+
+    def __init__(self, test, *, raw, recv_chunk=8, on_recv=None, **kwargs):
+        super().__init__(test, recv_chunk=recv_chunk, **kwargs)
+        self.raw = raw
+        self.on_recv = on_recv
+        self.body_reads = 0
+        self._header_len = raw.index(b"\r\n\r\n") + 4
+        body = raw[self._header_len:]
+        self._chunks = [raw[:self._header_len]] + [body[i:i + recv_chunk] for i in range(0, len(body), recv_chunk)]
+
+    def body_served(self):
+        return max(0, self._served - self._header_len)
+
+    def _hit(self, phase):
+        if phase == "recv_body":
+            self.body_reads += 1
+        super()._hit(phase)
+
+    def make_context(self):
+        self._hit("context")
+        return _ICLRawResponseStack._Ctx(self)
+
+    class _Ctx(_LowLevelPhaseStack._Ctx):
+        def wrap_socket(self, sock, *, server_hostname, do_handshake_on_connect):
+            assert do_handshake_on_connect is False, "TLS handshake must be explicit"
+            self.stack.server_hostname = server_hostname
+            self.stack._hit("wrap")
+            return _ICLRawResponseStack._TLSSock(self.stack)
+
+    class _TLSSock(_LowLevelPhaseStack._TLSSock):
+        def recv_into(self, buffer):
+            n = super().recv_into(buffer)
+            if self.stack.on_recv is not None:
+                self.stack.on_recv(self.stack, n)
+            return n
+
+
+@contextlib.contextmanager
+def _icl_installed(stack):
+    with mock.patch.object(runner, "_d07_live_signed_get_resolve_addresses", stack.resolve), \
+            mock.patch("socket.socket", stack.make_socket), \
+            mock.patch("ssl.create_default_context", stack.make_context):
+        yield stack
+
+
+class ReadTransportIncompleteContentLengthTests(unittest.TestCase):
+    """RT-006..RT-013 / RT-016..RT-018 -- R01..R14 and R16 through the real
+    corrected signed-GET production path."""
+
+    TARGET = "/trade-api/v2/portfolio/orders"
+    VALID_ORDERS = b'{"orders": [], "cursor": ""}'
+
+    def setUp(self) -> None:
+        self.inputs = DeterministicInputs()
+        self.now_ns = 5_000_000_000_000
+        self.transport = runner._LiveDemoSignedReadTransport(
+            wall_clock=self.inputs.clock, monotonic_clock_ns=lambda: self.now_ns, env=_g1_env(),
+        )
+
+    def _deadline(self, *, remaining_ns=10 ** 12):
+        return OperationDeadlineV1.create(
+            process_instance_id="proc_" + "0" * 32, operation_name="GET_ORDERS",
+            request_ordinal=1, started_monotonic_ns=self.now_ns,
+            experiment_absolute_end_monotonic_ns=self.now_ns + remaining_ns, uuid_factory=self.inputs.uuid,
+        )
+
+    def _stack(self, raw, **kwargs):
+        return _ICLRawResponseStack(self, raw=raw, **kwargs)
+
+    def _get(self, stack, deadline=None):
+        with _icl_installed(stack):
+            return self.transport._perform_get(
+                runner.DEMO_HOST, self.TARGET, {"Accept": "application/json"},
+                deadline if deadline is not None else self._deadline(),
+            )
+
+    def _get_error(self, stack, deadline=None):
+        with self.assertRaises(RunnerError) as ctx:
+            self._get(stack, deadline)
+        return ctx.exception
+
+    def _assert_incomplete(self, error):
+        self.assertEqual(error.code, RunnerFailureCode.LIVE_READ_TRANSPORT_PROTOCOL_FAILED)
+        self.assertEqual(error.detail, "incomplete response body")
+        self.assertIsNone(error.__cause__)
+        self.assertFalse(hasattr(error, "_arb_http_status"))
+
+    def _prepared(self, operation=RunnerOperation.GET_ORDERS):
+        return prepare_runner_operation_request(
+            operation, path_parameters={}, ticker=CURRENT_TICKER, request_ordinal=1,
+            uuid_factory=self.inputs.uuid,
+        )
+
+    @contextlib.contextmanager
+    def _recording_remaining(self):
+        """Record every ``_remaining_seconds`` call (deadline object, stage,
+        returned budget) while delegating to the unchanged production rule."""
+        calls = []
+        real = runner._LiveDemoSignedReadTransport._remaining_seconds
+
+        def _spy(transport_self, deadline, *, stage):
+            try:
+                value = real(transport_self, deadline, stage=stage)
+            except RunnerError:
+                calls.append((deadline, stage, None))
+                raise
+            calls.append((deadline, stage, value))
+            return value
+
+        with mock.patch.object(runner._LiveDemoSignedReadTransport, "_remaining_seconds", _spy), \
+                mock.patch("time.monotonic_ns", side_effect=AssertionError("must use the injected runtime clock")):
+            yield calls
+
+    # ------------------------------------------------------------------ R01
+    def test_icl_r01_complete_fixed_length_returns_exact_body_and_status(self) -> None:
+        for chunk in (1, 5, 4096):
+            with self.subTest(recv_chunk=chunk):
+                stack = self._stack(_icl_raw_fixed(self.VALID_ORDERS, declared=len(self.VALID_ORDERS)), recv_chunk=chunk)
+                result = self._get(stack)
+                self.assertIs(type(result), RawOperationResponseV1)
+                self.assertEqual(result.http_status, 200)
+                self.assertEqual(result.body_bytes, self.VALID_ORDERS)
+                self.assertIs(type(result.body_bytes), bytes)
+                self.assertEqual(result.content_type, "application/json")
+                self.assertFalse(result.transport_unknown)
+
+    # ------------------------------------------------------------------ R02
+    def test_icl_r02_short_fixed_length_valid_json_fails_before_decode(self) -> None:
+        deadline = self._deadline()
+        # The exact received prefix is a schema-valid GET_ORDERS response: the
+        # failure cannot be attributed to JSON/schema validation.
+        decoded = runner._decode_and_validate_runner_json_response(
+            RunnerOperation.GET_ORDERS,
+            raw_response=RawOperationResponseV1(200, "application/json", self.VALID_ORDERS),
+            deadline=deadline, now_monotonic_ns=lambda: self.now_ns,
+        )
+        self.assertEqual(decoded["orders"], [])
+        for short_by in (1, 10, 5000):
+            with self.subTest(short_by=short_by):
+                raw = _icl_raw_fixed(self.VALID_ORDERS, declared=len(self.VALID_ORDERS) + short_by)
+                with mock.patch.object(runner, "_decode_and_validate_runner_json_response",
+                                       side_effect=AssertionError("short body must never reach decode")):
+                    self._assert_incomplete(self._get_error(self._stack(raw), deadline))
+        # Same theorem through the full signed ``__call__`` path (policy,
+        # synthetic RSA-PSS signing, post-sign deadline, real _perform_get).
+        stack = self._stack(_icl_raw_fixed(self.VALID_ORDERS, declared=len(self.VALID_ORDERS) + 7))
+        with _icl_installed(stack), self.assertRaises(RunnerError) as ctx:
+            self.transport(RunnerOperation.GET_ORDERS, self._prepared(), self._deadline())
+        self._assert_incomplete(ctx.exception)
+        self.assertIn(b"KALSHI-ACCESS-SIGNATURE: ", bytes(stack.sent))
+
+    # ------------------------------------------------------------------ R03
+    def test_icl_r03_short_fixed_length_arbitrary_bytes_same_failure(self) -> None:
+        for body in (b"\x00\xff\xfe", b"{\"orders\": [", b"x" * 300):
+            with self.subTest(body=body[:8]):
+                stack = self._stack(_icl_raw_fixed(body, declared=len(body) + 64), recv_chunk=7)
+                self._assert_incomplete(self._get_error(stack))
+
+    # ------------------------------------------------------------------ R04
+    def test_icl_r04_content_length_zero_is_an_empty_transport_body(self) -> None:
+        deadline = self._deadline()
+        result = self._get(self._stack(_icl_raw_fixed(b"", declared=0)), deadline)
+        self.assertEqual((result.http_status, result.body_bytes), (200, b""))
+        # Transport acceptance only: downstream JSON/schema validation stays a
+        # separate (rejecting) boundary -- no downstream success is claimed.
+        with self.assertRaises(RunnerError):
+            runner._decode_and_validate_runner_json_response(
+                RunnerOperation.GET_ORDERS, raw_response=result, deadline=deadline,
+                now_monotonic_ns=lambda: self.now_ns,
+            )
+
+    # ------------------------------------------------------------------ R05
+    def test_icl_r05_complete_eof_delimited_body_returned_exactly(self) -> None:
+        body = b'{"orders": [], "cursor": "", "pad": "' + b"e" * 100 + b'"}'
+        for chunk in (3, 4096):
+            with self.subTest(recv_chunk=chunk):
+                stack = self._stack(_http_response_bytes(200, None, body, framing="eof"), recv_chunk=chunk)
+                result = self._get(stack)
+                self.assertEqual(result.body_bytes, body)
+                self.assertEqual(result.http_status, 200)
+
+    # ------------------------------------------------------------------ R06
+    def test_icl_r06_complete_chunked_body_dechunked_exactly(self) -> None:
+        parts = (b'{"orders": [', b"], ", b'"cursor": ""}')
+        for chunk in (2, 4096):
+            with self.subTest(recv_chunk=chunk):
+                result = self._get(self._stack(_icl_raw_chunked(*parts), recv_chunk=chunk))
+                self.assertEqual(result.body_bytes, b"".join(parts))
+
+    # ------------------------------------------------------------------ R07
+    def test_icl_r07_malformed_or_truncated_chunked_keeps_existing_protocol_mapping(self) -> None:
+        head = _icl_raw_chunked(terminator=False)
+        cases = {
+            "truncated-chunk-data": head + b"a\r\n12345",
+            "missing-terminator": head + b"5\r\nhello\r\n",
+            "malformed-chunk-size": head + b"ZZ\r\nhello\r\n0\r\n\r\n",
+        }
+        for label, raw in cases.items():
+            with self.subTest(case=label):
+                error = self._get_error(self._stack(raw, recv_chunk=3))
+                self.assertEqual(error.code, RunnerFailureCode.LIVE_READ_TRANSPORT_PROTOCOL_FAILED)
+                self.assertEqual(error.detail, "http protocol failure")
+
+    # ------------------------------------------------------------------ R08
+    def test_icl_r08_cap_plus_one_rejected_on_every_framing_and_cap_precedes_residual(self) -> None:
+        cap = runner.MAX_RESPONSE_BODY_BYTES
+        self.assertEqual(cap, 65536)
+        over = b"o" * (cap + 1)
+        raws = {
+            "content-length": _icl_raw_fixed(over, declared=len(over)),
+            "chunked": _icl_raw_chunked(over),
+            "eof": _http_response_bytes(200, None, over, framing="eof"),
+            # residual parsed length remains after the cap+1 read: the cap
+            # failure (D) wins over the residual-framing failure (E).
+            "content-length-with-residual": _icl_raw_fixed(over + b"r" * 50, declared=len(over) + 50),
+            "content-length-short-and-oversized": _icl_raw_fixed(over, declared=len(over) + 999),
+        }
+        for label, raw in raws.items():
+            with self.subTest(framing=label):
+                deadline = self._deadline()
+                with self._recording_remaining() as calls:
+                    error = self._get_error(self._stack(raw, recv_chunk=4096), deadline)
+                self.assertEqual(error.code, RunnerFailureCode.RESPONSE_BODY_TOO_LARGE)
+                self.assertEqual(error.detail, "live read body cap")
+                complete = [c for c in calls if c[1] == "response-complete"]
+                self.assertEqual(len(complete), 1)
+                self.assertGreater(complete[0][2], 0.0)  # positive completion deadline
+
+    # ------------------------------------------------------------------ R09
+    def test_icl_r09_3xx_with_incomplete_unreadable_body_is_status_first(self) -> None:
+        for status in (301, 302):
+            with self.subTest(status=status):
+                raw = _icl_raw_fixed(b"partial", declared=500, status=status,
+                                     extra_headers={"Location": "https://evil.example.com/x"})
+                stack = self._stack(raw, raise_at={"recv_body": OSError(_ICL_SECRET)})
+                error = self._get_error(stack)
+                self.assertEqual(error.code, RunnerFailureCode.LIVE_READ_TRANSPORT_REDIRECT_NOT_FOLLOWED)
+                self.assertEqual(error.detail, "3xx redirect not followed")
+                self.assertEqual(error._arb_http_status, status)
+                self.assertNotIn("recv_body", stack.phase_calls)
+                self.assertEqual((stack.resolve_calls, stack.socket_ctor_calls, stack.connect_calls), (1, 1, 1))
+                self.assertEqual(bytes(stack.sent).count(b"GET "), 1)
+                self.assertNotIn(b"evil.example.com", bytes(stack.sent))
+
+    # ------------------------------------------------------------------ R10
+    def test_icl_r10_404_and_other_non_2xx_with_incomplete_unreadable_body(self) -> None:
+        for status in (404, 401, 429, 500, 503):
+            with self.subTest(status=status):
+                raw = _icl_raw_fixed(b'{"error":', declared=4096, status=status)
+                stack = self._stack(raw, raise_at={"recv_body": OSError(_ICL_SECRET)})
+                error = self._get_error(stack)
+                self.assertEqual(error.code, RunnerFailureCode.LIVE_READ_TRANSPORT_NON_2XX)
+                self.assertEqual(error.detail, "non-2xx terminal status")
+                self.assertIs(type(error._arb_http_status), int)
+                self.assertEqual(error._arb_http_status, status)
+                self.assertNotIn("recv_body", stack.phase_calls)
+                self.assertEqual(stack.connect_calls, 1)
+
+    # ------------------------------------------------------------------ R11
+    def test_icl_r11_body_phase_deadline_and_socket_timeout_never_succeed(self) -> None:
+        body = b'{"orders": [], "cursor": "", "pad": "' + b"p" * 64 + b'"}'
+        raws = {"complete": _icl_raw_fixed(body, declared=len(body)),
+                "short": _icl_raw_fixed(body, declared=len(body) + 40)}
+        for label, raw in raws.items():
+            with self.subTest(case=label, injected="deadline"):
+                deadline = self._deadline(remaining_ns=5_000_000_000)
+
+                def _expire_on_second_body_read(stack, n):
+                    if stack.body_reads == 2 and n:
+                        self.now_ns = deadline.absolute_deadline_monotonic_ns + 1
+
+                stack = self._stack(raw, recv_chunk=8, on_recv=_expire_on_second_body_read)
+                error = self._get_error(stack, deadline)
+                self.assertEqual(error.code, RunnerFailureCode.DEADLINE_EXCEEDED)
+                self.assertEqual(error.detail, "response-read")  # before the NEXT read's I/O
+                self.assertEqual(stack.body_reads, 2)
+            with self.subTest(case=label, injected="socket-timeout"):
+                stack = self._stack(raw, recv_chunk=8,
+                                    on_recv=lambda s, n: (_ for _ in ()).throw(socket.timeout(_ICL_SECRET))
+                                    if s.body_reads == 2 else None)
+                error = self._get_error(stack)
+                self.assertEqual(error.code, RunnerFailureCode.LIVE_READ_TRANSPORT_CONNECT_TIMEOUT)
+                self.assertEqual(error.detail, "transport timed out")
+                self.assertNotIn(_ICL_SECRET, f"{error}|{error!r}|{error.args}")
+
+    # ------------------------------------------------------------------ R12
+    def _completion_case(self, raw, *, set_now, trigger, recv_chunk=8):
+        """``trigger(stack, n)`` decides the read after which the SAME injected
+        clock is moved to ``set_now(deadline)``.  Returns (deadline, stack,
+        recorded remaining calls, result-or-error)."""
+        deadline = self._deadline(remaining_ns=5_000_000_000)
+        fired = []
+
+        def _on_recv(stack, n):
+            if not fired and trigger(stack, n):
+                fired.append(stack.body_reads)
+                self.now_ns = set_now(deadline)
+
+        stack = self._stack(raw, recv_chunk=recv_chunk, on_recv=_on_recv)
+        with self._recording_remaining() as calls:
+            try:
+                outcome = self._get(stack, deadline)
+            except RunnerError as exc:
+                outcome = exc
+        self.assertEqual(len(fired), 1, "clock trigger must fire exactly once")
+        return deadline, stack, calls, outcome
+
+    def test_icl_r12_response_complete_deadline_zero_negative_precedence_and_sub_ms(self) -> None:
+        body = b'{"orders": [], "cursor": "", "pad": "' + b"q" * 40 + b'"}'
+        complete = _icl_raw_fixed(body, declared=len(body))
+        last = lambda stack, n: n and not stack.raw[stack._header_len + stack.body_served():]  # noqa: E731
+        eof = lambda stack, n: n == 0 and stack.body_reads > 0  # noqa: E731
+        end = lambda d: d.absolute_deadline_monotonic_ns  # noqa: E731
+        for label, set_now in (("exactly-zero", end), ("negative", lambda d: end(d) + 1)):
+            with self.subTest(remainder=label):
+                deadline, stack, calls, outcome = self._completion_case(complete, set_now=set_now, trigger=last)
+                self.assertIsInstance(outcome, RunnerError)
+                self.assertEqual(outcome.code, RunnerFailureCode.DEADLINE_EXCEEDED)
+                self.assertEqual(outcome.detail, "response-complete")
+                reads = [c for c in calls if c[1] == "response-read"]
+                self.assertTrue(reads and all(v is not None and v > 0 for _d, _s, v in reads))  # last pre-read positive
+                self.assertEqual(calls[-1][1:], ("response-complete", None))
+                self.assertTrue(all(d is deadline for d, _s, _v in calls))  # SAME deadline object
+        cap = runner.MAX_RESPONSE_BODY_BYTES
+        over = b"o" * (cap + 1)
+        cap_reached = lambda stack, n: n and stack.body_served() >= cap + 1  # noqa: E731
+        precedence = {
+            # expiry beats cap (C before D)
+            "oversized": (_icl_raw_fixed(over, declared=len(over)), cap_reached, 4096),
+            # expiry beats residual framing (C before E); the clock moves on the EOF read
+            "residual": (_icl_raw_fixed(body, declared=len(body) + 30), eof, 8),
+            # expiry beats both
+            "oversized-and-residual": (_icl_raw_fixed(over + b"r" * 20, declared=len(over) + 20), cap_reached, 4096),
+        }
+        for label, (raw, trigger, chunk) in precedence.items():
+            with self.subTest(precedence=label):
+                _d, _s, calls, outcome = self._completion_case(raw, set_now=end, trigger=trigger, recv_chunk=chunk)
+                self.assertIsInstance(outcome, RunnerError)
+                self.assertEqual((outcome.code, outcome.detail), (RunnerFailureCode.DEADLINE_EXCEEDED, "response-complete"))
+        # Positive sub-millisecond completion remainder: used as-is (no floor,
+        # no reset, no new window) and the complete body succeeds.
+        deadline, stack, calls, outcome = self._completion_case(
+            complete, set_now=lambda d: end(d) - 400_000, trigger=last)
+        self.assertIsInstance(outcome, RawOperationResponseV1)
+        self.assertEqual(outcome.body_bytes, body)
+        final = [c for c in calls if c[1] == "response-complete"]
+        self.assertEqual(len(final), 1)
+        self.assertIs(final[0][0], deadline)
+        self.assertEqual(final[0][2], 400_000 / 1_000_000_000)
+        self.assertLess(final[0][2], 0.001)
+
+    # ------------------------------------------------------------------ R13
+    def test_icl_r13_one_address_one_connection_no_retry_same_deadline_and_clock(self) -> None:
+        candidates = [(socket.AF_INET6, ("2001:db8::1", 443, 0, 0)), (socket.AF_INET, ("203.0.113.9", 443)),
+                      (socket.AF_INET, ("198.51.100.7", 443))]
+        cases = {
+            "success": (_icl_raw_fixed(self.VALID_ORDERS, declared=len(self.VALID_ORDERS)), None),
+            "incomplete": (_icl_raw_fixed(self.VALID_ORDERS, declared=len(self.VALID_ORDERS) + 9),
+                           RunnerFailureCode.LIVE_READ_TRANSPORT_PROTOCOL_FAILED),
+        }
+        for label, (raw, expect) in cases.items():
+            with self.subTest(case=label):
+                deadline = self._deadline()
+                stack = self._stack(raw, candidates=candidates)
+                connected = []
+                real_make_socket = stack.make_socket
+
+                def _make_socket(family, socktype, _real=real_make_socket):
+                    sock = _real(family, socktype)
+                    real_connect = sock.connect
+                    sock.connect = lambda address, _c=real_connect: (connected.append(address), _c(address))[1]
+                    return sock
+
+                stack.make_socket = _make_socket
+                with self._recording_remaining() as calls:
+                    try:
+                        outcome = self._get(stack, deadline)
+                    except RunnerError as exc:
+                        outcome = exc
+                if expect is None:
+                    self.assertIsInstance(outcome, RawOperationResponseV1)
+                else:
+                    self.assertEqual(outcome.code, expect)
+                self.assertEqual((stack.resolve_calls, stack.socket_ctor_calls, stack.connect_calls), (1, 1, 1))
+                self.assertEqual(connected, [("198.51.100.7", 443)])  # deterministic ONE selected address
+                self.assertEqual(stack.phase_calls.count("wrap"), 1)
+                self.assertEqual(stack.phase_calls.count("handshake"), 1)
+                self.assertEqual(bytes(stack.sent).count(b"GET "), 1)  # zero retries / redirects
+                self.assertIs(stack.resolve_authority[0][0], deadline)
+                self.assertIs(stack.resolve_authority[0][1], self.transport._monotonic_clock_ns)
+                self.assertTrue(calls and all(d is deadline for d, _s, _v in calls))
+                self.assertEqual(sum(1 for c in calls if c[1] == "response-complete"), 1)
+        self.assertEqual((runner.AUTOMATIC_RETRIES, runner.REDIRECTS), (0, 0))
+
+    # ------------------------------------------------------------------ R14
+    def test_icl_r14_secret_markers_never_emitted_and_cleanup_never_overrides(self) -> None:
+        body = b'{"orders": [], "token": "' + _ICL_SECRET.encode("ascii") + b'"}'
+        raw = _icl_raw_fixed(body, declared=len(body) + 11,
+                             extra_headers={"X-Echo": _ICL_SECRET, "Set-Cookie": "s=" + _ICL_SECRET})
+        out, err = io.StringIO(), io.StringIO()
+        for close_failure in (None, OSError(_ICL_SECRET), ssl.SSLError(_ICL_SECRET)):
+            with self.subTest(close_failure=type(close_failure).__name__):
+                stack = self._stack(raw, raise_at={"close": close_failure} if close_failure else None)
+                with contextlib.redirect_stdout(out), contextlib.redirect_stderr(err):
+                    error = self._get_error(stack)
+                self._assert_incomplete(error)
+                self.assertIn("close", stack.phase_calls)  # cleanup ran, did not override
+                blob = f"{error}|{error!r}|{error.args}|{error.detail}|{error.__context__!r}"
+                for marker in (_ICL_SECRET, "X-Echo", "token", _G1_API_KEY_ID, "Traceback"):
+                    self.assertNotIn(marker, blob)
+                self.assertEqual(stack.connect_calls, 1)
+        self.assertEqual((out.getvalue(), err.getvalue()), ("", ""))
+        # Entry-point rendering: classification-only JSON, no marker on stdout.
+        buf = io.StringIO()
+        with mock.patch.object(runner, "run_read_only_stage3_live_entrypoint", side_effect=error), \
+                tempfile.TemporaryDirectory() as tmp:
+            path, sha = _d07_write_envelope(tmp, _d07_valid_envelope_dict())
+            risk = _d07_write_risk_config(tmp)
+            args = [
+                "--ticker", CURRENT_TICKER, "--authority-namespace-id", "ns",
+                "--authority-namespace-root", tmp, "--canonical-repository-root", tmp,
+                "--ledger-path", str(Path(tmp) / "active.sqlite3"),
+                "--bootstrap-contract-sha256", "a" * 64,
+                "--risk-config-json", risk[0], "--risk-config-sha256", risk[1],
+                "--execution-authorization-json", path, "--execution-authorization-sha256", sha,
+                "--installed-implementation-commit", "b" * 40, "--confirm-live-read",
+            ]
+            with contextlib.redirect_stdout(buf), contextlib.redirect_stderr(err):
+                code = runner.main(args)
+        self.assertEqual(code, 1)
+        self.assertEqual(json.loads(buf.getvalue())["failure"], "LIVE_READ_TRANSPORT_PROTOCOL_FAILED")
+        self.assertNotIn(_ICL_SECRET, buf.getvalue() + err.getvalue())
+
+    # ------------------------------------------------------------------ R16
+    def test_icl_r16_exact_cap_bodies_returned_byte_for_byte(self) -> None:
+        cap = runner.MAX_RESPONSE_BODY_BYTES
+        body = bytes(range(256)) * (cap // 256)
+        self.assertEqual(len(body), cap)
+        raws = {
+            "content-length": _icl_raw_fixed(body, declared=cap),
+            "chunked": _icl_raw_chunked(body[:1000], body[1000:]),
+            "eof": _http_response_bytes(200, None, body, framing="eof"),
+        }
+        for label, raw in raws.items():
+            with self.subTest(framing=label):
+                with self._recording_remaining() as calls:
+                    result = self._get(self._stack(raw, recv_chunk=4096))
+                self.assertEqual(result.body_bytes, body)
+                self.assertEqual(hashlib.sha256(result.body_bytes).hexdigest(), hashlib.sha256(body).hexdigest())
+                complete = [c for c in calls if c[1] == "response-complete"]
+                self.assertEqual(len(complete), 1)
+                self.assertGreater(complete[0][2], 0.0)
+
+    # ------------------------------------------------------- static RT-007
+    def test_icl_static_a_to_f_order_status_first_no_second_parser_write_unchanged(self) -> None:
+        src = inspect.getsource(runner._LiveDemoSignedReadTransport._perform_get)
+        tokens = (
+            "response.begin()", "if 300 <= status < 400:", "if not (200 <= status < 300):",
+            "body = response.read(MAX_RESPONSE_BODY_BYTES + 1)", "body = bytes(body)",
+            '_remaining("response-complete")', "if len(body) > MAX_RESPONSE_BODY_BYTES:",
+            'detail="live read body cap"', 'if getattr(response, "length", None) not in (None, 0):',
+            "RunnerFailureCode.LIVE_READ_TRANSPORT_PROTOCOL_FAILED", 'detail="incomplete response body"',
+            "return RawOperationResponseV1(",
+        )
+        positions = [src.index(token) for token in tokens]
+        self.assertEqual(positions, sorted(positions))
+        for token in tokens:
+            if token != "RunnerFailureCode.LIVE_READ_TRANSPORT_PROTOCOL_FAILED":  # also the HTTPException mapping
+                self.assertEqual(src.count(token), 1, token)
+        # no second parser / header-text inspection / new deadline / write semantics
+        for banned in ('getheader("Content-Length"', "getheader('Content-Length'", "response.msg", "headers.get(",
+                       "time.monotonic_ns", "transport_unknown", "OperationDeadlineV1.create", "max(",
+                       "return unknown"):
+            self.assertNotIn(banned, src)
+        self.assertIn("response-complete", inspect.getsource(runner._LiveDemoSignedReadTransport._remaining_seconds))
+        self.assertEqual(
+            hashlib.sha256(inspect.getsource(runner._DemoNormalWriteTransport).encode("utf-8")).hexdigest(),
+            _ICL_BASE_WRITE_TRANSPORT_SOURCE_SHA256)
+        self.assertNotIn("INCOMPLETE_RESPONSE", "|".join(RunnerFailureCode.__members__))
+
+
+def _icl_live_get(owner, response, record, *, short_by=0):
+    """Deferred scripted read that routes the operation through the REAL
+    ``_LiveDemoSignedReadTransport.__call__`` (policy, synthetic signing,
+    corrected ``_perform_get``) bound to the runtime's own monotonic clock.
+    ``response`` is a valid RawOperationResponseV1 (or a deferred builder);
+    its exact body bytes are served with a parsed Content-Length exceeding
+    them by ``short_by``."""
+
+    def _serve(operation, prepared, deadline):
+        valid = response(operation, prepared, deadline) if callable(response) else response
+        body = valid.body_bytes
+        stack = _ICLRawResponseStack(owner, raw=_icl_raw_fixed(body, declared=len(body) + short_by), recv_chunk=64)
+        transport = runner._LiveDemoSignedReadTransport(
+            wall_clock=owner.inputs.clock, monotonic_clock_ns=owner.inputs.monotonic_ns, env=_g1_env(),
+        )
+        with _icl_installed(stack):
+            try:
+                result = transport(operation, prepared, deadline)
+            except RunnerError as exc:
+                record.append((operation, exc, stack, body))
+                raise
+        record.append((operation, result, stack, body))
+        return result
+
+    return _serve
+
+
+class ReadTransportIncompleteContentLengthGateDTests(unittest.TestCase):
+    """RT-014 -- R15 (and the R10 pending-404 integration) through the REAL
+    Gate-D loop and F-2B ``_gate_d_reconcile_post_create`` with every
+    reconciliation read routed through the corrected live signed GET."""
+
+    def setUp(self) -> None:
+        self._g = G1GateDCreateIntegrationTests(methodName="test_g1_c01_t08_incomplete_fill_pagination_held")
+        self._g.setUp()
+        self.addCleanup(self._g.doCleanups)
+        self.addCleanup(self._g.tearDown)
+
+    def _fresh(self) -> None:
+        self._g.tearDown()
+        self._g.setUp()
+
+    def _calls(self, operation):
+        return sum(1 for call in self._g._transport.calls if call[0] is operation)
+
+    def _identity_events(self, locked, client_order_id):
+        return [e for e in locked.events if e.event_type.name == "ORDER_IDENTITY_BOUND"
+                and e.payload["client_order_id"] == client_order_id]
+
+    # ------------------------------------------------------------------ R15.1
+    def test_icl_r15_get_order_incomplete_before_binding_is_held_unbound(self) -> None:
+        g = self._g
+        rt, invocation, stage3, wt, _ = g._ready()
+        record: list = []
+        wt.queue(_create_201_for(g.ORDER))
+        g._transport.queue(RunnerOperation.GET_ORDER, _icl_live_get(
+            g, _authoritative_create_order_for(wt, g.ORDER), record, short_by=25))
+        sentinel_order = _authoritative_create_order_for(wt, g.ORDER)
+        g._transport.queue(RunnerOperation.GET_ORDER, sentinel_order)  # must NOT be consumed (no read retry)
+        locked = g._locked(stage3)
+        before = len(locked.events)
+        result = g._loop(stage3, rt, invocation)
+        outcome = g._assert_held(result, stage3, bound=False, wt=wt)
+        self.assertEqual(outcome.reconciliation_detail, "VISIBILITY_READ_FAILED:LIVE_READ_TRANSPORT_PROTOCOL_FAILED")
+        self.assertEqual(len(record), 1)
+        operation, error, stack, body = record[0]
+        self.assertIs(operation, RunnerOperation.GET_ORDER)
+        self.assertEqual((error.code, error.detail),
+                         (RunnerFailureCode.LIVE_READ_TRANSPORT_PROTOCOL_FAILED, "incomplete response body"))
+        self.assertIn(g.ORDER.encode("ascii"), body)  # the short prefix was a valid authoritative row
+        self.assertEqual(stack.connect_calls, 1)
+        self.assertEqual(self._calls(RunnerOperation.GET_ORDER), 1)
+        self.assertEqual(self._calls(RunnerOperation.GET_FILLS), 0)
+        self.assertEqual(g._transport.responses[RunnerOperation.GET_ORDER], [sentinel_order])
+        new = g._types_after(locked, before)
+        for forbidden in ("ORDER_IDENTITY_BOUND", "ORDER_OBSERVED", "FILL_OBSERVED", "RECONCILIATION_RECORDED"):
+            self.assertNotIn(forbidden, new)
+        self.assertEqual(self._identity_events(locked, outcome.client_order_id), [])
+        slot = reconstruct_slot_ownership_for_test(locked.events, rt, g.TICKER, QuoteSlot.LOWER_YES_BID.value)
+        self.assertNotIn(slot.classification, ("ACTIVE_EXACT", "TERMINAL_RECONCILED"))
+        g._end(stage3)
+
+    # ------------------------------------------------------------------ R15.2
+    def test_icl_r15_get_fills_incomplete_after_valid_identity_is_held_bound(self) -> None:
+        g = self._g
+        rt, invocation, stage3, wt, _ = g._ready()
+        record: list = []
+        wt.queue(_create_201_for(g.ORDER))
+        # Complete GET_ORDER through the real corrected transport: identity is
+        # established (executed / full fill would otherwise close the result).
+        g._transport.queue(RunnerOperation.GET_ORDER, _icl_live_get(g, _authoritative_create_order_for(
+            wt, g.ORDER, status="executed", fill_count_fp="1.00", remaining_count_fp="0.00"), record))
+        # The short GET_FILLS prefix is a syntactically valid page carrying the
+        # exact closing fill -- it must not be accepted.
+        g._transport.queue(RunnerOperation.GET_FILLS, _icl_live_get(
+            g, _create_fill_rows_for(wt, g.ORDER, "1.00"), record, short_by=40))
+        sentinel_fills = _create_fill_rows_for(wt, g.ORDER, "1.00")
+        g._transport.queue(RunnerOperation.GET_FILLS, sentinel_fills)  # must NOT be consumed (no read retry)
+        locked = g._locked(stage3)
+        before = len(locked.events)
+        result = g._loop(stage3, rt, invocation)
+        outcome = g._assert_held(result, stage3, bound=True, wt=wt)
+        self.assertEqual(outcome.reconciliation_detail, "FILL_TRAVERSAL_FAILED:LIVE_READ_TRANSPORT_PROTOCOL_FAILED")
+        self.assertEqual([r[0] for r in record], [RunnerOperation.GET_ORDER, RunnerOperation.GET_FILLS])
+        self.assertIsInstance(record[0][1], RawOperationResponseV1)
+        self.assertEqual(record[0][1].body_bytes, record[0][3])
+        self.assertEqual((record[1][1].code, record[1][1].detail),
+                         (RunnerFailureCode.LIVE_READ_TRANSPORT_PROTOCOL_FAILED, "incomplete response body"))
+        self.assertIn(b'"count_fp": "1.00"', record[1][3])
+        self.assertEqual(self._calls(RunnerOperation.GET_FILLS), 1)
+        self.assertEqual(g._transport.responses[RunnerOperation.GET_FILLS], [sentinel_fills])
+        new = g._types_after(locked, before)
+        self.assertIn("ORDER_IDENTITY_BOUND", new)  # earlier valid identity evidence preserved
+        for forbidden in ("ORDER_OBSERVED", "FILL_OBSERVED", "RECONCILIATION_RECORDED"):
+            self.assertNotIn(forbidden, new)
+        bound = self._identity_events(locked, outcome.client_order_id)
+        self.assertEqual(len(bound), 1)
+        self.assertEqual(bound[0].payload["venue_order_id"], g.ORDER)
+        slot = reconstruct_slot_ownership_for_test(locked.events, rt, g.TICKER, QuoteSlot.LOWER_YES_BID.value)
+        self.assertEqual(slot.classification, "UNRESOLVED_OR_AMBIGUOUS")
+        g._end(stage3)
+
+        # Control: the identical complete GET_FILLS through the same real path
+        # closes authoritatively -- completeness is the only difference.
+        self._fresh()
+        g = self._g
+        rt, invocation, stage3, wt, _ = g._ready()
+        record = []
+        wt.queue(_create_201_for(g.ORDER))
+        g._transport.queue(RunnerOperation.GET_ORDER, _icl_live_get(g, _authoritative_create_order_for(
+            wt, g.ORDER, status="executed", fill_count_fp="1.00", remaining_count_fp="0.00"), record))
+        g._transport.queue(RunnerOperation.GET_FILLS, _icl_live_get(g, _create_fill_rows_for(wt, g.ORDER, "1.00"), record))
+        result = g._loop(stage3, rt, invocation)
+        self.assertEqual(result.cycle_results[0].write_outcome.result_classification, "TERMINAL")
+        self.assertTrue(all(type(r[1]) is RawOperationResponseV1 for r in record))
+        self.assertEqual(len(wt.calls), 1)
+        g._end(stage3)
+
+    # ------------------------------------------------------------------ R10 / F-2B
+    def test_icl_r10_live_404_with_incomplete_body_remains_pending_visibility(self) -> None:
+        g = self._g
+        rt, invocation, stage3, wt, _ = g._ready()
+        wt.queue(_create_201_for(g.ORDER))
+        record: list = []
+        owner = g
+
+        def _live_404(operation, prepared, deadline):
+            stack = _ICLRawResponseStack(owner, raw=_icl_raw_fixed(b'{"err', declared=900, status=404),
+                                         raise_at={"recv_body": OSError(_ICL_SECRET)})
+            transport = runner._LiveDemoSignedReadTransport(
+                wall_clock=owner.inputs.clock, monotonic_clock_ns=owner.inputs.monotonic_ns, env=_g1_env())
+            with _icl_installed(stack):
+                try:
+                    return transport(operation, prepared, deadline)
+                except RunnerError as exc:
+                    record.append((exc, stack))
+                    raise
+
+        g._transport.queue(RunnerOperation.GET_ORDER, _live_404)
+        g._transport.queue(RunnerOperation.GET_ORDER, _icl_live_get(g, _authoritative_create_order_for(wt, g.ORDER), []))
+        g._transport.queue(RunnerOperation.GET_FILLS, _icl_live_get(g, _fills_payload([]), []))
+        result = g._loop(stage3, rt, invocation)
+        outcome = result.cycle_results[0].write_outcome
+        self.assertEqual(outcome.result_classification, "BOUND_ACTIVE")
+        self.assertEqual(outcome.target_venue_order_id, g.ORDER)
+        exc, stack = record[0]
+        self.assertEqual((exc.code, exc._arb_http_status), (RunnerFailureCode.LIVE_READ_TRANSPORT_NON_2XX, 404))
+        self.assertNotIn("recv_body", stack.phase_calls)
+        self.assertEqual(self._calls(RunnerOperation.GET_ORDER), 2)
+        self.assertEqual(len(wt.calls), 1)
+        g._end(stage3)
+
+
+class ReadTransportIncompleteContentLengthMatrixTests(unittest.TestCase):
+    """RT-019: every RT-018 R01..R16 case maps to concrete tests in this
+    module (R17..R19 are the recorded regression commands)."""
+
+    MATRIX = {
+        "R01": [("ReadTransportIncompleteContentLengthTests", "test_icl_r01_complete_fixed_length_returns_exact_body_and_status")],
+        "R02": [("ReadTransportIncompleteContentLengthTests", "test_icl_r02_short_fixed_length_valid_json_fails_before_decode")],
+        "R03": [("ReadTransportIncompleteContentLengthTests", "test_icl_r03_short_fixed_length_arbitrary_bytes_same_failure")],
+        "R04": [("ReadTransportIncompleteContentLengthTests", "test_icl_r04_content_length_zero_is_an_empty_transport_body")],
+        "R05": [("ReadTransportIncompleteContentLengthTests", "test_icl_r05_complete_eof_delimited_body_returned_exactly")],
+        "R06": [("ReadTransportIncompleteContentLengthTests", "test_icl_r06_complete_chunked_body_dechunked_exactly")],
+        "R07": [("ReadTransportIncompleteContentLengthTests",
+                 "test_icl_r07_malformed_or_truncated_chunked_keeps_existing_protocol_mapping")],
+        "R08": [("ReadTransportIncompleteContentLengthTests",
+                 "test_icl_r08_cap_plus_one_rejected_on_every_framing_and_cap_precedes_residual")],
+        "R09": [("ReadTransportIncompleteContentLengthTests", "test_icl_r09_3xx_with_incomplete_unreadable_body_is_status_first")],
+        "R10": [("ReadTransportIncompleteContentLengthTests", "test_icl_r10_404_and_other_non_2xx_with_incomplete_unreadable_body"),
+                ("ReadTransportIncompleteContentLengthGateDTests",
+                 "test_icl_r10_live_404_with_incomplete_body_remains_pending_visibility")],
+        "R11": [("ReadTransportIncompleteContentLengthTests", "test_icl_r11_body_phase_deadline_and_socket_timeout_never_succeed")],
+        "R12": [("ReadTransportIncompleteContentLengthTests",
+                 "test_icl_r12_response_complete_deadline_zero_negative_precedence_and_sub_ms")],
+        "R13": [("ReadTransportIncompleteContentLengthTests",
+                 "test_icl_r13_one_address_one_connection_no_retry_same_deadline_and_clock")],
+        "R14": [("ReadTransportIncompleteContentLengthTests",
+                 "test_icl_r14_secret_markers_never_emitted_and_cleanup_never_overrides")],
+        "R15": [("ReadTransportIncompleteContentLengthGateDTests",
+                 "test_icl_r15_get_order_incomplete_before_binding_is_held_unbound"),
+                ("ReadTransportIncompleteContentLengthGateDTests",
+                 "test_icl_r15_get_fills_incomplete_after_valid_identity_is_held_bound")],
+        "R16": [("ReadTransportIncompleteContentLengthTests", "test_icl_r16_exact_cap_bodies_returned_byte_for_byte")],
+    }
+
+    def test_icl_r01_r16_every_case_maps_to_an_existing_test(self) -> None:
+        self.assertEqual(set(self.MATRIX), {f"R{i:02d}" for i in range(1, 17)})
+        for case, targets in self.MATRIX.items():
+            for cls_name, method in targets:
+                with self.subTest(case=case, method=method):
+                    self.assertTrue(callable(getattr(globals()[cls_name], method, None)), (cls_name, method))
+
+
 if __name__ == "__main__":
     unittest.main()
