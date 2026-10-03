@@ -6562,3 +6562,211 @@ RETURN_TO_MARCO_FOR_SEPARATE_G_SELECTION
 ```
 
 This route is inherited from the still-unresolved current scenario state in A27. The conservative current-scenario profile and its approved S1 technical binding remain historical/current technical provenance as already recorded; G remains unselected. This record does not select or recommend a G value and does not prepare or authorize release, writer, Gate-D, or write execution.
+
+### A38 R1-D07 G1 execution substrate corrective implementation — MARCO APPROVED / CANONICALLY INSTALLED / PRE-G1 READ-TRANSPORT FINDING OPEN
+
+This documentation-only continuity overlay records the Marco-approved and canonically installed G1 execution-substrate corrective implementation. It was prepared by `R1-D07_G1_EXECUTION_SUBSTRATE_CORRECTIVE_IMPLEMENTATION_01_CANONICAL_CONTINUITY_01` as a documentation-only continuity candidate from canonical `rigolugo/ARB/main` commit `0d7b486e8f538a4396992d6043ad32cf492aceff` (tree `f4eba66cf678c7c7791bc0ee8b72e86fa56199db`, sole parent `a8e2bfd5f818c654eee5fc1cc39a3c31b65c78ae`). It records an installed technical milestone, not a live execution result and not runtime authorization. It changes documentation only and grants no runtime capability. A1-A37 remain historical provenance and are not rewritten.
+
+**A38.1 Supersession scope (supersedes A37 only for its current next-route statement).**
+
+```text
+A37 historical (unchanged as provenance):
+  post_correction_live_Stage3_revalidation = ACCEPTED_READ_PHASE_COMPLETE
+  trusted_read_set = MINTED (historical consumed-attempt evidence only)
+  next route = RETURN_TO_MARCO_FOR_SEPARATE_G_SELECTION
+
+A38 current:
+  G1 execution substrate corrective implementation = APPROVED_AND_CANONICALLY_INSTALLED
+  canonical_G_selection = UNSELECTED
+  repository_G_canonicalization = NOT_PERFORMED
+  next route = RETURN_TO_MARCO_FOR_BOUNDED_READ_TRANSPORT_INCOMPLETE_CONTENT_LENGTH_RESOLUTION
+```
+
+A38 preserves every A37 empirical Stage-3 fact. A38 supersedes A37 ONLY for A37's current next-route statement `RETURN_TO_MARCO_FOR_SEPARATE_G_SELECTION`. That route led to the bounded independent-G1 preparation/specification/implementation/installation work recorded here; it did NOT produce a canonical G selection. A37 is not rewritten to `G=1`, and no standing strategy-policy selection is claimed. The fact that the installed correction belongs to the planned independent G1 experiment work does NOT turn `G=1` into canonical repository policy or standing write authority.
+
+**A38.2 Exact installed identity.**
+
+```text
+installed commit = 0d7b486e8f538a4396992d6043ad32cf492aceff
+tree             = f4eba66cf678c7c7791bc0ee8b72e86fa56199db
+sole parent      = a8e2bfd5f818c654eee5fc1cc39a3c31b65c78ae (A37 canonicalization commit)
+commit_count_above_parent = 1
+changed paths (exactly two):
+
+src/arb/venues/kalshi/minimal_market_maker_experiment_runner.py
+  bytes = 809618
+  sha256 = 2c645f7019f11e1fdae97d6cf236103e0811b0c3884fa01b8cc1e9d430ef7e59
+  git_blob = 42fdf7ca79761223bbfccd816f74bcae7e7ce40c
+
+tests/test_kalshi_minimal_market_maker_experiment_runner.py
+  bytes = 1080602
+  sha256 = e3df0b36fcdc25e3cbeeb285beaf3fc95562a6efa9c3526a2887a8b4bf87c253
+  git_blob = e8007297396caaccb2e8ad1d289edb64141bf375
+
+independent compare theorem = ahead_by 1 / behind_by 0 / total_commits 1 / changed_paths exactly 2
+protected source/test blobs = 17/17 independently reverified unchanged
+implementer = CLAUDE_CODE
+```
+
+**A38.3 Controlling specification and implementation review identities (external/local; not repository-resident).**
+
+```text
+controlling specification =
+  KALSHI_DEMO_R1_D07_G1_EXECUTION_SUBSTRATE_CORRECTIVE_SPEC_01_CORRECTION_01.md
+  65636 bytes / sha256 84888d1ca9728f084d710eae522741f77b6e78a0d8f7dff6193f06ccdc1e10fb
+  decision = MARCO APPROVE
+
+controlling handoff =
+  HANDOFF_KALSHI_DEMO_R1_D07_G1_EXECUTION_SUBSTRATE_CORRECTIVE_SPEC_01_CORRECTION_01.md
+  5752 bytes / sha256 a9ff0938929c267e8409b3ee9ede0b1ed7d876ba65a064c41d8ce7197be197df
+
+implementation task = R1-D07_G1_EXECUTION_SUBSTRATE_CORRECTIVE_IMPLEMENTATION_01
+  decision = MARCO APPROVE
+
+implementation submission bundle =
+  R1-D07_G1_EXECUTION_SUBSTRATE_CORRECTIVE_IMPLEMENTATION_01_MARCO_SUBMISSION_BUNDLE.zip
+  495272 bytes / sha256 c9fa7fe55c476e1975888e8acd9f9f5e5b5ab68b78d137c9d838db76ae1a2b32
+
+implementation review ZIP =
+  R1-D07_G1_EXECUTION_SUBSTRATE_CORRECTIVE_IMPLEMENTATION_01_MARCO_REVIEW.zip
+  476447 bytes / sha256 0f9e70705c4b1936b2f44e0e3990fc21f06b1eef001b661f850012d574b1ef34
+
+candidate.patch =
+  264315 bytes / sha256 89d324fe2fc1349f9d8e2e8e258aa0e00864b344cff050fd2cd02a509c3a9520
+```
+
+The controlling specification and handoff are not repository-resident; they are bound here by exact identity only. The predecessor `KALSHI_DEMO_R1_D07_G1_EXECUTION_SUBSTRATE_CORRECTIVE_SPEC_01` remains MARCO-BLOCKED / NONCANONICAL content seed only.
+
+Reviewed implementation test evidence (offline; recorded by the approved implementation review; NOT rerun during installation and NOT rerun during this continuity authoring):
+
+```text
+focused runner = 1652 passed / 2 skipped / 633 subtests
+protected spine = 1470 passed / 584 subtests
+full offline repository suite = 4218 passed / 2 skipped / 1735 subtests
+failures/errors = 0
+```
+
+**A38.4 Installation evidence (external/local; not repository-resident).**
+
+```text
+installation task = R1-D07_G1_EXECUTION_SUBSTRATE_CORRECTIVE_IMPLEMENTATION_01_CANONICAL_INSTALLATION_01
+  decision = MARCO APPROVE (issued after independent remote GitHub readback)
+
+installation review ZIP =
+  R1-D07_G1_EXECUTION_SUBSTRATE_CORRECTIVE_IMPLEMENTATION_01_CANONICAL_INSTALLATION_01_MARCO_INSTALLATION_REVIEW.zip
+  13018 bytes / sha256 8382ba0f94059a3b3759aee039d3202d09a250890620b303be89c2879e3682f2
+
+installation evidence ZIP =
+  R1-D07_G1_EXECUTION_SUBSTRATE_CORRECTIVE_IMPLEMENTATION_01_CANONICAL_INSTALLATION_01_EVIDENCE_BUNDLE.zip
+  8052 bytes / sha256 96c2b077914aa14adc91cf7ac51d7f075cdcbf7aeea5e558b07de9ddc82147fe
+
+installation = REMOTE_AND_LOCAL_EXACT_APPROVED_COMMIT_CONFIRMED
+pre-write gates = 24/24 PASS
+push = git push origin <candidate>:refs/heads/main (ordinary non-force fast-forward), exit 0
+remote main = a8e2bfd5f818c654eee5fc1cc39a3c31b65c78ae -> 0d7b486e8f538a4396992d6043ad32cf492aceff
+push attempts = 1 ; push retries = 0
+local canonical C:\b1\kals\ARB: one `git merge --ff-only 0d7b486e...` (local ff-only attempts = 1), Fast-forward, exit 0
+final local status = clean
+repository content edits during install = 0 ; new commits during install = 0 ; tests during install = 0
+```
+
+Provenance note (non-material): a PowerShell `$c` / `$C` case-insensitive variable collision produced false protected-path mismatch messages during a read-only preliminary gate script. The script was corrected before the push; final protected-path verification was 17/17 PASS. It had no repository state effect and is read-only preflight provenance, not an implementation defect.
+
+**A38.5 Installed technical theorem (installed code; not a live result).**
+
+```text
+F-1 = INSTALLED
+  sanctioned bounded Demo normal-write POST/DELETE transport
+
+F-2A = INSTALLED
+  HTTP-201 / top-level CREATE response classification delegated to the
+  protected canonical lifecycle semantics
+
+F-2B = INSTALLED
+  bounded post-CREATE authoritative visibility + complete order/fill
+  reconciliation supporting resting/no-fill, resting/partial-fill, and
+  terminal/full-fill outcomes with zero write retry while unresolved
+
+F-3 = INSTALLED
+  bounded orchestration-owned credential lifetime covering the signed
+  Stage-3/Gate-D operations required by the write-capable path
+```
+
+This theorem is narrow: it records installed technical capability in the runner only. It does NOT establish production equivalence, profitability, arbitrage, live G1 readiness, or any authorization to exercise the write-capable path.
+
+**A38.6 Open findings (carried forward; none fixed).**
+
+```text
+READ_TRANSPORT_INCOMPLETE_CONTENT_LENGTH
+  OPEN
+  FIXED=NO
+  introduced_by_candidate=NO
+  live-G1 preflight effect =
+    RESOLUTION_OR_EXPLICIT_BOUNDING_REQUIRED
+
+GATE_D_POST_UNRESOLVED_NEXT_CYCLE_TERMINATION
+  OPEN
+  FIXED=NO
+  fail-closed
+  introduced_by_candidate=NO
+  second_write_possible=NO
+  future G1 containment decision =
+    decision_cycle_max=1 before live execution package approval
+
+ACTIVE_DOMAIN_ORDINARY_CANCEL_ROUTE_MISMATCH
+  OPEN
+  FIXED=NO
+  fail-closed
+  introduced_by_candidate=NO
+  later active-domain ordinary-CANCEL / G2+ concern
+
+PROTECTED_LEDGER_PARALLEL_CONSUMPTION_FLAKE
+  OPEN
+  FIXED=NO
+```
+
+`READ_TRANSPORT_INCOMPLETE_CONTENT_LENGTH` arises because the pre-existing signed read transport does not enforce the same declared-Content-Length completeness guard now used by the new write transport. It was nonblocking for implementation installation but must be resolved or explicitly bounded before a live G1 write.
+
+**A38.7 No-escalation / current state.**
+
+```text
+A37 Stage-3 accepted evidence = PRESERVED
+trusted read set = historical consumed-attempt evidence only
+canonical_G_selection = UNSELECTED
+repository_G_canonicalization = NOT_PERFORMED
+minimum_spread_usd = UNSELECTED
+
+Step-Q = NOT RUN
+fresh G1 qualification = NOT RUN
+release = NOT_GRANTED
+writer admission = NOT_GRANTED
+Gate-D = NOT_ENTERED
+G1 execution = NOT_AUTHORIZED / NOT RUN
+Demo write = NONE
+production = NONE
+```
+
+The installed implementation creates technical capability only. Capability is not authorization. This record establishes no G selection or canonicalization, no minimum-spread selection, no Step-Q or G1 qualification, no release/writer/Gate-D/G1/Demo-write/production authority, no production equivalence, no profitability theorem, and no arbitrage theorem.
+
+**A38.8 Raw-artifact storage and retrieval classification.**
+
+```text
+implementation review/submission artifacts repository-resident = NO (LOCAL_ONLY)
+installation review/evidence artifacts repository-resident = NO (LOCAL_ONLY)
+Marco approval handoffs repository-resident = NO (LOCAL_ONLY)
+controlling spec/handoff repository-resident = NO (LOCAL_ONLY; identity-bound only)
+permanent repository raw-byte retrievability claimed = NO
+installed source/test bytes = repository-resident; retrievable by commit/blob identity
+```
+
+The implementation review/submission, installation review/evidence, and approval artifacts are external/local and MUST NOT be committed by this record. The repository stores identities and theorems only.
+
+**A38.9 Next bounded route.**
+
+```text
+NEXT_BOUNDED_ACTION =
+RETURN_TO_MARCO_FOR_BOUNDED_READ_TRANSPORT_INCOMPLETE_CONTENT_LENGTH_RESOLUTION
+(routing only; not authorization)
+```
+
+This route grants no source edit, test execution, Kalshi, credential, N1/deployed-state, Step-Q, G1, Demo-write, or production capability. Any resolution of `READ_TRANSPORT_INCOMPLETE_CONTENT_LENGTH` requires its own separately dispatched and authorized task.
