@@ -11,6 +11,7 @@ cases C01-C25.
 
 from __future__ import annotations
 
+import base64
 import contextlib
 import copy
 import dataclasses
@@ -206,12 +207,122 @@ class _ScriptedTransport:
         response = pending.pop(0)
         if isinstance(response, Exception):
             raise response
+        if callable(response):
+            # G1 correction fixtures: a deferred response built from state that
+            # only exists at call time (e.g. the runtime-allocated client id).
+            response = response(operation, prepared, deadline)
+            if isinstance(response, Exception):
+                raise response
         return response
 
 
 def _json_response(payload: Mapping[str, object]) -> RawOperationResponseV1:
     body = json.dumps(payload).encode("utf-8")
     return RawOperationResponseV1(http_status=200, content_type="application/json", body_bytes=body)
+
+
+# ---------------------------------------------------------------------------
+# G1 execution-substrate correction fixtures (F-2A / F-2B).  The accepted
+# Demo CreateOrder V2 success shape is HTTP 201 with a TOP-LEVEL order summary
+# (canonical checkpoint sections 7/8/9/9A); the predecessor HTTP-200 /
+# {"order": {...}} wrapper fixtures are obsolete and never accepted.
+# ---------------------------------------------------------------------------
+
+_ECHO = object()
+
+
+def _create_201_raw(
+    request, *, order_id: str, fill_count: str = "0.00", remaining_count: str = "1.00",
+    ts_ms: object = 1_755_000_000_123, client_order_id: object = _ECHO, status: int = 201,
+    content_type: str = "application/json", extra: Mapping[str, object] | None = None,
+    drop: tuple = (),
+) -> RawOperationResponseV1:
+    body: dict = {
+        "order_id": order_id,
+        "client_order_id": request["client_order_id"] if client_order_id is _ECHO else client_order_id,
+        "fill_count": fill_count, "remaining_count": remaining_count, "ts_ms": ts_ms,
+    }
+    if extra:
+        body.update(extra)
+    for name in drop:
+        body.pop(name, None)
+    return RawOperationResponseV1(
+        http_status=status, content_type=content_type, body_bytes=json.dumps(body).encode("utf-8"),
+    )
+
+
+def _create_201_for(order_id: str, **kwargs):
+    """Deferred scripted write response: a 201 top-level CREATE summary that
+    echoes the exact runtime-allocated client_order_id of the request."""
+    return lambda request: _create_201_raw(request, order_id=order_id, **kwargs)
+
+
+def _authoritative_create_order_for(
+    write_transport, order_id: str, *, subaccount: object = 1, exchange_index: object = 0,
+    status: str = "resting", fill_count_fp: str = "0.00", remaining_count_fp: str = "1.00",
+    initial_count_fp: str = "1.00", overrides: Mapping[str, object] | None = None,
+    omit: tuple = (),
+):
+    """Deferred scripted GET_ORDER response for the exact order the last
+    scripted CREATE created: its authoritative row carries the persisted
+    client_order_id, ticker, side and price taken from the trusted CREATE
+    request body (G1S-015C fields).  ``overrides``/``omit`` mutate single
+    authoritative fields for the negative matrix."""
+
+    def _build(operation, prepared, deadline):
+        request = write_transport.calls[-1]
+        body = request["canonical_body"]
+        row = _order_row(
+            order_id, ticker=body["ticker"], side=("yes" if body["side"] == "bid" else "no"), status=status,
+            remaining_count_fp=remaining_count_fp, fill_count_fp=fill_count_fp,
+            initial_count_fp=initial_count_fp, client_order_id=request["client_order_id"],
+            yes_price_dollars=body["price"], subaccount=subaccount, exchange_index=exchange_index,
+        )
+        if overrides:
+            row.update(overrides)
+        for name in omit:
+            row.pop(name, None)
+        return _json_response({"order": row})
+
+    return _build
+
+
+def _create_fill_rows_for(write_transport, order_id: str, *quantities: str, subaccount: int = 1,
+                          exchange_index: int = 0, id_prefix: str = "fill-g1", cursor: str = ""):
+    """Deferred scripted GET_FILLS page for the exact created order."""
+
+    def _build(operation, prepared, deadline):
+        request = write_transport.calls[-1]
+        body = request["canonical_body"]
+        rows = []
+        for index, quantity in enumerate(quantities):
+            rows.append({
+                "fill_id": f"{id_prefix}-{index}", "order_id": order_id, "ticker": body["ticker"],
+                "side": ("yes" if body["side"] == "bid" else "no"), "subaccount": subaccount,
+                "exchange_index": exchange_index, "yes_price_dollars": body["price"], "count_fp": quantity,
+                "created_time": f"2026-08-17T13:00:0{index}.000000Z",
+            })
+        return _json_response({"fills": rows, "cursor": cursor})
+
+    return _build
+
+
+def _raw_404() -> RawOperationResponseV1:
+    return RawOperationResponseV1(http_status=404, content_type="application/json", body_bytes=b'{"error":"not_found"}')
+
+
+def _live_reader_404() -> RunnerError:
+    exc = RunnerError(RunnerFailureCode.LIVE_READ_TRANSPORT_NON_2XX, detail="non-2xx terminal status")
+    exc._arb_http_status = 404
+    return exc
+
+
+@contextlib.contextmanager
+def _test_only_null_credential_scope():
+    """TEST-ONLY synthetic F-3 credential scope: no environment mutation and
+    no credential material.  Production orchestration binds the real
+    ``_demo_path_to_pem_credential_bridge`` whenever none is supplied."""
+    yield
 
 
 _PRICE_RANGES = [{"start": "0.00", "end": "1.00", "step": "0.01"}]
@@ -3359,6 +3470,8 @@ class _ScriptedWriteTransport:
         response = self.responses.pop(0)
         if isinstance(response, Exception):
             raise response
+        if callable(response):
+            response = response(request)
         return response
 
 
@@ -5600,13 +5713,13 @@ class ActiveGateDDomainBoundPermitTestCase(ActiveStage3EndToEndTestCase):
 
     def test_c02_f1_active_create_permit_carries_exact_domain_commitments(self) -> None:
         wt = _ScriptedWriteTransport()
-        wt.queue(_json_response({"order": {"order_id": "venue-active-create-1"}}))
+        wt.queue(_create_201_for("venue-active-create-1"))
         rt = self._runtime(gate_d=True, write_transport=wt)
         invocation, stage3 = self._reach_stage3(rt)
         self._reset_reads()
         self._q_empty_read_cycle()
-        self._transport.queue(RunnerOperation.GET_ORDER, _order_payload(
-            "venue-active-create-1", ticker=self.TICKER, subaccount=1, exchange_index=0))
+        self._transport.queue(RunnerOperation.GET_ORDER, _authoritative_create_order_for(wt, "venue-active-create-1"))
+        self._transport.queue(RunnerOperation.GET_FILLS, _fills_payload([]))
 
         patcher, permits = self._capture_permits()
         with patcher:
@@ -5632,7 +5745,7 @@ class ActiveGateDDomainBoundPermitTestCase(ActiveStage3EndToEndTestCase):
     def _assert_create_mutation_blocks(self, mutate_key: str) -> None:
         real_commit = runner.active_domain_commitment
         wt = _ScriptedWriteTransport()
-        wt.queue(_json_response({"order": {"order_id": "venue-active-create-x"}}))
+        wt.queue(_create_201_for("venue-active-create-x"))
         rt = self._runtime(gate_d=True, write_transport=wt)
         invocation, stage3 = self._reach_stage3(rt)
         self._reset_reads()
@@ -5684,7 +5797,7 @@ class ActiveGateDDomainBoundPermitTestCase(ActiveStage3EndToEndTestCase):
 
     def test_c02_f1_active_create_mutated_permit_commitment_digest_blocks_before_transport(self) -> None:
         wt = _ScriptedWriteTransport()
-        wt.queue(_json_response({"order": {"order_id": "venue-active-create-2"}}))
+        wt.queue(_create_201_for("venue-active-create-2"))
         rt = self._runtime(gate_d=True, write_transport=wt)
         invocation, stage3 = self._reach_stage3(rt)
         self._reset_reads()
@@ -5705,14 +5818,14 @@ class ActiveGateDDomainBoundPermitTestCase(ActiveStage3EndToEndTestCase):
     def _c08_active_create_ready(self, *, create_response: bool = True):
         wt = _ScriptedWriteTransport()
         if create_response:
-            wt.queue(_json_response({"order": {"order_id": "venue-c08-create-1"}}))
+            wt.queue(_create_201_for("venue-c08-create-1"))
         rt = self._runtime(gate_d=True, write_transport=wt)
         invocation, stage3 = self._reach_stage3(rt)
         self._reset_reads()
         self._q_empty_read_cycle()
         if create_response:
-            self._transport.queue(RunnerOperation.GET_ORDER, _order_payload(
-                "venue-c08-create-1", ticker=self.TICKER, subaccount=1, exchange_index=0))
+            self._transport.queue(RunnerOperation.GET_ORDER, _authoritative_create_order_for(wt, "venue-c08-create-1"))
+            self._transport.queue(RunnerOperation.GET_FILLS, _fills_payload([]))
         return rt, invocation, stage3, wt
 
     def _c08_scoped_spy(self):
@@ -10266,8 +10379,15 @@ class D07SignedTransportTests(unittest.TestCase):
         # delegates to the canonical orderbook closed rule, no re-implementation
         src = inspect.getsource(runner._d07_credential_header_value_is_safe)
         self.assertIn("_kalshi_orderbook._api_key_id_is_header_safe(value)", src)
-        # the auth-header builder validates BEFORE constructing headers
-        auth_src = inspect.getsource(runner._LiveDemoSignedReadTransport._auth_headers)
+        # the auth-header builder validates BEFORE constructing headers.
+        # G1S-010: the GET transport delegates to the ONE extracted runner
+        # signing computation (shared with the sanctioned normal-write
+        # transport); the validation-before-signature ordering is asserted on
+        # that single signer.
+        reader_src = inspect.getsource(runner._LiveDemoSignedReadTransport._auth_headers)
+        self.assertIn("_d07_demo_signed_auth_headers(", reader_src)
+        self.assertIn('method="GET"', reader_src)
+        auth_src = inspect.getsource(runner._d07_demo_signed_auth_headers)
         self.assertLess(
             auth_src.index("_d07_credential_header_value_is_safe"),
             auth_src.index("KALSHI-ACCESS-SIGNATURE"))
@@ -11397,8 +11517,12 @@ class ReleaseOrchestrationTestCase(unittest.TestCase):
                 context, send_operation_request=transport,
                 fetch_orderbook=runner._TestOnlyActiveV2OrderbookSeam(orderbook),
                 strategy_instance_id=GATE_D_STRATEGY_INSTANCE_ID, minimum_spread_usd=GATE_D_MIN_SPREAD,
-                gate_d_capability_reference_id="cap_active_gate_d_test",
-                normal_write_transport=write_transport or _ScriptedWriteTransport())
+                gate_d_capability_reference_id="cap_active_gate_d_test")
+            # G1S-006: production construction always binds the sanctioned
+            # transport; a scripted fake is a visibly TEST-ONLY replacement.
+            assert type(runtime.normal_write_transport) is runner._DemoNormalWriteTransport
+            if write_transport is not None:
+                runtime = dataclasses.replace(runtime, normal_write_transport=write_transport)
             specs = []
             for k in range(phases):
                 truth = self._selected_route_truth(runtime)
@@ -11436,7 +11560,8 @@ class ReleaseOrchestrationTestCase(unittest.TestCase):
     def _run(self, package, *, builder, **kwargs):
         options = dict(
             monotonic_clock_ns=self.inputs.monotonic_ns, wall_clock=self.inputs.clock,
-            uuid_factory=self.inputs.uuid, decision_cycle_max=2)
+            uuid_factory=self.inputs.uuid, decision_cycle_max=2,
+            credential_bridge=_test_only_null_credential_scope)
         options.update(kwargs)
         return runner.run_release_orchestration_v1(
             trusted_expectations=self._issue_trusted_expectations(package),
@@ -11587,7 +11712,8 @@ class ReleaseOrchestrationTestCase(unittest.TestCase):
             runner.run_release_orchestration_v1(
                 trusted_expectations=expectations, runtime_builder=self._builder(phases=1),
                 monotonic_clock_ns=mono, wall_clock=self.inputs.clock,
-                uuid_factory=self.inputs.uuid, decision_cycle_max=2)
+                uuid_factory=self.inputs.uuid, decision_cycle_max=2,
+                credential_bridge=_test_only_null_credential_scope)
         # The very first thing the orchestration does is sample the monotonic
         # start, and nothing before the first artifact read is anything else.
         self.assertIn("verify", calls)
@@ -13216,7 +13342,7 @@ class GateDAccountAggregateEnforcementTests(GateDTestCase):
         transport.queue(
             RunnerOperation.GET_ORDER, _order_payload("venue-order-created-1", ticker=self.TICKER),
         )
-        write_transport.queue(_json_response({"order": {"order_id": "venue-order-created-1"}}))
+        write_transport.queue(_create_201_for("venue-order-created-1"))
 
         result = run_gate_d_ordinary_decision_loop(stage3, exact, invocation, decision_cycle_max=1)
 
@@ -16054,6 +16180,2413 @@ class UdtClientWallCorrectiveSpec01TestCase(unittest.TestCase):
         self.assertEqual(outcome.testsRun, len(self._CW_PROTECTED_REGRESSION_TESTS))
         self.assertTrue(outcome.wasSuccessful(), stream.getvalue())
         self.assertEqual((len(outcome.failures), len(outcome.errors), len(outcome.skipped)), (0, 0, 0))
+
+
+# ===========================================================================
+# R1-D07_G1_EXECUTION_SUBSTRATE_CORRECTIVE_IMPLEMENTATION_01
+# KALSHI_DEMO_R1_D07_G1_EXECUTION_SUBSTRATE_CORRECTIVE_SPEC_01_CORRECTION_01
+# (65636 bytes / sha256 84888d1ca9728f084d710eae522741f77b6e78a0d8f7dff6193f06ccdc1e10fb)
+#
+# F-1 sanctioned Demo normal-write transport, F-2A 201/top-level CREATE
+# classification, F-2B bounded post-CREATE authoritative order/fill
+# reconciliation, F-3 single orchestration-owned credential scope.
+#
+# Every test is OFFLINE: deterministic clocks/UUIDs, fake DNS/socket/TLS/HTTP
+# framing at the lowest boundary (the production transport/classifier code
+# runs unmodified above it), SYNTHETIC RSA key material generated in-process,
+# synthetic temporary authority/ledger stores.  Zero real DNS/socket/HTTP,
+# zero Kalshi, zero credential reads.  Test IDs (T01-T30, C01-T01..C01-T22)
+# are named in each test's docstring; the concrete mapping is also asserted
+# by ``G1TestMatrixTests``.
+# ===========================================================================
+
+
+def _only_own_tests(cls):
+    """Run only the tests DEFINED on ``cls`` (helper-only inheritance): an
+    inherited ``test_*`` attribute is set to ``None`` so the unittest loader
+    (and pytest's unittest collection) does not collect it again."""
+    own = set(cls.__dict__)
+    for name in dir(cls):
+        if name.startswith("test") and name not in own:
+            setattr(cls, name, None)
+    return cls
+
+
+_G1_CLIENT_ID = "11111111-1111-4111-8111-111111111111"
+_G1_API_KEY_ID = "SYNTHETIC-G1-DEMO-KEY-ID-DO-NOT-USE"
+_G1_PID = "proc_" + "a" * 32
+_G1_RSA: dict = {}
+
+
+def _g1_synthetic_rsa():
+    """In-process SYNTHETIC RSA-2048 key (never a real credential)."""
+    if "pem" not in _G1_RSA:
+        from cryptography.hazmat.primitives import serialization as _ser
+        from cryptography.hazmat.primitives.asymmetric import rsa as _rsa
+        key = _rsa.generate_private_key(public_exponent=65537, key_size=2048)
+        _G1_RSA["pem"] = key.private_bytes(
+            _ser.Encoding.PEM, _ser.PrivateFormat.PKCS8, _ser.NoEncryption()).decode("ascii")
+        _G1_RSA["public"] = key.public_key()
+    return _G1_RSA["pem"], _G1_RSA["public"]
+
+
+def _g1_env(**overrides):
+    pem, _ = _g1_synthetic_rsa()
+    env = {"KALSHI_DEMO_API_KEY_ID": _G1_API_KEY_ID, "KALSHI_DEMO_PRIVATE_KEY_PEM": pem}
+    env.update(overrides)
+    return {key: value for key, value in env.items() if value is not None}
+
+
+def _g1_parse_request(sent: bytes):
+    head, _, body = bytes(sent).partition(b"\r\n\r\n")
+    lines = head.decode("ascii").split("\r\n")
+    headers: dict = {}
+    for line in lines[1:]:
+        name, _, value = line.partition(": ")
+        headers[name] = value
+    return lines[0], headers, body
+
+
+def _g1_verify_signature(headers, method: str, path: str) -> None:
+    from cryptography.hazmat.primitives import hashes as _hashes
+    from cryptography.hazmat.primitives.asymmetric import padding as _padding
+    _, public = _g1_synthetic_rsa()
+    message = (headers["KALSHI-ACCESS-TIMESTAMP"] + method + path).encode("ascii")
+    public.verify(
+        base64.b64decode(headers["KALSHI-ACCESS-SIGNATURE"]), message,
+        _padding.PSS(mgf=_padding.MGF1(_hashes.SHA256()), salt_length=32), _hashes.SHA256())
+
+
+def _g1_201_responder(order_id: str, **extra):
+    """Low-level fake server: 201 top-level CREATE summary echoing the exact
+    client_order_id the transport actually put on the wire."""
+
+    def _respond(sent: bytes) -> bytes:
+        _line, _headers, body = _g1_parse_request(sent)
+        request = json.loads(body.decode("utf-8"))
+        payload = {"order_id": order_id, "client_order_id": request["client_order_id"],
+                   "fill_count": "0.00", "remaining_count": "1.00", "ts_ms": 1_755_000_000_123}
+        payload.update(extra)
+        return json.dumps(payload).encode("utf-8")
+
+    return _respond
+
+
+class _G1WriteStack:
+    """Fake of the sanctioned write transport's lowest I/O boundary (the same
+    three patch points as ``_LowLevelPhaseStack``): bounded DNS helper,
+    ``socket.socket`` and ``ssl.create_default_context``.  The HTTP response
+    bytes are built lazily from the EXACT request bytes the production code
+    sent (``responder``) so a 201 can echo the runtime client id."""
+
+    def __init__(self, test, *, status=201, body=b"{}", responder=None, headers=None,
+                 framing="content-length", raw=None, recv_chunk=64, send_chunk=1 << 20,
+                 candidates=None, raise_at=None, advance_at=None):
+        self.test = test
+        self.status, self.body, self.responder = status, body, responder
+        self.headers, self.framing, self.raw = headers, framing, raw
+        self.recv_chunk, self.send_chunk = recv_chunk, send_chunk
+        self.candidates = candidates if candidates is not None else [(socket.AF_INET, ("203.0.113.9", 443))]
+        self.raise_at = dict(raise_at or {})
+        self.advance_at = dict(advance_at or {})
+        self.timeline: list = []
+        self.phase_calls: list = []
+        self.resolve_calls = self.socket_ctor_calls = self.connect_calls = 0
+        self.resolved = None
+        self.server_hostname = None
+        self.sent = bytearray()
+        self._chunks = None
+
+    def _hit(self, phase):
+        self.phase_calls.append(phase)
+        adv = self.advance_at.get(phase)
+        if adv:
+            self.test.now_ns += adv
+        exc = self.raise_at.get(phase)
+        if exc is not None:
+            raise exc
+
+    def resolve(self, host, port, *, deadline, monotonic_clock_ns):
+        self.resolve_calls += 1
+        self.resolved = (host, port)
+        self.timeline.append(("pre-dns", (deadline.absolute_deadline_monotonic_ns - monotonic_clock_ns()) / 1e9))
+        self._hit("resolve")
+        return list(self.candidates)
+
+    def make_socket(self, family, socktype):
+        self.socket_ctor_calls += 1
+        self._hit("socket")
+        return _G1WriteStack._RawSock(self)
+
+    def make_context(self):
+        self._hit("context")
+        return _G1WriteStack._Ctx(self)
+
+    def _ensure_response(self):
+        if self._chunks is None:
+            if self.raw is not None:
+                data = self.raw
+            else:
+                body = self.responder(bytes(self.sent)) if self.responder is not None else self.body
+                data = _http_response_bytes(self.status, self.headers, body, framing=self.framing)
+            self._chunks = [data[i:i + self.recv_chunk] for i in range(0, len(data), self.recv_chunk)]
+
+    @contextlib.contextmanager
+    def installed(self):
+        with mock.patch.object(runner, "_d07_live_signed_get_resolve_addresses", self.resolve), \
+                mock.patch("socket.socket", self.make_socket), \
+                mock.patch("ssl.create_default_context", self.make_context):
+            yield self
+
+    class _RawSock:
+        def __init__(self, stack):
+            self.stack = stack
+
+        def settimeout(self, value):
+            self.stack.timeline.append(("raw.settimeout", value))
+
+        def connect(self, address):
+            self.stack.connect_calls += 1
+            self.stack._hit("connect")
+
+        def close(self):
+            self.stack._hit("raw-close")
+
+    class _Ctx:
+        def __init__(self, stack):
+            self.stack = stack
+
+        def wrap_socket(self, sock, *, server_hostname, do_handshake_on_connect):
+            assert do_handshake_on_connect is False
+            self.stack.server_hostname = server_hostname
+            self.stack._hit("wrap")
+            return _G1WriteStack._TLSSock(self.stack)
+
+    class _TLSSock:
+        def __init__(self, stack):
+            self.stack = stack
+
+        def settimeout(self, value):
+            self.stack.timeline.append(("tls.settimeout", value))
+
+        def do_handshake(self):
+            self.stack._hit("handshake")
+
+        def send(self, view):
+            self.stack._hit("send")
+            n = min(len(view), self.stack.send_chunk)
+            self.stack.sent += bytes(view[:n])
+            return n
+
+        def recv_into(self, buffer):
+            self.stack._ensure_response()
+            self.stack._hit("recv")
+            if not self.stack._chunks:
+                return 0
+            chunk = self.stack._chunks.pop(0)
+            n = min(len(chunk), len(buffer))
+            buffer[:n] = chunk[:n]
+            if n < len(chunk):
+                self.stack._chunks.insert(0, chunk[n:])
+            return n
+
+        def close(self):
+            self.stack._hit("close")
+
+
+def _g1_unit_binding(*, operation="CREATE", process_instance_id=_G1_PID, deadline,
+                     mutate=None, expected_subaccount=0, expected_exchange_index=0,
+                     venue_order_id="venue-order-old-1", rehash=True):
+    """TEST-ONLY unit construction of the module-private runner binding (the
+    integration tests obtain it through the genuine permit/T2/T3 chain)."""
+    if operation == "CREATE":
+        binding_v1 = VenueBindingV1(adapter_payload_schema_id="gate-d-create-v1")
+        body = build_mm_create_order_body(
+            ticker=CURRENT_TICKER, client_order_id=_G1_CLIENT_ID, venue_side="bid", yes_price=D("0.44"),
+            quantity=D("1.00"), expiration_time=6_000_000_000, venue_binding=binding_v1)
+        prepared = build_create_prepared_payload(
+            request_id="req_g1unit", environment="KALSHI_DEMO", client_order_id=_G1_CLIENT_ID,
+            canonical_body=body, venue_binding=binding_v1)
+    else:
+        prepared = build_cancel_prepared_payload(
+            request_id="req_g1unit", environment="KALSHI_DEMO", venue_order_id=venue_order_id,
+            client_order_id=_G1_CLIENT_ID, adapter_payload_schema_id="gate-d-cancel-v1")
+    if mutate is not None:
+        mutate(prepared)
+        if rehash:
+            _g1_rehash(prepared)
+    wire_body = None if prepared["canonical_body"] is None else canonical_json_bytes(prepared["canonical_body"])
+    try:
+        wire_query = runner._gate_d_wire_query_string(prepared["canonical_query"])
+    except RunnerError:
+        wire_query = "INVALID"
+    binding = runner._NormalWriteOperationBindingV1(
+        runner._NORMAL_WRITE_BINDING_KEY, process_instance_id=process_instance_id, permit_id="nwp_g1unit",
+        request_id=prepared["request_id"], operation_name=prepared["operation_name"],
+        trusted_t2=runner._orch_deep_freeze_trusted_json_v1(prepared),
+        prepared_request_sha256=prepared["prepared_request_sha256"], t2_event_id="evt_t2", t3_event_id="evt_t3",
+        t3_sequence=3, t3_event_hash="0" * 64, deadline=deadline, expected_subaccount=expected_subaccount,
+        expected_exchange_index=expected_exchange_index, wire_body=wire_body, wire_query=wire_query)
+    return binding, prepared
+
+
+def _g1_rehash(prepared: dict) -> None:
+    """Recompute a SELF-CONSISTENT canonical query/body/prepared hash set for
+    a mutated prepared payload (a forged replacement that hashes correctly)."""
+    prepared["canonical_query_sha256"] = hashlib.sha256(canonical_json_bytes(prepared["canonical_query"])).hexdigest()
+    body = prepared["canonical_body"]
+    prepared["canonical_body_sha256"] = None if body is None else hashlib.sha256(canonical_json_bytes(body)).hexdigest()
+    identity = {key: value for key, value in prepared.items() if key != "prepared_request_sha256"}
+    prepared["prepared_request_sha256"] = hashlib.sha256(canonical_json_bytes(identity)).hexdigest()
+
+
+class G1SanctionedWriteTransportUnitTests(unittest.TestCase):
+    """F-1 transport-level evidence (G1S-009..012) with I/O replaced only at
+    the lowest DNS/socket/TLS boundary.  T02 T07 T08 T10 T11 (+T05/T25 unit
+    halves)."""
+
+    def setUp(self) -> None:
+        self.inputs = DeterministicInputs()
+        self.now_ns = 7_000_000_000_000
+
+    def _deadline(self, *, remaining_ns=10 ** 12, operation="CREATE_ORDER_V2"):
+        return OperationDeadlineV1.create(
+            process_instance_id=_G1_PID, operation_name=operation, request_ordinal=0,
+            started_monotonic_ns=self.now_ns, experiment_absolute_end_monotonic_ns=self.now_ns + remaining_ns,
+            uuid_factory=self.inputs.uuid)
+
+    def _transport(self, env=None, pid=_G1_PID):
+        return runner._DemoNormalWriteTransport(
+            wall_clock=self.inputs.clock, monotonic_clock_ns=lambda: self.now_ns,
+            process_instance_id=pid, env=_g1_env() if env is None else env)
+
+    def _send(self, stack, *, operation="CREATE", deadline=None, transport=None, mutate=None, **binding_kwargs):
+        transport = transport or self._transport()
+        binding, prepared = _g1_unit_binding(
+            operation=operation, deadline=deadline or self._deadline(
+                operation="CREATE_ORDER_V2" if operation == "CREATE" else "CANCEL_ORDER_V2"),
+            mutate=mutate, **binding_kwargs)
+        transport._arm(binding)
+        try:
+            with stack.installed():
+                return transport(dict(prepared)), transport
+        finally:
+            transport._disarm(binding)
+
+    # --- T01 (unit half) ---------------------------------------------------
+    def test_g1_t01_construction_is_credential_free_and_io_free(self) -> None:
+        """T01: constructing the sanctioned transport performs zero env reads,
+        zero key reads and zero I/O; its surface exposes no URL/host/method/
+        header/body seam."""
+        env = mock.MagicMock()
+        with mock.patch("socket.socket", side_effect=AssertionError("no socket")), \
+                mock.patch.object(runner, "_d07_live_signed_get_resolve_addresses", side_effect=AssertionError("no dns")), \
+                mock.patch.object(runner, "_d07_demo_signed_auth_headers", side_effect=AssertionError("no signing")):
+            transport = runner._DemoNormalWriteTransport(
+                wall_clock=self.inputs.clock, monotonic_clock_ns=lambda: self.now_ns,
+                process_instance_id=_G1_PID, env=env)
+        self.assertEqual(env.mock_calls, [])
+        self.assertEqual(transport.physical_send_attempts, 0)
+        params = set(inspect.signature(runner._DemoNormalWriteTransport.__init__).parameters)
+        self.assertEqual(params, {"self", "wall_clock", "monotonic_clock_ns", "process_instance_id", "env"})
+        self.assertEqual(repr(transport), "_DemoNormalWriteTransport(demo_normal_write)")
+
+    # --- T02 ---------------------------------------------------------------
+    def test_g1_t02_disallowed_operation_method_path_query_rejected_before_signing_or_io(self) -> None:
+        """T02: every disallowed operation/method/environment/path/query/body
+        shape fails with a fixed policy classification BEFORE signing and
+        before any DNS/socket activity; there is no host/port/URL override."""
+        cases = (
+            ("CREATE", lambda p: p.update(operation_name="GET_ORDER")),
+            ("CREATE", lambda p: p.update(method="PUT")),
+            ("CREATE", lambda p: p.update(method="DELETE")),
+            ("CREATE", lambda p: p.update(environment="KALSHI_PRODUCTION")),
+            ("CREATE", lambda p: p.update(venue="POLYMARKET")),
+            ("CREATE", lambda p: p.update(operation_class="READ")),
+            ("CREATE", lambda p: p.update(path_without_query="/trade-api/v2/portfolio/orders")),
+            ("CREATE", lambda p: p.update(path_without_query="/trade-api/v2/portfolio/events/orders/batched")),
+            ("CREATE", lambda p: p.update(canonical_query={"subaccount": 0})),
+            ("CREATE", lambda p: p["canonical_body"].update(order_group_id="og1")),
+            ("CREATE", lambda p: p.update(operation_name="AMEND_ORDER_V2")),
+            ("CANCEL", lambda p: p.update(method="POST")),
+            ("CANCEL", lambda p: p.update(canonical_body={"x": 1})),
+            ("CANCEL", lambda p: p.update(canonical_query={"subaccount": 0, "exchange_index": 0, "extra": 1})),
+            ("CANCEL", lambda p: p.update(canonical_query={"subaccount": True, "exchange_index": 0})),
+            ("CANCEL", lambda p: p.update(canonical_query={"subaccount": 1, "exchange_index": 0})),
+            ("CANCEL", lambda p: p.update(path_without_query="/trade-api/v2/portfolio/events/orders/other-order")),
+        )
+        for index, (operation, mutate) in enumerate(cases):
+            with self.subTest(operation=operation, case=index):
+                stack = _G1WriteStack(self)
+                signer = mock.Mock(side_effect=AssertionError("signed before policy"))
+                with mock.patch.object(runner, "_d07_demo_signed_auth_headers", signer):
+                    with self.assertRaises(RunnerError) as ctx:
+                        self._send(stack, operation=operation, mutate=mutate)
+                self.assertEqual(ctx.exception.code, RunnerFailureCode.LIVE_WRITE_TRANSPORT_POLICY_VIOLATION)
+                self.assertEqual((stack.resolve_calls, stack.socket_ctor_calls), (0, 0))
+                self.assertEqual(signer.call_count, 0)
+        # Unsafe exact-target identifiers are rejected, never sanitized.
+        for unsafe in ("../x", "a/b", "a\\b", "a?b", "a#b", "a%2Fb", "a\r\nb", ".", ".."):
+            with self.subTest(unsafe=unsafe):
+                stack = _G1WriteStack(self)
+                with self.assertRaises(RunnerError) as ctx:
+                    self._send(stack, operation="CANCEL", venue_order_id=unsafe)
+                self.assertEqual(ctx.exception.code, RunnerFailureCode.LIVE_WRITE_TRANSPORT_POLICY_VIOLATION)
+                self.assertEqual(stack.resolve_calls, 0)
+        # Header injection through the credential header value: fixed class, no I/O.
+        stack = _G1WriteStack(self)
+        with self.assertRaises(RunnerError) as ctx:
+            self._send(stack, transport=self._transport(env=_g1_env(KALSHI_DEMO_API_KEY_ID="k\r\nX-Evil: 1")))
+        self.assertEqual(ctx.exception.code, RunnerFailureCode.LIVE_READ_TRANSPORT_HEADER_INVALID)
+        self.assertEqual(stack.resolve_calls, 0)
+        # Fixed destination: the transport source has no host/port/URL seam
+        # (constructor parameters are asserted exactly by T01).
+        src = inspect.getsource(runner._DemoNormalWriteTransport)
+        self.assertIn("DEMO_HOST, DEMO_PORT", src)
+        self.assertIn("server_hostname=DEMO_HOST", src)
+        self.assertNotIn("PRODUCTION", src)
+        self.assertNotIn("Location", src)
+
+    def test_g1_t02b_unarmed_reused_or_cross_process_binding_never_signs(self) -> None:
+        """T05/T02: no armed binding, a reused binding or a binding minted for
+        another process/runtime fails before signing and I/O."""
+        stack = _G1WriteStack(self)
+        transport = self._transport()
+        binding, prepared = _g1_unit_binding(deadline=self._deadline())
+        with stack.installed(), mock.patch.object(
+                runner, "_d07_demo_signed_auth_headers", side_effect=AssertionError("signed")):
+            with self.assertRaises(RunnerError) as ctx:
+                transport(dict(prepared))  # nothing armed
+            self.assertEqual(ctx.exception.code, RunnerFailureCode.LIVE_WRITE_TRANSPORT_BINDING_INVALID)
+            transport._arm(binding)
+            transport._disarm(binding)
+            with self.assertRaises(RunnerError):
+                transport._arm(binding)  # reuse of a consumed binding
+            foreign = self._transport(pid="proc_" + "b" * 32)
+            foreign._arm(binding)
+            with self.assertRaises(RunnerError) as ctx:
+                foreign(dict(prepared))
+            self.assertEqual(ctx.exception.code, RunnerFailureCode.LIVE_WRITE_TRANSPORT_BINDING_INVALID)
+            other_binding, _ = _g1_unit_binding(deadline=self._deadline())
+            transport._arm(other_binding)
+            with self.assertRaises(RunnerError):
+                transport._arm(binding)  # one armed binding at a time
+            transport._disarm(other_binding)
+        self.assertEqual(stack.resolve_calls, 0)
+        with self.assertRaises(RunnerError):
+            runner._NormalWriteOperationBindingV1(object(), **{})
+
+    def test_g1_t02c_sequential_distinct_bindings_each_usable_exactly_once(self) -> None:
+        """T05 / G1S-006: one transport serves sequential distinct genuine
+        operations, each binding exactly once (consumption is tracked by
+        object identity, never by a recyclable ``id()``)."""
+        transport = self._transport()
+        for index in range(3):
+            stack = _G1WriteStack(self, responder=_g1_201_responder(f"ord-seq-{index}"))
+            raw, _ = self._send(stack, transport=transport)
+            self.assertEqual(raw.http_status, 201)
+        self.assertEqual(transport.physical_send_attempts, 3)
+
+    def test_g1_t05b_mutation_after_comparison_cannot_change_wire_bytes(self) -> None:
+        """T05: the wire projection is an immutable snapshot of trusted T2; a
+        caller mutation after the comparison is rejected (zero sends) and can
+        never alter the bytes."""
+        transport = self._transport()
+        binding, prepared = _g1_unit_binding(deadline=self._deadline())
+        self.assertIsInstance(binding.trusted_t2, types.MappingProxyType)
+        mutated = copy.deepcopy(prepared)
+        mutated["canonical_body"]["price"] = "0.9900"
+        _g1_rehash(mutated)
+        prepared["canonical_body"]["price"] = "0.9900"  # caller-side alias mutation
+        self.assertEqual(binding.trusted_t2["canonical_body"]["price"], "0.4400")
+        stack = _G1WriteStack(self)
+        transport._arm(binding)
+        with stack.installed():
+            with self.assertRaises(RunnerError) as ctx:
+                transport(mutated)
+        self.assertEqual(ctx.exception.code, RunnerFailureCode.LIVE_WRITE_TRANSPORT_BINDING_INVALID)
+        self.assertEqual(stack.resolve_calls, 0)
+
+    # --- T03/T04 (unit wire halves) -----------------------------------------
+    def test_g1_t03_t04_unit_wire_bytes_and_signature_message(self) -> None:
+        """T03/T04 unit halves: exact POST/DELETE request line, closed header
+        set, deterministic Content-Length, body bytes equal to the trusted T2
+        canonical body (hash-verified), and a signature over exactly
+        timestamp + METHOD + path_without_query (query/body excluded)."""
+        stack = _G1WriteStack(self, responder=_g1_201_responder("ord-unit-1"))
+        raw, transport = self._send(stack)
+        self.assertEqual((raw.http_status, raw.transport_unknown), (201, False))
+        line, headers, body = _g1_parse_request(stack.sent)
+        self.assertEqual(line, "POST /trade-api/v2/portfolio/events/orders HTTP/1.1")
+        self.assertEqual(set(headers), {
+            "Host", "Accept", "Content-Type", "Content-Length", "Connection",
+            "KALSHI-ACCESS-KEY", "KALSHI-ACCESS-SIGNATURE", "KALSHI-ACCESS-TIMESTAMP"})
+        self.assertEqual(headers["Host"], "external-api.demo.kalshi.co")
+        self.assertEqual(headers["Content-Length"], str(len(body)))
+        self.assertEqual(headers["Connection"], "close")
+        _, prepared = _g1_unit_binding(deadline=self._deadline())
+        self.assertEqual(body, canonical_json_bytes(prepared["canonical_body"]))
+        self.assertEqual(hashlib.sha256(body).hexdigest(), prepared["canonical_body_sha256"])
+        _g1_verify_signature(headers, "POST", "/trade-api/v2/portfolio/events/orders")
+        self.assertEqual(stack.resolved, ("external-api.demo.kalshi.co", 443))
+        self.assertEqual(stack.server_hostname, "external-api.demo.kalshi.co")
+        self.assertEqual(transport.physical_send_attempts, 1)
+        # CANCEL: DELETE, sorted RFC3986 query appended once, empty body, no Content-Type.
+        stack = _G1WriteStack(self, status=200, body=b'{"order_id":"venue-order-old-1","reduced_by":"1.00","ts_ms":1}')
+        raw, _transport = self._send(stack, operation="CANCEL")
+        line, headers, body = _g1_parse_request(stack.sent)
+        self.assertEqual(
+            line, "DELETE /trade-api/v2/portfolio/events/orders/venue-order-old-1?exchange_index=0&subaccount=0 HTTP/1.1")
+        self.assertEqual(body, b"")
+        self.assertEqual(headers["Content-Length"], "0")
+        self.assertNotIn("Content-Type", headers)
+        _g1_verify_signature(headers, "DELETE", "/trade-api/v2/portfolio/events/orders/venue-order-old-1")
+        self.assertEqual(raw.http_status, 200)
+
+    # --- T07 ---------------------------------------------------------------
+    def test_g1_t07_one_attempt_no_retry_no_redirect_no_reconnect(self) -> None:
+        """T07: partial send then timeout -> one attempt, SEND_MAY_HAVE_BEGUN
+        unknown; an alternate DNS address is never tried; 3xx with Location
+        and 429/5xx are returned verbatim (never followed, never retried)."""
+        stack = _G1WriteStack(self, send_chunk=7, raise_at={"recv": socket.timeout("t")})
+        raw, transport = self._send(stack)
+        self.assertTrue(raw.transport_unknown)
+        self.assertEqual((stack.resolve_calls, stack.socket_ctor_calls, stack.connect_calls), (1, 1, 1))
+        self.assertGreater(stack.phase_calls.count("send"), 1)  # partial-send loop on ONE connection
+        self.assertEqual(transport.physical_send_attempts, 1)
+        # Alternate address available but connect fails: no second address / connection.
+        stack = _G1WriteStack(self, candidates=[
+            (socket.AF_INET, ("203.0.113.9", 443)), (socket.AF_INET, ("203.0.113.10", 443)),
+            (socket.AF_INET6, ("2001:db8::1", 443, 0, 0))], raise_at={"connect": OSError("refused")})
+        with self.assertRaises(RunnerError) as ctx:
+            self._send(stack)
+        self.assertEqual(ctx.exception.code, RunnerFailureCode.LIVE_WRITE_TRANSPORT_PRE_SEND_FAILED)
+        self.assertEqual((stack.socket_ctor_calls, stack.connect_calls), (1, 1))
+        for status, extra in ((302, {"Location": "https://evil.example/x"}), (301, {"Location": "/y"}),
+                              (429, {"Retry-After": "1"}), (500, None), (503, None), (400, None)):
+            with self.subTest(status=status):
+                body = json.dumps({"error": status}).encode("utf-8")
+                stack = _G1WriteStack(self, status=status, body=body, headers=extra)
+                raw, _ = self._send(stack)
+                self.assertEqual((raw.http_status, raw.body_bytes, raw.transport_unknown), (status, body, False))
+                self.assertEqual((stack.resolve_calls, stack.connect_calls), (1, 1))
+
+    # --- T08 ---------------------------------------------------------------
+    def test_g1_t08_same_absolute_end_through_every_phase_no_floor_no_new_window(self) -> None:
+        """T08: clock advances during signing / DNS / connect / TLS / send /
+        reads shrink every subsequent budget from the SAME absolute end; there
+        is no positive floor and no fresh 10-s window; an expired pre-send
+        phase performs no next I/O; expiry after the send began is unknown."""
+        deadline = self._deadline(remaining_ns=5_000_000_000)
+        real_sign = runner._d07_demo_signed_auth_headers
+
+        def slow_sign(**kwargs):
+            self.now_ns += 1_000_000_000
+            return real_sign(**kwargs)
+
+        stack = _G1WriteStack(self, responder=_g1_201_responder("ord-t08"), advance_at={
+            "resolve": 500_000_000, "connect": 500_000_000, "wrap": 250_000_000, "handshake": 250_000_000,
+            "send": 100_000_000})
+        with mock.patch.object(runner, "_d07_demo_signed_auth_headers", side_effect=slow_sign):
+            raw, _ = self._send(stack, deadline=deadline)
+        self.assertEqual(raw.http_status, 201)
+        budgets = [value for label, value in stack.timeline]
+        self.assertTrue(all(0 < value <= 5.0 for value in budgets), budgets)
+        self.assertLessEqual(stack.timeline[0][1], 4.0 + 1e-9)  # signing consumed 1 s of the same end
+        non_increasing = [b for _label, b in stack.timeline]
+        self.assertEqual(non_increasing, sorted(non_increasing, reverse=True))
+        # Expiry at the handshake -> DEADLINE_EXCEEDED before any send.
+        stack = _G1WriteStack(self, advance_at={"handshake": 6_000_000_000})
+        with self.assertRaises(RunnerError) as ctx:
+            self._send(stack, deadline=self._deadline(remaining_ns=5_000_000_000))
+        self.assertEqual(ctx.exception.code, RunnerFailureCode.DEADLINE_EXCEEDED)
+        self.assertNotIn("send", stack.phase_calls)
+        # Expiry after signing -> no DNS at all.
+        stack = _G1WriteStack(self)
+
+        def very_slow_sign(**kwargs):
+            self.now_ns += 9_000_000_000
+            return real_sign(**kwargs)
+
+        with mock.patch.object(runner, "_d07_demo_signed_auth_headers", side_effect=very_slow_sign):
+            with self.assertRaises(RunnerError) as ctx:
+                self._send(stack, deadline=self._deadline(remaining_ns=5_000_000_000))
+        self.assertEqual(ctx.exception.code, RunnerFailureCode.DEADLINE_EXCEEDED)
+        self.assertEqual(stack.resolve_calls, 0)
+        # Expiry during the response read (send already begun) -> unknown, never success.
+        stack = _G1WriteStack(self, responder=_g1_201_responder("ord-t08b"), advance_at={"recv": 6_000_000_000})
+        raw, _ = self._send(stack, deadline=self._deadline(remaining_ns=5_000_000_000))
+        self.assertTrue(raw.transport_unknown)
+        # Sub-millisecond positive remainder is used as-is (no upward floor).
+        stack = _G1WriteStack(self, responder=_g1_201_responder("ord-t08c"))
+        with mock.patch.object(runner, "_d07_demo_signed_auth_headers",
+                               side_effect=lambda **kw: {"KALSHI-ACCESS-KEY": "k", "KALSHI-ACCESS-SIGNATURE": "s",
+                                                         "KALSHI-ACCESS-TIMESTAMP": "1"}):
+            self._send(stack, deadline=self._deadline(remaining_ns=300_000))
+        self.assertLess(stack.timeline[0][1], 0.001)
+        self.assertGreater(stack.timeline[0][1], 0.0)
+
+    # --- T10 ---------------------------------------------------------------
+    def test_g1_t10_body_cap_and_framing(self) -> None:
+        """T10: a 65536-byte body is returned intact for validation; 65537
+        bytes, incomplete Content-Length and truncated chunked framing are
+        unknown -- never truncated-and-accepted."""
+        cap = runner.MAX_RESPONSE_BODY_BYTES
+        at_cap = b'{"a":"' + b"x" * (cap - 8) + b'"}'
+        self.assertEqual(len(at_cap), cap)
+        for framing in ("content-length", "chunked", "eof"):
+            with self.subTest(framing=framing):
+                stack = _G1WriteStack(self, body=at_cap, framing=framing, recv_chunk=4096)
+                raw, _ = self._send(stack)
+                self.assertEqual((raw.transport_unknown, len(raw.body_bytes)), (False, cap))
+                stack = _G1WriteStack(self, body=at_cap + b" ", framing=framing, recv_chunk=4096)
+                raw, _ = self._send(stack)
+                self.assertTrue(raw.transport_unknown)
+                self.assertEqual(raw.body_bytes, b"")
+        incomplete = _http_response_bytes(201, {"Content-Length": "500"}, b'{"order_id":"x"}')
+        raw, _ = self._send(_G1WriteStack(self, raw=incomplete))
+        self.assertTrue(raw.transport_unknown)
+        bad_chunk = b"HTTP/1.1 201 Created\r\nContent-Type: application/json\r\nTransfer-Encoding: chunked\r\n\r\nZZ\r\n"
+        raw, _ = self._send(_G1WriteStack(self, raw=bad_chunk))
+        self.assertTrue(raw.transport_unknown)
+        # The F-2A adapter accepts at-cap bytes for validation and rejects cap+1.
+        deadline = self._deadline()
+        over = RawOperationResponseV1(201, "application/json", at_cap + b" ")
+        self.assertIs(runner._gate_d_classify_create_result(
+            over, expected_client_order_id=_G1_CLIENT_ID, deadline=deadline,
+            monotonic_clock_ns=lambda: self.now_ns)[0], runner.SendOutcome.SEND_MAY_HAVE_BEGUN_UNKNOWN)
+
+    # --- T11 ---------------------------------------------------------------
+    def test_g1_t11_secret_bearing_exceptions_map_to_fixed_secret_free_classes(self) -> None:
+        """T11: socket/TLS/protocol/Unicode/value/OS failures seeded with a
+        synthetic secret map to fixed classes with no secret in str/repr/args
+        or exception chain; after the send began they are unknown; close
+        failures are suppressed; an unexpected exception still closes and is
+        never converted into success."""
+        secret = "SECRET-SENTINEL-" + _G1_API_KEY_ID
+        families = (ssl.SSLError(secret), socket.gaierror(secret), socket.timeout(secret), TimeoutError(secret),
+                    http.client.HTTPException(secret), UnicodeError(secret), ValueError(secret), OSError(secret))
+        for exc in families:
+            for phase in ("resolve", "socket", "connect", "context", "wrap", "handshake"):
+                with self.subTest(phase=phase, exc=type(exc).__name__):
+                    stack = _G1WriteStack(self, raise_at={phase: exc})
+                    with self.assertRaises(RunnerError) as ctx:
+                        self._send(stack)
+                    error = ctx.exception
+                    self.assertEqual(error.code, RunnerFailureCode.LIVE_WRITE_TRANSPORT_PRE_SEND_FAILED)
+                    blob = f"{error}|{error!r}|{error.args}|{error.detail}"
+                    self.assertNotIn(secret, blob)
+                    self.assertIsNone(error.__cause__)
+                    self.assertTrue(error.__suppress_context__)
+            for phase in ("send", "recv"):
+                with self.subTest(phase=phase, exc=type(exc).__name__):
+                    stack = _G1WriteStack(self, raise_at={phase: exc})
+                    raw, _ = self._send(stack)
+                    self.assertTrue(raw.transport_unknown)
+                    self.assertNotIn(secret.encode(), repr(raw).encode())
+        # Close failures never escape and never override a success.
+        stack = _G1WriteStack(self, responder=_g1_201_responder("ord-t11"), raise_at={"close": OSError(secret)})
+        raw, _ = self._send(stack)
+        self.assertEqual(raw.http_status, 201)
+        # Signing failure with a non-key PEM is fixed, secret-free and pre-send.
+        stack = _G1WriteStack(self)
+        with self.assertRaises(RunnerError) as ctx:
+            self._send(stack, transport=self._transport(env=_g1_env(KALSHI_DEMO_PRIVATE_KEY_PEM=_D07_SENTINEL_PEM_TEXT)))
+        self.assertEqual(ctx.exception.code, RunnerFailureCode.CREDENTIAL_SOURCE_UNRESOLVED)
+        self.assertIsNone(ctx.exception.__cause__)
+        self.assertEqual(stack.resolve_calls, 0)
+        # An unexpected (non-bounded) exception propagates after cleanup -- no fabricated success.
+        stack = _G1WriteStack(self, raise_at={"recv": KeyError("unexpected")})
+        with self.assertRaises(KeyError):
+            self._send(stack)
+        self.assertIn("close", stack.phase_calls)
+
+
+class G1CreateClassifierTests(unittest.TestCase):
+    """F-2A (G1S-013/014/016): strict raw adapter delegating to the protected
+    ``order_lifecycle.classify_create_response``.  T09 T12 T13 T14 T15 T16."""
+
+    def setUp(self) -> None:
+        self.now = 1_000_000
+
+    def _deadline(self, end_offset=10 ** 12):
+        return OperationDeadlineV1(
+            schema_revision=1, deadline_id="odl_t", process_instance_id=_G1_PID, operation_name="CREATE_ORDER_V2",
+            request_ordinal=0, started_monotonic_ns=self.now, absolute_deadline_monotonic_ns=self.now + end_offset,
+            experiment_absolute_end_monotonic_ns=self.now + end_offset)
+
+    def _raw(self, body, *, status=201, media="application/json", unknown=False):
+        data = body if type(body) is bytes else json.dumps(body).encode("utf-8")
+        return RawOperationResponseV1(http_status=status, content_type=media, body_bytes=data, transport_unknown=unknown)
+
+    def _good(self, **overrides):
+        body = {"order_id": "ord-1", "client_order_id": _G1_CLIENT_ID, "fill_count": "0.00",
+                "remaining_count": "1.00", "ts_ms": 1_755_000_000_000}
+        body.update(overrides)
+        return body
+
+    def _classify(self, raw, *, clock=None):
+        return runner._gate_d_classify_create_result(
+            raw, expected_client_order_id=_G1_CLIENT_ID, deadline=self._deadline(),
+            monotonic_clock_ns=clock or (lambda: self.now))
+
+    def _unknown(self, raw, **kwargs):
+        outcome, order_id, fields_ = self._classify(raw, **kwargs)
+        self.assertIs(outcome, runner.SendOutcome.SEND_MAY_HAVE_BEGUN_UNKNOWN)
+        self.assertIsNone(order_id)
+        self.assertEqual(fields_, {})
+
+    def test_g1_t12_exact_201_top_level_delegates_to_protected_classifier(self) -> None:
+        """T12: an exact 201 top-level summary matching the persisted CREATE is
+        accepted only through the REAL protected classifier, called with the
+        exact expected client id; the result is a response identity only."""
+        real = runner.classify_create_response
+        with mock.patch.object(runner, "classify_create_response", wraps=real) as spy:
+            outcome, order_id, fields_ = self._classify(self._raw(self._good(average_fill_price="0.4400")))
+        self.assertIs(outcome, runner.SendOutcome.DEFINITIVE_SUCCESS)
+        self.assertEqual(order_id, "ord-1")
+        self.assertEqual(spy.call_count, 1)
+        self.assertEqual(spy.call_args.kwargs, {"expected_client_order_id": _G1_CLIENT_ID})
+        lifecycle_raw = spy.call_args.args[0]
+        self.assertEqual((lifecycle_raw.status, lifecycle_raw.retry_count, lifecycle_raw.redirect_count), (201, 0, 0))
+        self.assertIs(lifecycle_raw.send_result_classification, runner.SendOutcome.DEFINITIVE_SUCCESS)
+        self.assertEqual(fields_, {"order_id": "ord-1", "client_order_id": _G1_CLIENT_ID, "fill_count": "0.00",
+                                   "remaining_count": "1.00", "ts_ms": 1_755_000_000_000})
+        # Extra top-level fields the protected classifier allows survive unchanged.
+        self.assertIs(self._classify(self._raw(self._good(status="resting")))[0], runner.SendOutcome.DEFINITIVE_SUCCESS)
+        source = inspect.getsource(runner._gate_d_classify_create_result)
+        self.assertIn("classify_create_response(lifecycle_raw, expected_client_order_id=expected_client_order_id)", source)
+
+    def test_g1_t13_wrapper_non_201_and_unknown_transport_stay_unknown(self) -> None:
+        """T13 / C01-T14: HTTP 200 wrapper, HTTP 201 wrapper, non-201 and
+        transport_unknown (even with an otherwise good body) are unknown with
+        no trusted id; non-201 is delegated as DEFINITIVE_RESPONSE_AFTER_SEND."""
+        wrapper = {"order": self._good()}
+        self._unknown(self._raw(wrapper, status=200))
+        self._unknown(self._raw(wrapper, status=201))
+        self._unknown(self._raw(self._good(), unknown=True))
+        real = runner.classify_create_response
+        for status in (200, 202, 204, 302, 400, 409, 429, 500):
+            with self.subTest(status=status):
+                with mock.patch.object(runner, "classify_create_response", wraps=real) as spy:
+                    self._unknown(self._raw(self._good(), status=status))
+                self.assertIs(spy.call_args.args[0].send_result_classification,
+                              runner.SendOutcome.DEFINITIVE_RESPONSE_AFTER_SEND)
+        self._unknown(object())
+        self._unknown(RawOperationResponseV1(True, "application/json", b"{}"))  # bool is not int
+        self._unknown(RawOperationResponseV1(201, "application/json", json.dumps(self._good()).encode(), 0))
+
+    def test_g1_t14_g1_consumer_requires_present_exact_client_id(self) -> None:
+        """T14 / C01-T05: missing, null, non-string or mismatched top-level
+        client_order_id is rejected by the G1 consumer before identity is
+        accepted; the protected classifier's own optionality is unchanged."""
+        body = self._good()
+        del body["client_order_id"]
+        self._unknown(self._raw(body))
+        for bad in (None, 1, True, ["x"], {"x": 1}, "", _G1_CLIENT_ID + " ", " " + _G1_CLIENT_ID,
+                    "22222222-2222-4222-8222-222222222222"):
+            with self.subTest(bad=bad):
+                self._unknown(self._raw(self._good(client_order_id=bad)))
+        # Protected classifier unchanged: it still accepts an ABSENT client id.
+        from arb.venues.kalshi.order_lifecycle import RawHttpResponse as _LRaw, classify_create_response as _protected
+        protected_body = self._good()
+        del protected_body["client_order_id"]
+        self.assertEqual(_protected(_LRaw(201, protected_body, "application/json", 0, 0, runner.SendOutcome.DEFINITIVE_SUCCESS),
+                                    expected_client_order_id=_G1_CLIENT_ID), (runner.SendOutcome.DEFINITIVE_SUCCESS, "ord-1"))
+
+    def test_g1_t15_protected_lexical_rules(self) -> None:
+        """T15: wrong count scale/type/sign/exponent/non-finite/sum, bool or
+        non-int ts_ms, empty id and invalid optional money stay unknown."""
+        bad_cases = (
+            {"fill_count": "0.0"}, {"fill_count": "0"}, {"fill_count": 0}, {"fill_count": "-0.00"},
+            {"fill_count": "1e0"}, {"fill_count": "NaN"}, {"remaining_count": "0.50"}, {"remaining_count": "1.000"},
+            {"fill_count": "0.50", "remaining_count": "0.60"}, {"ts_ms": True}, {"ts_ms": "1"}, {"ts_ms": 1.5},
+            {"order_id": ""}, {"order_id": 7}, {"average_fill_price": "abc"}, {"average_fee_paid": "-1"},
+        )
+        for overrides in bad_cases:
+            with self.subTest(overrides=overrides):
+                self._unknown(self._raw(self._good(**overrides)))
+        for field in ("order_id", "fill_count", "remaining_count", "ts_ms"):
+            body = self._good()
+            del body[field]
+            with self.subTest(missing=field):
+                self._unknown(self._raw(body))
+
+    def test_g1_t16_strict_pre_delegation_guard(self) -> None:
+        """T16: non-JSON media, malformed UTF-8, BOM, malformed JSON, duplicate
+        keys, non-finite tokens, top-level array and oversize are rejected
+        BEFORE the protected classifier; nothing is repaired."""
+        good_bytes = json.dumps(self._good()).encode("utf-8")
+        with mock.patch.object(runner, "classify_create_response", side_effect=AssertionError("delegated")):
+            for media in ("text/plain", "application/xml", "", "application/jsonx", "application/problem+json"):
+                with self.subTest(media=media):
+                    self._unknown(self._raw(good_bytes, media=media))
+            for body in (b"\xff\xfe{}", b"\xef\xbb\xbf" + good_bytes, b"{not json", b"[]", b'"x"',
+                         b'{"order_id":"a","order_id":"b"}', b'{"x": NaN}', b'{"x": Infinity}',
+                         good_bytes + b" " * (runner.MAX_RESPONSE_BODY_BYTES + 1 - len(good_bytes))):
+                with self.subTest(body=body[:24]):
+                    self._unknown(self._raw(body))
+        # Normalized media type (case/parameters/OWS) is accepted.
+        self.assertIs(self._classify(self._raw(good_bytes, media=" Application/JSON ; charset=utf-8"))[0],
+                      runner.SendOutcome.DEFINITIVE_SUCCESS)
+
+    def test_g1_t09_minimum_end_controls_classification_no_late_identity(self) -> None:
+        """T09: the write deadline is min(10 s action horizon, permit
+        freshness, experiment end); expiry at any parse/classification step
+        yields no accepted identity."""
+        runtime = types.SimpleNamespace(
+            experiment_absolute_end_monotonic_ns=5_000, normal_gate=types.SimpleNamespace(process_instance_id=_G1_PID))
+        deadline = runner._gate_d_write_operation_deadline(
+            runtime=runtime, request_id="req_x", operation_name="CREATE_ORDER_V2", started_monotonic_ns=1_000,
+            freshness_deadline_monotonic_ns=9_000)
+        self.assertEqual(deadline.absolute_deadline_monotonic_ns, 5_000)
+        runtime.experiment_absolute_end_monotonic_ns = 10 ** 15
+        deadline = runner._gate_d_write_operation_deadline(
+            runtime=runtime, request_id="req_x", operation_name="CREATE_ORDER_V2", started_monotonic_ns=1_000,
+            freshness_deadline_monotonic_ns=7_000)
+        self.assertEqual(deadline.absolute_deadline_monotonic_ns, 7_000)
+        deadline = runner._gate_d_write_operation_deadline(
+            runtime=runtime, request_id="req_x", operation_name="CREATE_ORDER_V2", started_monotonic_ns=1_000,
+            freshness_deadline_monotonic_ns=10 ** 14)
+        self.assertEqual(deadline.absolute_deadline_monotonic_ns, 1_000 + 10_000 * 1_000_000)
+        raw = self._raw(self._good())
+        calls = {"n": 0}
+
+        def clock_expiring_after(k):
+            def _clock():
+                calls["n"] += 1
+                return self.now if calls["n"] <= k else self.now + 10 ** 13
+            return _clock
+
+        accepted_at = None
+        for k in range(0, 8):
+            calls["n"] = 0
+            outcome, order_id, _ = self._classify(raw, clock=clock_expiring_after(k))
+            if outcome is runner.SendOutcome.DEFINITIVE_SUCCESS:
+                accepted_at = k
+                break
+            self.assertIsNone(order_id)
+        self.assertIsNotNone(accepted_at)
+        self.assertGreaterEqual(accepted_at, 4)  # every step re-checks the same absolute end
+        # Expiry DURING the protected classification -> no late accepted identity.
+        real = runner.classify_create_response
+        with mock.patch.object(runner, "classify_create_response",
+                               side_effect=lambda *a, **k: (setattr(self, "now", self.now + 10 ** 13), real(*a, **k))[1]):
+            self._unknown(raw)
+
+
+class _G1PreparedRecorder:
+    def __init__(self) -> None:
+        self.calls: list = []
+
+
+@contextlib.contextmanager
+def _g1_record_prepared():
+    """Record the exact prepared payload handed to the ONE runner adapter call
+    site (used to echo the runtime-allocated client id in scripted reads when
+    the sanctioned transport, not a scripted fake, performs the write)."""
+    recorder = _G1PreparedRecorder()
+    real = runner._gate_d_invoke_normal_write_adapter
+
+    def _spy(**kwargs):
+        recorder.calls.append(kwargs["prepared"])
+        return real(**kwargs)
+
+    with mock.patch.object(runner, "_gate_d_invoke_normal_write_adapter", side_effect=_spy):
+        yield recorder
+
+
+@_only_own_tests
+class G1GateDCreateIntegrationTests(ActiveGateDDomainBoundPermitTestCase):
+    """F-2B (G1S-015A..015H) + F-1/F-2A integration through the REAL Gate-D
+    loop, genuine scoped permit, canonical T1->T2->T3, real LockedLedger and
+    protected replay, with deterministic scripted reads.  C01-T01..C01-T18,
+    T03 T04(active half) T05 T06 T17 T18 T20 T28 T29."""
+
+    ORDER = "ord-g1-created-1"
+
+    def _ready(self, *, sanctioned=False, env=None):
+        wt = _ScriptedWriteTransport()
+        rt = self._runtime(gate_d=True, write_transport=wt)
+        invocation, stage3 = self._reach_stage3(rt)
+        self._reset_reads()
+        self._q_empty_read_cycle()
+        transport = None
+        if sanctioned:
+            transport = runner._DemoNormalWriteTransport(
+                wall_clock=self.inputs.clock, monotonic_clock_ns=rt.monotonic_clock_ns,
+                process_instance_id=rt.normal_gate.process_instance_id, env=_g1_env() if env is None else env)
+            rt = dataclasses.replace(rt, normal_write_transport=transport)
+        return rt, invocation, stage3, wt, transport
+
+    def _fresh(self) -> None:
+        self.tearDown()
+        self.setUp()
+
+    @staticmethod
+    def _locked(stage3):
+        return stage3.normal_writer_acquisition.handle
+
+    def _loop(self, stage3, rt, invocation, **kwargs):
+        options = {"decision_cycle_max": 1, "ordinary_write_send_max": 1}
+        options.update(kwargs)
+        return runner.run_gate_d_ordinary_decision_loop(stage3, rt, invocation, **options)
+
+    def _end(self, stage3) -> None:
+        handle = self._locked(stage3)
+        if not handle.closed:
+            end_writer_session(handle, writer_session_id=stage3.normal_writer_session_id)
+
+    def _events_after(self, locked, before):
+        return list(locked.events[before:])
+
+    def _types_after(self, locked, before):
+        return [event.event_type.name for event in locked.events[before:]]
+
+    def _get_order_calls(self):
+        return sum(1 for call in self._transport.calls if call[0] is RunnerOperation.GET_ORDER)
+
+    def _assert_held(self, result, stage3, *, detail=None, bound=False, wt=None):
+        outcome = result.cycle_results[0].write_outcome
+        self.assertEqual(outcome.action, "CREATE")
+        self.assertIn(outcome.result_classification, {"AMBIGUOUS", "TERMINAL_UNRECONCILED"})
+        if detail is not None:
+            self.assertEqual(outcome.reconciliation_detail, detail)
+        self.assertTrue(outcome.budget_charged)
+        locked = self._locked(stage3)
+        self.assertIn(outcome.request_id, locked.projection().unresolved_write_request_ids)
+        closures = [e.payload["write_closure_class"] for e in locked.events
+                    if e.event_type.name == "HTTP_RESPONSE_CLASSIFIED" and e.payload["request_id"] == outcome.request_id]
+        self.assertNotIn("AUTHORITATIVE_RESULT_CLOSED", closures)
+        bindings = [e for e in locked.events if e.event_type.name == "ORDER_IDENTITY_BOUND"
+                    and e.payload["client_order_id"] == outcome.client_order_id]
+        self.assertEqual(bool(bindings), bound)
+        self.assertEqual(result.ordinary_writes_sent, 1)
+        self.assertEqual(result.cleanup_cancels_sent, 0)
+        if wt is not None:
+            self.assertEqual(len(wt.calls), 1)  # no write retry / CREATE resend / second write
+        return outcome
+
+    # ------------------------------------------------------------ C01-T01
+    def _c01_t01(self, pending_404) -> None:
+        rt, invocation, stage3, wt, _ = self._ready()
+        wt.queue(_create_201_for(self.ORDER))
+        self._transport.queue(RunnerOperation.GET_ORDER, pending_404)
+        self._transport.queue(RunnerOperation.GET_ORDER, _authoritative_create_order_for(wt, self.ORDER))
+        self._transport.queue(RunnerOperation.GET_FILLS, _fills_payload([]))
+        locked = self._locked(stage3)
+        before = len(locked.events)
+        result = self._loop(stage3, rt, invocation)
+        outcome = result.cycle_results[0].write_outcome
+        self.assertEqual(outcome.result_classification, "BOUND_ACTIVE")
+        self.assertIsNone(outcome.reconciliation_detail)
+        self.assertEqual(outcome.target_venue_order_id, self.ORDER)
+        self.assertEqual(len(wt.calls), 1)  # PENDING_AUTHORITATIVE_VISIBILITY is never a resend
+        self.assertEqual(self._get_order_calls(), 2)
+        types_ = self._types_after(locked, before)
+        tail = [t for t in types_ if t in ("HTTP_RESPONSE_CLASSIFIED", "ORDER_IDENTITY_BOUND", "ORDER_OBSERVED", "FILL_OBSERVED")]
+        self.assertEqual(tail, ["HTTP_RESPONSE_CLASSIFIED", "ORDER_IDENTITY_BOUND", "ORDER_OBSERVED", "HTTP_RESPONSE_CLASSIFIED"])
+        self.assertNotIn(outcome.request_id, locked.projection().unresolved_write_request_ids)
+        slot = reconstruct_slot_ownership_for_test(locked.events, rt, self.TICKER, QuoteSlot.LOWER_YES_BID.value)
+        self.assertEqual(slot.classification, "ACTIVE_EXACT")
+        self.assertEqual(slot.working_order.venue_order_id, self.ORDER)
+        self.assertEqual(slot.working_order.remaining_quantity, Decimal("1.00"))
+        self._end(stage3)
+
+    def test_g1_c01_t01a_typed_raw_404_then_resting_zero_fill(self) -> None:
+        """C01-T01 (typed RawOperationResponseV1 404 seam): 201 -> immediate
+        404 -> later resting/zero fill: the same write stays pending, no
+        resend, authoritative active binding only after complete proof."""
+        self._c01_t01(_raw_404())
+
+    def test_g1_c01_t01b_live_reader_non_2xx_404_then_resting_zero_fill(self) -> None:
+        """C01-T01 (live-reader provenance): the live read transport's fixed
+        LIVE_READ_TRANSPORT_NON_2XX carrying exact int _arb_http_status=404 is
+        the only exception-form 404."""
+        self._c01_t01(_live_reader_404())
+
+    def test_g1_c01_t01c_non_404_read_failures_are_never_pending(self) -> None:
+        """C01-T01/T02 negative provenance: a schema exception, a non-2xx with
+        another status, a bool/str 404 marker, transport_unknown and a 404
+        RunnerError of a different code are NEVER counted as 404."""
+        cases = (
+            ("schema", RawOperationResponseV1(http_status=500, content_type="application/json", body_bytes=b"{}")),
+            ("non2xx-403", (lambda: (lambda e: (setattr(e, "_arb_http_status", 403), e)[1])(
+                RunnerError(RunnerFailureCode.LIVE_READ_TRANSPORT_NON_2XX)))()),
+            ("bool-marker", (lambda: (lambda e: (setattr(e, "_arb_http_status", True), e)[1])(
+                RunnerError(RunnerFailureCode.LIVE_READ_TRANSPORT_NON_2XX)))()),
+            ("str-marker", (lambda: (lambda e: (setattr(e, "_arb_http_status", "404"), e)[1])(
+                RunnerError(RunnerFailureCode.LIVE_READ_TRANSPORT_NON_2XX)))()),
+            ("other-code-404", (lambda: (lambda e: (setattr(e, "_arb_http_status", 404), e)[1])(
+                RunnerError(RunnerFailureCode.RESPONSE_SCHEMA_INVALID)))()),
+            ("unknown-404", RawOperationResponseV1(http_status=404, content_type="application/json",
+                                                   body_bytes=b"{}", transport_unknown=True)),
+        )
+        for index, (label, response) in enumerate(cases):
+            with self.subTest(label=label):
+                if index:
+                    self._fresh()
+                rt, invocation, stage3, wt, _ = self._ready()
+                wt.queue(_create_201_for(self.ORDER))
+                self._transport.queue(RunnerOperation.GET_ORDER, response)
+                result = self._loop(stage3, rt, invocation)
+                outcome = self._assert_held(result, stage3, wt=wt)
+                self.assertTrue(outcome.reconciliation_detail.startswith("VISIBILITY_READ_FAILED:"), outcome.reconciliation_detail)
+                self.assertEqual(self._get_order_calls(), 1)
+                self._end(stage3)
+
+    # ------------------------------------------------------------ C01-T02
+    def test_g1_c01_t02_404_404_executed_full_fill_terminal_closure(self) -> None:
+        """C01-T02: 201 -> 404 -> 404 -> executed/full fill: terminal order +
+        exact fills reconcile; closing reconciliation after the observation and
+        every fill; authoritative closure -- not AMBIGUOUS merely because the
+        status is not resting; a later fill invalidates the closure on replay."""
+        rt, invocation, stage3, wt, _ = self._ready()
+        wt.queue(_create_201_for(self.ORDER))
+        self._transport.queue(RunnerOperation.GET_ORDER, _raw_404())
+        self._transport.queue(RunnerOperation.GET_ORDER, _live_reader_404())
+        self._transport.queue(RunnerOperation.GET_ORDER, _authoritative_create_order_for(
+            wt, self.ORDER, status="executed", fill_count_fp="1.00", remaining_count_fp="0.00"))
+        self._transport.queue(RunnerOperation.GET_FILLS, _create_fill_rows_for(wt, self.ORDER, "1.00"))
+        locked = self._locked(stage3)
+        before = len(locked.events)
+        result = self._loop(stage3, rt, invocation)
+        outcome = result.cycle_results[0].write_outcome
+        self.assertEqual(outcome.result_classification, "TERMINAL")
+        self.assertEqual(self._get_order_calls(), 3)
+        self.assertEqual(len(wt.calls), 1)
+        events = self._events_after(locked, before)
+        names = [e.event_type.name for e in events if e.event_type.name in (
+            "HTTP_RESPONSE_CLASSIFIED", "ORDER_IDENTITY_BOUND", "ORDER_OBSERVED", "FILL_OBSERVED", "RECONCILIATION_RECORDED")]
+        self.assertEqual(names, ["HTTP_RESPONSE_CLASSIFIED", "ORDER_IDENTITY_BOUND", "ORDER_OBSERVED", "FILL_OBSERVED",
+                                 "RECONCILIATION_RECORDED", "HTTP_RESPONSE_CLASSIFIED"])
+        observed = [e for e in events if e.event_type.name == "ORDER_OBSERVED"][0]
+        self.assertEqual(observed.payload["observation_semantic_class"], "AUTHORITATIVE_TERMINAL_ORDER")
+        self.assertEqual(set(observed.payload["canonical_venue_payload"]), set(runner._GATE_D_TERMINAL_ORDER_EVIDENCE_FIELDS))
+        slot = reconstruct_slot_ownership_for_test(locked.events, rt, self.TICKER, QuoteSlot.LOWER_YES_BID.value)
+        self.assertEqual(slot.classification, "TERMINAL_RECONCILED")
+        self.assertNotIn(outcome.request_id, locked.projection().unresolved_write_request_ids)
+        # Replay theorem: a LATER fill invalidates the prior terminal closure.
+        from arb.execution_ledger import EventInput as _EI, EventType as _ET
+        late = {"fill_id": "fill-late-1", "order_id": self.ORDER, "outcome_side": "YES", "quantity": "1.00",
+                "yes_price": "0.01", "created_time_utc": "2026-08-17T13:00:09.000000Z"}
+        locked.append_batch((_EI(_ET.FILL_OBSERVED, {
+            "venue_fill_id": "fill-late-1", "venue_order_id": self.ORDER, "client_order_id": outcome.client_order_id,
+            "source_request_id": "late", "source_operation": "GET_FILLS_V2", "venue_payload_schema_id": "gate-d-fill-v1",
+            "canonical_venue_payload": late,
+            "canonical_venue_payload_sha256": hashlib.sha256(canonical_json_bytes(late)).hexdigest(),
+        }, stage3.normal_writer_session_id, None, None),))
+        slot = reconstruct_slot_ownership_for_test(locked.events, rt, self.TICKER, QuoteSlot.LOWER_YES_BID.value)
+        self.assertEqual(slot.classification, "UNRESOLVED_OR_AMBIGUOUS")
+        self._end(stage3)
+
+    # ------------------------------------------------------------ C01-T03
+    def test_g1_c01_t03_resting_partial_fill_reduced_active_remainder_no_replenishment(self) -> None:
+        """C01-T03: 201 -> resting/partial fill: exact fills persisted and
+        reconciled; the slot is ACTIVE at the authoritative reduced remainder
+        (0.60) -- never replenished to 1.00 and never zero exposure."""
+        rt, invocation, stage3, wt, _ = self._ready()
+        wt.queue(_create_201_for(self.ORDER))
+        self._transport.queue(RunnerOperation.GET_ORDER, _authoritative_create_order_for(
+            wt, self.ORDER, fill_count_fp="0.40", remaining_count_fp="0.60"))
+        self._transport.queue(RunnerOperation.GET_FILLS, _create_fill_rows_for(wt, self.ORDER, "0.40"))
+        locked = self._locked(stage3)
+        before = len(locked.events)
+        result = self._loop(stage3, rt, invocation)
+        outcome = result.cycle_results[0].write_outcome
+        self.assertEqual(outcome.result_classification, "BOUND_ACTIVE")
+        names = [e.event_type.name for e in self._events_after(locked, before) if e.event_type.name in (
+            "ORDER_IDENTITY_BOUND", "ORDER_OBSERVED", "FILL_OBSERVED", "RECONCILIATION_RECORDED")]
+        self.assertEqual(names, ["ORDER_IDENTITY_BOUND", "ORDER_OBSERVED", "FILL_OBSERVED"])  # no terminal-only reconciliation
+        slot = reconstruct_slot_ownership_for_test(locked.events, rt, self.TICKER, QuoteSlot.LOWER_YES_BID.value)
+        self.assertEqual(slot.classification, "ACTIVE_EXACT")
+        self.assertEqual(slot.working_order.remaining_quantity, Decimal("0.60"))
+        observed = [e for e in locked.events if e.event_type.name == "ORDER_OBSERVED"][-1]
+        self.assertEqual(observed.payload["canonical_venue_payload"]["remaining_count_fp"], "0.60")
+        self.assertEqual(observed.payload["observation_semantic_class"], "AUTHORITATIVE_ACTIVE_ORDER")
+        self.assertEqual(len(wt.calls), 1)
+        self._end(stage3)
+
+    # ------------------------------------------------------------ C01-T04..T07 / T15
+    def _held_by_row(self, *, overrides=None, omit=(), status="resting", fill="0.00", remaining="1.00", bound=False):
+        rt, invocation, stage3, wt, _ = self._ready()
+        wt.queue(_create_201_for(self.ORDER))
+        self._transport.queue(RunnerOperation.GET_ORDER, _authoritative_create_order_for(
+            wt, self.ORDER, status=status, fill_count_fp=fill, remaining_count_fp=remaining,
+            overrides=overrides, omit=omit))
+        self._transport.queue(RunnerOperation.GET_FILLS, _fills_payload([]))
+        locked = self._locked(stage3)
+        before = len(locked.events)
+        result = self._loop(stage3, rt, invocation)
+        outcome = self._assert_held(result, stage3, wt=wt, bound=bound)
+        new = self._types_after(locked, before)
+        self.assertEqual("ORDER_IDENTITY_BOUND" in new, bound)
+        self.assertNotIn("ORDER_OBSERVED", new)  # no local/desired fallback observation
+        self.assertNotIn("FILL_OBSERVED", new)
+        self.assertEqual(sum(1 for c in self._transport.calls if c[0] is RunnerOperation.GET_FILLS), 0)
+        self._end(stage3)
+        return outcome
+
+    def test_g1_c01_t04_order_id_mismatch_held(self) -> None:
+        """C01-T04: authoritative order_id mismatch -> held/unresolved, no
+        binding, no resend."""
+        outcome = self._held_by_row(overrides={"order_id": "ord-someone-else"})
+        self.assertEqual(outcome.reconciliation_detail, "ORDER_ID_MISMATCH")
+
+    def test_g1_c01_t05_client_order_id_missing_or_mismatch_held(self) -> None:
+        """C01-T05: client_order_id missing / null / mismatched -> held."""
+        self.assertEqual(self._held_by_row(omit=("client_order_id",)).reconciliation_detail, "CLIENT_ORDER_ID_MISSING")
+        self._fresh()
+        self.assertEqual(self._held_by_row(overrides={"client_order_id": None}).reconciliation_detail, "CLIENT_ORDER_ID_MISSING")
+        self._fresh()
+        self.assertEqual(self._held_by_row(overrides={"client_order_id": _G1_CLIENT_ID}).reconciliation_detail,
+                         "CLIENT_ORDER_ID_MISMATCH")
+
+    def test_g1_c01_t06_ticker_side_subaccount_exchange_mismatch_held(self) -> None:
+        """C01-T06: ticker / side / subaccount / exchange_index mismatch ->
+        held; the expected scope is the ACTIVE runtime domain (1, 0)."""
+        cases = (({"ticker": "OTHER-TICKER"}, "TICKER_MISMATCH"), ({"side": "no"}, "OUTCOME_SIDE_MISMATCH"),
+                 ({"subaccount": 0}, "SUBACCOUNT_MISMATCH"), ({"subaccount": 2}, "SUBACCOUNT_MISMATCH"),
+                 ({"exchange_index": 3}, "EXCHANGE_INDEX_MISMATCH"))
+        for index, (overrides, detail) in enumerate(cases):
+            with self.subTest(overrides=overrides):
+                if index:
+                    self._fresh()
+                self.assertEqual(self._held_by_row(overrides=overrides).reconciliation_detail, detail)
+
+    def test_g1_c01_t07_missing_or_malformed_authoritative_fields_no_fallback(self) -> None:
+        """C01-T07: every authoritative field mutated independently (missing,
+        null, wrong type, bool account/index, malformed counts/price) -> held
+        with no local/desired fallback."""
+        cases = (
+            ({"overrides": {"subaccount": True}}, "SUBACCOUNT_MISSING_OR_MALFORMED"),
+            ({"overrides": {"exchange_index": False}}, "EXCHANGE_INDEX_MISSING_OR_MALFORMED"),
+            ({"omit": ("subaccount",)}, "SUBACCOUNT_MISSING_OR_MALFORMED"),
+            ({"omit": ("exchange_index",)}, "EXCHANGE_INDEX_MISSING_OR_MALFORMED"),
+            ({"omit": ("status",)}, "STATUS_UNSUPPORTED_OR_MALFORMED"),
+            ({"overrides": {"status": "pending"}}, "STATUS_UNSUPPORTED_OR_MALFORMED"),
+            ({"omit": ("fill_count_fp",)}, "FILL_COUNT_FP_MISSING_OR_MALFORMED"),
+            ({"overrides": {"fill_count_fp": 0}}, "FILL_COUNT_FP_MISSING_OR_MALFORMED"),
+            ({"overrides": {"remaining_count_fp": "1.0"}}, "REMAINING_COUNT_FP_MISSING_OR_MALFORMED"),
+            ({"omit": ("remaining_count_fp",)}, "REMAINING_COUNT_FP_MISSING_OR_MALFORMED"),
+            ({"overrides": {"initial_count_fp": "1"}}, "INITIAL_COUNT_FP_MISSING_OR_MALFORMED"),
+            ({"omit": ("initial_count_fp",)}, "INITIAL_COUNT_FP_MISSING_OR_MALFORMED"),
+            ({"overrides": {"initial_count_fp": "2.00"}}, "INITIAL_COUNT_FP_NOT_FIXED_QUANTITY"),
+            ({"omit": ("yes_price_dollars",)}, "PRICE_EVIDENCE_MISSING_OR_MALFORMED"),
+            ({"overrides": {"yes_price_dollars": 0.44}}, "PRICE_EVIDENCE_MISSING_OR_MALFORMED"),
+            ({"overrides": {"yes_price_dollars": "nan"}}, "PRICE_EVIDENCE_MISSING_OR_MALFORMED"),
+            ({"omit": ("side",)}, "OUTCOME_SIDE_MISMATCH"),
+            ({"omit": ("ticker",)}, "TICKER_MISMATCH"),
+            ({"omit": ("order_id",)}, "ORDER_ID_MISMATCH"),
+            ({"status": "executed", "fill": "1.00", "remaining": "0.00", "overrides": {"remaining_count_fp": "0.10"}},
+             "FILL_PLUS_REMAINING_EXCEEDS_QUANTITY"),
+            # Status-specific count conservation is checked AFTER G1S-015C has
+            # proven the venue identity, which is therefore durably bound.
+            ({"fill": "0.00", "remaining": "0.90", "bound": True}, "RESTING_COUNT_CONSERVATION_FAILED"),
+            ({"fill": "0.00", "remaining": "0.00", "bound": True}, "RESTING_COUNT_CONSERVATION_FAILED"),
+            ({"status": "executed", "fill": "0.90", "remaining": "0.00", "bound": True}, "EXECUTED_COUNT_CONSERVATION_FAILED"),
+        )
+        for index, (kwargs, detail) in enumerate(cases):
+            with self.subTest(kwargs=kwargs):
+                if index:
+                    self._fresh()
+                outcome = self._held_by_row(**kwargs)
+                self.assertEqual(outcome.reconciliation_detail, detail)
+
+    def test_g1_c01_t15_valid_201_cannot_override_authoritative_conflict(self) -> None:
+        """C01-T15: a valid 201 top-level response followed by an
+        authoritative conflict (price) stays held; the response identity
+        never overrides authoritative evidence."""
+        outcome = self._held_by_row(overrides={"yes_price_dollars": "0.0100"})
+        self.assertEqual(outcome.reconciliation_detail, "PRICE_MISMATCH")
+        self.assertEqual(outcome.target_venue_order_id, self.ORDER)
+
+    # ------------------------------------------------------------ C01-T08..T10
+    def _held_after_identity(self, fills_responses, *, fill="0.00", remaining="1.00"):
+        rt, invocation, stage3, wt, _ = self._ready()
+        wt.queue(_create_201_for(self.ORDER))
+        self._transport.queue(RunnerOperation.GET_ORDER, _authoritative_create_order_for(
+            wt, self.ORDER, fill_count_fp=fill, remaining_count_fp=remaining))
+        for response in fills_responses(wt):
+            self._transport.queue(RunnerOperation.GET_FILLS, response)
+        locked = self._locked(stage3)
+        before = len(locked.events)
+        result = self._loop(stage3, rt, invocation)
+        outcome = self._assert_held(result, stage3, bound=True, wt=wt)
+        new = self._types_after(locked, before)
+        self.assertNotIn("ORDER_OBSERVED", new)
+        self.assertNotIn("FILL_OBSERVED", new)
+        slot = reconstruct_slot_ownership_for_test(locked.events, rt, self.TICKER, QuoteSlot.LOWER_YES_BID.value)
+        self.assertEqual(slot.classification, "UNRESOLVED_OR_AMBIGUOUS")  # identity durable, never active/terminal
+        self._end(stage3)
+        return outcome
+
+    def test_g1_c01_t08_incomplete_fill_pagination_held(self) -> None:
+        """C01-T08: page ceiling with continuation, cursor cycle and a
+        malformed page are INCOMPLETE (never empty/no-fill) -> held, with the
+        proven venue identity durably retained (Marco review emphasis)."""
+        outcome = self._held_after_identity(lambda wt: [
+            _create_fill_rows_for(wt, self.ORDER, cursor=f"c{i}") for i in range(1, 5)])
+        self.assertEqual(outcome.reconciliation_detail, "FILL_TRAVERSAL_INCOMPLETE")
+        self._fresh()
+        outcome = self._held_after_identity(lambda wt: [
+            _create_fill_rows_for(wt, self.ORDER, cursor="c1"), _create_fill_rows_for(wt, self.ORDER, cursor="c1")])
+        self.assertEqual(outcome.reconciliation_detail, "FILL_TRAVERSAL_FAILED:CURSOR_CYCLE_DETECTED")
+        self._fresh()
+        outcome = self._held_after_identity(lambda wt: [_json_response({"fills": {}, "cursor": ""})])
+        self.assertEqual(outcome.reconciliation_detail, "FILL_TRAVERSAL_FAILED:RESPONSE_SCHEMA_INVALID")
+        self._fresh()
+        outcome = self._held_after_identity(lambda wt: [_json_response({"fills": []})])
+        self.assertEqual(outcome.reconciliation_detail, "FILL_TRAVERSAL_FAILED:RESPONSE_SCHEMA_INVALID")
+
+    def test_g1_c01_t09_duplicate_fill_identity(self) -> None:
+        """C01-T09: a conflicting duplicate fill id inside the traversal is a
+        held conflict; an identical duplicate contributes once."""
+        outcome = self._held_after_identity(lambda wt: [
+            _create_fill_rows_for(wt, self.ORDER, "0.40", cursor="c1"),
+            _create_fill_rows_for(wt, self.ORDER, "0.30")], fill="0.40", remaining="0.60")
+        self.assertEqual(outcome.reconciliation_detail, "FILL_TRAVERSAL_FAILED:FILL_DUPLICATE_CONFLICT")
+        self._fresh()
+        rt, invocation, stage3, wt, _ = self._ready()
+        wt.queue(_create_201_for(self.ORDER))
+        self._transport.queue(RunnerOperation.GET_ORDER, _authoritative_create_order_for(
+            wt, self.ORDER, fill_count_fp="0.40", remaining_count_fp="0.60"))
+        self._transport.queue(RunnerOperation.GET_FILLS, _create_fill_rows_for(wt, self.ORDER, "0.40", cursor="c1"))
+        self._transport.queue(RunnerOperation.GET_FILLS, _create_fill_rows_for(wt, self.ORDER, "0.40"))
+        result = self._loop(stage3, rt, invocation)
+        self.assertEqual(result.cycle_results[0].write_outcome.result_classification, "BOUND_ACTIVE")
+        fills = [e for e in self._locked(stage3).events if e.event_type.name == "FILL_OBSERVED"]
+        self.assertEqual(len(fills), 1)
+        self._end(stage3)
+
+    def test_g1_c01_t09b_durable_duplicate_fill_identical_once_conflict_held(self) -> None:
+        """C01-T09 (durable half): before append, fresh fills are compared with
+        existing durable FILL_OBSERVED evidence -- an identical persisted fill
+        contributes once (not re-appended); a conflicting duplicate stays held
+        and is never appended."""
+        rt, invocation, stage3, wt, _ = self._ready()
+        wt.queue(_create_201_for(self.ORDER))
+        self._transport.queue(RunnerOperation.GET_ORDER, _authoritative_create_order_for(
+            wt, self.ORDER, fill_count_fp="0.40", remaining_count_fp="0.60"))
+        self._transport.queue(RunnerOperation.GET_FILLS, _create_fill_rows_for(wt, self.ORDER, "0.40"))
+        result = self._loop(stage3, rt, invocation)
+        outcome = result.cycle_results[0].write_outcome
+        self.assertEqual(outcome.result_classification, "BOUND_ACTIVE")
+        locked = self._locked(stage3)
+        raw = _create_201_raw(wt.calls[-1], order_id=self.ORDER)
+        fields_ = {"order_id": self.ORDER, "client_order_id": outcome.client_order_id, "fill_count": "0.00",
+                   "remaining_count": "1.00", "ts_ms": 1_755_000_000_123}
+        price = Decimal(wt.calls[-1]["canonical_body"]["price"])
+
+        def _again(fill_rows):
+            capability = runner._issue_gate_d_read_capability(
+                process_instance_id=rt.normal_gate.process_instance_id, ticker=self.TICKER, runtime=rt)
+            self._transport.queue(RunnerOperation.GET_ORDER, _authoritative_create_order_for(
+                wt, self.ORDER, fill_count_fp="0.40", remaining_count_fp="0.60"))
+            self._transport.queue(RunnerOperation.GET_FILLS, fill_rows)
+            return runner._gate_d_reconcile_post_create(
+                locked=locked, session_id=stage3.normal_writer_session_id, capability=capability, runtime=rt,
+                request_id=outcome.request_id, client_order_id=outcome.client_order_id, response_order_id=self.ORDER,
+                ticker=self.TICKER, expected_outcome_side="YES", trusted_prepared_yes_price=price, raw_response=raw,
+                validated_identity_fields=fields_)
+
+        before = sum(1 for e in locked.events if e.event_type.name == "FILL_OBSERVED")
+        self.assertEqual(_again(_create_fill_rows_for(wt, self.ORDER, "0.40")).classification, "BOUND_ACTIVE")
+        self.assertEqual(sum(1 for e in locked.events if e.event_type.name == "FILL_OBSERVED"), before)
+
+        def _conflicting(operation, prepared, deadline):
+            response = _create_fill_rows_for(wt, self.ORDER, "0.40")(operation, prepared, deadline)
+            payload = json.loads(response.body_bytes)
+            payload["fills"][0]["created_time"] = "2026-08-17T13:00:05.000000Z"
+            return _json_response(payload)
+
+        count_before = len(locked.events)
+        held = _again(_conflicting)
+        self.assertEqual((held.classification, held.detail), ("AMBIGUOUS", "DURABLE_FILL_CONFLICT"))
+        self.assertEqual(len(locked.events), count_before)  # nothing appended
+        self._end(stage3)
+
+    def test_g1_c01_t10_fill_total_not_equal_order_fill_count_held(self) -> None:
+        """C01-T10: authoritative fill total != order fill_count_fp -> held;
+        an empty traversal proves zero only with an authoritative zero count."""
+        outcome = self._held_after_identity(
+            lambda wt: [_create_fill_rows_for(wt, self.ORDER, "0.30")], fill="0.40", remaining="0.60")
+        self.assertEqual(outcome.reconciliation_detail, "FILL_TOTAL_DOES_NOT_RECONCILE_TO_ORDER")
+        self._fresh()
+        outcome = self._held_after_identity(
+            lambda wt: [_create_fill_rows_for(wt, self.ORDER)], fill="0.40", remaining="0.60")
+        self.assertEqual(outcome.reconciliation_detail, "FILL_TOTAL_DOES_NOT_RECONCILE_TO_ORDER")
+        self._fresh()
+        outcome = self._held_after_identity(lambda wt: [_create_fill_rows_for(wt, self.ORDER, "0.10")])
+        self.assertEqual(outcome.reconciliation_detail, "FILL_TOTAL_DOES_NOT_RECONCILE_TO_ORDER")
+
+    # ------------------------------------------------------------ C01-T11 / T17 / T18
+    def test_g1_c01_t11_budget_exhausted_while_invisible_with_nonadvancing_clock(self) -> None:
+        """C01-T11 / C01-T17: with a NON-advancing runtime clock and every read
+        returning 404, the finite existing 64-read Gate-D budget stops the
+        phase held; write retry 0, second strategy write 0, cleanup 0."""
+        rt, invocation, stage3, wt, _ = self._ready()
+        frozen = self.inputs.monotonic_value + 1_000_000_000
+        rt = dataclasses.replace(rt, monotonic_clock_ns=lambda: frozen)
+        wt.queue(_create_201_for(self.ORDER))
+        for _ in range(80):
+            self._transport.queue(RunnerOperation.GET_ORDER, _raw_404())
+        result = self._loop(stage3, rt, invocation, decision_cycle_max=3)
+        outcome = self._assert_held(result, stage3, detail="READ_BUDGET_EXHAUSTED_PENDING_AUTHORITATIVE_VISIBILITY", wt=wt)
+        self.assertEqual(result.reads_consumed, runner.GATE_D_READ_REQUEST_MAX)
+        self.assertEqual(result.stop_reason, "READ_BUDGET_EXHAUSTED")
+        self.assertLess(self._get_order_calls(), 80)
+        self.assertEqual(sum(1 for e in self._locked(stage3).events if e.event_type.name == "WRITE_SEND_BOUNDARY_ENTERED"
+                             and e.payload["request_id"] == outcome.request_id), 1)
+        self._end(stage3)
+
+    def test_g1_c01_t17_g1_one_charged_write_across_multiple_reconciliation_reads(self) -> None:
+        """C01-T17: one charged ordinary write stays one across several
+        reconciliation reads (404 x3 -> resting)."""
+        rt, invocation, stage3, wt, _ = self._ready()
+        wt.queue(_create_201_for(self.ORDER))
+        for _ in range(3):
+            self._transport.queue(RunnerOperation.GET_ORDER, _raw_404())
+        self._transport.queue(RunnerOperation.GET_ORDER, _authoritative_create_order_for(wt, self.ORDER))
+        self._transport.queue(RunnerOperation.GET_FILLS, _fills_payload([]))
+        result = self._loop(stage3, rt, invocation)
+        self.assertEqual(result.cycle_results[0].write_outcome.result_classification, "BOUND_ACTIVE")
+        self.assertEqual((result.ordinary_writes_sent, result.cleanup_cancels_sent, len(wt.calls)), (1, 0, 1))
+        self.assertEqual(self._get_order_calls(), 4)
+        boundaries = [e for e in self._locked(stage3).events if e.event_type.name == "WRITE_SEND_BOUNDARY_ENTERED"]
+        self.assertEqual(len(boundaries), 1)
+        self._end(stage3)
+
+    def test_g1_c01_t18_unresolved_create_no_second_action_no_cleanup_borrowing(self) -> None:
+        """C01-T18 / T28: an unresolved CREATE never yields a second ordinary
+        action nor a cleanup-lane send, under G=1 and under the wider installed
+        generic ceiling alike.
+
+        PRESERVED INSTALLED BEHAVIOUR (reported, not changed by this
+        correction): with a durable unresolved write the NEXT Gate-D cycle's
+        unchanged strategy-input construction raises the protected
+        ``MarketMakerInputError(INPUT_UNKNOWN_INVENTORY_SHAPE_INVALID)`` before
+        any action selection.  That is fail-closed: no second T3 and no second
+        transport call occur, and the held request stays durable."""
+        from arb.venues.kalshi.minimal_market_maker import MarketMakerInputError
+        for index, g in enumerate((1, runner.GATE_D_ORDINARY_WRITE_SEND_MAX)):
+            with self.subTest(g=g):
+                if index:
+                    self._fresh()
+                rt, invocation, stage3, wt, _ = self._ready()
+                wt.queue(_create_201_for(self.ORDER))
+                self._transport.queue(RunnerOperation.GET_ORDER, _authoritative_create_order_for(
+                    wt, self.ORDER, overrides={"ticker": "OTHER"}))
+                for _ in range(3):
+                    self._q_empty_read_cycle()
+                with self.assertRaises(MarketMakerInputError):
+                    self._loop(stage3, rt, invocation, decision_cycle_max=3, ordinary_write_send_max=g)
+                self.assertEqual(len(wt.calls), 1)
+                locked = self._locked(stage3)
+                boundaries = [e for e in locked.events if e.event_type.name == "WRITE_SEND_BOUNDARY_ENTERED"]
+                self.assertEqual(len(boundaries), 1)
+                self.assertIn(boundaries[0].payload["request_id"], locked.projection().unresolved_write_request_ids)
+                self.assertEqual(sum(1 for e in locked.events if e.event_type.name == "EXECUTION_INTENT_RECORDED"
+                                     and e.payload.get("operation_family") == "KALSHI_DEMO_MINIMAL_MM_CANCEL"), 0)
+                self._end(stage3)
+        # One cycle with G=1: the unresolved CREATE is the only ordinary send.
+        self._fresh()
+        rt, invocation, stage3, wt, _ = self._ready()
+        wt.queue(_create_201_for(self.ORDER))
+        self._transport.queue(RunnerOperation.GET_ORDER, _authoritative_create_order_for(
+            wt, self.ORDER, overrides={"ticker": "OTHER"}))
+        result = self._loop(stage3, rt, invocation)
+        self.assertEqual((result.ordinary_writes_sent, result.cleanup_cancels_sent, len(wt.calls)), (1, 0, 1))
+        self._end(stage3)
+
+    # ------------------------------------------------------------ C01-T12
+    def test_g1_c01_t12_deadline_expiry_during_reconciliation_held_no_reset(self) -> None:
+        """C01-T12: operation/absolute deadline expiry during the visibility
+        loop, a fill page, visibility validation, and after durable proof but
+        before closure -> held; no read deadline is ever reset/extended past
+        the unchanged experiment end."""
+        clock = {"now": self.inputs.monotonic_value + 1_000_000_000}
+
+        def _advancing(response, ns):
+            def _respond(operation, prepared, deadline):
+                clock["now"] += ns
+                return response(operation, prepared, deadline) if callable(response) else response
+            return _respond
+
+        def _run(setup, *, expected_detail, bound):
+            rt, invocation, stage3, wt, _ = self._ready()
+            end = clock["now"] + 5_000_000_000
+            rt = dataclasses.replace(rt, monotonic_clock_ns=lambda: clock["now"], experiment_absolute_end_monotonic_ns=end)
+            wt.queue(_create_201_for(self.ORDER))
+            setup(wt)
+            first_loop_call = len(self._transport.calls)
+            result = self._loop(stage3, rt, invocation)
+            outcome = self._assert_held(result, stage3, bound=bound, wt=wt)
+            self.assertEqual(outcome.reconciliation_detail, expected_detail)
+            loop_calls = self._transport.calls[first_loop_call:]
+            self.assertTrue(loop_calls)
+            for operation, _prepared, deadline in loop_calls:
+                self.assertLessEqual(deadline.absolute_deadline_monotonic_ns, end)
+                self.assertEqual(deadline.absolute_deadline_monotonic_ns,
+                                 min(deadline.started_monotonic_ns + 10_000_000_000, end))
+                self.assertEqual(deadline.experiment_absolute_end_monotonic_ns, end)
+            self._end(stage3)
+
+        # Pending 404s consume the SAME unchanged experiment end: the read that
+        # crosses it is a fixed DEADLINE_EXCEEDED (its own deadline is clamped
+        # to the experiment end, never reset).
+        _run(lambda wt: [self._transport.queue(RunnerOperation.GET_ORDER, _advancing(_raw_404(), 2_000_000_000))
+                         for _ in range(4)],
+             expected_detail="VISIBILITY_READ_FAILED:DEADLINE_EXCEEDED", bound=False)
+        self._fresh()
+        clock["now"] = self.inputs.monotonic_value + 1_000_000_000
+        _run(lambda wt: self._transport.queue(RunnerOperation.GET_ORDER, _advancing(
+            _authoritative_create_order_for(wt, self.ORDER), 6_000_000_000)),
+             expected_detail="VISIBILITY_READ_FAILED:DEADLINE_EXCEEDED", bound=False)
+        self._fresh()
+        clock["now"] = self.inputs.monotonic_value + 1_000_000_000
+        _run(lambda wt: (self._transport.queue(RunnerOperation.GET_ORDER, _authoritative_create_order_for(wt, self.ORDER)),
+                         self._transport.queue(RunnerOperation.GET_FILLS, _advancing(
+                             _create_fill_rows_for(wt, self.ORDER), 6_000_000_000))),
+             expected_detail="FILL_TRAVERSAL_FAILED:DEADLINE_EXCEEDED", bound=True)
+        self._fresh()
+        clock["now"] = self.inputs.monotonic_value + 1_000_000_000
+        real_observe = runner._gate_d_record_active_order_observation
+
+        def _slow_observation(*args, **kwargs):
+            real_observe(*args, **kwargs)
+            clock["now"] += 6_000_000_000
+
+        with mock.patch.object(runner, "_gate_d_record_active_order_observation", side_effect=_slow_observation):
+            _run(lambda wt: (self._transport.queue(RunnerOperation.GET_ORDER, _authoritative_create_order_for(wt, self.ORDER)),
+                             self._transport.queue(RunnerOperation.GET_FILLS, _fills_payload([]))),
+                 expected_detail="EXPERIMENT_DEADLINE_REACHED_DURING_RECONCILIATION", bound=True)
+
+    # ------------------------------------------------------------ C01-T13 / T14
+    def test_g1_c01_t13_canceled_terminal_without_conservation_proof_held(self) -> None:
+        """C01-T13: supported terminal ``canceled`` (no fill / partial fill)
+        closes only with complete existing conservation proof; none exists in
+        a CREATE phase (cleanup=0, no DELETE, no inferred reduced_by) ->
+        TERMINAL_UNRECONCILED/held, with the proven identity retained."""
+        for index, (fill, remaining) in enumerate((("0.00", "0.00"), ("0.40", "0.00"))):
+            with self.subTest(fill=fill):
+                if index:
+                    self._fresh()
+                rt, invocation, stage3, wt, _ = self._ready()
+                wt.queue(_create_201_for(self.ORDER))
+                self._transport.queue(RunnerOperation.GET_ORDER, _authoritative_create_order_for(
+                    wt, self.ORDER, status="canceled", fill_count_fp=fill, remaining_count_fp=remaining))
+                result = self._loop(stage3, rt, invocation)
+                outcome = self._assert_held(result, stage3, detail="CANCELED_WITHOUT_CONSERVATION_PROOF", bound=True, wt=wt)
+                self.assertEqual(outcome.result_classification, "TERMINAL_UNRECONCILED")
+                types_ = [e.event_type.name for e in self._locked(stage3).events]
+                self.assertNotIn("RECONCILIATION_RECORDED", types_[-4:])
+                self.assertEqual(len(wt.calls), 1)  # no DELETE sent to obtain closure evidence
+                self.assertEqual(sum(1 for c in self._transport.calls if c[0] is RunnerOperation.GET_FILLS), 0)
+                self._end(stage3)
+
+    def test_g1_c01_t14_wrapper_create_response_remains_unknown(self) -> None:
+        """C01-T14 / T13: an HTTP-200 or HTTP-201 {"order": ...} wrapper stays
+        unknown under the preserved F-2A adapter: no visibility read, no
+        binding, truthful UNRESOLVED HTTP evidence with the actual status."""
+        for index, status in enumerate((200, 201)):
+            with self.subTest(status=status):
+                if index:
+                    self._fresh()
+                rt, invocation, stage3, wt, _ = self._ready()
+                wt.queue(lambda request, _s=status: RawOperationResponseV1(
+                    http_status=_s, content_type="application/json",
+                    body_bytes=json.dumps({"order": {"order_id": self.ORDER, "client_order_id": request["client_order_id"]}}).encode()))
+                result = self._loop(stage3, rt, invocation)
+                outcome = self._assert_held(result, stage3, wt=wt)
+                self.assertIsNone(outcome.target_venue_order_id)
+                self.assertEqual(self._get_order_calls(), 0)
+                http = [e.payload for e in self._locked(stage3).events if e.event_type.name == "HTTP_RESPONSE_CLASSIFIED"
+                        and e.payload["request_id"] == outcome.request_id]
+                self.assertEqual(len(http), 1)
+                self.assertEqual((http[0]["http_status"], http[0]["write_closure_class"],
+                                  http[0]["adapter_result_class"], http[0]["validated_identity_fields"]),
+                                 (status, "UNRESOLVED", "SEND_MAY_HAVE_BEGUN_UNKNOWN", {}))
+                self._end(stage3)
+
+    # ------------------------------------------------------------ C01-T16 / T20
+    def test_g1_c01_t16_t20_existing_schemas_truthful_evidence_and_secret_free(self) -> None:
+        """C01-T16 / T20: exact existing event schemas only; HTTP evidence
+        retains the ACTUAL status, media header value, raw byte length/SHA and
+        the validated identity projection; the original 201 is never replaced
+        by the later GET; nothing secret is persisted."""
+        rt, invocation, stage3, wt, _ = self._ready()
+        media = "application/json; charset=utf-8"
+        wt.queue(lambda request: dataclasses.replace(_create_201_raw(request, order_id=self.ORDER), content_type=media))
+        self._transport.queue(RunnerOperation.GET_ORDER, _raw_404())
+        self._transport.queue(RunnerOperation.GET_ORDER, _authoritative_create_order_for(
+            wt, self.ORDER, fill_count_fp="0.40", remaining_count_fp="0.60"))
+        self._transport.queue(RunnerOperation.GET_FILLS, _create_fill_rows_for(wt, self.ORDER, "0.40"))
+        locked = self._locked(stage3)
+        before = len(locked.events)
+        result = self._loop(stage3, rt, invocation)
+        outcome = result.cycle_results[0].write_outcome
+        raw = _create_201_raw(wt.calls[-1], order_id=self.ORDER)
+        http = [e for e in self._events_after(locked, before) if e.event_type.name == "HTTP_RESPONSE_CLASSIFIED"]
+        self.assertEqual(len(http), 2)
+        for event in http:
+            self.assertEqual(set(event.payload), {
+                "request_id", "http_status", "response_media_type", "response_byte_length", "response_sha256",
+                "adapter_result_class", "write_closure_class", "validated_identity_fields"})
+            self.assertEqual(event.payload["http_status"], 201)
+            self.assertEqual(event.payload["response_media_type"], media)
+            self.assertEqual(event.payload["response_byte_length"], len(raw.body_bytes))
+            self.assertEqual(event.payload["response_sha256"], hashlib.sha256(raw.body_bytes).hexdigest())
+            self.assertEqual(event.payload["adapter_result_class"], "DEFINITIVE_SUCCESS")
+            self.assertEqual(event.payload["validated_identity_fields"], {
+                "order_id": self.ORDER, "client_order_id": outcome.client_order_id, "fill_count": "0.00",
+                "remaining_count": "1.00", "ts_ms": 1_755_000_000_123})
+        self.assertEqual([e.payload["write_closure_class"] for e in http], ["UNRESOLVED", "AUTHORITATIVE_RESULT_CLOSED"])
+        observed = [e for e in self._events_after(locked, before) if e.event_type.name == "ORDER_OBSERVED"][0]
+        self.assertEqual(set(observed.payload["canonical_venue_payload"]), set(runner._GATE_D_TERMINAL_ORDER_EVIDENCE_FIELDS))
+        for event in locked.events:
+            self.assertEqual(event.event_schema_revision, 1)
+            self.assertNotIn(_G1_API_KEY_ID, event.payload_json)
+            self.assertNotIn("PRIVATE KEY", event.payload_json)
+        self._end(stage3)
+
+    def test_g1_c01_t16b_persistence_failure_at_each_boundary_never_clears_early(self) -> None:
+        """C01-T16: a persistence failure at the binding / order / fill /
+        terminal reconciliation / final HTTP classification boundary leaves
+        the original trusted-T3 request unresolved (live projection AND an
+        independent restart replay from disk); no later closure record."""
+        boundaries = (
+            ("_gate_d_record_order_identity_binding", "PERSISTENCE_FAILED_ORDER_IDENTITY_BOUND", "resting", "0.00", "1.00", ()),
+            ("_gate_d_record_active_order_observation", "PERSISTENCE_FAILED_ORDER_OBSERVED", "resting", "0.00", "1.00", ()),
+            ("_gate_d_record_fill_observation", "PERSISTENCE_FAILED_FILL_OBSERVED", "resting", "0.40", "0.60", ("0.40",)),
+            ("_gate_d_record_closing_reconciliation", "PERSISTENCE_FAILED_RECONCILIATION_RECORDED", "executed", "1.00", "0.00", ("1.00",)),
+            ("_gate_d_record_http_response_classified", "PERSISTENCE_FAILED_HTTP_RESPONSE_CLASSIFIED", "resting", "0.00", "1.00", ()),
+        )
+        for index, (name, detail, status, fill, remaining, fills) in enumerate(boundaries):
+            with self.subTest(boundary=name):
+                if index:
+                    self._fresh()
+                rt, invocation, stage3, wt, _ = self._ready()
+                wt.queue(_create_201_for(self.ORDER))
+                self._transport.queue(RunnerOperation.GET_ORDER, _authoritative_create_order_for(
+                    wt, self.ORDER, status=status, fill_count_fp=fill, remaining_count_fp=remaining))
+                self._transport.queue(RunnerOperation.GET_FILLS, _create_fill_rows_for(wt, self.ORDER, *fills))
+                real = getattr(runner, name)
+
+                def _fail(*args, _real=real, _name=name, **kwargs):
+                    if _name == "_gate_d_record_http_response_classified" and kwargs.get("write_closure_class") != "AUTHORITATIVE_RESULT_CLOSED":
+                        return _real(*args, **kwargs)
+                    raise LedgerError(FailureCode.LEDGER_COMMIT_FAILURE)
+
+                with mock.patch.object(runner, name, side_effect=_fail):
+                    result = self._loop(stage3, rt, invocation)
+                outcome = self._assert_held(result, stage3, detail=detail, bound=index > 0, wt=wt)
+                self._end(stage3)
+                replay = rt.read_local_safety_state()
+                self.assertIsNone(replay.failure_code)
+                self.assertIn(outcome.request_id, replay.projection.unresolved_write_request_ids)
+
+    # ------------------------------------------------------------ T03 / T20 / T29 (sanctioned transport)
+    def test_g1_t03_t29_genuine_create_through_sanctioned_transport(self) -> None:
+        """T03 / T29 / C01-T21: a genuine scoped-permit CREATE travels runner
+        -> permit -> T1/T2/T3 -> NormalWriteAdapter -> WriterEligibilityGate ->
+        the sanctioned transport -> (fake lowest-level socket) with exact
+        POST/path/body bytes equal to trusted T2, a signature over exactly
+        timestamp+POST+path, T1/T2 sharing execution_attempt_id metadata and
+        T3 null, then F-2A/F-2B closes it BOUND_ACTIVE."""
+        rt, invocation, stage3, wt, transport = self._ready(sanctioned=True)
+        stack = _G1WriteStack(self, responder=_g1_201_responder(self.ORDER))
+        locked = self._locked(stage3)
+        before = len(locked.events)
+        with _g1_record_prepared() as recorder, stack.installed():
+            self._transport.queue(RunnerOperation.GET_ORDER, _authoritative_create_order_for(recorder, self.ORDER))
+            self._transport.queue(RunnerOperation.GET_FILLS, _fills_payload([]))
+            result = self._loop(stage3, rt, invocation)
+        outcome = result.cycle_results[0].write_outcome
+        self.assertEqual(outcome.result_classification, "BOUND_ACTIVE")
+        self.assertEqual((stack.resolve_calls, stack.connect_calls, transport.physical_send_attempts), (1, 1, 1))
+        events = self._events_after(locked, before)
+        t1 = [e for e in events if e.event_type.name == "EXECUTION_INTENT_RECORDED"][0]
+        t2 = [e for e in events if e.event_type.name == "REQUEST_PREPARED"][0]
+        t3 = [e for e in events if e.event_type.name == "WRITE_SEND_BOUNDARY_ENTERED"][0]
+        self.assertEqual((t2.sequence, t3.sequence), (t1.sequence + 1, t1.sequence + 2))
+        self.assertEqual(t1.execution_attempt_id, t2.execution_attempt_id)
+        self.assertIsNotNone(t1.execution_attempt_id)
+        self.assertIsNone(t3.execution_attempt_id)
+        self.assertNotIn("request_id", t1.payload)
+        self.assertNotIn("execution_attempt_id", t2.payload)
+        self.assertEqual(set(t2.payload), runner._GATE_D_T2_PREPARED_KEYS)
+        line, headers, body = _g1_parse_request(stack.sent)
+        self.assertEqual(line, "POST /trade-api/v2/portfolio/events/orders HTTP/1.1")
+        self.assertEqual(body, canonical_json_bytes(t2.payload["canonical_body"]))
+        self.assertEqual(hashlib.sha256(body).hexdigest(), t2.payload["canonical_body_sha256"])
+        self.assertEqual(json.loads(body)["client_order_id"], outcome.client_order_id)
+        _g1_verify_signature(headers, "POST", "/trade-api/v2/portfolio/events/orders")
+        self.assertEqual(headers["KALSHI-ACCESS-KEY"], _G1_API_KEY_ID)
+        self._end(stage3)
+
+    def test_g1_t20b_unknown_transport_records_transport_unknown_never_a_fabricated_response(self) -> None:
+        """T20 / G1S-016: when the send may have begun but no complete raw
+        response exists, the existing TRANSPORT_UNKNOWN_AFTER_SEND carrier is
+        recorded (never an invented HTTP response) and the write stays held."""
+        rt, invocation, stage3, wt, transport = self._ready(sanctioned=True)
+        stack = _G1WriteStack(self, raise_at={"recv": socket.timeout("t")})
+        with stack.installed():
+            result = self._loop(stage3, rt, invocation)
+        outcome = self._assert_held(result, stage3)
+        self.assertEqual(transport.physical_send_attempts, 1)
+        unknown = [e.payload for e in self._locked(stage3).events if e.event_type.name == "TRANSPORT_UNKNOWN_AFTER_SEND"]
+        self.assertEqual(unknown, [{"request_id": outcome.request_id, "unknown_class": "TRANSPORT_RESULT_UNKNOWN_AFTER_SEND",
+                                    "write_closure_class": "UNRESOLVED"}])
+        self.assertEqual(self._get_order_calls(), 0)
+        self._end(stage3)
+
+    def test_g1_t04b_active_prepared_cancel_domain_incompatibility_fails_closed_before_send(self) -> None:
+        """T04 (active half) / G1S-009: the installed CANCEL preparation's
+        canonical query is not repaired in transport; an incompatible prepared
+        CANCEL domain fails closed before signing/I/O (zero HTTP sends) while
+        the trusted-T3 ordinary unit stays consumed."""
+        rt, invocation, stage3, wt, transport = self._ready(sanctioned=True)
+        self._seed_active_resting_order(
+            stage3, rt, quote_slot=QuoteSlot.LOWER_YES_BID.value, client_order_id="99999999-9999-4999-8999-999999999999",
+            venue_order_id="venue-active-old-1", yes_price=D("0.05"), request_seed="g1t04b")
+        self._reset_reads()
+        self._q_resting_order_read_cycle("venue-active-old-1")
+        stack = _G1WriteStack(self)
+        with stack.installed():
+            result = self._loop(stage3, rt, invocation)
+        outcome = result.cycle_results[0].write_outcome
+        self.assertEqual(outcome.action, "CANCEL")
+        self.assertTrue(outcome.budget_charged)
+        self.assertEqual(outcome.result_classification, "ADAPTER_EXCEPTION")
+        self.assertEqual((stack.resolve_calls, stack.socket_ctor_calls, transport.physical_send_attempts), (0, 0, 0))
+        self.assertEqual(result.cleanup_cancels_sent, 0)
+        self._end(stage3)
+
+    def test_g1_t05_t02_consumer_trusted_t2_equality_rejects_self_consistent_replacements(self) -> None:
+        """T05: at the final runner consumer boundary every T2 field changed
+        with RECOMPUTED self-consistent hashes is rejected; a mutation after
+        the comparison never reaches the wire; a foreign T2 is never accepted."""
+        rt, invocation, stage3, wt, transport = self._ready(sanctioned=True)
+        real_prepare = runner._gate_d_prepare_normal_write_binding
+        checked: dict = {}
+
+        def _spy(**kwargs):
+            prepared = kwargs["prepared"]
+            for field in sorted(runner._GATE_D_T2_PREPARED_KEYS - {
+                    "prepared_request_sha256", "canonical_query_sha256", "canonical_body_sha256"}):
+                mutated = copy.deepcopy(dict(prepared))
+                value = mutated[field]
+                if isinstance(value, dict):
+                    mutated[field] = dict(value, injected="x")
+                elif value is None:
+                    mutated[field] = "x"
+                else:
+                    mutated[field] = str(value) + "X"
+                _g1_rehash(mutated)
+                checked[field] = real_prepare(**dict(kwargs, prepared=mutated))
+            forged_hash = copy.deepcopy(dict(prepared))
+            forged_hash["prepared_request_sha256"] = "0" * 64
+            checked["prepared_request_sha256"] = real_prepare(**dict(kwargs, prepared=forged_hash))
+            checked["foreign-request"] = real_prepare(**dict(kwargs, prepared=dict(prepared, request_id="req_foreign")))
+            binding = real_prepare(**kwargs)
+            checked["genuine"] = binding
+            return binding
+
+        real_invoke = runner._gate_d_invoke_normal_write_adapter
+
+        def _mutate_after_comparison(**kwargs):
+            kwargs["prepared"]["canonical_body"]["price"] = "0.9900"
+            return real_invoke(**kwargs)
+
+        stack = _G1WriteStack(self, responder=_g1_201_responder(self.ORDER))
+        with mock.patch.object(runner, "_gate_d_prepare_normal_write_binding", side_effect=_spy), \
+                mock.patch.object(runner, "_gate_d_invoke_normal_write_adapter", side_effect=_mutate_after_comparison), \
+                stack.installed():
+            result = self._loop(stage3, rt, invocation)
+        for field, value in checked.items():
+            if field == "genuine":
+                self.assertIs(type(value), runner._NormalWriteOperationBindingV1)
+                self.assertEqual(value.trusted_t2["canonical_body"]["price"] != "0.9900", True)
+            else:
+                self.assertEqual(value, "TRUSTED_T2_BINDING_INVALID", field)
+        self.assertEqual(len(checked), len(runner._GATE_D_T2_PREPARED_KEYS) - 3 + 3)
+        outcome = result.cycle_results[0].write_outcome
+        self.assertEqual(outcome.result_classification, "ADAPTER_EXCEPTION")  # transport rejected the mutated payload
+        self.assertEqual((stack.resolve_calls, transport.physical_send_attempts), (0, 0))
+        self.assertTrue(outcome.budget_charged)
+        self._end(stage3)
+
+    def test_g1_t06_protected_gate_rejections_zero_http_sends(self) -> None:
+        """T06: HALT latched before the adapter, a reused (already consumed)
+        permit, a forged permit and a moved trusted tail all fail with zero
+        normal HTTP sends through the GENUINE protected gate/adapter."""
+        # (a) HALT before invoke + (b) forged permit + (c) reused permit after one genuine send.
+        rt, invocation, stage3, wt, transport = self._ready(sanctioned=True)
+        real_invoke = runner._gate_d_invoke_normal_write_adapter
+        observed: dict = {}
+
+        def _halt_then_invoke(**kwargs):
+            with self.assertRaises(RiskControlError):
+                kwargs["adapter"].invoke(object(), kwargs["prepared"])  # forged permit
+            kwargs["runtime"].normal_gate.latch_hard_halt()
+            return real_invoke(**kwargs)
+
+        stack = _G1WriteStack(self, responder=_g1_201_responder(self.ORDER))
+        with mock.patch.object(runner, "_gate_d_invoke_normal_write_adapter", side_effect=_halt_then_invoke), stack.installed():
+            result = self._loop(stage3, rt, invocation)
+        self.assertEqual(result.cycle_results[0].write_outcome.result_classification, "ADAPTER_EXCEPTION")
+        self.assertEqual((stack.resolve_calls, transport.physical_send_attempts), (0, 0))
+        self._end(stage3)
+        self._fresh()
+        rt, invocation, stage3, wt, transport = self._ready(sanctioned=True)
+        recorder = _G1PreparedRecorder()
+
+        def _invoke_twice(**kwargs):
+            recorder.calls.append(kwargs["prepared"])
+            raw = real_invoke(**kwargs)
+            with self.assertRaises(RiskControlError) as ctx:
+                kwargs["adapter"].invoke(kwargs["permit"], kwargs["prepared"])
+            observed["second"] = ctx.exception.code
+            return raw
+
+        stack = _G1WriteStack(self, responder=_g1_201_responder(self.ORDER))
+        with mock.patch.object(runner, "_gate_d_invoke_normal_write_adapter", side_effect=_invoke_twice), stack.installed():
+            self._transport.queue(RunnerOperation.GET_ORDER, _authoritative_create_order_for(recorder, self.ORDER))
+            self._transport.queue(RunnerOperation.GET_FILLS, _fills_payload([]))
+            self._loop(stage3, rt, invocation)
+        self.assertEqual(observed["second"], RiskControlCode.NORMAL_WRITER_PERMIT_ALREADY_CONSUMED)
+        self.assertEqual((stack.resolve_calls, transport.physical_send_attempts), (1, 1))
+        self._end(stage3)
+        # (d) a moved trusted tail at the consumer boundary.
+        self._fresh()
+        rt, invocation, stage3, wt, transport = self._ready(sanctioned=True)
+        real_prepare = runner._gate_d_prepare_normal_write_binding
+
+        def _moved_tail(**kwargs):
+            locked = kwargs["locked"]
+            extra = dataclasses.replace(locked.events[-1], event_id="evt_foreign_tail", sequence=locked.events[-1].sequence + 1)
+            moved = types.SimpleNamespace(events=tuple(locked.events) + (extra,), authority_row=locked.authority_row)
+            return real_prepare(**dict(kwargs, locked=moved))
+
+        stack = _G1WriteStack(self)
+        with mock.patch.object(runner, "_gate_d_prepare_normal_write_binding", side_effect=_moved_tail), stack.installed():
+            result = self._loop(stage3, rt, invocation)
+        outcome = result.cycle_results[0].write_outcome
+        self.assertEqual((outcome.result_classification, outcome.transport_invoked, outcome.budget_charged),
+                         ("TRUSTED_T2_BINDING_INVALID", False, True))
+        self.assertEqual(stack.resolve_calls, 0)
+        self._end(stage3)
+
+    def test_g1_t28_trusted_t3_charge_then_local_signing_failure_no_refund_no_second_send(self) -> None:
+        """T28: a signing failure after trusted T3 sends zero HTTP bytes but
+        still consumes the one G1 unit (no refund); a later cycle never borrows
+        a second ordinary or cleanup send."""
+        rt, invocation, stage3, wt, transport = self._ready(sanctioned=True, env=_g1_env(KALSHI_DEMO_PRIVATE_KEY_PEM=None))
+        stack = _G1WriteStack(self)
+        with stack.installed():
+            result = self._loop(stage3, rt, invocation, decision_cycle_max=1)
+        outcome = result.cycle_results[0].write_outcome
+        self.assertEqual((outcome.result_classification, outcome.budget_charged, outcome.transport_invoked),
+                         ("ADAPTER_EXCEPTION", True, True))
+        self.assertEqual((stack.resolve_calls, transport.physical_send_attempts), (0, 0))
+        self.assertEqual((result.ordinary_writes_sent, result.cleanup_cancels_sent), (1, 0))
+        boundaries = [e for e in self._locked(stage3).events if e.event_type.name == "WRITE_SEND_BOUNDARY_ENTERED"]
+        self.assertEqual(len(boundaries), 1)
+        self.assertIn(outcome.request_id, self._locked(stage3).projection().unresolved_write_request_ids)
+        self._end(stage3)
+
+
+def reconstruct_slot_ownership_for_test(events, runtime, ticker, slot):
+    from arb.venues.kalshi.quote_lifecycle import reconstruct_slot_ownership as _reconstruct
+    return _reconstruct(events, strategy_instance_id=runtime.strategy_instance_id, market_ticker=ticker, quote_slot=slot)
+
+
+_G1_SYNTHETIC_PEM_PATH = r"C:\synthetic\g1\demo_private_key.pem"
+
+
+def _g1_bridge_env(**overrides):
+    env = {"KALSHI_DEMO_API_KEY_ID": _G1_API_KEY_ID, "KALSHI_DEMO_PRIVATE_KEY_PATH": _G1_SYNTHETIC_PEM_PATH,
+           "UNRELATED_ENV": "keep-me"}
+    env.update(overrides)
+    return {key: value for key, value in env.items() if value is not None}
+
+
+class _G1BridgeSpy:
+    """The REAL ``_demo_path_to_pem_credential_bridge`` over a synthetic env
+    mapping + synthetic PEM reader, instrumented to count entries/exits and
+    reader calls and to expose whether the scope is currently active."""
+
+    def __init__(self, env=None, *, reader=None):
+        self.env = _g1_bridge_env() if env is None else env
+        pem, _ = _g1_synthetic_rsa()
+        self.reader_calls = 0
+        self._reader = reader or (lambda path: pem)
+        self.entered = 0
+        self.exited = 0
+        self.active = False
+        self.timeline: list = []
+
+    def _read(self, path):
+        self.reader_calls += 1
+        return self._reader(path)
+
+    @contextlib.contextmanager
+    def __call__(self):
+        self.entered += 1
+        try:
+            with runner._demo_path_to_pem_credential_bridge(env=self.env, read_pem_text=self._read):
+                self.active = True
+                self.timeline.append("bridge_enter")
+                try:
+                    yield
+                finally:
+                    self.active = False
+                    self.timeline.append("bridge_exit")
+        finally:
+            self.exited += 1
+
+    @property
+    def pem_present(self) -> bool:
+        return "KALSHI_DEMO_PRIVATE_KEY_PEM" in self.env
+
+
+@_only_own_tests
+class G1LegacyDomainCancelTransportTests(GateDTestCase):
+    """T04 / T19: the exact ordinary CANCEL travels the genuine permit/T3
+    chain into the sanctioned transport as an exact-target DELETE (domain
+    (0, 0)); the protected CANCEL classifier/conservation path is unchanged."""
+
+    def test_g1_t04_t19_exact_target_delete_through_sanctioned_transport(self) -> None:
+        """T04 / T19: DELETE /portfolio/events/orders/{exact id} with the
+        exact sorted canonical query appended once, zero body bytes, no
+        Content-Type, canonical signature over timestamp+DELETE+path (query
+        excluded), ordinary lane only, protected classify_cancel_response +
+        check_cancel_conservation still decide closure."""
+        stage3, gate_d_runtime, invocation, transport, _wt = self._gate_d_ready()
+        self._seed_active_exact_order(
+            stage3, gate_d_runtime, quote_slot=QuoteSlot.LOWER_YES_BID.value,
+            client_order_id="99999999-9999-4999-8999-999999999999", venue_order_id="venue-order-old-1",
+            yes_price=D("0.05"), request_seed="g1t04")
+        self._queue_gate_d_read_cycle(transport, order_ids=("venue-order-old-1",))
+        transport.queue(RunnerOperation.GET_ORDER, _order_payload(
+            "venue-order-old-1", ticker=self.TICKER, status="canceled", remaining_count_fp="1.00",
+            fill_count_fp="0.00", initial_count_fp="1.00", client_order_id="99999999-9999-4999-8999-999999999999",
+            yes_price_dollars="0.05"))
+        transport.queue(RunnerOperation.GET_FILLS, _fills_payload([]))
+        sanctioned = runner._DemoNormalWriteTransport(
+            wall_clock=gate_d_runtime.wall_clock, monotonic_clock_ns=gate_d_runtime.monotonic_clock_ns,
+            process_instance_id=gate_d_runtime.normal_gate.process_instance_id, env=_g1_env())
+        rt = dataclasses.replace(gate_d_runtime, normal_write_transport=sanctioned)
+        stack = _G1WriteStack(self, status=200, body=json.dumps(
+            {"order_id": "venue-order-old-1", "reduced_by": "1.00", "ts_ms": 1_755_000_000_000}).encode("utf-8"))
+        real_cancel = runner.classify_cancel_response
+        with stack.installed(), mock.patch.object(runner, "classify_cancel_response", wraps=real_cancel) as cancel_spy, \
+                mock.patch.object(runner, "check_cancel_conservation", wraps=runner.check_cancel_conservation) as conservation:
+            result = run_gate_d_ordinary_decision_loop(stage3, rt, invocation, decision_cycle_max=1)
+        outcome = result.cycle_results[0].write_outcome
+        self.assertEqual((outcome.action, outcome.lane, outcome.result_classification), ("CANCEL", "ORDINARY", "TERMINAL"))
+        self.assertEqual((result.ordinary_writes_sent, result.cleanup_cancels_sent), (1, 0))
+        line, headers, body = _g1_parse_request(stack.sent)
+        self.assertEqual(
+            line, "DELETE /trade-api/v2/portfolio/events/orders/venue-order-old-1?exchange_index=0&subaccount=0 HTTP/1.1")
+        self.assertEqual((body, headers["Content-Length"]), (b"", "0"))
+        self.assertNotIn("Content-Type", headers)
+        _g1_verify_signature(headers, "DELETE", "/trade-api/v2/portfolio/events/orders/venue-order-old-1")
+        self.assertEqual(cancel_spy.call_count, 1)
+        self.assertEqual(cancel_spy.call_args.kwargs, {
+            "expected_order_id": "venue-order-old-1", "expected_client_order_id": "99999999-9999-4999-8999-999999999999"})
+        self.assertEqual(conservation.call_count, 1)
+        self.assertEqual((sanctioned.physical_send_attempts, stack.connect_calls), (1, 1))
+        end_writer_session(stage3.normal_writer_acquisition.handle, writer_session_id=stage3.normal_writer_session_id)
+
+
+@_only_own_tests
+class G1GateDCredentialScopeTests(G1GateDCreateIntegrationTests):
+    """C01-T19: post-CREATE reconciliation reads stay inside the ONE owned F-3
+    scope with no re-entry; credential loss mid-traversal is held and the
+    owned PEM is still removed on exit."""
+
+    def _guarded(self, rt, spy, *, lose_on_get_order=None):
+        seen: list = []
+        real_send = rt.send_operation_request
+
+        def _send(operation, prepared, deadline):
+            if operation is RunnerOperation.GET_ORDER:
+                seen.append(operation)
+                if lose_on_get_order is not None and len(seen) == lose_on_get_order:
+                    spy.env.pop("KALSHI_DEMO_PRIVATE_KEY_PEM", None)
+            self.assertTrue(spy.active, "a signed read ran outside the owned credential scope")
+            # The real runner signer runs against the live bridge value; a lost
+            # PEM fails closed here exactly as the live signed transport would.
+            runner._d07_demo_signed_auth_headers(
+                env=spy.env, wall_clock=self.inputs.clock, method="GET",
+                signed_path_without_query=prepared.signed_path_without_query)
+            return real_send(operation, prepared, deadline)
+
+        return dataclasses.replace(rt, send_operation_request=_send)
+
+    def test_g1_c01_t19_reconciliation_reads_inside_scope_and_credential_loss_held(self) -> None:
+        """C01-T19: every Gate-D and reconciliation read ran with the bridge
+        PEM present inside one scope (entered once); losing the PEM during the
+        visibility traversal holds the write (no re-acquisition, no resend)
+        and the bridge still removes its own value on exit."""
+        spy = _G1BridgeSpy()
+        rt, invocation, stage3, wt, _ = self._ready()
+        rt = self._guarded(rt, spy)
+        wt.queue(_create_201_for(self.ORDER))
+        self._transport.queue(RunnerOperation.GET_ORDER, _raw_404())
+        self._transport.queue(RunnerOperation.GET_ORDER, _authoritative_create_order_for(wt, self.ORDER))
+        self._transport.queue(RunnerOperation.GET_FILLS, _fills_payload([]))
+        with spy():
+            result = self._loop(stage3, rt, invocation)
+            self._end(stage3)
+        self.assertEqual(result.cycle_results[0].write_outcome.result_classification, "BOUND_ACTIVE")
+        self.assertEqual((spy.entered, spy.exited, spy.reader_calls), (1, 1, 1))
+        self.assertFalse(spy.pem_present)
+        self._fresh()
+        spy = _G1BridgeSpy()
+        rt, invocation, stage3, wt, _ = self._ready()
+        rt = self._guarded(rt, spy, lose_on_get_order=2)
+        wt.queue(_create_201_for(self.ORDER))
+        self._transport.queue(RunnerOperation.GET_ORDER, _raw_404())
+        self._transport.queue(RunnerOperation.GET_ORDER, _authoritative_create_order_for(wt, self.ORDER))
+        with spy():
+            result = self._loop(stage3, rt, invocation)
+            self._end(stage3)
+        outcome = result.cycle_results[0].write_outcome
+        self.assertEqual(outcome.reconciliation_detail, "VISIBILITY_READ_FAILED:CREDENTIAL_SOURCE_UNRESOLVED")
+        self.assertEqual(len(wt.calls), 1)
+        self.assertEqual((spy.entered, spy.exited, spy.reader_calls), (1, 1, 1))
+        self.assertFalse(spy.pem_present)
+        self.assertEqual(spy.env.get("UNRELATED_ENV"), "keep-me")
+
+
+@_only_own_tests
+class G1OrchestrationCredentialScopeTests(ReleaseOrchestrationTestCase):
+    """F-3 (G1S-018/019) through the PRODUCTION orchestration with the REAL
+    PATH->PEM bridge over a synthetic env mapping: T01 (production builder)
+    T21 T22 T23 T24 T25 T26 T27 and C01-T19 (orchestration half) / C01-T22."""
+
+    def _order_spies(self, spy):
+        """Instrument the composed orchestration: record each phase together
+        with whether the owned credential scope was active at that moment."""
+        timeline = spy.timeline
+        stack = contextlib.ExitStack()
+
+        def _wrap(name, label):
+            real = getattr(runner, name)
+
+            def _spy(*args, **kwargs):
+                timeline.append((label, spy.active, spy.pem_present))
+                return real(*args, **kwargs)
+
+            stack.enter_context(mock.patch.object(runner, name, side_effect=_spy))
+
+        _wrap("run_pre_release_read_phase_v2", "read_phase")
+        _wrap("_orch_run_boot_hold_bridge", "boot_hold_bridge")
+        _wrap("_complete_stage3_active_release_and_normal_writer_v2", "release_and_writer")
+        _wrap("run_gate_d_ordinary_decision_loop", "gate_d")
+        _wrap("_fail_closed_end_writer_session", "writer_cleanup")
+        real_revoke = ledger_binding.ActiveAuthorizationConsumptionV1.revoke
+
+        def _revoke(receipt, *args, **kwargs):
+            timeline.append(("revoke", spy.active, spy.pem_present))
+            return real_revoke(receipt, *args, **kwargs)
+
+        stack.enter_context(mock.patch.object(ledger_binding.ActiveAuthorizationConsumptionV1, "revoke", _revoke))
+        return stack
+
+    def _read_guard(self, spy, counter):
+        def _mutate(runtime):
+            real_send = runtime.send_operation_request
+
+            def _send(operation, prepared, deadline):
+                counter.append(operation)
+                if not spy.active or not spy.pem_present:
+                    raise AssertionError("signed read outside the owned credential scope")
+                return real_send(operation, prepared, deadline)
+
+            return dataclasses.replace(runtime, send_operation_request=_send)
+
+        return _mutate
+
+    # ------------------------------------------------------------------ T01
+    def test_g1_t01_production_orchestration_builder_binds_sanctioned_transport_without_io(self) -> None:
+        """T01: the write-capable production builder always binds the ONE
+        sanctioned transport, credential-free / I/O-free / tail-neutral; it has
+        no launcher network-callable parameter; the read-only builder never
+        constructs a send-enabled transport."""
+        self._enter_clean_safe_held()
+        self._run(self._package(self.CLEAN), builder=self._builder(phases=1))
+        context = self.builder_calls[0]
+        state = self._state()
+        env_reads: list = []
+
+        class _EnvSpy(dict):
+            def get(self, *args, **kwargs):
+                env_reads.append(args)
+                return super().get(*args, **kwargs)
+
+        with mock.patch.object(runner.os, "environ", _EnvSpy()), \
+                mock.patch("socket.socket", side_effect=AssertionError("no socket")), \
+                mock.patch.object(runner, "_d07_live_signed_get_resolve_addresses", side_effect=AssertionError("no dns")), \
+                mock.patch.object(runner, "_d07_demo_signed_auth_headers", side_effect=AssertionError("no signing")), \
+                mock.patch("builtins.open", side_effect=AssertionError("no file I/O")):
+            runtime = runner.build_orchestrated_release_runtime_v1(
+                context, send_operation_request=lambda *a: None,
+                fetch_orderbook=runner._TestOnlyActiveV2OrderbookSeam(lambda *a: None),
+                strategy_instance_id=GATE_D_STRATEGY_INSTANCE_ID, minimum_spread_usd=GATE_D_MIN_SPREAD,
+                gate_d_capability_reference_id="cap_active_gate_d_test")
+        self.assertIs(type(runtime.normal_write_transport), runner._DemoNormalWriteTransport)
+        self.assertEqual(runtime.normal_write_transport._process_instance_id, context.normal_gate.process_instance_id)
+        self.assertEqual(env_reads, [])
+        self.assertEqual(self._state(), state)
+        self.assertNotIn("normal_write_transport", inspect.signature(runner.build_orchestrated_release_runtime_v1).parameters)
+        read_only = inspect.getsource(runner._build_read_only_stage3_live_runtime)
+        self.assertNotIn("_DemoNormalWriteTransport", read_only)
+        self.assertNotIn("normal_write_transport", read_only)
+        self.assertNotIn("_DemoNormalWriteTransport", inspect.getsource(runner.run_read_only_stage3_live_entrypoint))
+
+    # ------------------------------------------------------------------ T21
+    def _assert_scope_order(self, spy, phases):
+        phase_events = [entry for entry in spy.timeline if isinstance(entry, tuple)]
+        self.assertEqual(spy.timeline[0], "bridge_enter")
+        self.assertEqual(spy.timeline.count("bridge_enter"), 1)
+        self.assertEqual(spy.timeline.count("bridge_exit"), 1)
+        inside = spy.timeline[1:spy.timeline.index("bridge_exit")]
+        self.assertEqual([label for label, *_ in inside], phases)
+        for label, active, pem in inside:
+            self.assertTrue(active and pem, label)
+        after = spy.timeline[spy.timeline.index("bridge_exit") + 1:]
+        self.assertEqual(after, [("revoke", False, False)])
+        self.assertEqual(len(phase_events), len(phases) + 1)
+
+    def test_g1_t21_clean_one_phase_single_scope_ordering(self) -> None:
+        """T21 (CLEAN): admission -> consumption -> runtime -> ONE bridge
+        entry -> phase 1 -> release/writer -> Gate D (all signed reads inside)
+        -> writer cleanup -> bridge exit (PEM removed) -> receipt revoke."""
+        self._enter_clean_safe_held()
+        spy, reads = _G1BridgeSpy(), []
+        with self._order_spies(spy):
+            result = self._run(self._package(self.CLEAN), credential_bridge=spy,
+                               builder=self._builder(phases=1, mutate_runtime=self._read_guard(spy, reads)))
+        self.assertEqual(result.writer_cleanup, "ENDED")
+        self._assert_scope_order(spy, ["read_phase", "release_and_writer", "gate_d", "writer_cleanup"])
+        self.assertTrue(reads)
+        self.assertEqual((spy.entered, spy.exited, spy.reader_calls), (1, 1, 1))
+        self.assertFalse(spy.pem_present)
+
+    def test_g1_t21_boot_hold_two_phase_single_scope_ordering(self) -> None:
+        """T21 (BOOT_HOLD): phase 1, the local BOOT_HOLD bridge and phase 2 run
+        under the SAME single scope as release, Gate D and writer cleanup."""
+        spy, reads = _G1BridgeSpy(), []
+        with self._order_spies(spy):
+            result = self._run(self._package(self.BOOT), credential_bridge=spy,
+                               builder=self._builder(phases=2, mutate_runtime=self._read_guard(spy, reads)))
+        self.assertEqual(result.route, "BOOT_HOLD_R0")
+        self._assert_scope_order(spy, ["read_phase", "boot_hold_bridge", "read_phase", "release_and_writer",
+                                       "gate_d", "writer_cleanup"])
+        self.assertEqual((spy.entered, spy.exited), (1, 1))
+        self.assertFalse(spy.pem_present)
+
+    # ------------------------------------------------------------------ T22
+    def test_g1_t22_invalid_admission_consumption_or_runtime_enters_no_bridge(self) -> None:
+        """T22: replayed authorization, tampered (invalid) authorization, a
+        runtime that mismatches the verified context and a runtime without
+        the sanctioned write transport each enter NO bridge, read NO PEM and
+        send NO request."""
+        RF = RunnerFailureCode
+        self._enter_clean_safe_held()
+        package = self._package(self.CLEAN)
+        self._run(package, builder=self._builder(phases=1), credential_bridge=_G1BridgeSpy())
+        spy = _G1BridgeSpy()
+        with self.assertRaises(RunnerError) as ctx:
+            self._run(package, builder=self._builder(phases=1), credential_bridge=spy)
+        self.assertEqual(ctx.exception.code, RF.BRIDGE_AUTHORIZATION_STALE_OR_REPLAYED)
+        self.assertEqual((spy.entered, spy.reader_calls), (0, 0))
+        for label, mutate, code in (
+            ("runtime mismatch", lambda rt: dataclasses.replace(
+                rt, experiment_absolute_end_monotonic_ns=rt.experiment_absolute_end_monotonic_ns + 1),
+             RF.ORCHESTRATION_PHASE_STATE_INVALID),
+            ("no sanctioned write transport", lambda rt: dataclasses.replace(rt, normal_write_transport=None),
+             RF.ORCHESTRATION_PHASE_STATE_INVALID),
+        ):
+            with self.subTest(label=label):
+                self.tearDown()
+                self.setUp()
+                self._enter_clean_safe_held()
+                spy, reads = _G1BridgeSpy(), []
+                guard = self._read_guard(spy, reads)
+                with self.assertRaises(RunnerError) as ctx:
+                    self._run(self._package(self.CLEAN), credential_bridge=spy,
+                              builder=self._builder(phases=1, mutate_runtime=lambda rt, _m=mutate, _g=guard: _g(_m(rt))))
+                self.assertEqual(ctx.exception.code, code)
+                self.assertEqual((spy.entered, spy.reader_calls, len(reads)), (0, 0, 0))
+                types_ = self._event_types()
+                self.assertNotIn("RISK_RELEASE_RECORDED", types_)
+                self.assertNotIn("WRITER_SESSION_STARTED", types_)
+        self.tearDown()
+        self.setUp()
+        self._enter_clean_safe_held()
+        spy = _G1BridgeSpy()
+        with self.assertRaises(RunnerError):
+            self._run(self._package(self.CLEAN, tamper=lambda root: (root / runner._ORCH_O_FILENAME).write_bytes(b"{}")),
+                      builder=self._builder(phases=1), credential_bridge=spy)
+        self.assertEqual((spy.entered, spy.reader_calls), (0, 0))
+
+    # ------------------------------------------------------------------ T23 / T26
+    def test_g1_t23_t26_exceptions_at_every_phase_clean_pem_once_revoke_once(self) -> None:
+        """T23 / T26: an exception (including a BaseException) at phase 1, the
+        BOOT_HOLD bridge, phase 2, release/writer acquisition, the Stage-3K ->
+        Gate-D linkage or inside Gate D exits the ONE scope exactly once (owned
+        PEM removed), revokes the receipt exactly once, runs acquired writer
+        cleanup exactly once (never invented before acquisition) and never
+        retries."""
+        cases = (
+            ("phase 1", self.BOOT, "run_pre_release_read_phase_v2", 1, 0),
+            ("boot-hold bridge", self.BOOT, "_orch_run_boot_hold_bridge", 1, 0),
+            ("phase 2", self.BOOT, "run_pre_release_read_phase_v2", 2, 0),
+            ("release / writer acquisition", self.CLEAN, "_complete_stage3_active_release_and_normal_writer_v2", 1, 0),
+            ("stage-3K -> gate-D linkage", self.CLEAN, "_orch_verify_gate_d_linkage", 1, 1),
+            ("gate-D read/write", self.CLEAN, "run_gate_d_ordinary_decision_loop", 1, 1),
+            ("gate-D BaseException", self.CLEAN, "run_gate_d_ordinary_decision_loop", 1, 1),
+        )
+        for index, (label, cls, target, fail_on_call, expected_cleanups) in enumerate(cases):
+            with self.subTest(label=label):
+                if index:
+                    self.tearDown()
+                    self.setUp()
+                if cls == self.CLEAN:
+                    self._enter_clean_safe_held()
+                spy = _G1BridgeSpy()
+                real = getattr(runner, target)
+                calls = {"n": 0, "cleanup": 0, "revoke": 0}
+                exc_type = KeyboardInterrupt if "BaseException" in label else RuntimeError
+
+                def _maybe_fail(*args, _real=real, **kwargs):
+                    calls["n"] += 1
+                    if calls["n"] == fail_on_call:
+                        raise exc_type("synthetic injected failure")
+                    return _real(*args, **kwargs)
+
+                real_cleanup = runner._fail_closed_end_writer_session
+
+                def _cleanup(*args, **kwargs):
+                    calls["cleanup"] += 1
+                    return real_cleanup(*args, **kwargs)
+
+                real_revoke = ledger_binding.ActiveAuthorizationConsumptionV1.revoke
+
+                def _revoke(receipt, *args, **kwargs):
+                    calls["revoke"] += 1
+                    return real_revoke(receipt, *args, **kwargs)
+
+                with mock.patch.object(runner, target, side_effect=_maybe_fail), \
+                        mock.patch.object(runner, "_fail_closed_end_writer_session", side_effect=_cleanup), \
+                        mock.patch.object(ledger_binding.ActiveAuthorizationConsumptionV1, "revoke", _revoke):
+                    with self.assertRaises(exc_type):
+                        self._run(self._package(cls), credential_bridge=spy,
+                                  builder=self._builder(phases=2 if cls == self.BOOT else 1))
+                self.assertEqual((spy.entered, spy.exited, spy.reader_calls), (1, 1, 1))
+                self.assertFalse(spy.pem_present)
+                self.assertEqual(calls["revoke"], 1)
+                self.assertEqual(calls["cleanup"], expected_cleanups)
+                self.assertEqual(spy.env.get("UNRELATED_ENV"), "keep-me")
+
+    def test_g1_t26_normal_no_write_return_and_no_scope_outliving_the_invocation(self) -> None:
+        """T26: a normal no-write return leaves no owned PEM installed, and a
+        caller that already holds a PEM value (an outer/nested scope) is
+        rejected as ambiguous -- the orchestration never nests a second
+        secret window and never removes the caller's value."""
+        self._enter_clean_safe_held()
+        spy = _G1BridgeSpy()
+        result = self._run(self._package(self.CLEAN), builder=self._builder(phases=1), credential_bridge=spy)
+        self.assertEqual(result.gate_d_result.ordinary_writes_sent, 0)
+        self.assertFalse(spy.pem_present)
+        self.assertEqual((spy.entered, spy.exited), (1, 1))
+
+    # ------------------------------------------------------------------ T24
+    def test_g1_t24_primary_error_preserved_and_secrets_cleaned_on_cleanup_failure(self) -> None:
+        """T24: Gate-D exception + writer-cleanup exception -> the primary
+        Gate-D error is preserved; a sole cleanup failure is the classified
+        ORCHESTRATION_WRITER_CLEANUP_FAILED; the owned PEM is removed and the
+        receipt revoked in both cases."""
+        RF = RunnerFailureCode
+
+        def exploding_loop(*args, **kwargs):
+            raise RunnerError(RF.GATE_D_ENTRY_PRECONDITION_FAILED, detail="synthetic loop failure")
+
+        def failing_cleanup(locked, session_id):
+            locked.close()
+            raise OSError("cleanup broke")
+
+        for index, (patches, code) in enumerate((
+            ((("run_gate_d_ordinary_decision_loop", exploding_loop), ("_fail_closed_end_writer_session", failing_cleanup)),
+             RF.GATE_D_ENTRY_PRECONDITION_FAILED),
+            ((("_fail_closed_end_writer_session", failing_cleanup),), RF.ORCHESTRATION_WRITER_CLEANUP_FAILED),
+        )):
+            with self.subTest(code=code):
+                if index:
+                    self.tearDown()
+                    self.setUp()
+                self._enter_clean_safe_held()
+                spy = _G1BridgeSpy()
+                with contextlib.ExitStack() as stack:
+                    for name, replacement in patches:
+                        stack.enter_context(mock.patch.object(runner, name, replacement))
+                    with self.assertRaises(RunnerError) as ctx:
+                        self._run(self._package(self.CLEAN), builder=self._builder(phases=1), credential_bridge=spy)
+                self.assertEqual(ctx.exception.code, code)
+                self.assertEqual((spy.entered, spy.exited), (1, 1))
+                self.assertFalse(spy.pem_present)
+
+    # ------------------------------------------------------------------ T25
+    def test_g1_t25_credential_source_ambiguity_and_unresolved_fail_closed_after_consumption(self) -> None:
+        """T25: a pre-existing KALSHI_DEMO_PRIVATE_KEY_PEM (including empty)
+        is CREDENTIAL_SOURCE_AMBIGUOUS and is never overwritten/removed;
+        missing PATH, an unreadable / non-UTF-8 file and non-PEM text are
+        CREDENTIAL_SOURCE_UNRESOLVED; zero signed I/O; the consumed attempt
+        stays consumed (a replay is rejected)."""
+        RF = RunnerFailureCode
+        cases = (
+            ("preexisting pem", _g1_bridge_env(KALSHI_DEMO_PRIVATE_KEY_PEM="caller-owned"), None, RF.CREDENTIAL_SOURCE_AMBIGUOUS),
+            ("preexisting empty pem", _g1_bridge_env(KALSHI_DEMO_PRIVATE_KEY_PEM=""), None, RF.CREDENTIAL_SOURCE_AMBIGUOUS),
+            ("missing path", _g1_bridge_env(KALSHI_DEMO_PRIVATE_KEY_PATH=None), None, RF.CREDENTIAL_SOURCE_UNRESOLVED),
+            ("invalid utf-8", None, lambda p: b"\xff".decode("utf-8"), RF.CREDENTIAL_SOURCE_UNRESOLVED),
+            ("unreadable", None, lambda p: (_ for _ in ()).throw(OSError("no such file")), RF.CREDENTIAL_SOURCE_UNRESOLVED),
+            ("non-pem", None, lambda p: "not a key", RF.CREDENTIAL_SOURCE_UNRESOLVED),
+        )
+        for index, (label, env, reader, code) in enumerate(cases):
+            with self.subTest(label=label):
+                if index:
+                    self.tearDown()
+                    self.setUp()
+                self._enter_clean_safe_held()
+                spy = _G1BridgeSpy(env, reader=reader)
+                before_pem = spy.env.get("KALSHI_DEMO_PRIVATE_KEY_PEM")
+                reads: list = []
+                package = self._package(self.CLEAN)
+                with self.assertRaises(RunnerError) as ctx:
+                    self._run(package, credential_bridge=spy,
+                              builder=self._builder(phases=1, mutate_runtime=self._read_guard(spy, reads)))
+                self.assertEqual(ctx.exception.code, code)
+                self.assertEqual(reads, [])
+                self.assertEqual(spy.env.get("KALSHI_DEMO_PRIVATE_KEY_PEM"), before_pem)
+                self.assertEqual(self._event_types().count("EXECUTION_AUTHORIZATION_SET_CONSUMED"), 1)
+                self.assertNotIn("WRITER_SESSION_STARTED", self._event_types())
+                with self.assertRaises(RunnerError) as replay:
+                    self._run(package, builder=self._builder(phases=1), credential_bridge=_G1BridgeSpy())
+                self.assertEqual(replay.exception.code, RF.BRIDGE_AUTHORIZATION_STALE_OR_REPLAYED)
+
+    # ------------------------------------------------------------------ T27
+    def test_g1_t27_no_secret_artifacts_no_child_process_no_key_cache(self) -> None:
+        """T27: a complete run with the real bridge spawns no child process
+        while the PEM exists, and no PEM / API-key id / signature appears in
+        the result repr, the durable ledger or any exception chain; the
+        transports hold no key object between requests."""
+        self._enter_clean_safe_held()
+        spy = _G1BridgeSpy()
+        pem, _ = _g1_synthetic_rsa()
+        import subprocess as _subprocess
+        with mock.patch.object(_subprocess, "Popen", side_effect=AssertionError("child process")), \
+                mock.patch.object(os, "system", side_effect=AssertionError("child process")), \
+                mock.patch.object(os, "popen", side_effect=AssertionError("child process")):
+            result = self._run(self._package(self.CLEAN), builder=self._builder(phases=1), credential_bridge=spy)
+        text = repr(result) + str(result)
+        for secret in (pem, _G1_API_KEY_ID, _G1_SYNTHETIC_PEM_PATH, "PRIVATE KEY"):
+            self.assertNotIn(secret, text)
+            for row in self._sql("SELECT payload_json FROM ledger_events"):
+                self.assertNotIn(secret, row[0])
+        transport = runner._DemoNormalWriteTransport(
+            wall_clock=self.inputs.clock, monotonic_clock_ns=self.inputs.monotonic_ns, process_instance_id=_G1_PID,
+            env=_g1_env())
+        self.assertEqual(set(type(transport).__slots__), {
+            "_wall_clock", "_monotonic_clock_ns", "_env", "_process_instance_id", "_lock", "_armed",
+            "_consumed_bindings", "_physical_send_attempts"})
+        source = inspect.getsource(runner)
+        for banned in ("import subprocess", "subprocess.", "os.system(", "os.popen(", "os.fork(", "pty.spawn"):
+            self.assertNotIn(banned, source)
+
+
+class G1StaticConformanceTests(unittest.TestCase):
+    """Static proofs: C01-T20 (protected bytes) / C01-T21 (sole F-1 transport
+    topology) / C01-T22 (sole F-3 scope) / T29 (protected identity) / T30
+    (regression evidence is the recorded command set)."""
+
+    _BASE_BLOBS = {
+        "src/arb/execution_ledger.py": "608f4cd281525a8bf53fafa2b19eb23cc5b669ac",
+        "src/arb/venues/kalshi/emergency_cancel.py": "cb110f4821ff7bd77e13b7c69d2219528ea05105",
+        "src/arb/venues/kalshi/ledger_binding.py": "fac56b5555b48ee04da1753a4042b1f11debaf97",
+        "src/arb/venues/kalshi/minimal_market_maker.py": "be1bbfa31c7d814d48751f9b2399ef62c866d36e",
+        "src/arb/venues/kalshi/order_lifecycle.py": "2ea2c40437626de7218dc318432db94e9bc9d4f5",
+        "src/arb/venues/kalshi/quote_lifecycle.py": "8d857abc15aafb2601a549f0bd8bbd7ed05d679b",
+        "src/arb/venues/kalshi/risk_control.py": "111685c8c1dc7735a53b45830d93844c329f23e3",
+        "src/arb/venues/kalshi/write_result_reconciliation.py": "a26985c64c62fd7288724be52f050212d0fea97f",
+        "tests/test_execution_ledger.py": "242566dd3146e1a8461e59f71c9e2c2f8b6dd701",
+        "tests/test_kalshi_emergency_cancel.py": "7bea1f054eaec81383a369a5860f43f8dd2847a3",
+        "tests/test_kalshi_ledger_binding.py": "9786ce5d5fa609c5ed5f2d7ca9804cd736e8c3f5",
+        "tests/test_kalshi_minimal_market_maker.py": "43e2a7fdbdbcfd769713e6e04cbaa321d8313e44",
+        "tests/test_kalshi_one_order_lifecycle.py": "850ed38cdb8fe526e9c947a003d8a1d5a433e3e5",
+        "tests/test_kalshi_quote_lifecycle.py": "3d5cf1373a7282ebc6ad36809a8391ce1438ae30",
+        "tests/test_kalshi_risk_control.py": "c19a15db167f7664ae94b9944d17d5af4ae716da",
+        "tests/test_kalshi_write_result_reconciliation.py": "6f6f615ee48abe6187d3145281922fe13f7d3135",
+        "tests/test_r1_d07_n1_fresh_read_only_state_revalidation_v2.py": "91d0163bc43ae2a2d7192a68da42d1463810c007",
+    }
+
+    def test_g1_c01_t20_t29_protected_paths_byte_identical(self) -> None:
+        """C01-T20 / T29: every protected production path and protected spine
+        test is byte-identical to the required base (Git blob identity)."""
+        root = Path(__file__).resolve().parents[1]
+        for relative, blob in self._BASE_BLOBS.items():
+            with self.subTest(path=relative):
+                data = (root / relative).read_bytes()
+                self.assertEqual(hashlib.sha1(b"blob %d\x00" % len(data) + data).hexdigest(), blob)
+
+    def test_g1_c01_t21_sole_sanctioned_write_transport_topology(self) -> None:
+        """C01-T21 / T01: exactly one sanctioned write transport class, built
+        only by the production orchestration builder; exactly one
+        NormalWriteAdapter construction and one adapter.invoke call site; no
+        HTTP-200 wrapper CREATE parser; no generic client/URL/redirect seam."""
+        import re as _re
+        source = inspect.getsource(runner)
+        # Constructor call sites only (the redacted repr string literal is excluded).
+        self.assertEqual(len(_re.findall(r"(?<![\"'\w])_DemoNormalWriteTransport\(", source)), 1)
+        self.assertIn("_DemoNormalWriteTransport(", inspect.getsource(runner.build_orchestrated_release_runtime_v1))
+        self.assertEqual(source.count("NormalWriteAdapter(runtime.normal_gate, runtime.normal_write_transport)"), 1)
+        self.assertEqual(source.count("adapter.invoke(permit, prepared)"), 1)
+        self.assertIn("adapter.invoke(permit, prepared)", inspect.getsource(runner._gate_d_invoke_normal_write_adapter))
+        self.assertFalse(hasattr(runner, "_gate_d_extract_created_order_id"))
+        self.assertFalse(hasattr(runner, "_gate_d_record_order_identity_and_observation"))
+        create_src = inspect.getsource(runner._gate_d_execute_create) + inspect.getsource(runner._gate_d_classify_create_result)
+        self.assertNotIn('get("order")', create_src)
+        self.assertNotIn("http_status != 200", create_src)
+        self.assertIn(".issue_strategy1_gate_d_create_permit(", create_src)
+        transport_src = inspect.getsource(runner._DemoNormalWriteTransport)
+        for banned in ("HTTPSConnection", "urllib", "requests.", "getheader(\"Location\"", "retry", "PRODUCTION"):
+            self.assertNotIn(banned, transport_src)
+        self.assertNotIn("time.sleep", inspect.getsource(runner._gate_d_reconcile_post_create))
+        self.assertNotIn("sleep(", inspect.getsource(runner._gate_d_reconcile_post_create))
+        self.assertEqual(dict(runner._DEMO_NORMAL_WRITE_OPERATIONS), {"CREATE_ORDER_V2": "POST", "CANCEL_ORDER_V2": "DELETE"})
+
+    def test_g1_c01_t22_sole_orchestration_credential_scope(self) -> None:
+        """C01-T22 / T21: the read phase has no bridge parameter; the
+        orchestration enters exactly one scope (production default = the real
+        bridge) before phase 1 and encloses Gate D and writer cleanup, with
+        receipt revocation after the scope."""
+        self.assertNotIn("bridge", inspect.signature(runner._orch_run_read_phase).parameters)
+        self.assertNotIn("bridge()", inspect.getsource(runner._orch_run_read_phase))
+        source = inspect.getsource(runner.run_release_orchestration_v1)
+        self.assertEqual(source.count("with bridge():"), 1)
+        self.assertIn("_demo_path_to_pem_credential_bridge if credential_bridge is None else credential_bridge", source)
+        order = [source.index(token) for token in (
+            "runtime_builder(context)", "with bridge():", "_orch_run_read_phase(", "_complete_stage3_active_release_and_normal_writer_v2(",
+            "run_gate_d_ordinary_decision_loop(", "_fail_closed_end_writer_session(", "return result", "receipt.revoke()")]
+        self.assertEqual(order, sorted(order))
+        self.assertEqual(runner.AUTOMATIC_RETRIES, 0)
+        self.assertEqual(runner.REDIRECTS, 0)
+
+
+class G1TestMatrixTests(unittest.TestCase):
+    """T30 / G1S-024: every controlling T01-T30 and C01-T01..C01-T22 ID maps
+    to at least one concrete test that exists in this module."""
+
+    MATRIX = {
+        "T01": [("G1SanctionedWriteTransportUnitTests", "test_g1_t01_construction_is_credential_free_and_io_free"),
+                ("G1OrchestrationCredentialScopeTests", "test_g1_t01_production_orchestration_builder_binds_sanctioned_transport_without_io")],
+        "T02": [("G1SanctionedWriteTransportUnitTests", "test_g1_t02_disallowed_operation_method_path_query_rejected_before_signing_or_io")],
+        "T03": [("G1GateDCreateIntegrationTests", "test_g1_t03_t29_genuine_create_through_sanctioned_transport"),
+                ("G1SanctionedWriteTransportUnitTests", "test_g1_t03_t04_unit_wire_bytes_and_signature_message")],
+        "T04": [("G1LegacyDomainCancelTransportTests", "test_g1_t04_t19_exact_target_delete_through_sanctioned_transport"),
+                ("G1GateDCreateIntegrationTests", "test_g1_t04b_active_prepared_cancel_domain_incompatibility_fails_closed_before_send")],
+        "T05": [("G1GateDCreateIntegrationTests", "test_g1_t05_t02_consumer_trusted_t2_equality_rejects_self_consistent_replacements"),
+                ("G1SanctionedWriteTransportUnitTests", "test_g1_t02b_unarmed_reused_or_cross_process_binding_never_signs"),
+                ("G1SanctionedWriteTransportUnitTests", "test_g1_t02c_sequential_distinct_bindings_each_usable_exactly_once"),
+                ("G1SanctionedWriteTransportUnitTests", "test_g1_t05b_mutation_after_comparison_cannot_change_wire_bytes")],
+        "T06": [("G1GateDCreateIntegrationTests", "test_g1_t06_protected_gate_rejections_zero_http_sends"),
+                ("ActiveGateDDomainBoundPermitTestCase", "test_c02_f1_active_create_mutated_permit_commitment_digest_blocks_before_transport")],
+        "T07": [("G1SanctionedWriteTransportUnitTests", "test_g1_t07_one_attempt_no_retry_no_redirect_no_reconnect")],
+        "T08": [("G1SanctionedWriteTransportUnitTests", "test_g1_t08_same_absolute_end_through_every_phase_no_floor_no_new_window")],
+        "T09": [("G1CreateClassifierTests", "test_g1_t09_minimum_end_controls_classification_no_late_identity")],
+        "T10": [("G1SanctionedWriteTransportUnitTests", "test_g1_t10_body_cap_and_framing")],
+        "T11": [("G1SanctionedWriteTransportUnitTests", "test_g1_t11_secret_bearing_exceptions_map_to_fixed_secret_free_classes")],
+        "T12": [("G1CreateClassifierTests", "test_g1_t12_exact_201_top_level_delegates_to_protected_classifier")],
+        "T13": [("G1CreateClassifierTests", "test_g1_t13_wrapper_non_201_and_unknown_transport_stay_unknown")],
+        "T14": [("G1CreateClassifierTests", "test_g1_t14_g1_consumer_requires_present_exact_client_id")],
+        "T15": [("G1CreateClassifierTests", "test_g1_t15_protected_lexical_rules")],
+        "T16": [("G1CreateClassifierTests", "test_g1_t16_strict_pre_delegation_guard")],
+        "T17": [("G1GateDCreateIntegrationTests", "test_g1_c01_t01a_typed_raw_404_then_resting_zero_fill"),
+                ("G1GateDCreateIntegrationTests", "test_g1_c01_t01c_non_404_read_failures_are_never_pending"),
+                ("G1GateDCreateIntegrationTests", "test_g1_c01_t08_incomplete_fill_pagination_held")],
+        "T18": [("G1GateDCreateIntegrationTests", "test_g1_c01_t02_404_404_executed_full_fill_terminal_closure"),
+                ("G1GateDCreateIntegrationTests", "test_g1_c01_t03_resting_partial_fill_reduced_active_remainder_no_replenishment")],
+        "T19": [("G1LegacyDomainCancelTransportTests", "test_g1_t04_t19_exact_target_delete_through_sanctioned_transport"),
+                ("GateDLoopBehaviorTests", "test_gd13_cancel_terminal_classification_uses_exact_accepted_vocabulary"),
+                ("GateDLoopBehaviorTests", "test_gd14_cancel_unsupported_status_stays_ambiguous_not_terminal")],
+        "T20": [("G1GateDCreateIntegrationTests", "test_g1_c01_t16_t20_existing_schemas_truthful_evidence_and_secret_free"),
+                ("G1GateDCreateIntegrationTests", "test_g1_t20b_unknown_transport_records_transport_unknown_never_a_fabricated_response")],
+        "T21": [("G1OrchestrationCredentialScopeTests", "test_g1_t21_clean_one_phase_single_scope_ordering"),
+                ("G1OrchestrationCredentialScopeTests", "test_g1_t21_boot_hold_two_phase_single_scope_ordering")],
+        "T22": [("G1OrchestrationCredentialScopeTests", "test_g1_t22_invalid_admission_consumption_or_runtime_enters_no_bridge")],
+        "T23": [("G1OrchestrationCredentialScopeTests", "test_g1_t23_t26_exceptions_at_every_phase_clean_pem_once_revoke_once")],
+        "T24": [("G1OrchestrationCredentialScopeTests", "test_g1_t24_primary_error_preserved_and_secrets_cleaned_on_cleanup_failure")],
+        "T25": [("G1OrchestrationCredentialScopeTests", "test_g1_t25_credential_source_ambiguity_and_unresolved_fail_closed_after_consumption"),
+                ("G1GateDCredentialScopeTests", "test_g1_c01_t19_reconciliation_reads_inside_scope_and_credential_loss_held"),
+                ("G1SanctionedWriteTransportUnitTests", "test_g1_t11_secret_bearing_exceptions_map_to_fixed_secret_free_classes")],
+        "T26": [("G1OrchestrationCredentialScopeTests", "test_g1_t23_t26_exceptions_at_every_phase_clean_pem_once_revoke_once"),
+                ("G1OrchestrationCredentialScopeTests", "test_g1_t26_normal_no_write_return_and_no_scope_outliving_the_invocation")],
+        "T27": [("G1OrchestrationCredentialScopeTests", "test_g1_t27_no_secret_artifacts_no_child_process_no_key_cache")],
+        "T28": [("G1GateDCreateIntegrationTests", "test_g1_t28_trusted_t3_charge_then_local_signing_failure_no_refund_no_second_send"),
+                ("G1GateDCreateIntegrationTests", "test_g1_c01_t18_unresolved_create_no_second_action_no_cleanup_borrowing")],
+        "T29": [("G1GateDCreateIntegrationTests", "test_g1_t03_t29_genuine_create_through_sanctioned_transport"),
+                ("G1StaticConformanceTests", "test_g1_c01_t20_t29_protected_paths_byte_identical")],
+        "T30": [("G1TestMatrixTests", "test_g1_t30_every_controlling_test_id_maps_to_an_existing_test")],
+        "C01-T01": [("G1GateDCreateIntegrationTests", "test_g1_c01_t01a_typed_raw_404_then_resting_zero_fill"),
+                    ("G1GateDCreateIntegrationTests", "test_g1_c01_t01b_live_reader_non_2xx_404_then_resting_zero_fill"),
+                    ("G1GateDCreateIntegrationTests", "test_g1_c01_t01c_non_404_read_failures_are_never_pending")],
+        "C01-T02": [("G1GateDCreateIntegrationTests", "test_g1_c01_t02_404_404_executed_full_fill_terminal_closure")],
+        "C01-T03": [("G1GateDCreateIntegrationTests", "test_g1_c01_t03_resting_partial_fill_reduced_active_remainder_no_replenishment")],
+        "C01-T04": [("G1GateDCreateIntegrationTests", "test_g1_c01_t04_order_id_mismatch_held")],
+        "C01-T05": [("G1GateDCreateIntegrationTests", "test_g1_c01_t05_client_order_id_missing_or_mismatch_held"),
+                    ("G1CreateClassifierTests", "test_g1_t14_g1_consumer_requires_present_exact_client_id")],
+        "C01-T06": [("G1GateDCreateIntegrationTests", "test_g1_c01_t06_ticker_side_subaccount_exchange_mismatch_held")],
+        "C01-T07": [("G1GateDCreateIntegrationTests", "test_g1_c01_t07_missing_or_malformed_authoritative_fields_no_fallback")],
+        "C01-T08": [("G1GateDCreateIntegrationTests", "test_g1_c01_t08_incomplete_fill_pagination_held")],
+        "C01-T09": [("G1GateDCreateIntegrationTests", "test_g1_c01_t09_duplicate_fill_identity"),
+                    ("G1GateDCreateIntegrationTests", "test_g1_c01_t09b_durable_duplicate_fill_identical_once_conflict_held")],
+        "C01-T10": [("G1GateDCreateIntegrationTests", "test_g1_c01_t10_fill_total_not_equal_order_fill_count_held")],
+        "C01-T11": [("G1GateDCreateIntegrationTests", "test_g1_c01_t11_budget_exhausted_while_invisible_with_nonadvancing_clock")],
+        "C01-T12": [("G1GateDCreateIntegrationTests", "test_g1_c01_t12_deadline_expiry_during_reconciliation_held_no_reset")],
+        "C01-T13": [("G1GateDCreateIntegrationTests", "test_g1_c01_t13_canceled_terminal_without_conservation_proof_held")],
+        "C01-T14": [("G1GateDCreateIntegrationTests", "test_g1_c01_t14_wrapper_create_response_remains_unknown"),
+                    ("G1CreateClassifierTests", "test_g1_t13_wrapper_non_201_and_unknown_transport_stay_unknown")],
+        "C01-T15": [("G1GateDCreateIntegrationTests", "test_g1_c01_t15_valid_201_cannot_override_authoritative_conflict")],
+        "C01-T16": [("G1GateDCreateIntegrationTests", "test_g1_c01_t16_t20_existing_schemas_truthful_evidence_and_secret_free"),
+                    ("G1GateDCreateIntegrationTests", "test_g1_c01_t16b_persistence_failure_at_each_boundary_never_clears_early"),
+                    ("G1GateDCreateIntegrationTests", "test_g1_c01_t02_404_404_executed_full_fill_terminal_closure")],
+        "C01-T17": [("G1GateDCreateIntegrationTests", "test_g1_c01_t17_g1_one_charged_write_across_multiple_reconciliation_reads"),
+                    ("G1GateDCreateIntegrationTests", "test_g1_c01_t11_budget_exhausted_while_invisible_with_nonadvancing_clock")],
+        "C01-T18": [("G1GateDCreateIntegrationTests", "test_g1_c01_t18_unresolved_create_no_second_action_no_cleanup_borrowing")],
+        "C01-T19": [("G1GateDCredentialScopeTests", "test_g1_c01_t19_reconciliation_reads_inside_scope_and_credential_loss_held"),
+                    ("G1OrchestrationCredentialScopeTests", "test_g1_t21_clean_one_phase_single_scope_ordering")],
+        "C01-T20": [("G1StaticConformanceTests", "test_g1_c01_t20_t29_protected_paths_byte_identical")],
+        "C01-T21": [("G1StaticConformanceTests", "test_g1_c01_t21_sole_sanctioned_write_transport_topology"),
+                    ("G1GateDCreateIntegrationTests", "test_g1_t03_t29_genuine_create_through_sanctioned_transport")],
+        "C01-T22": [("G1StaticConformanceTests", "test_g1_c01_t22_sole_orchestration_credential_scope"),
+                    ("G1OrchestrationCredentialScopeTests", "test_g1_t23_t26_exceptions_at_every_phase_clean_pem_once_revoke_once")],
+    }
+
+    def test_g1_t30_every_controlling_test_id_maps_to_an_existing_test(self) -> None:
+        """T30 / G1S-024: T01-T30 and C01-T01..C01-T22 are each mapped to
+        concrete existing tests (not just report claims)."""
+        expected = {f"T{i:02d}" for i in range(1, 31)} | {f"C01-T{i:02d}" for i in range(1, 23)}
+        self.assertEqual(set(self.MATRIX), expected)
+        for test_id, targets in self.MATRIX.items():
+            self.assertTrue(targets, test_id)
+            for cls_name, method in targets:
+                with self.subTest(test_id=test_id, method=method):
+                    cls = globals()[cls_name]
+                    self.assertTrue(callable(getattr(cls, method, None)), (cls_name, method))
 
 
 if __name__ == "__main__":

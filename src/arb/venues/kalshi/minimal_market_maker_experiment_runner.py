@@ -205,6 +205,7 @@ from arb.venues.kalshi.order_lifecycle import (
     SendOutcome,
     check_cancel_conservation,
     classify_cancel_response,
+    classify_create_response,
 )
 from arb.venues.kalshi.order_lifecycle import RawHttpResponse as LifecycleRawHttpResponse
 from arb.venues.kalshi.minimal_market_maker import (
@@ -333,8 +334,11 @@ __all__ = [
 # 04 Section 8/15).  Only the six read members are ever exposed by
 # `PreReleaseReadCapabilityV1`; CREATE_ORDER_V2/CANCEL_ORDER_V2 exist only so
 # the enum/frozensets can express the closed universe this correction is
-# carved out of -- no code path in this file can construct a request for
-# either of them.
+# carved out of -- no read-capability / ``prepare_runner_operation_request``
+# code path can construct a request for either of them.  (The ONE ordinary
+# write route is the sanctioned ``_DemoNormalWriteTransport`` of Section
+# 40.2b, reachable only behind the genuine NormalWriteAdapter / permit /
+# trusted T3 chain with a runner-private armed binding.)
 # ---------------------------------------------------------------------------
 
 
@@ -621,6 +625,16 @@ class RunnerFailureCode(enum.StrEnum):
     ORCHESTRATION_RUNTIME_CONSTRUCTION_MUTATED_STATE = "ORCHESTRATION_RUNTIME_CONSTRUCTION_MUTATED_STATE"
     ORCHESTRATION_PHASE_STATE_INVALID = "ORCHESTRATION_PHASE_STATE_INVALID"
     ORCHESTRATION_WRITER_CLEANUP_FAILED = "ORCHESTRATION_WRITER_CLEANUP_FAILED"
+
+    # KALSHI_DEMO_R1_D07_G1_EXECUTION_SUBSTRATE_CORRECTIVE_SPEC_01_CORRECTION_01
+    # (G1S-009..012) -- fixed secret-safe sanctioned normal-write transport
+    # classifications.  Each is raised only BEFORE the first request byte is
+    # handed to the socket (zero HTTP sends); a failure after the send may
+    # have begun is never raised as one of these but returned as an
+    # unknown-after-send raw result.
+    LIVE_WRITE_TRANSPORT_POLICY_VIOLATION = "LIVE_WRITE_TRANSPORT_POLICY_VIOLATION"
+    LIVE_WRITE_TRANSPORT_BINDING_INVALID = "LIVE_WRITE_TRANSPORT_BINDING_INVALID"
+    LIVE_WRITE_TRANSPORT_PRE_SEND_FAILED = "LIVE_WRITE_TRANSPORT_PRE_SEND_FAILED"
 
 
 class RunnerError(RuntimeError):
@@ -2359,6 +2373,15 @@ class ExperimentRunnerInvocationV1:
 # `_issue_pre_release_read_capability` ever passes to the constructor.
 _CAPABILITY_ISSUANCE_KEY = object()
 
+# G1S-015B: module-private key for the narrow Gate-D post-CREATE
+# reconciliation integration (exact-order visibility read with positively
+# identified 404 recognition, and admission of the one exact order ID whose
+# authoritative GET row already passed G1S-015C).  Never exported; only
+# ``_gate_d_reconcile_post_create`` passes it.
+_GATE_D_CREATE_RECONCILIATION_KEY = object()
+_GATE_D_CREATE_VISIBILITY_PENDING_404 = "PENDING_AUTHORITATIVE_VISIBILITY"
+_GATE_D_CREATE_VISIBILITY_VISIBLE = "VISIBLE"
+
 
 class PreReleaseReadCapabilityV1:
     """Closed Demo-only, REST-only, read-only capability (ER04-PRE-002).
@@ -2493,6 +2516,76 @@ class PreReleaseReadCapabilityV1:
             now_monotonic_ns=self.__runtime.monotonic_clock_ns,
         )
         return parsed, deadline
+
+    # -- G1S-015B: narrow runner-private Gate-D post-CREATE integration ----
+
+    def __require_gate_d_create_reconciliation(self, key: object) -> None:
+        if key is not _GATE_D_CREATE_RECONCILIATION_KEY:
+            raise RunnerError(RunnerFailureCode.CAPABILITY_ISSUANCE_UNAUTHORIZED, detail="gate-d create reconciliation")
+        # Only the Gate-D-scoped capability (64-read budget) participates;
+        # the Stage-3 capability's admission/read policy is unchanged.
+        if self.__exhausted_code is not RunnerFailureCode.GATE_D_READ_BUDGET_EXHAUSTED:
+            raise RunnerError(RunnerFailureCode.PRE_RELEASE_OPERATION_PROHIBITED, detail="not a Gate-D capability")
+
+    def _gate_d_create_visibility_read(
+        self, key: object, *, order_id: str,
+    ) -> Tuple[str, "Mapping[str, object] | None", OperationDeadlineV1]:
+        """One budgeted exact GET_ORDER for the post-CREATE reconciliation
+        phase through the same closed request/deadline/budget pipeline as
+        ``_send_generic``.  A 404 is recognized ONLY from actual exact-order
+        status evidence: the live read transport's fixed
+        ``LIVE_READ_TRANSPORT_NON_2XX`` carrying exact int
+        ``_arb_http_status == 404``, or a complete exact typed
+        ``RawOperationResponseV1`` carrying 404.  Every other transport /
+        schema / deadline failure is raised unchanged (never collapsed into
+        404).  The reservation is charged before transport and retained for
+        a 404."""
+
+        self.__require_gate_d_create_reconciliation(key)
+        operation = RunnerOperation.GET_ORDER
+        ordinal = self._reserve()
+        deadline = self._deadline(operation, ordinal)
+        check_deadline(deadline, self.__runtime.monotonic_clock_ns(), checkpoint=DeadlineCheckpoint.BEFORE_PREPARATION)
+        prepared = prepare_runner_operation_request(
+            operation, path_parameters={"order_id": order_id}, request_ordinal=ordinal,
+            uuid_factory=self.__runtime.uuid_factory,
+            subaccount=self.__domain_subaccount, exchange_index=self.__domain_exchange_index,
+        )
+        check_deadline(deadline, self.__runtime.monotonic_clock_ns(), checkpoint=DeadlineCheckpoint.AFTER_PREPARATION)
+        check_deadline(deadline, self.__runtime.monotonic_clock_ns(), checkpoint=DeadlineCheckpoint.AFTER_SIGNING)
+        try:
+            raw = self.__runtime.send_operation_request(operation, prepared, deadline)
+        except RunnerError as exc:
+            status = getattr(exc, "_arb_http_status", None)
+            if exc.code is RunnerFailureCode.LIVE_READ_TRANSPORT_NON_2XX and type(status) is int and status == 404:
+                check_deadline(deadline, self.__runtime.monotonic_clock_ns(), checkpoint=DeadlineCheckpoint.AFTER_TRANSPORT)
+                return _GATE_D_CREATE_VISIBILITY_PENDING_404, None, deadline
+            raise
+        check_deadline(deadline, self.__runtime.monotonic_clock_ns(), checkpoint=DeadlineCheckpoint.AFTER_TRANSPORT)
+        if (
+            type(raw) is RawOperationResponseV1
+            and type(raw.transport_unknown) is bool
+            and raw.transport_unknown is False
+            and type(raw.http_status) is int
+            and raw.http_status == 404
+        ):
+            return _GATE_D_CREATE_VISIBILITY_PENDING_404, None, deadline
+        parsed = _decode_and_validate_runner_json_response(
+            operation, raw_response=raw, deadline=deadline,
+            now_monotonic_ns=self.__runtime.monotonic_clock_ns,
+        )
+        return _GATE_D_CREATE_VISIBILITY_VISIBLE, parsed, deadline
+
+    def _gate_d_admit_validated_create_order_id(self, key: object, *, order_id: str) -> None:
+        """Admit exactly the current post-CREATE phase's order ID as a
+        GET_FILLS target -- called ONLY after that order's exact
+        authoritative GET row has passed G1S-015C.  A CREATE response ID
+        alone is never admitted."""
+
+        self.__require_gate_d_create_reconciliation(key)
+        if type(order_id) is not str or _ORDER_ID_PATTERN.fullmatch(order_id) is None:
+            raise RunnerError(RunnerFailureCode.ORDER_IDENTITY_INVALID, detail="order_id")
+        self.__admit_order_id(order_id)
 
     # -- the exact six closed read operations -----------------------------
 
@@ -3919,8 +4012,13 @@ class GateDWriteOutcomeV1:
     transport_invoked: bool
     result_classification: str
     # ELIGIBLE_NOT_SENT | TARGET_BINDING_INVALID | PERMIT_ISSUANCE_FAILED |
-    # FRESHNESS_EXPIRED_BEFORE_ADAPTER | ADAPTER_EXCEPTION | TERMINAL |
-    # TERMINAL_UNRECONCILED | STILL_ACTIVE | BOUND_ACTIVE | AMBIGUOUS
+    # FRESHNESS_EXPIRED_BEFORE_ADAPTER | TRUSTED_T2_BINDING_INVALID |
+    # ADAPTER_EXCEPTION | TERMINAL | TERMINAL_UNRECONCILED | STILL_ACTIVE |
+    # BOUND_ACTIVE | AMBIGUOUS
+    # G1S-015B/015H: process-local, secret-free diagnostic for a held
+    # post-CREATE reconciliation (e.g. PENDING_AUTHORITATIVE_VISIBILITY at
+    # the bounded stop).  Never persisted; never a closure.
+    reconciliation_detail: str | None = None
 
 
 @dataclass(frozen=True, slots=True)
@@ -4153,16 +4251,52 @@ def _gate_d_record_terminal_order_observation(
     `_gate_d_validate_terminal_order_identity` has already proven every one
     of these fields present and well-formed."""
 
+    _gate_d_record_authoritative_order_observation(
+        locked, session_id=session_id, venue_order_id=venue_order_id, client_order_id=client_order_id,
+        order_row=order_row, observation_semantic_class="AUTHORITATIVE_TERMINAL_ORDER",
+        source_request_id=f"gate-d-post-send-{venue_order_id}",
+    )
+
+
+def _gate_d_record_active_order_observation(
+    locked: "LockedLedger", *, session_id: str, venue_order_id: str, client_order_id: str, order_row: Mapping[str, object],
+) -> None:
+    """G1S-015G: the durable authoritative ACTIVE observation of a post-CREATE
+    resting order.  Supersedes the predecessor local-fallback construction:
+    every retained field is the actual validated authoritative venue value
+    (the same eleven-field ``_GATE_D_TERMINAL_ORDER_EVIDENCE_FIELDS``
+    projection the terminal helper uses), never a desired/request value.
+    Only called after G1S-015C/015D proof is complete."""
+
+    _gate_d_record_authoritative_order_observation(
+        locked, session_id=session_id, venue_order_id=venue_order_id, client_order_id=client_order_id,
+        order_row=order_row, observation_semantic_class="AUTHORITATIVE_ACTIVE_ORDER",
+        source_request_id=f"gate-d-{venue_order_id}",
+    )
+
+
+def _gate_d_record_authoritative_order_observation(
+    locked: "LockedLedger", *, session_id: str, venue_order_id: str, client_order_id: str,
+    order_row: Mapping[str, object], observation_semantic_class: str, source_request_id: str,
+) -> None:
     canonical_order = {
         name: order_row[name] for name in _GATE_D_TERMINAL_ORDER_EVIDENCE_FIELDS if name in order_row
     }
     locked.append_batch((EventInput(EventType.ORDER_OBSERVED, {
         "venue_order_id": venue_order_id, "client_order_id": client_order_id,
-        "source_request_id": f"gate-d-post-send-{venue_order_id}", "source_operation": "GET_ORDER_V2",
+        "source_request_id": source_request_id, "source_operation": "GET_ORDER_V2",
         "venue_payload_schema_id": "gate-d-order-v1", "canonical_venue_payload": canonical_order,
         "canonical_venue_payload_sha256": sha256_hex(canonical_json_bytes(canonical_order)),
-        "observation_semantic_class": "AUTHORITATIVE_TERMINAL_ORDER",
+        "observation_semantic_class": observation_semantic_class,
     }, session_id, None, None),))
+
+
+def _gate_d_canonical_fill_payload(fill: EconomicFillV1, *, venue_order_id: str) -> dict:
+    return {
+        "fill_id": fill.fill_id, "order_id": venue_order_id, "outcome_side": fill.outcome_side,
+        "quantity": str(fill.quantity), "yes_price": str(fill.yes_price),
+        "created_time_utc": fill.authoritative_created_time_utc,
+    }
 
 
 def _gate_d_record_fill_observation(
@@ -4173,13 +4307,11 @@ def _gate_d_record_fill_observation(
     closure's reconciliation relied on into the same durable evidence chain
     `_authoritative_terminal_reconciliation_exists` (quote_lifecycle.py)
     already checks every `FILL_OBSERVED` sequence number against, so a
-    still-later race is always detectable on restart."""
+    still-later race is always detectable on restart.  G1S-015G reuses the
+    exact same fill payload semantics for post-CREATE fills; the historical
+    post-CANCEL naming implies no CANCEL occurred."""
 
-    canonical_fill = {
-        "fill_id": fill.fill_id, "order_id": venue_order_id, "outcome_side": fill.outcome_side,
-        "quantity": str(fill.quantity), "yes_price": str(fill.yes_price),
-        "created_time_utc": fill.authoritative_created_time_utc,
-    }
+    canonical_fill = _gate_d_canonical_fill_payload(fill, venue_order_id=venue_order_id)
     locked.append_batch((EventInput(EventType.FILL_OBSERVED, {
         "venue_fill_id": fill.fill_id, "venue_order_id": venue_order_id, "client_order_id": client_order_id,
         "source_request_id": f"gate-d-post-cancel-fill-{fill.fill_id}", "source_operation": "GET_FILLS_V2",
@@ -4402,25 +4534,17 @@ def _gate_d_classify_cancel_result(
     return outcome, body
 
 
-def _gate_d_record_order_identity_and_observation(
-    locked: "LockedLedger", *, session_id: str, incident_id: str, client_order_id: str,
-    venue_order_id: str, market_ticker: str, outcome_side: str, remaining_count_fp: str, yes_price_dollars: str,
+def _gate_d_record_order_identity_binding(
+    locked: "LockedLedger", *, session_id: str, incident_id: str, client_order_id: str, venue_order_id: str,
 ) -> None:
+    """G1S-015G: the durable exact persisted-client -> authoritative venue
+    order identity.  Only ever called after the exact GET row has passed
+    G1S-015C (never from a CREATE response alone)."""
+
     locked.append_batch((EventInput(EventType.ORDER_IDENTITY_BOUND, {
         "client_order_id": client_order_id, "venue_order_id": venue_order_id, "venue": "KALSHI",
         "environment": "KALSHI_DEMO", "incident_id": incident_id, "binding_basis_event_ids": [],
     }, session_id, incident_id, None),))
-    canonical_order = {
-        "order_id": venue_order_id, "status": "resting", "remaining_count_fp": remaining_count_fp,
-        "market": market_ticker, "outcome_side": outcome_side, "yes_price": yes_price_dollars,
-    }
-    locked.append_batch((EventInput(EventType.ORDER_OBSERVED, {
-        "venue_order_id": venue_order_id, "client_order_id": client_order_id,
-        "source_request_id": f"gate-d-{venue_order_id}", "source_operation": "GET_ORDER_V2",
-        "venue_payload_schema_id": "gate-d-order-v1", "canonical_venue_payload": canonical_order,
-        "canonical_venue_payload_sha256": sha256_hex(canonical_json_bytes(canonical_order)),
-        "observation_semantic_class": "AUTHORITATIVE_ACTIVE_ORDER",
-    }, session_id, None, None),))
 
 
 def _gate_d_record_http_response_classified(
@@ -4444,16 +4568,36 @@ def _gate_d_record_http_response_classified(
     for a validated definitive CANCEL success this is `order_id`,
     `reduced_by`, `ts_ms`, and `client_order_id` when present -- using this
     existing allowed evidence structure rather than a new persistent event
-    field or schema."""
+    field or schema.
 
-    if type(raw_response) is RawOperationResponseV1:
-        http_status = raw_response.http_status
-        body = raw_response.body_bytes
-    else:
-        http_status = 0
-        body = b""
+    G1S-016: the recorded evidence is truthful -- the actual received
+    ``http_status``, the actual ``Content-Type`` header value (never a
+    fabricated ``application/json``), and the byte length / SHA-256 of the
+    exact raw body bytes.  When no complete raw response exists (unknown
+    transport, a non-``RawOperationResponseV1`` result, or a status outside
+    the ledger's HTTP range) none is invented: the existing
+    ``TRANSPORT_UNKNOWN_AFTER_SEND`` carrier is recorded instead, which can
+    only ever leave the request UNRESOLVED."""
+
+    complete = (
+        type(raw_response) is RawOperationResponseV1
+        and type(raw_response.transport_unknown) is bool
+        and raw_response.transport_unknown is False
+        and type(raw_response.http_status) is int
+        and 100 <= raw_response.http_status <= 599
+        and type(raw_response.content_type) is str
+        and type(raw_response.body_bytes) is bytes
+    )
+    if not complete:
+        locked.append_batch((EventInput(EventType.TRANSPORT_UNKNOWN_AFTER_SEND, {
+            "request_id": request_id, "unknown_class": "TRANSPORT_RESULT_UNKNOWN_AFTER_SEND",
+            "write_closure_class": "UNRESOLVED",
+        }, session_id, None, None),))
+        return
+    body = raw_response.body_bytes
     payload = {
-        "request_id": request_id, "http_status": http_status, "response_media_type": "application/json",
+        "request_id": request_id, "http_status": raw_response.http_status,
+        "response_media_type": raw_response.content_type,
         "response_byte_length": len(body), "response_sha256": sha256_hex(body),
         "adapter_result_class": adapter_result_class, "write_closure_class": write_closure_class,
         "validated_identity_fields": dict(validated_identity_fields) if validated_identity_fields else {},
@@ -4461,36 +4605,106 @@ def _gate_d_record_http_response_classified(
     locked.append_batch((EventInput(EventType.HTTP_RESPONSE_CLASSIFIED, payload, session_id, None, None),))
 
 
-def _gate_d_extract_created_order_id(raw_response: object, *, expected_client_order_id: str) -> str | None:
-    """Parse Gate D's own internal CREATE transport-response contract for
-    the venue-assigned order id. This identity is ordinary send-result
-    evidence (receiving it back is how the strategy learns a new order's
-    identity at all); it is never treated as authoritative *state* --
-    `_gate_d_execute_create` still requires a fresh authoritative GET_ORDER
-    read reporting `"resting"` before binding it."""
+_UTF8_BOM = b"\xef\xbb\xbf"
 
+
+def _gate_d_classify_create_result(
+    raw_response: object, *, expected_client_order_id: str, deadline: OperationDeadlineV1,
+    monotonic_clock_ns: "Callable[[], int]",
+) -> Tuple[SendOutcome, "str | None", Mapping[str, object]]:
+    """G1S-013/014 -- the ONE runner-private CREATE result adapter.
+
+    Strict pre-delegation guard over the exact ``RawOperationResponseV1``
+    (exact field types; ``transport_unknown`` -> unknown; 65536-byte cap;
+    normalized ``application/json`` media type; strict UTF-8 with no BOM;
+    duplicate-key / non-finite rejecting strict JSON; top-level exact
+    ``dict``), then delegation to the protected canonical
+    ``order_lifecycle.classify_create_response`` with the exact persisted
+    ``client_order_id``.  The provisional ``DEFINITIVE_SUCCESS`` class is
+    supplied ONLY for an actual HTTP 201; every other status is
+    ``DEFINITIVE_RESPONSE_AFTER_SEND`` (which the protected classifier keeps
+    unknown).  No wrapper fallback, no status/shape rewriting, no numeric
+    coercion.
+
+    G1 consumer restriction (G1S-014): a top-level ``client_order_id`` must be
+    present as an exact string equal to the persisted ID before an identity
+    is accepted -- the protected classifier itself is not modified.
+
+    G1S-011: the same absolute write-operation deadline governs body
+    parsing/classification and result construction; reaching it at any step
+    returns unknown with no identity (no late accepted identity).
+
+    Returns ``(outcome, order_id_or_None, validated_identity_fields)``; a
+    usable ``order_id`` is returned only when the consumer guard and the
+    protected classifier BOTH accept the same exact top-level order id."""
+
+    unknown: Tuple[SendOutcome, "str | None", Mapping[str, object]] = (SendOutcome.SEND_MAY_HAVE_BEGUN_UNKNOWN, None, {})
+
+    def _expired() -> bool:
+        now = monotonic_clock_ns()
+        return type(now) is not int or type(now) is bool or deadline.expired(now)
+
+    if type(raw_response) is not RawOperationResponseV1:
+        return unknown
     if (
-        type(raw_response) is not RawOperationResponseV1
-        or raw_response.transport_unknown
-        or raw_response.http_status != 200
+        type(raw_response.http_status) is not int
+        or type(raw_response.content_type) is not str
+        or type(raw_response.body_bytes) is not bytes
+        or type(raw_response.transport_unknown) is not bool
     ):
-        return None
+        return unknown
+    if raw_response.transport_unknown:
+        return unknown
+    if _expired():
+        return unknown
+    body = raw_response.body_bytes
+    if len(body) > MAX_RESPONSE_BODY_BYTES:
+        return unknown
+    media_type = _normalize_media_type(raw_response.content_type)
+    if media_type != "application/json":
+        return unknown
+    if body.startswith(_UTF8_BOM):
+        return unknown
     try:
-        parsed = _strict_json_loads(raw_response.body_bytes.decode("utf-8"))
-    except (RunnerError, UnicodeDecodeError):
-        return None
+        text = body.decode("utf-8", errors="strict")
+    except UnicodeDecodeError:
+        return unknown
+    try:
+        parsed = _strict_json_loads(text)
+    except RunnerError:
+        return unknown
     if type(parsed) is not dict:
-        return None
-    order = parsed.get("order")
-    if type(order) is not dict:
-        return None
-    order_id = order.get("order_id")
-    if type(order_id) is not str or not order_id:
-        return None
-    client_order_id = order.get("client_order_id")
-    if client_order_id is not None and client_order_id != expected_client_order_id:
-        return None
-    return order_id
+        return unknown
+    if _expired():
+        return unknown
+    # G1 consumer identity guard (G1S-014): present, exact string, exact match.
+    response_client_order_id = parsed.get("client_order_id") if "client_order_id" in parsed else None
+    if type(response_client_order_id) is not str or response_client_order_id != expected_client_order_id:
+        return unknown
+    lifecycle_raw = LifecycleRawHttpResponse(
+        status=raw_response.http_status, body=parsed, media_type=media_type, retry_count=0, redirect_count=0,
+        send_result_classification=(
+            SendOutcome.DEFINITIVE_SUCCESS if raw_response.http_status == 201
+            else SendOutcome.DEFINITIVE_RESPONSE_AFTER_SEND
+        ),
+    )
+    outcome, order_id = classify_create_response(lifecycle_raw, expected_client_order_id=expected_client_order_id)
+    if _expired():
+        return unknown
+    if (
+        outcome is not SendOutcome.DEFINITIVE_SUCCESS
+        or type(order_id) is not str
+        or order_id == ""
+        or parsed.get("order_id") != order_id
+    ):
+        return unknown
+    validated = {
+        "order_id": order_id, "client_order_id": response_client_order_id,
+        "fill_count": parsed["fill_count"], "remaining_count": parsed["remaining_count"], "ts_ms": parsed["ts_ms"],
+    }
+    if _expired():
+        return unknown
+    return SendOutcome.DEFINITIVE_SUCCESS, order_id, validated
 
 
 # ---------------------------------------------------------------------------
@@ -4576,6 +4790,471 @@ def _gate_d_build_quote_plan(
 
 
 # ---------------------------------------------------------------------------
+# G1S-006..011 -- runner-private per-operation normal-write binding.
+#
+# The protected ``WriterEligibilityGate.invoke_transport`` calls the transport
+# with ONLY the prepared payload.  The deadline and the trusted-T2 linkage
+# therefore live in this runner-private, process-local, one-shot binding that
+# the canonical CREATE/CANCEL consumers establish immediately before the
+# genuine ``NormalWriteAdapter.invoke`` -- after trusted T3 and every
+# unchanged pre-adapter gate.  It proves request linkage only; it is not a
+# permit and grants no write capability.
+# ---------------------------------------------------------------------------
+
+_NORMAL_WRITE_BINDING_KEY = object()
+
+_GATE_D_T2_PREPARED_KEYS = frozenset({
+    "request_id", "operation_class", "venue", "environment", "operation_name", "method",
+    "path_without_query", "canonical_query", "canonical_query_sha256", "canonical_body",
+    "canonical_body_sha256", "prepared_request_sha256", "client_order_id", "venue_order_id",
+    "idempotency_key", "adapter_payload_schema_id",
+})
+_GATE_D_TRUSTED_T2_BINDING_INVALID = "TRUSTED_T2_BINDING_INVALID"
+
+
+@dataclass(frozen=True, slots=True, init=False)
+class _NormalWriteOperationBindingV1:
+    """Immutable runner-private linkage between ONE genuine permit, its
+    locked trusted T2 ``REQUEST_PREPARED`` / T3 ``WRITE_SEND_BOUNDARY_ENTERED``
+    events, the ONE absolute write-operation ``OperationDeadlineV1`` and the
+    exact immutable wire projection.  Constructible only with the
+    module-private key; never serialized, never persisted."""
+
+    process_instance_id: str
+    permit_id: str
+    request_id: str
+    operation_name: str
+    trusted_t2: Mapping[str, object]
+    prepared_request_sha256: str
+    t2_event_id: str
+    t3_event_id: str
+    t3_sequence: int
+    t3_event_hash: str
+    deadline: OperationDeadlineV1
+    expected_subaccount: int
+    expected_exchange_index: int
+    wire_body: "bytes | None"
+    wire_query: str
+
+    def __init__(self, key: object, **values: object) -> None:
+        if key is not _NORMAL_WRITE_BINDING_KEY:
+            raise RunnerError(RunnerFailureCode.LIVE_WRITE_TRANSPORT_BINDING_INVALID, detail="binding construction")
+        for item in fields(type(self)):
+            object.__setattr__(self, item.name, values[item.name])
+
+    def __copy__(self):
+        raise TypeError("normal-write binding cannot be copied")
+
+    def __deepcopy__(self, memo):
+        del memo
+        raise TypeError("normal-write binding cannot be copied")
+
+    def __reduce_ex__(self, protocol):
+        del protocol
+        raise TypeError("normal-write binding cannot be serialized")
+
+
+def _gate_d_write_operation_deadline(
+    *, runtime: "ExperimentRunnerRuntimeV1 | ExperimentRunnerRuntimeV2", request_id: str, operation_name: str,
+    started_monotonic_ns: int, freshness_deadline_monotonic_ns: int,
+) -> OperationDeadlineV1:
+    """G1S-011: the ONE immutable absolute write-operation deadline,
+    established from the existing action assessment/freshness horizon
+    BEFORE T1.  Its absolute end is the minimum of the preserved 10000-ms
+    action horizon, the genuine assessment/permit freshness deadline and the
+    unchanged row-0 experiment end.  No new window is ever sampled later.
+    The deadline id is derived from the request id so no UUID is consumed."""
+
+    absolute = min(
+        started_monotonic_ns + OPERATION_DEADLINE_MS * 1_000_000,
+        freshness_deadline_monotonic_ns,
+        runtime.experiment_absolute_end_monotonic_ns,
+    )
+    return OperationDeadlineV1(
+        schema_revision=1,
+        deadline_id="odl_" + sha256_hex(f"normal-write:{request_id}".encode("utf-8"))[:32],
+        process_instance_id=runtime.normal_gate.process_instance_id,
+        operation_name=operation_name,
+        request_ordinal=0,
+        started_monotonic_ns=started_monotonic_ns,
+        absolute_deadline_monotonic_ns=absolute,
+        experiment_absolute_end_monotonic_ns=runtime.experiment_absolute_end_monotonic_ns,
+    )
+
+
+def _gate_d_wire_query_string(canonical_query: object) -> str:
+    """G1S-009: the existing runner sorted RFC3986 encoding of the trusted
+    T2 ``canonical_query`` (exact ``int`` -> base-10 text, no bool-as-int, no
+    float, no nested values).  Empty mapping -> empty string."""
+
+    if type(canonical_query) is not dict:
+        raise RunnerError(RunnerFailureCode.LIVE_WRITE_TRANSPORT_POLICY_VIOLATION, detail="query shape")
+    pairs: list[Tuple[str, str]] = []
+    for key in sorted(canonical_query):
+        value = canonical_query[key]
+        if type(key) is not str:
+            raise RunnerError(RunnerFailureCode.LIVE_WRITE_TRANSPORT_POLICY_VIOLATION, detail="query key")
+        if type(value) is int:
+            pairs.append((key, str(value)))
+        elif type(value) is str:
+            pairs.append((key, value))
+        else:
+            raise RunnerError(RunnerFailureCode.LIVE_WRITE_TRANSPORT_POLICY_VIOLATION, detail="query value")
+    return _canonical_query_string(pairs)
+
+
+def _gate_d_prepare_normal_write_binding(
+    *, runtime: "ExperimentRunnerRuntimeV1 | ExperimentRunnerRuntimeV2", locked: "LockedLedger",
+    permit: object, prepared: object, deadline: OperationDeadlineV1,
+) -> "_NormalWriteOperationBindingV1 | str":
+    """G1S-006/007/008 final runner consumer boundary.  Reads back the genuine
+    permit's locked T1/T2/T3 events and requires: T3 is the exact current
+    trusted tail; T1 -> T2 -> T3 are contiguous; T1/T2 carry the same exact
+    ``execution_attempt_id`` metadata and T3 carries null; the T2 payload has
+    exactly the canonical key set and canonical query/body/prepared hashes
+    (recomputed with ``canonical_json_bytes``) equal to the permit candidate
+    hash and the T3 reference; and the complete incoming prepared payload is
+    field-for-field byte-identical (canonical bytes) to that trusted T2
+    payload -- so a self-consistent replacement payload with recomputed
+    hashes is still rejected.  The validated content is snapshotted into an
+    immutable wire projection.  Returns the binding, or the fixed
+    ``TRUSTED_T2_BINDING_INVALID`` classification (zero transport)."""
+
+    invalid = _GATE_D_TRUSTED_T2_BINDING_INVALID
+    try:
+        events = locked.events
+        tail = events[-1]
+        authority_row = locked.authority_row
+        t1 = t2 = t3 = None
+        for event in events:
+            if event.event_id == permit.intent_event_id:
+                t1 = event
+            elif event.event_id == permit.prepared_event_id:
+                t2 = event
+            elif event.event_id == permit.send_boundary_event_id:
+                t3 = event
+        if t1 is None or t2 is None or t3 is None:
+            return invalid
+        if (
+            t1.event_type is not EventType.EXECUTION_INTENT_RECORDED
+            or t2.event_type is not EventType.REQUEST_PREPARED
+            or t3.event_type is not EventType.WRITE_SEND_BOUNDARY_ENTERED
+            or t3.event_id != tail.event_id
+            or (authority_row.trusted_sequence, authority_row.trusted_event_hash) != (tail.sequence, tail.event_hash)
+            or t2.sequence != t1.sequence + 1
+            or t3.sequence != t2.sequence + 1
+            or type(t1.execution_attempt_id) is not str
+            or not t1.execution_attempt_id
+            or t2.execution_attempt_id != t1.execution_attempt_id
+            or t3.execution_attempt_id is not None
+        ):
+            return invalid
+        # The immutable trusted T2 read back from the durable stored JSON (a
+        # fresh plain structure, alias-independent of any caller object).
+        t2_payload = _strict_json_loads(t2.payload_json)
+        if type(t2_payload) is not dict or set(t2_payload) != _GATE_D_T2_PREPARED_KEYS:
+            return invalid
+        if t2_payload != _d07_thaw_trusted_json(t2.payload):
+            return invalid
+        if (
+            t2_payload["request_id"] != permit.request_id
+            or t3.payload.get("request_id") != permit.request_id
+            or t3.payload.get("prepared_request_sha256") != t2_payload["prepared_request_sha256"]
+            or t3.payload.get("write_ambiguity_rule") != "WRITE_MAY_HAVE_BEEN_SENT_AFTER_THIS_COMMIT"
+            or t2_payload["prepared_request_sha256"] != permit.candidate_request_sha256
+            or t2_payload["operation_name"] != permit.operation_kind
+        ):
+            return invalid
+        if sha256_hex(canonical_json_bytes(t2_payload["canonical_query"])) != t2_payload["canonical_query_sha256"]:
+            return invalid
+        body = t2_payload["canonical_body"]
+        body_hash = None if body is None else sha256_hex(canonical_json_bytes(body))
+        if body_hash != t2_payload["canonical_body_sha256"]:
+            return invalid
+        identity = {key: value for key, value in t2_payload.items() if key != "prepared_request_sha256"}
+        if sha256_hex(canonical_json_bytes(identity)) != t2_payload["prepared_request_sha256"]:
+            return invalid
+        # Field-for-field equality of the complete incoming prepared payload.
+        if not isinstance(prepared, Mapping) or set(prepared) != _GATE_D_T2_PREPARED_KEYS:
+            return invalid
+        if canonical_json_bytes(dict(prepared)) != canonical_json_bytes(t2_payload):
+            return invalid
+        if (
+            type(deadline) is not OperationDeadlineV1
+            or deadline.process_instance_id != permit.process_instance_id
+            or deadline.absolute_deadline_monotonic_ns > permit.freshness_deadline_monotonic_ns
+            or deadline.absolute_deadline_monotonic_ns > runtime.experiment_absolute_end_monotonic_ns
+            or deadline.operation_name != permit.operation_kind
+        ):
+            return invalid
+        wire_body = None if body is None else canonical_json_bytes(body)
+        if wire_body is not None and sha256_hex(wire_body) != t2_payload["canonical_body_sha256"]:
+            return invalid
+        wire_query = _gate_d_wire_query_string(t2_payload["canonical_query"])
+        subaccount, exchange_index = _runtime_domain_scope(runtime)
+        return _NormalWriteOperationBindingV1(
+            _NORMAL_WRITE_BINDING_KEY,
+            process_instance_id=permit.process_instance_id,
+            permit_id=permit.permit_id,
+            request_id=permit.request_id,
+            operation_name=permit.operation_kind,
+            trusted_t2=_orch_deep_freeze_trusted_json_v1(t2_payload),
+            prepared_request_sha256=t2_payload["prepared_request_sha256"],
+            t2_event_id=t2.event_id,
+            t3_event_id=t3.event_id,
+            t3_sequence=t3.sequence,
+            t3_event_hash=t3.event_hash,
+            deadline=deadline,
+            expected_subaccount=subaccount,
+            expected_exchange_index=exchange_index,
+            wire_body=wire_body,
+            wire_query=wire_query,
+        )
+    except (RunnerError, LedgerError, KeyError, TypeError, ValueError, AttributeError):
+        return invalid
+
+
+def _gate_d_invoke_normal_write_adapter(
+    *, runtime: "ExperimentRunnerRuntimeV1 | ExperimentRunnerRuntimeV2", adapter: NormalWriteAdapter,
+    permit: object, prepared: object, binding: _NormalWriteOperationBindingV1,
+) -> object:
+    """The ONE runner call site of ``NormalWriteAdapter.invoke`` for an
+    ordinary Gate-D write.  When the runtime carries the sanctioned Demo
+    normal-write transport, the exact binding is armed (one-shot) immediately
+    before the genuine adapter call and always disarmed afterwards -- so a
+    gate rejection before transport never leaves an armed binding behind."""
+
+    transport = runtime.normal_write_transport
+    sanctioned = type(transport) is _DemoNormalWriteTransport
+    if sanctioned:
+        transport._arm(binding)
+    try:
+        return adapter.invoke(permit, prepared)
+    finally:
+        if sanctioned:
+            transport._disarm(binding)
+
+
+# ---------------------------------------------------------------------------
+# G1S-015A..015H -- bounded post-CREATE authoritative order/fill
+# reconciliation.  Read-only: owns no write authority, adds no CREATE/CANCEL,
+# and never re-enters the normal write adapter.
+# ---------------------------------------------------------------------------
+
+
+@dataclass(frozen=True, slots=True)
+class _GateDCreateReconciliationResultV1:
+    classification: str  # BOUND_ACTIVE | TERMINAL | TERMINAL_UNRECONCILED | AMBIGUOUS
+    detail: str | None
+
+
+def _gate_d_held(detail: str) -> _GateDCreateReconciliationResultV1:
+    return _GateDCreateReconciliationResultV1("AMBIGUOUS", detail)
+
+
+def _gate_d_reconcile_post_create(
+    *,
+    locked: "LockedLedger",
+    session_id: str,
+    capability: PreReleaseReadCapabilityV1,
+    runtime: "ExperimentRunnerRuntimeV1 | ExperimentRunnerRuntimeV2",
+    request_id: str,
+    client_order_id: str,
+    response_order_id: str,
+    ticker: str,
+    expected_outcome_side: str,
+    trusted_prepared_yes_price: Decimal,
+    raw_response: RawOperationResponseV1,
+    validated_identity_fields: Mapping[str, object],
+) -> _GateDCreateReconciliationResultV1:
+    """Synchronous bounded post-CREATE phase (G1S-015A).
+
+    The definitive F-2A response order ID is a lookup candidate only.  The
+    expected values bound here are comparison predicates, never venue
+    evidence.  Progression: exact GET_ORDER (each attempt reserves one unit of
+    the SAME Gate-D 64-read counter before transport) -> on a positively
+    identified 404, PENDING_AUTHORITATIVE_VISIBILITY and the same exact GET
+    again while the existing budget / per-read deadline / experiment end
+    allow -> on a visible row, complete G1S-015C validation -> durable
+    ORDER_IDENTITY_BOUND -> narrow exact-target admission -> complete exact
+    fill traversal (G1S-015D) -> resting/executed closure conditions
+    (G1S-015E/F) -> ORDER_OBSERVED, FILL_OBSERVED, [closing reconciliation]
+    -> HTTP_RESPONSE_CLASSIFIED AUTHORITATIVE_RESULT_CLOSED (G1S-015G).  Any
+    other outcome stops HELD/UNRESOLVED (G1S-015H): no write retry, no
+    resend, no second strategy write, no cleanup borrowing, no inter-read
+    sleep, no new freshness clock."""
+
+    subaccount, exchange_index = _runtime_domain_scope(runtime)
+
+    # -- G1S-015A/B: bounded exact-order visibility -------------------------
+    order_row: "Mapping[str, object] | None" = None
+    while order_row is None:
+        if runtime.monotonic_clock_ns() >= runtime.experiment_absolute_end_monotonic_ns:
+            return _gate_d_held("EXPERIMENT_DEADLINE_REACHED_DURING_RECONCILIATION")
+        try:
+            kind, parsed, read_deadline = capability._gate_d_create_visibility_read(
+                _GATE_D_CREATE_RECONCILIATION_KEY, order_id=response_order_id,
+            )
+        except RunnerError as exc:
+            if exc.code is RunnerFailureCode.GATE_D_READ_BUDGET_EXHAUSTED:
+                return _gate_d_held("READ_BUDGET_EXHAUSTED_" + _GATE_D_CREATE_VISIBILITY_PENDING_404)
+            return _gate_d_held("VISIBILITY_READ_FAILED:" + exc.code.value)
+        if kind == _GATE_D_CREATE_VISIBILITY_PENDING_404:
+            continue  # same G1 unit; another budgeted read only while bounds allow
+        obj = parsed if type(parsed) is dict else None
+        row = obj.get("order") if obj is not None else None
+        if type(row) is not dict:
+            return _gate_d_held("ORDER_ROW_MALFORMED")
+        violation = _gate_d_validate_terminal_order_identity(
+            row, expected_order_id=response_order_id, expected_client_order_id=client_order_id,
+            expected_ticker=ticker, expected_outcome_side=expected_outcome_side,
+            expected_yes_price=trusted_prepared_yes_price,
+            expected_subaccount=subaccount, expected_exchange_index=exchange_index,
+        )
+        if violation is not None:
+            return _gate_d_held(violation)
+        if type(row.get("client_order_id")) is not str or type(row.get("ticker")) is not str:
+            return _gate_d_held("ORDER_IDENTITY_FIELD_TYPE")
+        try:
+            check_deadline(read_deadline, runtime.monotonic_clock_ns(), checkpoint=DeadlineCheckpoint.AFTER_SCHEMA_VALIDATION)
+            check_deadline(read_deadline, runtime.monotonic_clock_ns(), checkpoint=DeadlineCheckpoint.AFTER_RESULT_CONSTRUCTION)
+        except RunnerError as exc:
+            return _gate_d_held("VISIBILITY_READ_FAILED:" + exc.code.value)
+        order_row = MappingProxyType(dict(row))
+
+    status = order_row["status"]
+    fill_count = _gate_d_nonnegative_decimal(order_row.get("fill_count_fp"))
+    remaining_count = _gate_d_nonnegative_decimal(order_row.get("remaining_count_fp"))
+    initial_count = _gate_d_nonnegative_decimal(order_row.get("initial_count_fp"))
+    if fill_count is None or remaining_count is None or initial_count is None:  # pragma: no cover - validator proved these
+        return _gate_d_held("ORDER_COUNT_FIELDS_MALFORMED")
+
+    # -- durable authoritative identity chain (G1S-015G; Marco review emphasis):
+    # once the exact GET row has proven the venue identity, a later fill /
+    # reconciliation / persistence failure must not strand it without the
+    # existing restart-reconciliation identity chain.
+    existing_bindings = {
+        event.payload.get("venue_order_id") for event in locked.events
+        if event.event_type is EventType.ORDER_IDENTITY_BOUND and event.payload.get("client_order_id") == client_order_id
+    }
+    if existing_bindings and existing_bindings != {response_order_id}:
+        return _gate_d_held("ORDER_IDENTITY_BINDING_CONFLICT")
+    if not existing_bindings:
+        try:
+            _gate_d_record_order_identity_binding(
+                locked, session_id=session_id, incident_id=runtime.gate_d_incident_id,
+                client_order_id=client_order_id, venue_order_id=response_order_id,
+            )
+        except (LedgerError, RiskControlError):
+            return _gate_d_held("PERSISTENCE_FAILED_ORDER_IDENTITY_BOUND")
+
+    # -- status-specific authoritative count conditions (G1S-015C/E/F) -------
+    if status == "resting":
+        if not (remaining_count > 0 and fill_count + remaining_count == initial_count == QUOTE_QUANTITY):
+            return _gate_d_held("RESTING_COUNT_CONSERVATION_FAILED")
+    elif status == "executed":
+        if not (remaining_count == 0 and fill_count == initial_count == QUOTE_QUANTITY):
+            return _gate_d_held("EXECUTED_COUNT_CONSERVATION_FAILED")
+    elif status == "canceled":
+        # G1S-015F: no genuine exact-target cancellation result exists in this
+        # CREATE phase (cleanup = 0; no DELETE is ever sent to obtain closure
+        # evidence and no reduced_by is inferred).  Supported status alone
+        # never suffices.
+        return _GateDCreateReconciliationResultV1("TERMINAL_UNRECONCILED", "CANCELED_WITHOUT_CONSERVATION_PROOF")
+    else:  # pragma: no cover - validator admits only SUPPORTED_ORDER_STATUSES
+        return _gate_d_held("STATUS_UNSUPPORTED_OR_MALFORMED")
+
+    # -- G1S-015B narrow admission + G1S-015D complete exact fill traversal ---
+    try:
+        capability._gate_d_admit_validated_create_order_id(
+            _GATE_D_CREATE_RECONCILIATION_KEY, order_id=response_order_id,
+        )
+        fills, fills_complete = _gate_d_fetch_fresh_fills_for_order(
+            capability, ticker=ticker, order_id=response_order_id,
+        )
+    except RunnerError as exc:
+        return _gate_d_held("FILL_TRAVERSAL_FAILED:" + exc.code.value)
+    except RiskControlError:
+        return _gate_d_held("FILL_TRAVERSAL_FAILED:FILL_MALFORMED")
+    if not fills_complete:
+        return _gate_d_held("FILL_TRAVERSAL_INCOMPLETE")
+    if any(fill.outcome_side != expected_outcome_side or fill.market != ticker for fill in fills):
+        return _gate_d_held("FILL_SCOPE_MISMATCH")
+    if _gate_d_fresh_fill_reconciliation_violation(order_row=order_row, fresh_fills=fills) is not None:
+        return _gate_d_held("FILL_TOTAL_DOES_NOT_RECONCILE_TO_ORDER")
+    if status == "resting" and fill_count == 0 and fills:
+        return _gate_d_held("FILL_TOTAL_DOES_NOT_RECONCILE_TO_ORDER")  # pragma: no cover - reconciliation proves this
+
+    # Compare against existing durable fill evidence before append: an
+    # identical previously persisted fill contributes once; a conflicting
+    # duplicate stays held (never appended -- the ledger would reject it).
+    durable_fill_payloads: dict[str, object] = {}
+    for event in locked.events:
+        if event.event_type is EventType.FILL_OBSERVED:
+            durable_fill_payloads.setdefault(event.payload.get("venue_fill_id"), event.payload.get("canonical_venue_payload"))
+    new_fills: list[EconomicFillV1] = []
+    for fill in fills:
+        canonical = _gate_d_canonical_fill_payload(fill, venue_order_id=response_order_id)
+        if fill.fill_id in durable_fill_payloads:
+            durable = durable_fill_payloads[fill.fill_id]
+            if not isinstance(durable, Mapping) or dict(durable) != canonical:
+                return _gate_d_held("DURABLE_FILL_CONFLICT")
+            continue
+        new_fills.append(fill)
+
+    if runtime.monotonic_clock_ns() >= runtime.experiment_absolute_end_monotonic_ns:
+        return _gate_d_held("EXPERIMENT_DEADLINE_REACHED_DURING_RECONCILIATION")
+
+    # -- G1S-015G durable proof before closure, unchanged schemas -----------
+    try:
+        if status == "resting":
+            _gate_d_record_active_order_observation(
+                locked, session_id=session_id, venue_order_id=response_order_id,
+                client_order_id=client_order_id, order_row=order_row,
+            )
+        else:
+            _gate_d_record_terminal_order_observation(
+                locked, session_id=session_id, venue_order_id=response_order_id,
+                client_order_id=client_order_id, order_row=order_row,
+            )
+    except (LedgerError, RiskControlError):
+        return _gate_d_held("PERSISTENCE_FAILED_ORDER_OBSERVED")
+    try:
+        for fill in new_fills:
+            _gate_d_record_fill_observation(
+                locked, session_id=session_id, venue_order_id=response_order_id,
+                client_order_id=client_order_id, fill=fill,
+            )
+    except (LedgerError, RiskControlError):
+        return _gate_d_held("PERSISTENCE_FAILED_FILL_OBSERVED")
+    if status == "executed":
+        try:
+            _gate_d_record_closing_reconciliation(
+                locked, session_id=session_id, incident_id=runtime.gate_d_incident_id,
+                bound_order_id=response_order_id,
+            )
+        except (LedgerError, RiskControlError):
+            return _gate_d_held("PERSISTENCE_FAILED_RECONCILIATION_RECORDED")
+
+    if runtime.monotonic_clock_ns() >= runtime.experiment_absolute_end_monotonic_ns:
+        # Deadline exhaustion cannot be erased by the evidence above.
+        return _gate_d_held("EXPERIMENT_DEADLINE_REACHED_DURING_RECONCILIATION")
+    try:
+        _gate_d_record_http_response_classified(
+            locked, session_id=session_id, request_id=request_id, raw_response=raw_response,
+            write_closure_class="AUTHORITATIVE_RESULT_CLOSED",
+            adapter_result_class=SendOutcome.DEFINITIVE_SUCCESS.value,
+            validated_identity_fields=validated_identity_fields,
+        )
+        closed = request_id not in locked.projection().unresolved_write_request_ids
+    except (LedgerError, RiskControlError):
+        return _gate_d_held("PERSISTENCE_FAILED_HTTP_RESPONSE_CLASSIFIED")
+    if not closed:
+        return _gate_d_held("CLOSURE_READBACK_FAILED")
+    return _GateDCreateReconciliationResultV1("BOUND_ACTIVE" if status == "resting" else "TERMINAL", None)
+
+
+# ---------------------------------------------------------------------------
 # MM07-CANCEL-001..003 / MM07-PERMIT-001..003 / MM07-CLAR-002/004 -- the
 # ordinary CANCEL send sequence, corrected for exact terminal classification
 # and trusted-T3 budget charging.
@@ -4632,6 +5311,12 @@ def _gate_d_execute_cancel(
         FreshnessStampV1(process_instance_id, now_utc, now_ns, "NONE", None, reconciliation_snapshot_sha256),
     )
     freshness_deadline_monotonic_ns = now_ns + OPERATION_DEADLINE_MS * 1_000_000
+    # G1S-011: the ONE absolute write-operation deadline, established from the
+    # action freshness horizon before T1 and never re-sampled.
+    write_deadline = _gate_d_write_operation_deadline(
+        runtime=runtime, request_id=request_id, operation_name="CANCEL_ORDER_V2",
+        started_monotonic_ns=now_ns, freshness_deadline_monotonic_ns=freshness_deadline_monotonic_ns,
+    )
 
     active_commitment: "dict | None" = None
     if type(runtime) is ExperimentRunnerRuntimeV2:
@@ -4735,8 +5420,18 @@ def _gate_d_execute_cancel(
         if mismatch is not None:
             return _outcome(budget_charged=budget_charged, transport_invoked=False, classification=mismatch)
 
+    # G1S-008: final runner consumer boundary -- trusted T2 equality and the
+    # immutable wire projection, before the genuine adapter.
+    binding = _gate_d_prepare_normal_write_binding(
+        runtime=runtime, locked=locked, permit=permit, prepared=prepared, deadline=write_deadline,
+    )
+    if type(binding) is not _NormalWriteOperationBindingV1:
+        return _outcome(budget_charged=budget_charged, transport_invoked=False, classification=binding)
+
     try:
-        raw_response = adapter.invoke(permit, prepared)
+        raw_response = _gate_d_invoke_normal_write_adapter(
+            runtime=runtime, adapter=adapter, permit=permit, prepared=prepared, binding=binding,
+        )
     except Exception:
         # trusted T3 + adapter exception => budget already consumed above;
         # the request may or may not have reached the venue (write-ambiguity
@@ -4889,7 +5584,16 @@ def _gate_d_execute_create(
     assessment/permit lineage also commits to
     ``active_trusted_read_set_id`` -- the exact ``ADRS2_<64hex>`` identity of
     the fresh trusted dynamic read-set that supported the current release --
-    so a permit cannot be carried across current-read acquisitions."""
+    so a permit cannot be carried across current-read acquisitions.
+
+    G1 execution-substrate correction: after the unchanged T0 -> T1 -> T2 ->
+    T3 chain and pre-adapter gates, the final consumer boundary proves
+    trusted-T2 equality (G1S-008) and the ONE adapter call reaches the
+    sanctioned transport (F-1); the raw result is classified ONLY through the
+    strict adapter + protected ``classify_create_response`` (F-2A); a
+    definitive response identity is a lookup candidate that must be proven by
+    the bounded authoritative order/fill reconciliation (F-2B) before any
+    BOUND_ACTIVE / TERMINAL closure."""
 
     if desired is None or type(desired) is not DesiredQuoteV1:
         raise RunnerError(RunnerFailureCode.GATE_D_STRATEGY_INPUT_CONSTRUCTION_FAILED, detail="missing desired for CREATE_NEW")
@@ -4912,6 +5616,13 @@ def _gate_d_execute_create(
         FreshnessStampV1(process_instance_id, now_utc, now_ns, "NONE", None, reconciliation_snapshot_sha256),
     )
     unresolved_exposure_usd = _gate_d_unresolved_exposure_usd(projection, truth)
+    create_freshness_deadline_monotonic_ns = now_ns + OPERATION_DEADLINE_MS * 1_000_000
+    # G1S-011: the ONE absolute write-operation deadline, established from the
+    # action assessment/freshness horizon before T1 and never re-sampled.
+    write_deadline = _gate_d_write_operation_deadline(
+        runtime=runtime, request_id=request_id, operation_name="CREATE_ORDER_V2",
+        started_monotonic_ns=now_ns, freshness_deadline_monotonic_ns=create_freshness_deadline_monotonic_ns,
+    )
 
     # Active revision-2 path binds the venue create route to the immutable
     # domain binding (VenueBindingV2, DSB-QUOTE-001..003).  The
@@ -4986,7 +5697,7 @@ def _gate_d_execute_create(
         reconciliation_snapshot_sha256=reconciliation_snapshot_sha256,
         reconciliation_freshness_identity_sha256=reconciliation_freshness_identity_sha256,
         risk_state_epoch=projection.risk_state_epoch,
-        freshness_deadline_monotonic_ns=now_ns + OPERATION_DEADLINE_MS * 1_000_000,
+        freshness_deadline_monotonic_ns=create_freshness_deadline_monotonic_ns,
         active_domain_commitment=active_commitment,
         trusted_dynamic_read_set_id=active_trusted_read_set_id,
         account_aggregate_input=account_aggregate_input,
@@ -5005,10 +5716,14 @@ def _gate_d_execute_create(
         quantity=desired.quantity,
     )
 
-    def _outcome(*, budget_charged: bool, transport_invoked: bool, classification: str, venue_order_id: str | None = None) -> GateDWriteOutcomeV1:
+    def _outcome(
+        *, budget_charged: bool, transport_invoked: bool, classification: str, venue_order_id: str | None = None,
+        reconciliation_detail: str | None = None,
+    ) -> GateDWriteOutcomeV1:
         return GateDWriteOutcomeV1(
             selected.quote_slot, "CREATE", "ORDINARY", request_id, client_order_id,
             venue_order_id, assessment.eligible, budget_charged, transport_invoked, classification,
+            reconciliation_detail,
         )
 
     if not assessment.eligible:
@@ -5056,40 +5771,68 @@ def _gate_d_execute_create(
         if mismatch is not None:
             return _outcome(budget_charged=budget_charged, transport_invoked=False, classification=mismatch)
 
+    # G1S-008: final runner consumer boundary -- trusted T2 equality and the
+    # immutable wire projection, before the genuine adapter.
+    binding = _gate_d_prepare_normal_write_binding(
+        runtime=runtime, locked=locked, permit=permit, prepared=prepared, deadline=write_deadline,
+    )
+    if type(binding) is not _NormalWriteOperationBindingV1:
+        return _outcome(budget_charged=budget_charged, transport_invoked=False, classification=binding)
+
     try:
-        raw_response = adapter.invoke(permit, prepared)
+        raw_response = _gate_d_invoke_normal_write_adapter(
+            runtime=runtime, adapter=adapter, permit=permit, prepared=prepared, binding=binding,
+        )
     except Exception:
+        # trusted T3 + adapter exception => the G1 unit is already consumed;
+        # the durable write-ambiguity boundary stays unresolved -- no resend.
         return _outcome(budget_charged=budget_charged, transport_invoked=True, classification="ADAPTER_EXCEPTION")
 
-    venue_order_id = _gate_d_extract_created_order_id(raw_response, expected_client_order_id=client_order_id)
-    classification = "AMBIGUOUS"
-    if venue_order_id is not None:
-        try:
-            status, order_row = _gate_d_read_order_status(capability, order_id=venue_order_id)
-        except RunnerError as exc:
-            if exc.code is RunnerFailureCode.GATE_D_READ_BUDGET_EXHAUSTED:
-                raise
-            status = ""
-            order_row = {}
-        if status == "resting":
-            # Dispatch Section 16: use the real authoritative returned order
-            # record, not an invented/desired value, when it is present and
-            # well-formed.
-            raw_remaining_count_fp = order_row.get("remaining_count_fp")
-            _gate_d_record_order_identity_and_observation(
-                locked, session_id=session_id, incident_id=runtime.gate_d_incident_id, client_order_id=client_order_id,
-                venue_order_id=venue_order_id, market_ticker=invocation.market_ticker, outcome_side=desired.outcome_side,
-                remaining_count_fp=raw_remaining_count_fp if type(raw_remaining_count_fp) is str else str(desired.quantity),
-                yes_price_dollars=str(desired.yes_price),
-            )
-            classification = "BOUND_ACTIVE"
-
-    _gate_d_record_http_response_classified(
-        locked, session_id=session_id, request_id=request_id, raw_response=raw_response,
-        write_closure_class="AUTHORITATIVE_RESULT_CLOSED" if classification == "BOUND_ACTIVE" else "UNRESOLVED",
+    # G1S-013/014: strict raw adapter + protected classify_create_response.
+    create_outcome, response_order_id, validated_identity_fields = _gate_d_classify_create_result(
+        raw_response, expected_client_order_id=client_order_id, deadline=write_deadline,
+        monotonic_clock_ns=runtime.monotonic_clock_ns,
     )
+    # G1S-015G / G1S-016: retain the truthful F-2A classification with the
+    # write still UNRESOLVED until complete authoritative proof is durable.
+    try:
+        _gate_d_record_http_response_classified(
+            locked, session_id=session_id, request_id=request_id, raw_response=raw_response,
+            write_closure_class="UNRESOLVED", adapter_result_class=create_outcome.value,
+            validated_identity_fields=validated_identity_fields,
+        )
+    except (LedgerError, RiskControlError):
+        # The original trusted-T3 unresolved request survives; no later
+        # closure record or eligible result is permitted.
+        return _outcome(
+            budget_charged=budget_charged, transport_invoked=True, classification="AMBIGUOUS",
+            venue_order_id=response_order_id,
+            reconciliation_detail="PERSISTENCE_FAILED_HTTP_RESPONSE_CLASSIFIED_UNRESOLVED",
+        )
+    if create_outcome is not SendOutcome.DEFINITIVE_SUCCESS or response_order_id is None:
+        return _outcome(budget_charged=budget_charged, transport_invoked=True, classification="AMBIGUOUS")
 
-    return _outcome(budget_charged=budget_charged, transport_invoked=True, classification=classification, venue_order_id=venue_order_id)
+    # G1S-015A..015H: bounded authoritative post-CREATE order/fill
+    # reconciliation.  The response identity is a lookup candidate only.
+    trusted_body = binding.trusted_t2["canonical_body"]
+    try:
+        trusted_prepared_yes_price = Decimal(trusted_body["price"])
+    except (KeyError, TypeError, InvalidOperation):  # pragma: no cover - T2 body is canonical
+        return _outcome(
+            budget_charged=budget_charged, transport_invoked=True, classification="AMBIGUOUS",
+            venue_order_id=response_order_id, reconciliation_detail="TRUSTED_PREPARED_PRICE_UNAVAILABLE",
+        )
+    reconciliation = _gate_d_reconcile_post_create(
+        locked=locked, session_id=session_id, capability=capability, runtime=runtime,
+        request_id=request_id, client_order_id=client_order_id, response_order_id=response_order_id,
+        ticker=invocation.market_ticker, expected_outcome_side=desired.outcome_side,
+        trusted_prepared_yes_price=trusted_prepared_yes_price, raw_response=raw_response,
+        validated_identity_fields=validated_identity_fields,
+    )
+    return _outcome(
+        budget_charged=budget_charged, transport_invoked=True, classification=reconciliation.classification,
+        venue_order_id=response_order_id, reconciliation_detail=reconciliation.detail,
+    )
 
 
 def run_gate_d_ordinary_decision_loop(
@@ -11256,7 +11999,6 @@ def build_orchestrated_release_runtime_v1(
     strategy_instance_id: str | None = None,
     minimum_spread_usd: Decimal | None = None,
     gate_d_capability_reference_id: str | None = None,
-    normal_write_transport=None,
 ) -> "ExperimentRunnerRuntimeV2":
     """The sanctioned production runtime construction for the orchestration.
 
@@ -11264,9 +12006,21 @@ def build_orchestrated_release_runtime_v1(
     (:func:`build_dormant_emergency_control_handle_v1`): no restricted session is
     started or ended, no anchor is repaired and no event is appended (the D07
     read-only builder's ``RESTRICTED_SESSION_STARTED``/``ENDED`` pair is an
-    accepted effect of THAT entrypoint only, never of this one)."""
+    accepted effect of THAT entrypoint only, never of this one).
+
+    G1S-006 (F-1): the write-capable production runtime ALWAYS receives the
+    one sanctioned runner-private ``_DemoNormalWriteTransport``, constructed
+    here credential-free and I/O-free and bound to the context's exact
+    runtime clocks and process identity.  There is no launcher-provided
+    network-callable parameter; deterministic fake write transports exist
+    only as a visibly test-only post-construction replacement in the offline
+    tests and are unreachable from this production selection."""
     if type(context) is not OrchestrationRuntimeContextV1:
         raise _orch_fail(RunnerFailureCode.ORCHESTRATION_PHASE_STATE_INVALID, "runtime context type")
+    normal_write_transport = _DemoNormalWriteTransport(
+        wall_clock=context.wall_clock, monotonic_clock_ns=context.monotonic_clock_ns,
+        process_instance_id=context.normal_gate.process_instance_id,
+    )
     flow = context.risk_config.flow
     rate_lane = EmergencyRateLane(EmergencyRateConfigV1(
         flow.emergency_cancel_max_sends,
@@ -11399,17 +12153,19 @@ class _PhaseAccounting:
 
 def _orch_run_read_phase(
     *, stage: str, invocation: "ExperimentRunnerInvocationV2", runtime: "ExperimentRunnerRuntimeV2",
-    receipt: "ActiveAuthorizationConsumptionV1", accounting: _PhaseAccounting, bridge,
+    receipt: "ActiveAuthorizationConsumptionV1", accounting: _PhaseAccounting,
 ) -> "PreReleaseReadPhaseResultV2":
     """One fresh Stage 3A-3F pass: fresh private capability, <=72 charged
-    requests, zero persistent appends (proved by the unchanged no-repair tail)."""
+    requests, zero persistent appends (proved by the unchanged no-repair tail).
+
+    G1S-018 (F-3): invoked ONLY under the already-owned single orchestration
+    credential scope -- there is no per-phase bridge (re-)entry here."""
     receipt.assert_live(process_instance_id=runtime.normal_gate.process_instance_id)
     _orch_require_before_deadline(runtime.monotonic_clock_ns, receipt.absolute_deadline_monotonic_ns, stage)
     receipt.claim_stage(stage)
     accounting.begin()
     before = _orch_tail_key(_orch_local_tail(runtime))
-    with bridge():
-        result = run_pre_release_read_phase_v2(invocation, runtime)
+    result = run_pre_release_read_phase_v2(invocation, runtime)
     if type(result) is not PreReleaseReadPhaseResultV2:
         raise _orch_fail(RunnerFailureCode.BRIDGE_PRE_READ_INCOMPLETE, "phase result type")
     if result.status != "READ_PHASE_COMPLETE":
@@ -11760,8 +12516,16 @@ def run_release_orchestration_v1(
       CLEAN SAFE_HELD : phase 1 -> release -> V2 -> NormalWriter -> 3K -> Gate D
                     -> cleanup
 
-    ``credential_bridge`` (a context-manager factory) is entered only around each
-    read phase; ``None`` means no credential activity.
+    G1S-018/019 (F-3): ONE contiguous orchestration-owned credential scope is
+    entered exactly once, after row-10 runtime construction and immediately
+    before phase 1, and encloses every signed Stage-3 read, the BOOT_HOLD local
+    bridge, phase 2, release, NormalWriter acquisition, Stage 3K, Gate-D reads,
+    the sanctioned normal write and the post-write reads.  Order on exit:
+    canonical writer cleanup -> bridge removes its PEM -> receipt revoked ->
+    result delivered.  ``credential_bridge=None`` (production) binds the
+    existing ``_demo_path_to_pem_credential_bridge``; a supplied factory is the
+    offline tests' visibly test-only synthetic scope.  Credential presence
+    grants no capability.
 
     ``trusted_expectations`` must be the private immutable carrier issued by the
     separately approved launcher through the module-private launcher-only seam
@@ -11852,6 +12616,11 @@ def run_release_orchestration_v1(
             or runtime.authority_binding != admitted.authority_binding
         ):
             raise _orch_fail(RunnerFailureCode.ORCHESTRATION_PHASE_STATE_INVALID, "runtime does not match the verified context")
+        # G1S-006: a known missing sanctioned write transport fails closed here,
+        # before any credential scope, read phase, release or writer step --
+        # never deferred to Gate-D entry.
+        if not callable(runtime.normal_write_transport):
+            raise _orch_fail(RunnerFailureCode.ORCHESTRATION_PHASE_STATE_INVALID, "normal write transport not constructed")
         invocation = ExperimentRunnerInvocationV2(
             invocation_id=binding["invocation_id"], market_ticker=admitted.market_ticker,
         )
@@ -11860,80 +12629,94 @@ def run_release_orchestration_v1(
             per_phase_max=orchestration["per_phase_pre_release_read_request_max_v2"],
             aggregate_ceiling=orchestration["aggregate_pre_release_read_request_ceiling"],
         )
-        bridge = _nullcontext_factory if credential_bridge is None else credential_bridge
+        # G1S-018 (F-3): ONE contiguous orchestration-owned credential scope,
+        # entered exactly once AFTER rows 1-8 admission, row-9 durable
+        # consumption and row-10 credential-free runtime construction/tail
+        # checks, and immediately BEFORE phase-1 signed Stage-3 network work.
+        # Production binds the existing PATH -> temporary PEM bridge; a
+        # non-``None`` ``credential_bridge`` is the offline tests' visibly
+        # test-only synthetic scope.
+        bridge = _demo_path_to_pem_credential_bridge if credential_bridge is None else credential_bridge
         entry_eligible = admitted.typed_expectation.entry_checkpoint["writer_proof_release_eligible"]
+        receipt.assert_live(process_instance_id=runtime.normal_gate.process_instance_id)
+        _orch_require_before_deadline(runtime.monotonic_clock_ns, receipt.absolute_deadline_monotonic_ns, "credential scope entry")
 
-        phase1 = _orch_run_read_phase(
-            stage="PHASE_1_READ", invocation=invocation, runtime=runtime, receipt=receipt,
-            accounting=accounting, bridge=bridge,
-        )
-        read_set_ids = [phase1.trusted_dynamic_read_set_id]
-        bridge_outcome: "_BridgeOutcomeV1 | None" = None
-        if entry_class == _ACTIVE_ENTRY_CLASS_BOOT_HOLD:
-            bridge_outcome = _orch_run_boot_hold_bridge(
-                admitted=admitted, runtime=runtime, receipt=receipt, phase1=phase1,
-                entry_eligible=entry_eligible,
+        with bridge():
+            phase1 = _orch_run_read_phase(
+                stage="PHASE_1_READ", invocation=invocation, runtime=runtime, receipt=receipt,
+                accounting=accounting,
             )
-            release_phase = _orch_run_read_phase(
-                stage="PHASE_2_READ", invocation=invocation, runtime=runtime, receipt=receipt,
-                accounting=accounting, bridge=bridge,
-            )
-            # The phase-1 release state is bridge evidence only: phase 2 must mint a
-            # NEW private capability / ADRS2 identity after the successful close.
-            if release_phase.trusted_dynamic_read_set_id == phase1.trusted_dynamic_read_set_id:
-                raise _orch_fail(RunnerFailureCode.BRIDGE_POST_CLOSE_REFRESH_UNAVAILABLE, "phase 2 reused the phase-1 read set")
-            read_set_ids.append(release_phase.trusted_dynamic_read_set_id)
-        else:
-            release_phase = phase1
-
-        stage3 = _complete_stage3_active_release_and_normal_writer_v2(
-            release_phase, runtime, orchestration_receipt=receipt,
-        )
-        gate_d_result: "GateDLoopResultV1 | None" = None
-        primary_error: "BaseException | None" = None
-        try:
-            _orch_verify_gate_d_linkage(
-                admitted=admitted, stage3=stage3, runtime=runtime, receipt=receipt,
-                last_read_set_id=release_phase.trusted_dynamic_read_set_id, invocation=invocation,
-            )
-            gate_d_result = run_gate_d_ordinary_decision_loop(
-                stage3, runtime, invocation, decision_cycle_max=decision_cycle_max,
-                ordinary_write_send_max=admitted.gate_d["max_ordinary_write_sends"],
-            )
-        except BaseException as exc:
-            primary_error = exc
-            raise
-        finally:
-            # ``finally``-equivalent canonical writer cleanup after Gate D returns OR
-            # raises: performed exactly once; a cleanup failure never masks the
-            # primary error, and is itself raised when there is none.
-            cleanup_error: "BaseException | None" = None
-            try:
-                _fail_closed_end_writer_session(
-                    stage3.normal_writer_acquisition.handle, stage3.normal_writer_session_id,
+            read_set_ids = [phase1.trusted_dynamic_read_set_id]
+            bridge_outcome: "_BridgeOutcomeV1 | None" = None
+            if entry_class == _ACTIVE_ENTRY_CLASS_BOOT_HOLD:
+                bridge_outcome = _orch_run_boot_hold_bridge(
+                    admitted=admitted, runtime=runtime, receipt=receipt, phase1=phase1,
+                    entry_eligible=entry_eligible,
                 )
-            except BaseException as exc:  # noqa: BLE001 - classified below
-                cleanup_error = exc
-            if cleanup_error is not None and primary_error is None:
-                raise _orch_fail(RunnerFailureCode.ORCHESTRATION_WRITER_CLEANUP_FAILED, "canonical writer cleanup") from cleanup_error
-        return ReleaseOrchestrationResultV1(
-            entry_state_class=entry_class,
-            route=(bridge_outcome.route if bridge_outcome is not None else "CLEAN_SAFE_HELD"),
-            process_instance_id=normal_gate.process_instance_id,
-            consumption_event_id=receipt.consumption_event_id,
-            consumption_sequence=receipt.consumption_sequence,
-            absolute_deadline_monotonic_ns=end_ns,
-            phase_requests=accounting.charges,
-            aggregate_requests=sum(accounting.charges),
-            trusted_dynamic_read_set_ids=tuple(read_set_ids),
-            bridge_reconciliation_appended=(bridge_outcome.reconciliation_appended if bridge_outcome is not None else None),
-            bridge_pre_close_sequence=(bridge_outcome.pre_close_sequence if bridge_outcome is not None else None),
-            bridge_post_close_sequence=(bridge_outcome.post_close_sequence if bridge_outcome is not None else None),
-            release_id=stage3.release_id,
-            normal_writer_session_id=stage3.normal_writer_session_id,
-            gate_d_result=gate_d_result,
-            writer_cleanup="ENDED",
-        )
+                release_phase = _orch_run_read_phase(
+                    stage="PHASE_2_READ", invocation=invocation, runtime=runtime, receipt=receipt,
+                    accounting=accounting,
+                )
+                # The phase-1 release state is bridge evidence only: phase 2 must mint a
+                # NEW private capability / ADRS2 identity after the successful close.
+                if release_phase.trusted_dynamic_read_set_id == phase1.trusted_dynamic_read_set_id:
+                    raise _orch_fail(RunnerFailureCode.BRIDGE_POST_CLOSE_REFRESH_UNAVAILABLE, "phase 2 reused the phase-1 read set")
+                read_set_ids.append(release_phase.trusted_dynamic_read_set_id)
+            else:
+                release_phase = phase1
+
+            stage3 = _complete_stage3_active_release_and_normal_writer_v2(
+                release_phase, runtime, orchestration_receipt=receipt,
+            )
+            gate_d_result: "GateDLoopResultV1 | None" = None
+            primary_error: "BaseException | None" = None
+            try:
+                _orch_verify_gate_d_linkage(
+                    admitted=admitted, stage3=stage3, runtime=runtime, receipt=receipt,
+                    last_read_set_id=release_phase.trusted_dynamic_read_set_id, invocation=invocation,
+                )
+                gate_d_result = run_gate_d_ordinary_decision_loop(
+                    stage3, runtime, invocation, decision_cycle_max=decision_cycle_max,
+                    ordinary_write_send_max=admitted.gate_d["max_ordinary_write_sends"],
+                )
+            except BaseException as exc:
+                primary_error = exc
+                raise
+            finally:
+                # ``finally``-equivalent canonical writer cleanup after Gate D returns OR
+                # raises: performed exactly once, INSIDE the credential scope and
+                # BEFORE the bridge removes its PEM; a cleanup failure never masks
+                # the primary error, and is itself raised when there is none.
+                cleanup_error: "BaseException | None" = None
+                try:
+                    _fail_closed_end_writer_session(
+                        stage3.normal_writer_acquisition.handle, stage3.normal_writer_session_id,
+                    )
+                except BaseException as exc:  # noqa: BLE001 - classified below
+                    cleanup_error = exc
+                if cleanup_error is not None and primary_error is None:
+                    raise _orch_fail(RunnerFailureCode.ORCHESTRATION_WRITER_CLEANUP_FAILED, "canonical writer cleanup") from cleanup_error
+            # Local, secret-free result assembly; it is delivered to the caller
+            # only after the bridge has removed its PEM and the receipt is revoked.
+            result = ReleaseOrchestrationResultV1(
+                entry_state_class=entry_class,
+                route=(bridge_outcome.route if bridge_outcome is not None else "CLEAN_SAFE_HELD"),
+                process_instance_id=normal_gate.process_instance_id,
+                consumption_event_id=receipt.consumption_event_id,
+                consumption_sequence=receipt.consumption_sequence,
+                absolute_deadline_monotonic_ns=end_ns,
+                phase_requests=accounting.charges,
+                aggregate_requests=sum(accounting.charges),
+                trusted_dynamic_read_set_ids=tuple(read_set_ids),
+                bridge_reconciliation_appended=(bridge_outcome.reconciliation_appended if bridge_outcome is not None else None),
+                bridge_pre_close_sequence=(bridge_outcome.pre_close_sequence if bridge_outcome is not None else None),
+                bridge_post_close_sequence=(bridge_outcome.post_close_sequence if bridge_outcome is not None else None),
+                release_id=stage3.release_id,
+                normal_writer_session_id=stage3.normal_writer_session_id,
+                gate_d_result=gate_d_result,
+                writer_cleanup="ENDED",
+            )
+        return result
     finally:
         # Terminal state of the invocation: the live receipt is retired.  The
         # DURABLE consumed event is permanent regardless.
@@ -12217,6 +13000,65 @@ def _d07_credential_header_value_is_safe(value: object) -> bool:
     function only CHECKS; it never strips, cases, parses, transforms, or
     renders the value."""
     return _kalshi_orderbook._api_key_id_is_header_safe(value)
+
+
+def _d07_demo_signed_auth_headers(
+    *, env: "Mapping[str, str]", wall_clock: "Callable[[], datetime]", method: str,
+    signed_path_without_query: str,
+) -> "dict[str, str]":
+    """The ONE runner-local Kalshi Demo signing computation (G1S-010 minimal
+    extraction of the predecessor GET signer): RSA-PSS / MGF1(SHA-256) /
+    salt 32 / SHA-256 over ASCII ``timestamp_ms + METHOD + path_without_query``
+    (query and body are never part of the message).  The API-key id is
+    validated by the closed secret-safe header rule BEFORE any signature is
+    produced; the PEM is read from the process-local bridge value at request
+    time only; every failure is a fixed secret-free classification with no
+    exception chain.  No key generation, conversion, fallback or cache."""
+
+    from cryptography.hazmat.primitives import hashes, serialization
+    from cryptography.hazmat.primitives.asymmetric import padding
+
+    if method not in ("GET", "POST", "DELETE"):
+        raise RunnerError(RunnerFailureCode.LIVE_WRITE_TRANSPORT_POLICY_VIOLATION, detail="signing method")
+    api_key_id = env.get(_D07_API_KEY_ID_ENV_NAME)
+    if type(api_key_id) is not str or api_key_id == "":
+        raise RunnerError(
+            RunnerFailureCode.CREDENTIAL_SOURCE_UNRESOLVED, detail="KALSHI_DEMO_API_KEY_ID not set",
+        )
+    # DSB-LIVE-TRANSPORT-001: closed secret-safe credential-header value
+    # validation BEFORE request construction.  The value is never included
+    # in any error detail.
+    if not _d07_credential_header_value_is_safe(api_key_id):
+        raise RunnerError(
+            RunnerFailureCode.LIVE_READ_TRANSPORT_HEADER_INVALID,
+            detail="credential header value failed the closed ASCII/header-safety rule",
+        )
+    pem_text = env.get(_D07_LEGACY_PEM_ENV_NAME)
+    if type(pem_text) is not str or "PRIVATE KEY-----" not in pem_text:
+        raise RunnerError(
+            RunnerFailureCode.CREDENTIAL_SOURCE_UNRESOLVED, detail="bridge PEM value absent",
+        )
+    timestamp_ms = str(int(wall_clock().timestamp() * 1000))
+    message = (timestamp_ms + method + signed_path_without_query).encode("ascii")
+    try:
+        private_key = serialization.load_pem_private_key(pem_text.encode("utf-8"), password=None)
+        signature = private_key.sign(
+            message,
+            padding.PSS(mgf=padding.MGF1(hashes.SHA256()), salt_length=_D07_SIGNING_SALT_LENGTH),
+            hashes.SHA256(),
+        )
+    except Exception:
+        raise RunnerError(
+            RunnerFailureCode.CREDENTIAL_SOURCE_UNRESOLVED, detail="request signing failed",
+        ) from None
+    finally:
+        private_key = None
+        pem_text = None
+    return {
+        "KALSHI-ACCESS-KEY": api_key_id,
+        "KALSHI-ACCESS-SIGNATURE": base64.b64encode(signature).decode("ascii"),
+        "KALSHI-ACCESS-TIMESTAMP": timestamp_ms,
+    }
 
 
 # ---------------------------------------------------------------------------
@@ -12561,45 +13403,15 @@ class _LiveDemoSignedReadTransport:
         )
 
     def _auth_headers(self, prepared: "PreparedRunnerOperationRequestV1") -> "dict[str, str]":
-        from cryptography.hazmat.primitives import hashes, serialization
-        from cryptography.hazmat.primitives.asymmetric import padding
-
-        api_key_id = self._env.get(_D07_API_KEY_ID_ENV_NAME)
-        if type(api_key_id) is not str or api_key_id == "":
-            raise RunnerError(
-                RunnerFailureCode.CREDENTIAL_SOURCE_UNRESOLVED, detail="KALSHI_DEMO_API_KEY_ID not set",
-            )
-        # DSB-LIVE-TRANSPORT-001: closed secret-safe credential-header value
-        # validation BEFORE request construction.  The value is never included
-        # in any error detail.
-        if not _d07_credential_header_value_is_safe(api_key_id):
-            raise RunnerError(
-                RunnerFailureCode.LIVE_READ_TRANSPORT_HEADER_INVALID,
-                detail="credential header value failed the closed ASCII/header-safety rule",
-            )
-        pem_text = self._env.get(_D07_LEGACY_PEM_ENV_NAME)
-        if type(pem_text) is not str or "PRIVATE KEY-----" not in pem_text:
-            raise RunnerError(
-                RunnerFailureCode.CREDENTIAL_SOURCE_UNRESOLVED, detail="bridge PEM value absent",
-            )
-        timestamp_ms = str(int(self._wall_clock().timestamp() * 1000))
-        message = (timestamp_ms + "GET" + prepared.signed_path_without_query).encode("ascii")
-        try:
-            private_key = serialization.load_pem_private_key(pem_text.encode("utf-8"), password=None)
-            signature = private_key.sign(
-                message,
-                padding.PSS(mgf=padding.MGF1(hashes.SHA256()), salt_length=_D07_SIGNING_SALT_LENGTH),
-                hashes.SHA256(),
-            )
-        except Exception:
-            raise RunnerError(
-                RunnerFailureCode.CREDENTIAL_SOURCE_UNRESOLVED, detail="request signing failed",
-            ) from None
-        return {
-            "KALSHI-ACCESS-KEY": api_key_id,
-            "KALSHI-ACCESS-SIGNATURE": base64.b64encode(signature).decode("ascii"),
-            "KALSHI-ACCESS-TIMESTAMP": timestamp_ms,
-        }
+        # G1S-010: the ONE runner-local Demo signing computation, shared with
+        # the sanctioned normal-write transport.  GET signatures, credential
+        # validation (``_d07_credential_header_value_is_safe`` BEFORE any
+        # KALSHI-ACCESS-SIGNATURE is produced) and failure semantics are
+        # byte-for-byte the predecessor behaviour.
+        return _d07_demo_signed_auth_headers(
+            env=self._env, wall_clock=self._wall_clock, method="GET",
+            signed_path_without_query=prepared.signed_path_without_query,
+        )
 
     def _perform_get(
         self,
@@ -12769,6 +13581,341 @@ class _LiveDemoSignedReadTransport:
         lines.append("Accept-Encoding: identity")
         lines.append("Connection: close")
         return ("\r\n".join(lines) + "\r\n\r\n").encode("ascii")
+
+
+# ---------------------------------------------------------------------------
+# 40.2b -- G1S-006..012 (KALSHI_DEMO_R1_D07_G1_EXECUTION_SUBSTRATE_CORRECTIVE_
+# SPEC_01_CORRECTION_01, F-1): the ONE sanctioned runner-private Kalshi Demo
+# ordinary normal-write transport.
+#
+# Reached ONLY as the protected ``WriterEligibilityGate.invoke_transport``
+# callable behind the genuine ``NormalWriteAdapter`` / NormalWriterPermit /
+# trusted T0->T1->T2->T3 chain, and ONLY while a runner-private one-shot
+# ``_NormalWriteOperationBindingV1`` is armed by a canonical Gate-D
+# CREATE/CANCEL consumer.  Fixed Demo origin; POST CreateOrder V2 and exact
+# target DELETE CancelOrder V2 only; retries 0, redirects 0, one connection /
+# request attempt; the actual raw status / media header / body bytes are
+# returned unchanged (3xx/4xx/5xx included).  Owns only signing + network
+# I/O: never strategy, permits, persistence, risk, retry/recovery policy or
+# reconciliation.
+# ---------------------------------------------------------------------------
+
+_DEMO_NORMAL_WRITE_CREATE_PATH = DEMO_BASE_PATH + "/portfolio/events/orders"
+_DEMO_NORMAL_WRITE_CANCEL_PATH_PREFIX = _DEMO_NORMAL_WRITE_CREATE_PATH + "/"
+_DEMO_NORMAL_WRITE_OPERATIONS = MappingProxyType({
+    "CREATE_ORDER_V2": "POST",
+    "CANCEL_ORDER_V2": "DELETE",
+})
+
+
+class _DemoNormalWriteTransport:
+    """Sanctioned F-1 transport.  Construction is credential-free and I/O-free:
+    it stores only the bound runtime clocks, the process identity of the
+    owning ``WriterEligibilityGate`` and an environment reference.  Credential
+    material is read inside the valid F-3 bridge at request time only, and
+    per-request key / header references are released after use."""
+
+    __slots__ = (
+        "_wall_clock", "_monotonic_clock_ns", "_env", "_process_instance_id",
+        "_lock", "_armed", "_consumed_bindings", "_physical_send_attempts",
+    )
+
+    def __init__(
+        self,
+        *,
+        wall_clock: "Callable[[], datetime]",
+        monotonic_clock_ns: "Callable[[], int]",
+        process_instance_id: str,
+        env: "Mapping[str, str] | None" = None,
+    ) -> None:
+        if not callable(monotonic_clock_ns) or not callable(wall_clock):
+            raise RunnerError(
+                RunnerFailureCode.LIVE_WRITE_TRANSPORT_POLICY_VIOLATION,
+                detail="sanctioned write transport requires the exact runtime clocks",
+            )
+        if type(process_instance_id) is not str or not process_instance_id:
+            raise RunnerError(RunnerFailureCode.LIVE_WRITE_TRANSPORT_POLICY_VIOLATION, detail="process identity")
+        self._wall_clock = wall_clock
+        self._monotonic_clock_ns = monotonic_clock_ns
+        self._env = os.environ if env is None else env
+        self._process_instance_id = process_instance_id
+        self._lock = threading.Lock()
+        self._armed: "_NormalWriteOperationBindingV1 | None" = None
+        # Consumed bindings are retained by REFERENCE (identity membership),
+        # never by ``id()``, so a recycled object address can never alias a
+        # later genuine binding.
+        self._consumed_bindings: list = []
+        self._physical_send_attempts = 0
+
+    def __repr__(self) -> str:  # never render a secret or a credential
+        return "_DemoNormalWriteTransport(demo_normal_write)"
+
+    __str__ = __repr__
+
+    @property
+    def physical_send_attempts(self) -> int:
+        """Process-local physical-send evidence (number of requests whose
+        first byte was handed to a socket).  Distinct from durable trusted-T3
+        send-budget accounting, which this object never touches."""
+        with self._lock:
+            return self._physical_send_attempts
+
+    # -- runner-private one-shot arming (Gate-D consumers only) -------------
+
+    def _consumed(self, binding: object) -> bool:
+        return any(item is binding for item in self._consumed_bindings)
+
+    def _arm(self, binding: "_NormalWriteOperationBindingV1") -> None:
+        if type(binding) is not _NormalWriteOperationBindingV1:
+            raise RunnerError(RunnerFailureCode.LIVE_WRITE_TRANSPORT_BINDING_INVALID, detail="binding type")
+        with self._lock:
+            if self._armed is not None or self._consumed(binding):
+                raise RunnerError(RunnerFailureCode.LIVE_WRITE_TRANSPORT_BINDING_INVALID, detail="binding reuse")
+            self._armed = binding
+
+    def _disarm(self, binding: "_NormalWriteOperationBindingV1") -> None:
+        with self._lock:
+            if self._armed is binding:
+                self._armed = None
+            if not self._consumed(binding):
+                self._consumed_bindings.append(binding)
+
+    def _take_binding(self) -> "_NormalWriteOperationBindingV1":
+        with self._lock:
+            binding = self._armed
+            self._armed = None
+            if binding is None or self._consumed(binding):
+                raise RunnerError(RunnerFailureCode.LIVE_WRITE_TRANSPORT_BINDING_INVALID, detail="no armed binding")
+            self._consumed_bindings.append(binding)
+            return binding
+
+    # -- the ONE callable(prepared_payload) gate surface --------------------
+
+    def __call__(self, prepared_payload: object) -> "RawOperationResponseV1":
+        binding = self._take_binding()
+        if binding.process_instance_id != self._process_instance_id:
+            raise RunnerError(RunnerFailureCode.LIVE_WRITE_TRANSPORT_BINDING_INVALID, detail="cross-process binding")
+        # G1S-008: the complete incoming payload must still equal the trusted
+        # T2 projection field for field (a later caller mutation is caught).
+        if (
+            not isinstance(prepared_payload, Mapping)
+            or set(prepared_payload) != _GATE_D_T2_PREPARED_KEYS
+        ):
+            raise RunnerError(RunnerFailureCode.LIVE_WRITE_TRANSPORT_BINDING_INVALID, detail="prepared shape")
+        try:
+            incoming = canonical_json_bytes(dict(prepared_payload))
+            trusted = canonical_json_bytes(_d07_thaw_trusted_json(binding.trusted_t2))
+        except (TypeError, ValueError):
+            raise RunnerError(RunnerFailureCode.LIVE_WRITE_TRANSPORT_BINDING_INVALID, detail="prepared encoding") from None
+        if incoming != trusted:
+            raise RunnerError(RunnerFailureCode.LIVE_WRITE_TRANSPORT_BINDING_INVALID, detail="prepared differs from trusted T2")
+        method, path, wire_query, wire_body = self._wire_projection(binding)
+        _d07_absolute_deadline_remaining_seconds(binding.deadline, self._monotonic_clock_ns(), stage="pre-sign")
+        headers = _d07_demo_signed_auth_headers(
+            env=self._env, wall_clock=self._wall_clock, method=method, signed_path_without_query=path,
+        )
+        try:
+            _d07_absolute_deadline_remaining_seconds(binding.deadline, self._monotonic_clock_ns(), stage="post-sign")
+            request_target = path + ("" if wire_query == "" else "?" + wire_query)
+            request_bytes = self._build_request_bytes(method, request_target, wire_body, headers)
+        finally:
+            headers = None  # release per-request credential-derived references
+        return self._perform_write(method, request_bytes, binding.deadline)
+
+    # -- G1S-009 closed endpoint / wire rules --------------------------------
+
+    @staticmethod
+    def _wire_projection(binding: "_NormalWriteOperationBindingV1") -> "Tuple[str, str, str, bytes | None]":
+        violation = RunnerFailureCode.LIVE_WRITE_TRANSPORT_POLICY_VIOLATION
+        t2 = binding.trusted_t2
+        operation_name = t2["operation_name"]
+        method = _DEMO_NORMAL_WRITE_OPERATIONS.get(operation_name) if type(operation_name) is str else None
+        if (
+            method is None
+            or t2["operation_class"] != "WRITE"
+            or t2["venue"] != "KALSHI"
+            or t2["environment"] != "KALSHI_DEMO"
+            or t2["method"] != method
+            or binding.operation_name != operation_name
+        ):
+            raise RunnerError(violation, detail="operation")
+        path = t2["path_without_query"]
+        if type(path) is not str:
+            raise RunnerError(violation, detail="path")
+        if operation_name == "CREATE_ORDER_V2":
+            body = t2["canonical_body"]
+            if (
+                path != _DEMO_NORMAL_WRITE_CREATE_PATH
+                or binding.wire_query != ""
+                or len(t2["canonical_query"]) != 0
+                or not isinstance(body, Mapping)
+                or type(binding.wire_body) is not bytes
+                or sha256_hex(binding.wire_body) != t2["canonical_body_sha256"]
+                or t2["venue_order_id"] is not None
+                or body.get("client_order_id") != t2["client_order_id"]
+                or "order_group_id" in body
+                or type(body.get("subaccount")) is not int
+                or body.get("subaccount") != binding.expected_subaccount
+                or ("exchange_index" in body and (
+                    type(body.get("exchange_index")) is not int
+                    or body.get("exchange_index") != binding.expected_exchange_index))
+            ):
+                raise RunnerError(violation, detail="create wire contract")
+            return method, path, "", binding.wire_body
+        # CANCEL_ORDER_V2: exact authoritative strategy-owned venue_order_id
+        # as ONE safe opaque segment; no sanitizing, no fuzzy target.
+        venue_order_id = t2["venue_order_id"]
+        if (
+            type(venue_order_id) is not str
+            or _ORDER_ID_PATTERN.fullmatch(venue_order_id) is None
+            or venue_order_id in (".", "..")
+            or path != _DEMO_NORMAL_WRITE_CANCEL_PATH_PREFIX + venue_order_id
+            or t2["canonical_body"] is not None
+            or t2["canonical_body_sha256"] is not None
+            or binding.wire_body is not None
+        ):
+            raise RunnerError(violation, detail="cancel wire contract")
+        query = t2["canonical_query"]
+        # Prepared CANCEL domain must equal the bound active domain; an
+        # incompatible prepared domain fails closed and is never repaired.
+        if (
+            set(query) != {"subaccount", "exchange_index"}
+            or type(query["subaccount"]) is not int
+            or type(query["exchange_index"]) is not int
+            or query["subaccount"] != binding.expected_subaccount
+            or query["exchange_index"] != binding.expected_exchange_index
+            or binding.wire_query == ""
+        ):
+            raise RunnerError(violation, detail="cancel domain")
+        return method, path, binding.wire_query, None
+
+    @staticmethod
+    def _build_request_bytes(
+        method: str, request_target: str, body: "bytes | None", auth_headers: "Mapping[str, str]",
+    ) -> bytes:
+        """Closed, locally constructed header set only: Host, Accept,
+        Content-Type (POST only), deterministic Content-Length, Connection:
+        close and the three canonical authentication headers.  Every value is
+        checked by the closed ASCII/header-safety rule; caller headers are
+        never accepted and no venue idempotency header is invented."""
+
+        payload = b"" if body is None else body
+        header_items = [
+            ("Host", DEMO_HOST),
+            ("Accept", "application/json"),
+        ]
+        if method == "POST":
+            header_items.append(("Content-Type", "application/json"))
+        header_items.append(("Content-Length", str(len(payload))))
+        header_items.append(("Connection", "close"))
+        for name in ("KALSHI-ACCESS-KEY", "KALSHI-ACCESS-SIGNATURE", "KALSHI-ACCESS-TIMESTAMP"):
+            header_items.append((name, auth_headers[name]))
+        lines = [method + " " + request_target + " HTTP/1.1"]
+        for name, value in header_items:
+            if not _d07_credential_header_value_is_safe(value):
+                raise RunnerError(
+                    RunnerFailureCode.LIVE_READ_TRANSPORT_HEADER_INVALID,
+                    detail="request header value failed the closed ASCII/header-safety rule",
+                )
+            lines.append(name + ": " + value)
+        return ("\r\n".join(lines) + "\r\n\r\n").encode("ascii") + payload
+
+    # -- G1S-011/012 bounded one-attempt I/O ---------------------------------
+
+    def _perform_write(
+        self, method: str, request_bytes: bytes, deadline: "OperationDeadlineV1",
+    ) -> "RawOperationResponseV1":
+        import http.client
+        import socket as _socket
+        import ssl
+
+        _bounded = (
+            ssl.SSLError, _socket.gaierror, _socket.timeout, TimeoutError,
+            http.client.HTTPException, UnicodeError, ValueError, OSError,
+        )
+
+        def _remaining(stage: str) -> float:
+            return _d07_absolute_deadline_remaining_seconds(deadline, self._monotonic_clock_ns(), stage=stage)
+
+        unknown = RawOperationResponseV1(http_status=0, content_type="", body_bytes=b"", transport_unknown=True)
+        raw_sock = None
+        tls_sock = None
+        response = None
+        send_begun = False
+        try:
+            candidates = _d07_live_signed_get_resolve_addresses(
+                DEMO_HOST, DEMO_PORT, deadline=deadline, monotonic_clock_ns=self._monotonic_clock_ns,
+            )
+            family, sockaddr = _d07_live_signed_get_select_stream_address(candidates)
+            raw_sock = _socket.socket(family, _socket.SOCK_STREAM)
+            raw_sock.settimeout(_remaining("pre-connect"))
+            raw_sock.connect(sockaddr)
+            context = ssl.create_default_context()
+            raw_sock.settimeout(_remaining("pre-tls-wrap"))
+            tls_sock = context.wrap_socket(raw_sock, server_hostname=DEMO_HOST, do_handshake_on_connect=False)
+            raw_sock = None
+            tls_sock.settimeout(_remaining("pre-handshake"))
+            tls_sock.do_handshake()
+
+            view = memoryview(request_bytes)
+            sent_total = 0
+            while sent_total < len(request_bytes):
+                tls_sock.settimeout(_remaining("pre-send"))
+                if not send_begun:
+                    send_begun = True
+                    with self._lock:
+                        self._physical_send_attempts += 1
+                sent = tls_sock.send(view[sent_total:])
+                if sent <= 0:
+                    return unknown
+                sent_total += sent
+
+            shim = _AbsoluteDeadlineResponseShim(tls_sock, _remaining)
+            response = http.client.HTTPResponse(shim, method=method)
+            response.begin()
+            status = int(response.status)
+            content_type = response.getheader("Content-Type", "") or ""
+            body = response.read(MAX_RESPONSE_BODY_BYTES + 1)
+            if type(body) is not bytes:
+                body = bytes(body)
+            _remaining("response-complete")
+            if len(body) > MAX_RESPONSE_BODY_BYTES:
+                return unknown  # never truncate and claim complete
+            # ``HTTPResponse.read(amt)`` returns a short body without raising
+            # when the peer closes before the declared Content-Length; any
+            # still-unread declared byte means the response is INCOMPLETE.
+            if getattr(response, "length", None) not in (None, 0):
+                return unknown
+            # 3xx/4xx/5xx are preserved as received evidence (never followed,
+            # never rewritten, never proof of no side effect).
+            return RawOperationResponseV1(http_status=status, content_type=content_type, body_bytes=body)
+        except RunnerError as exc:
+            if send_begun:
+                return unknown
+            raise RunnerError(exc.code, detail=exc.detail) from None
+        except _bounded:
+            if send_begun:
+                return unknown
+            raise RunnerError(
+                RunnerFailureCode.LIVE_WRITE_TRANSPORT_PRE_SEND_FAILED, detail="pre-send transport failure",
+            ) from None
+        finally:
+            for _closeable in (response, tls_sock, raw_sock):
+                if _closeable is not None:
+                    try:
+                        _closeable.close()
+                    except _bounded:
+                        pass
+
+
+def _d07_thaw_trusted_json(value: object) -> object:
+    """Inverse of ``_orch_deep_freeze_trusted_json_v1`` for canonical
+    re-encoding of an immutable trusted projection."""
+    if isinstance(value, Mapping):
+        return {key: _d07_thaw_trusted_json(item) for key, item in value.items()}
+    if type(value) is tuple:
+        return [_d07_thaw_trusted_json(item) for item in value]
+    return value
 
 
 # ---------------------------------------------------------------------------
