@@ -6980,3 +6980,342 @@ RETURN_TO_MARCO_FOR_POST_READ_TRANSPORT_RESOLUTION_R1_D07_NEXT_ACTION_SELECTION
 ```
 
 This route selects nothing: it does not select G, minimum spread, or decision-cycle policy, and it grants no Step-Q, release, writer admission, Gate-D entry, G1 execution, Demo write, production, source edit, test, Kalshi, credential, or N1/deployed-state capability. Any next action requires its own separately dispatched and authorized task.
+
+### A40 R1-D07 configurable read-only shadow experiment infrastructure — CORRECTION_01 REPOSITORY CANONICALIZATION CANDIDATE / PREDECESSOR BLOCKED / TEST-01 + TEST-02 EVIDENCE ACCEPTED / P01-P09 ROUTE OPEN
+
+This continuity overlay was prepared by `R1-D07_SHADOW_CONFIGURABLE_EXPERIMENT_INFRASTRUCTURE_CANONICALIZATION_01_CORRECTION_01` (implementer `CLAUDE_CODE`) as the second commit of a fresh exact two-commit local candidate from canonical `rigolugo/ARB/main` commit `6988439c35f8f666297ca30313be3666ce16cb29` (tree `a49a5c969a07c1f2d9262630365f07cc206b7d12`, sole parent `9f0dae4ffd3cfa807ec0ea47f8949fc0029c1da4`). **A40 controls only if the exact reviewed CORRECTION_01 two-commit stack (implementation commit + this continuity commit) is later present on canonical `main`.** Until then it is a review candidate only. It records a repository-resident research substrate and accepted empirical evidence; it is not a live execution authorization and grants no runtime capability. A1-A39 remain historical provenance and are not rewritten. The final review-candidate (Commit-2) identity is recorded in the review package and any later installation record, not inside this commit.
+
+**A40.0 Blocked predecessor lineage (NONCANONICAL / NEVER INSTALLED / CONTENT_SEED_ONLY).**
+
+```text
+predecessor task =
+  R1-D07_SHADOW_CONFIGURABLE_EXPERIMENT_INFRASTRUCTURE_CANONICALIZATION_01
+predecessor commit 1 = 861337de1e4d682910c9c67bc0b1577023565798 (tree 5e630fa6a57ad92da989578202c674f95ebf8dcc)
+predecessor candidate commit = cd5d75573125ee0b7bfcebcdade32e404344ce50 (tree e50ec992eb2e9df82b59c1d3bf73cf1bd286164b)
+predecessor submission bundle =
+  R1-D07_SHADOW_CONFIGURABLE_EXPERIMENT_INFRASTRUCTURE_CANONICALIZATION_01_MARCO_SUBMISSION_BUNDLE.zip
+  347313 bytes / sha256 916395662bf47721f067b8ff104a7d7e46bb4c268b92f21de1b5e4c3995a99ee
+Marco decision = BLOCK
+  (MARCO_BLOCK_HANDOFF_CORRECTION_01.md 1876 bytes / sha256 b0afc2e8b9d7cf988a9ef42ead50bcde2c07c2059aff88c846c81fba4d0e5679)
+blocked findings =
+  F01 OUTPUT_DIRECTORY_CAN_MUTATE_CANONICAL_REPOSITORY
+  F02 TRIAL_G_ACCEPTS_VALUES_OUTSIDE_CANONICAL_DOMAIN_1_TO_4
+predecessor status = NONCANONICAL / NEVER INSTALLED / CONTENT_SEED_ONLY
+predecessor A40 / ART-0161 / ART-0162 text = never installed; did not consume canonical numbering
+ancestry = NONE (the CORRECTION_01 stack descends directly from 6988439c35f8f666297ca30313be3666ce16cb29;
+  the blocked commits are not parent, merge, cherry-pick or rebase ancestry)
+```
+
+**A40.1 Supersession scope.**
+
+A40 supersedes A39 only for the current next-route statement (`RETURN_TO_MARCO_FOR_POST_READ_TRANSPORT_RESOLUTION_R1_D07_NEXT_ACTION_SELECTION`, now completed by the Marco selection recorded here). Every A39 fact, including all A39 finding dispositions and no-escalation facts, is preserved unchanged.
+
+**A40.2 Controlling specification (external/local; not repository-resident).**
+
+```text
+controlling specification (correction) =
+  KALSHI_DEMO_R1_D07_SHADOW_CONFIGURABLE_EXPERIMENT_INFRASTRUCTURE_CANONICALIZATION_SPEC_01_CORRECTION_01.md
+  14026 bytes / sha256 f255f059f834a48218c0515c6b3269a015d7908506b2873fc893d537b94a56bf
+
+controlling handoff (correction) =
+  HANDOFF_KALSHI_DEMO_R1_D07_SHADOW_CONFIGURABLE_EXPERIMENT_INFRASTRUCTURE_CANONICALIZATION_SPEC_01_CORRECTION_01.md
+  724 bytes / sha256 d18e4bd1d3124ac207ce34a087820b23f2de22c2748ef75f3c9afd4a42d3abee
+
+user approval record (2026-10-05, correction) = USER_APPROVAL_RECORD.txt
+  648 bytes / sha256 48a42d1279090e9c94ae08a62026ffe0a6045c86ebf6d3cab2003cd48e7ac80c
+
+incorporated predecessor specification (controlling except where CORRECTION_01 narrows/strengthens it) =
+  KALSHI_DEMO_R1_D07_SHADOW_CONFIGURABLE_EXPERIMENT_INFRASTRUCTURE_CANONICALIZATION_SPEC_01.md
+  14839 bytes / sha256 dac693f89e16bf752e6cda76222ef61a3b1a1f4fd2969cc41ef5eb4daaa1cb03
+  + handoff 988 bytes / sha256 0603f004106f1ae233676b762cd66f93d410bb754111aed0dbb6070036b182ca
+
+Marco orchestration decision (Spec-01) = APPROVE (architecture approved for canonicalization as a
+  read-only research substrate; concrete experiment values NOT approved as policy)
+user approval record (2026-10-04, Spec-01) = 1069 bytes / sha256 f8bfff60393c1482cfc8a22803f69511d40302aaa13dbf975d9c519127494df5
+```
+
+**A40.3 Exact implementation commit (Commit 1 of the reviewed stack).**
+
+```text
+implementation commit = 6c3f64fdc8da9d1562fde1aa0f1cc7fd2efcaf67
+tree                  = 828c29a52757bf3d9bc9cd9ac9d5dbdaba326d6b
+sole parent           = 6988439c35f8f666297ca30313be3666ce16cb29
+role = IMPLEMENTATION_SOURCE_AND_TESTS_ONLY
+new paths (exactly twelve; no existing path modified):
+
+run_shadow_experiment.py
+  bytes = 18912
+  sha256 = 2ad0dcb50c4f9d97ea98c76f0bb242c5a1f5ae9805b2e801075ed1936967adb1
+  git_blob = e1631adbcf1c064a7a832068265a4d66a54b485e
+
+src/arb/venues/kalshi/shadow_experiment/__init__.py
+  bytes = 282
+  sha256 = 2e4d9376b9bf8b11ab148c06a2d4a38e03b5877f365f33f27cdc421a45162272
+  git_blob = 8c21ec3acc3f040e62796a2810ccfdd2b7993dc6
+
+src/arb/venues/kalshi/shadow_experiment/canonical_binding.py
+  bytes = 8138
+  sha256 = 5cf4c104ad2cccb825468708d9dd748ab9a043f7501f910a3a76c7088b0b3c48
+  git_blob = 0035f9c87ad8c2bd718b9ae0fec9c38d9dbc044e
+
+src/arb/venues/kalshi/shadow_experiment/config.py
+  bytes = 16664
+  sha256 = bb19f80b407e1150dcf06f329ff54082149454316e1a03f6cd5bb4cd1e42a75f
+  git_blob = 946f63052bb7a62e68f01cb9ea51247f98da7963
+
+src/arb/venues/kalshi/shadow_experiment/configurable_selector.py
+  bytes = 29105
+  sha256 = c4961b41e71f29eec87466f2b26c73d0a452aefe7a4f64864d926ef093882abf
+  git_blob = f737d6801f5ffba5baa2ca8bb4f64f35520fd808
+
+src/arb/venues/kalshi/shadow_experiment/constants.py
+  bytes = 5216
+  sha256 = 685e0ff35df3ac49cbacdda0d8dd506dd64d2423fac7b647467f35a2c1951fb9
+  git_blob = d7bfbdffcfec2ee5786ca9598708821029944d08
+
+src/arb/venues/kalshi/shadow_experiment/live_capture.py
+  bytes = 10842
+  sha256 = f2312144e0cf2337a7b75d20f4b0cf4182cbd3f6e005c0a571473a02249c7166
+  git_blob = d5d0d7c58becc4e91307818d8f993bf90e16986c
+
+src/arb/venues/kalshi/shadow_experiment/shadow_evaluator.py
+  bytes = 13435
+  sha256 = 923b8008d557c8118207ef36a5cfee96751d42a830ca86094c6294c1bf3d2f21
+  git_blob = 17693df3030b3b2a607be9ebbb94dded7aa58c8b
+
+src/arb/venues/kalshi/shadow_experiment/sweep.py
+  bytes = 3756
+  sha256 = 5998526dde3c3982189b2599cc5f3136259e5fd3bc26ab5937493b22097aaec4
+  git_blob = bd37e8209710b7a64bfca6abb33779ed033a65fd
+
+src/arb/venues/kalshi/shadow_experiment/transport.py
+  bytes = 5306
+  sha256 = c36537752b5cf00526e825d93b03d1bca01d9a71af31de9e74b0c319b85a1094
+  git_blob = dfcd21896b70870e48abb1066b6b1a204eed1b17
+
+src/arb/venues/kalshi/shadow_experiment/write_guard.py
+  bytes = 4452
+  sha256 = 5eb5ee4893c6b864d1568df1b84f6976a0649773ab12a7178c04bb06bafbe4e4
+  git_blob = 961ff3d98c55af731605468872ebe8039f201cbd
+
+tests/test_kalshi_shadow_experiment.py
+  bytes = 123051
+  sha256 = b67c7eb6ebc77b29a7fafc93bd52f248ba1e11b3077944b8734e2ffee4127a81
+  git_blob = fcb9bcbc02344d727750e3562c7990aa8633283a
+
+implementer = CLAUDE_CODE
+```
+
+Nine package modules are byte-identical to the blocked predecessor content seed (`__init__.py`, `canonical_binding.py`, `configurable_selector.py`, `constants.py`, `live_capture.py`, `shadow_evaluator.py`, `sweep.py`, `transport.py`, `write_guard.py`); seven of them are also byte-identical to the original approved operator seed. Relative to the blocked seed only the root runner (F01), `config.py` (F02) and the test module differ.
+
+CORRECTION_01 theorem (installed code; not a live result):
+
+```text
+F01 OUTPUT CONTAINMENT (live and replay)
+  before credential presence inspection, signer/transport/selector, and any output creation:
+    repo_real   = repository root .resolve(strict=True)
+    target_real = --output-dir .resolve(strict=False)   (real filesystem resolution of existing
+                  components, so symlink / junction / reparse-point parents resolve to their targets)
+    compare os.path.normcase forms (case-insensitive on Windows) with component-wise commonpath;
+    different drives / root namespaces are never containment; no lexical startswith; no bypass
+    target equal to or beneath the repository root ->
+      PRECONDITION_FAILED / failed_check = OUTPUT_DIR_INSIDE_REPOSITORY (fixed, path-free);
+      the repository and the rejected target are left unmodified
+  only after all non-mutating preconditions pass is the output directory created
+
+F02 trial_g LABEL DOMAIN
+  shadow_experiment.trial_g = dedicated closed leaf INT_TRIAL_G_LABEL accepting exactly JSON integers 1..4
+  0 / negative / >=5 -> CONFIG_VALUE_OUT_OF_RANGE at $.shadow_experiment.trial_g ("must be an integer in 1..4")
+  bool / string / null / array / object -> CONFIG_WRONG_TYPE ; 1.0 / 1e0 -> CONFIG_FLOAT_PROHIBITED
+  trial_g remains an evidence label only; P01 G mechanics NOT implemented
+```
+
+**A40.4 Installed research-substrate theorem (installed code; not a live result).**
+
+```text
+run_shadow_experiment.py (repository root) + src/arb/venues/kalshi/shadow_experiment/
+  required external JSON config (--config); no fallback/default config
+  strict closed schema; duplicate keys / NaN / Infinity / binary floats rejected;
+    decimal knobs are plain decimal strings parsed with Decimal; every leaf required
+  all selector A4/C1/B1/C2 knobs, minimum_spread_usd list and trial_g come only from JSON
+  --execute-authorized-run = TECHNICAL_ACKNOWLEDGEMENT_ONLY__NOT_AN_AUTHORIZATION_GRANT
+  default = refusal; replay + acknowledgement = refused as ambiguous
+  Kalshi Demo origin only; production host refused; GET only (literal GET; no method parameter)
+  zero automatic retries; zero redirects followed; per-run request ceiling enforced before send
+  no CREATE/CANCEL/POST/PUT/PATCH/DELETE; no RELEASE_ONLY, NORMAL_WRITER, writer permit or Gate-D path
+  no deployed N1 / ledger / authority state access
+  exact config input copy + effective config + config-derived request accounting evidence
+  A4/C1/B1/C2 diagnostics; one selector invocation; at most four post-selection snapshot GETs
+  replay mode from a sanitized captured snapshot (offline; no network; no credentials)
+  no profitability claim; no winner selected
+  trial_g = NONCANONICAL_EXPERIMENT_INPUT label only; canonical_G_selection = UNSELECTED
+  static AST write guard scans ONLY the root runner + installed shadow package
+```
+
+Immutable request-resource safety bound:
+
+```text
+MAX_WHOLE_RUN_REQUESTS = 611 (code constant; not configurable)
+whole_run_request_ceiling(config)
+  = a4.max_pages + 1 + c1.event_diverse_shortlist_size * b1.max_pages_per_ticker
+    + b1.finalist_count + 1 + 4 snapshot reads
+ceiling > 611 -> CONFIG_REQUEST_CEILING_EXCEEDED during config validation,
+  before credential presence inspection and before any network operation
+approved baseline config and accepted Test-02 config both derive exactly 611 (valid)
+```
+
+This is a resource-safety bound only; it is NOT an experiment selector default and NOT market-preference policy. No venue page-size or batch maximum was invented.
+
+Repository-residence provenance adaptation (replaces only the external package's static base pin):
+
+```text
+static canonical commit/tree/parent pin in installed code = NONE
+repository root = directory of run_shadow_experiment.py; external checkout never substituted
+live mode requires: origin rigolugo/ARB; branch main; clean worktree; HEAD with exactly one parent;
+  committed shadow package module set == on-disk set; every self-surface file
+  (root runner + shadow_experiment/*.py) and every canonical dependency
+  (d07_market_selector, minimal_market_maker, minimal_market_maker_experiment_runner,
+   orderbook, risk_control) on-disk Git blob == HEAD:<path> blob
+run evidence records observed HEAD / HEAD^{tree} / parents and all self-surface and
+  dependency blob identities
+replay mode records the same provenance without requiring the live conditions
+canonical arb.* imports bound from the same repository src (path-proven)
+live authorization pin = EXTERNAL: any future credential-bearing live execution package is
+  separately prepared and Gustavo-operated and must pin the exact then-authorized canonical
+  commit/tree/parent and exact runner/config identities before crossing the credential boundary
+```
+
+Concrete experiment configurations are NOT installed: no `selector_config_experiment_02.json`, no Test-02 window/ask/lookback/relaxed-B1 values, no minimum-spread list and no selected G exist in the repository as default, example or policy. The ported tests construct the approved baseline and accepted Test-02 configuration bytes in test code only.
+
+Protected existing execution stack (byte-identical to the base; verified by Git blob): `d07_market_selector.py`, `minimal_market_maker.py`, `minimal_market_maker_experiment_runner.py`, `orderbook.py`, `risk_control.py`, their three protected test modules, `project_context/START_HERE.md`, and `project_context/GUARDRAILS.md`. The configurable research selector is not a replacement for the installed Gate-D selector.
+
+**A40.5 Candidate test evidence (offline; implementer-run; not Marco-verified).**
+
+```text
+interpreter = C:\Users\rigob\miniconda3\envs\pmresearch\python.exe (CPython 3.12.14); PYTHONPATH=src
+targeted = python -m pytest tests/test_kalshi_shadow_experiment.py
+  70 passed / 3773 subtests passed / 0 failed / 0 skipped (T01-T42), on the implementation state and on Commit 1
+  (the real-junction F01 test ran; it was not skipped)
+full offline regression (implementation state) = python -m pytest tests
+  4307 passed / 2 skipped (pre-existing) / 5571 subtests passed / 1 failed
+  the single failure = pre-existing PROTECTED_LEDGER_PARALLEL_CONSUMPTION_FLAKE
+  (test_kalshi_ledger_binding::test_parallel_consumption_has_at_most_one_winner_and_never_retries;
+   zero-winner LEDGER_BUSY / LEDGER_BUSY); protected module untouched; first-run evidence preserved;
+  not retried; not attributed to this candidate (finding remains OPEN)
+full offline regression on the final candidate: recorded in the review package TEST_RESULTS.txt
+network / Kalshi / credentials / deployed N1 state during tests = NONE (sockets and sqlite3.connect blocked in the new suite)
+package installation = NONE
+```
+
+**A40.6 Accepted empirical evidence (external/local; LOCAL_ONLY; not repository-resident).**
+
+```text
+Test-01 =
+  R1-D07_G1_READ_ONLY_SHADOW_EXPERIMENT_01_LIVE_EXECUTION_01_MARCO_REVIEW.zip
+  44354 bytes / sha256 d892612304797885cc341ea92030766736ae2681d0e769bb702b4a4294643b3a
+  executor = GUSTAVO_LOCAL_POWERSHELL ; live_invocation_count = 1 ; automatic_retries = 0
+  request_count = 59 / ceiling 611 ; demo_writes = 0 ; production = NONE
+  terminal = SELECTOR_NO_CANDIDATE ; selector halt = B1_NO_FINALISTS
+
+Test-02 =
+  R1-D07_SHADOW_EXPERIMENT_CONFIGURABLE_SELECTOR_01_LIVE_TEST_02_MARCO_REVIEW.zip
+  91062 bytes / sha256 09a287141719501c0658643aeb244837744e64b694cb0b1614b92552c8ee28d9
+  executor = GUSTAVO_LOCAL_POWERSHELL ; live_invocation_count = 1 ; automatic_retries = 0
+  process_exit_code = 0 ; requests = 168 GET / 168 HTTP 200 COMPLETED
+  demo_writes = 0 ; production = NONE
+  A4 pages = 137 ; A4 market rows = 68008 ; A4 eligible = 107 ; A4 retained = 100
+  C1 eligible = 99 ; C1 shortlist = 20
+  B1 complete_active = 11 ; B1 complete_zero = 9 ; B1 incomplete = 0 ; B1 finalists = 5
+  C2 survivors = 5
+  selected ticker (observation-time evidence only) = KXAAAGASDCA-26OCT05-6.4100
+  selected B1 status = COMPLETE_ACTIVE ; selected_via_relaxed_b1 = false
+  YES bid/ask = 0.0200 / 0.0300
+  terminal = SHADOW_EXPERIMENT_COMPLETE ; no_profitability_claim = true
+```
+
+Test-02 parameter values are DIRECT_EMPIRICAL_OBSERVATION inputs only and do not become policy. The selected ticker is freshness-bound observation evidence, not a standing market choice. The candidate test `t28` replays the accepted Test-02 configuration and sanitized snapshot through the installed runner and reproduces the accepted `SHADOW_MATRIX.json` (10440 bytes / sha256 `c19051faa8d7fb3e8a71cd865a2117953aa09522ab45d2e204848a950243a279`) and `SHADOW_MATRIX.csv` (1986 bytes / sha256 `259f8c8f07577f1ed479a166f317a4fc771aab4b2d1e6a8e6dbd3b49b67ace01`) byte-for-byte.
+
+**A40.7 Approved preparation provenance (external/local; LOCAL_ONLY; not repository-resident).**
+
+```text
+approved operator package (NONCANONICAL_CONTENT_SEED_ONLY; never Git ancestry) =
+  R1-D07_SHADOW_EXPERIMENT_CONFIGURABLE_SELECTOR_01_OPERATOR_PACKAGE.zip
+  65723 bytes / sha256 35d545e5994d41fb7fe8f6ba7fc713e921658431223caf561f6f27f7b713c879
+
+configurable-preparation Marco submission bundle =
+  R1-D07_SHADOW_EXPERIMENT_CONFIGURABLE_SELECTOR_PACKAGE_01_PREPARATION_01_MARCO_SUBMISSION_BUNDLE.zip
+  211585 bytes / sha256 556c493a77e7ecd1cdd45739648333fff4a489ee863c4b672ebb274618529f77
+```
+
+**A40.8 Finding dispositions (A39 preserved unchanged).**
+
+```text
+READ_TRANSPORT_INCOMPLETE_CONTENT_LENGTH        RESOLVED_BY_INSTALLED_IMPLEMENTATION / FIXED=YES (unchanged from A39)
+GATE_D_POST_UNRESOLVED_NEXT_CYCLE_TERMINATION   OPEN / FIXED=NO / fail-closed (unchanged)
+ACTIVE_DOMAIN_ORDINARY_CANCEL_ROUTE_MISMATCH    OPEN / FIXED=NO / fail-closed (unchanged; later G2+ real execution concern)
+PROTECTED_LEDGER_PARALLEL_CONSUMPTION_FLAKE     OPEN / FIXED=NO (unchanged)
+UNBOUNDED_CONFIG_DERIVED_REQUEST_PLAN (configurable-preparation review limitation)
+  CLOSED_IN_CANDIDATE by MAX_WHOLE_RUN_REQUESTS = 611 (effective only if the reviewed stack is installed)
+F01 OUTPUT_DIRECTORY_CAN_MUTATE_CANONICAL_REPOSITORY (blocked predecessor finding)
+  CORRECTED_IN_CANDIDATE (effective only if the reviewed CORRECTION_01 stack is installed)
+F02 TRIAL_G_ACCEPTS_VALUES_OUTSIDE_CANONICAL_DOMAIN_1_TO_4 (blocked predecessor finding)
+  CORRECTED_IN_CANDIDATE (effective only if the reviewed CORRECTION_01 stack is installed)
+```
+
+**A40.9 No-escalation / current state.**
+
+```text
+canonical_G_selection = UNSELECTED
+G definition (already canonical) = G.max_ordinary_write_sends, later Gate-D authorization choice, integer 1..4
+historical_noncanonical_trial_G = 1 ; standing_G_policy_effect = NONE
+trial_g in the shadow substrate = evidence label only; P01 G mechanics NOT implemented
+repository_G_canonicalization = NOT_PERFORMED
+minimum_spread_usd = UNSELECTED
+
+Step-Q = NOT RUN
+release = NOT_GRANTED ; writer admission = NOT_GRANTED ; Gate-D = NOT_ENTERED
+G1 execution = NOT_AUTHORIZED / NOT RUN
+shadow live run under the installed runner = NOT_AUTHORIZED / NOT RUN
+Demo write = NONE
+production = NONE
+```
+
+Capability is not authorization. This candidate performed zero Kalshi/venue, credential, deployed N1/persistent-state, production, package-installation and remote Git activity.
+
+**A40.10 Raw-artifact storage and retrieval classification.**
+
+```text
+controlling spec/handoff/decision/approval repository-resident = NO (LOCAL_ONLY; identity-bound only)
+Test-01 / Test-02 review ZIPs repository-resident = NO (LOCAL_ONLY)
+operator package / preparation submission bundle repository-resident = NO (LOCAL_ONLY)
+blocked predecessor submission / Marco BLOCK handoff repository-resident = NO (LOCAL_ONLY)
+concrete experiment configurations repository-resident = NO
+permanent repository raw-byte retrievability claimed = NO
+installed source/test bytes = repository-resident; retrievable by commit/blob identity
+```
+
+**A40.11 Next bounded route.**
+
+Objective (accepted, non-authorizing):
+
+> Find the most profitable currently available market and determine how profitability, fill opportunity, inventory behavior, and capital efficiency change as G varies.
+
+Tracked profitability-foundation prerequisites, all OPEN:
+
+```text
+P01 G_MECHANICS_SHADOW_BINDING
+P02 CONSERVATIVE_SHADOW_FILL_THEOREM
+P03 MARKET_SPECIFIC_FEE_BINDING
+P04 UNPAIRED_INVENTORY_AND_LIQUIDATION_ACCOUNTING
+P05 CAPITAL_EFFICIENCY_DENOMINATOR
+P06 FORWARD_HOLDOUT_PROTOCOL
+P07 MULTIPLE_TESTING_WINNER_CONTROL
+P08 ADAPTIVE_G_EXPERIMENT_PROTOCOL
+P09 OBSERVATION_CADENCE_AND_MICROSTRUCTURE_LIMITS
+
+NEXT_BOUNDED_ACTION =
+R1-D07_PROFITABILITY_FOUNDATION_P01_P02_P03_STATIC_CONTRACT_WORK
+(routing only; not authorization; begins with P01/P02/P03 static contract work)
+```
+
+This canonicalization closes none of P01-P09. The route selects no market, G, minimum spread, selector threshold, fee rule, profitability rule or trading policy, and grants no live run, Step-Q, release, writer admission, Gate-D entry, G1 execution, Demo write, production, Kalshi, credential, or N1/deployed-state capability. Any next action requires its own separately dispatched and authorized task.
