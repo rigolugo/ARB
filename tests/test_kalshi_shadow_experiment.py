@@ -1575,12 +1575,12 @@ PROTECTED_BASE_BLOBS = {
     "project_context/START_HERE.md": "d36ab5543dc6883704599c49049afa27d8b295da",
     "src/arb/venues/kalshi/d07_market_selector.py": "46d0e4904c3d8342a54a89fa7e685b40ede24ea4",
     "src/arb/venues/kalshi/minimal_market_maker.py": "be1bbfa31c7d814d48751f9b2399ef62c866d36e",
-    "src/arb/venues/kalshi/minimal_market_maker_experiment_runner.py": "6deef5dc60e66e992a92efe6c004786ef85240e4",
+    "src/arb/venues/kalshi/minimal_market_maker_experiment_runner.py": "eb455d9467448fcb2435abd3465bdf08e68b10fd",
     "src/arb/venues/kalshi/orderbook.py": "4d0c8b8407ddb941decaa5cf6a493ac6ab3063c5",
     "src/arb/venues/kalshi/risk_control.py": "111685c8c1dc7735a53b45830d93844c329f23e3",
     "tests/test_kalshi_d07_market_selector.py": "02dc6a12bd8883cd7c24fd8f9e3c1fba28c74096",
     "tests/test_kalshi_minimal_market_maker.py": "43e2a7fdbdbcfd769713e6e04cbaa321d8313e44",
-    "tests/test_kalshi_minimal_market_maker_experiment_runner.py": "9262029d0d557516b9bcdacd7957725ca2474688",
+    "tests/test_kalshi_minimal_market_maker_experiment_runner.py": "a92508c22029285e013a02f98c24779f6c4a895e",
 }
 
 # Accepted Test-02 configuration input (996 bytes).  TEST FIXTURE ONLY.

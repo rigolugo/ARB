@@ -19325,5 +19325,1174 @@ class ReadTransportIncompleteContentLengthMatrixTests(unittest.TestCase):
                     self.assertTrue(callable(getattr(globals()[cls_name], method, None)), (cls_name, method))
 
 
+# ===========================================================================
+# KALSHI_DEMO_R1_D07_F03_BALANCE_READ_BRIDGE_PREREQUISITE_SPEC_01 -- BR-T01..BR-T30
+# (task R1-D07_F03_BALANCE_READ_BRIDGE_PREREQUISITE_IMPLEMENTATION_01).
+#
+# Offline only.  Every test runs under ``_F03OfflineGuard``: real DNS /
+# socket / TLS / HTTP connection construction and the operator credential
+# file bridge are patched to fail loudly, every transport is constructed with
+# an explicit SYNTHETIC env, and the live-signed-transport tests drive the
+# unchanged ``_perform_get`` through the deterministic ``_LowLevelPhaseStack``
+# fake.  Synthetic balances are examples only; no venue behaviour is asserted.
+# ===========================================================================
+
+
+_F03_SUBACCOUNT = 1
+_F03_EXCHANGE_INDEX = 0
+_F03_PATH = "/trade-api/v2/portfolio/balance"
+_F03_DEMO_HOST = "external-api.demo.kalshi.co"
+
+
+def _f03_body(drop=(), **overrides):
+    """BR04-shaped synthetic GetBalanceResponse (example values only)."""
+    body = {
+        "balance": 123,
+        "balance_breakdown": [{"balance": "1.2345", "exchange_index": 0}],
+        "balance_dollars": "1.2345",
+        "portfolio_value": 456,
+        "updated_ts": 1791378000,
+    }
+    body.update(overrides)
+    for name in drop:
+        body.pop(name, None)
+    return body
+
+
+def _f03_raw(payload=None, *, raw_body=None, status=200, content_type="application/json", transport_unknown=False):
+    body = raw_body if raw_body is not None else json.dumps(
+        _f03_body() if payload is None else payload).encode("utf-8")
+    return RawOperationResponseV1(
+        http_status=status, content_type=content_type, body_bytes=body, transport_unknown=transport_unknown,
+    )
+
+
+def _f03_binding(subaccount=_F03_SUBACCOUNT, exchange_index=_F03_EXCHANGE_INDEX):
+    return ledger_binding.ExecutionDomainBindingV1(
+        venue="KALSHI", environment="KALSHI_DEMO", account_scope_ref="ARB_KALSHI_DEMO_PRIMARY_ACCOUNT",
+        subaccount=subaccount, exchange_index=exchange_index)
+
+
+class _F03UuidFactory:
+    def __init__(self, start=0xF03):
+        self.n = start
+
+    def __call__(self):
+        self.n += 1
+        return uuid.UUID(int=self.n, version=4)
+
+
+class _F03OfflineGuard:
+    """Mixin: block real network construction and operator credential-file
+    access for the whole test (BR-T25/T30 dispatch requirement)."""
+
+    def _install_offline_guard(self) -> None:
+        def _blocked(*_a, **_k):
+            raise AssertionError("F03 offline test attempted real network / credential access")
+
+        for target in (
+            "socket.socket", "socket.create_connection", "socket.getaddrinfo",
+            "ssl.create_default_context", "http.client.HTTPSConnection.connect",
+            "http.client.HTTPConnection.connect",
+        ):
+            patcher = mock.patch(target, side_effect=_blocked)
+            patcher.start()
+            self.addCleanup(patcher.stop)
+        for name in ("_d07_default_read_pem_text", "_demo_path_to_pem_credential_bridge"):
+            patcher = mock.patch.object(runner, name, side_effect=_blocked)
+            patcher.start()
+            self.addCleanup(patcher.stop)
+
+
+class _F03RuntimeHarness(_F03OfflineGuard, unittest.TestCase):
+    """Real ``ExperimentRunnerRuntimeV2`` (composed from the Correction-06
+    active-V2 scaffolding, N=1 domain subaccount=1 / exchange_index=0) with the
+    runtime ``send_operation_request`` replaced by a recording fake."""
+
+    def setUp(self) -> None:
+        self._install_offline_guard()
+        self._e2e = Correction06LiveTrustedAcquirerTestCase(methodName="setUp")
+        self._e2e.setUp()
+        self.addCleanup(self._e2e.tearDown)
+        self._base_rt = self._e2e._v2_runtime()
+
+    def _rt(self, transport, **overrides):
+        return dataclasses.replace(self._base_rt, send_operation_request=transport, **overrides)
+
+    @staticmethod
+    def _recorder(*responses):
+        calls = []
+        queue_ = list(responses)
+
+        def _transport(operation, prepared, deadline):
+            calls.append((operation, prepared, deadline))
+            if not queue_:
+                raise AssertionError("unexpected extra balance transport call (retry?)")
+            response = queue_.pop(0)
+            if callable(response) and not isinstance(response, RawOperationResponseV1):
+                response = response(operation, prepared, deadline)
+            if isinstance(response, BaseException):
+                raise response
+            return response
+
+        return _transport, calls
+
+    def _read(self, *responses, ordinal=1, **rt_overrides):
+        transport, calls = self._recorder(*responses)
+        snapshot = runner.read_f03_balance_snapshot_v1(self._rt(transport, **rt_overrides), request_ordinal=ordinal)
+        return snapshot, calls
+
+    def _read_fail(self, *responses, code, ordinal=1, consumed=1, **rt_overrides):
+        transport, calls = self._recorder(*responses)
+        with self.assertRaises(RunnerError) as ctx:
+            runner.read_f03_balance_snapshot_v1(self._rt(transport, **rt_overrides), request_ordinal=ordinal)
+        self.assertEqual(ctx.exception.code, code, ctx.exception.detail)
+        self.assertEqual(ctx.exception._arb_f03_balance_request_count, consumed)
+        self.assertEqual(len(calls), consumed)
+        return ctx.exception, calls
+
+
+class F03BalanceFrozenSurfaceTests(_F03OfflineGuard, unittest.TestCase):
+    """BR-T01..BR-T05 / BR-FROZEN-001..003."""
+
+    def setUp(self) -> None:
+        self._install_offline_guard()
+
+    def test_br_t01_get_balance_exists_but_is_absent_from_every_frozen_set(self) -> None:
+        op = RunnerOperation.GET_BALANCE
+        self.assertEqual(op.value, "GET_BALANCE")
+        self.assertNotIn(op, PRE_RELEASE_READ_OPERATIONS)
+        self.assertNotIn(op, WRITE_OPERATIONS)
+        self.assertNotIn(op, runner._GENERIC_REQUEST_OPERATIONS)
+        self.assertNotIn(op, runner._ROUTE_TEMPLATES)
+        self.assertNotIn(op, runner._ACTIVE_V2_TRANSPORT_OPERATIONS)
+        self.assertNotIn(op, set(runner._ACTIVE_V2_OP_TO_RUNNER_OP.values()))
+        self.assertNotIn("GET_BALANCE", runner._OPERATION_BINDING_ORDER)
+        self.assertNotIn("GET_BALANCE", runner._OPERATION_BINDING_RECORDS)
+        # the Stage-3 eight-operation semantic theorem is unchanged
+        self.assertEqual(
+            [m.value for m in runner.ActivePreReleaseReadOperationV2],
+            ["GET_EXCHANGE_STATUS", "GET_USER_DATA_TIMESTAMP", "GET_MARKET", "GET_MARKET_ORDERBOOK",
+             "GET_ORDERS", "GET_ORDER", "GET_FILLS", "GET_POSITIONS"])
+        self.assertNotIn("GET_BALANCE", [m.value for m in runner.ActivePreReleaseReadOperationV2])
+        self.assertEqual(len(runner._ACTIVE_V2_OP_BINDING), 8)
+        self.assertEqual(len(runner._ACTIVE_V2_OP_TO_RUNNER_OP), 8)
+        self.assertEqual(
+            [o.value for o in runner._ACTIVE_V2_PORTFOLIO_OPS], ["GET_ORDERS", "GET_FILLS", "GET_POSITIONS"])
+        self.assertEqual(runner.PRE_RELEASE_READ_REQUEST_MAX_V2, 72)
+        self.assertEqual(
+            sorted(o.value for o in PRE_RELEASE_READ_OPERATIONS),
+            ["GET_FILLS", "GET_MARKET", "GET_MARKET_ORDERBOOK", "GET_ORDER", "GET_ORDERS", "GET_POSITIONS"])
+        self.assertEqual(
+            sorted(o.value for o in runner._GENERIC_REQUEST_OPERATIONS),
+            ["GET_FILLS", "GET_MARKET", "GET_ORDER", "GET_ORDERS", "GET_POSITIONS"])
+        # no balance member on the legacy capability; no package export added
+        self.assertFalse([n for n in dir(PreReleaseReadCapabilityV1) if "balance" in n.lower()])
+        self.assertNotIn("read_f03_balance_snapshot_v1", runner.__all__)
+        self.assertNotIn("GET_BALANCE", runner.__all__)
+
+    def test_br_t02_operation_binding_index_bytes_hash_and_order_unchanged(self) -> None:
+        produced = build_operation_binding_index()
+        self.assertEqual(len(produced), OPERATION_BINDING_INDEX_BYTES)
+        self.assertEqual(len(produced), 1338)
+        self.assertEqual(hashlib.sha256(produced).hexdigest(), OPERATION_BINDING_INDEX_SHA256)
+        self.assertEqual(
+            OPERATION_BINDING_INDEX_SHA256, "f4e80e66cfb082318b26c1f622623f35489a5ff090613452a068740d4baf39e1")
+        self.assertEqual(produced, runner._OPERATION_BINDING_REFERENCE_PREIMAGE.encode("utf-8"))
+        self.assertEqual(
+            runner._OPERATION_BINDING_ORDER,
+            ("GET_MARKET", "GET_MARKET_ORDERBOOK", "GET_ORDERS", "GET_ORDER", "GET_FILLS",
+             "GET_POSITIONS", "CREATE_ORDER_V2", "CANCEL_ORDER_V2"))
+
+    def test_br_t03_generic_prepare_runner_operation_request_rejects_balance(self) -> None:
+        for kwargs in ({}, {"ticker": CURRENT_TICKER}):
+            with self.assertRaises(RunnerError) as ctx:
+                prepare_runner_operation_request(
+                    RunnerOperation.GET_BALANCE, path_parameters={}, request_ordinal=1,
+                    uuid_factory=_F03UuidFactory(), **kwargs)
+            self.assertEqual(ctx.exception.code, RunnerFailureCode.OPERATION_REQUEST_POLICY_VIOLATION)
+            self.assertEqual(ctx.exception.detail, "operation")
+
+    def test_br_t04_prepare_active_v2_request_cannot_accept_balance(self) -> None:
+        for candidate in (RunnerOperation.GET_BALANCE, "GET_BALANCE"):
+            with self.subTest(candidate=candidate):
+                with self.assertRaises((KeyError, RunnerError)):
+                    runner._prepare_active_v2_request(
+                        candidate, subaccount=1, exchange_index=0, request_ordinal=1,
+                        uuid_factory=_F03UuidFactory())
+        with self.assertRaises(ValueError):
+            runner.ActivePreReleaseReadOperationV2("GET_BALANCE")
+
+    def test_br_t05_orderbook_stays_off_the_generic_reader_and_on_the_protected_seam(self) -> None:
+        allowed = runner._LiveDemoSignedReadTransport._ALLOWED_OPERATIONS
+        self.assertNotIn(RunnerOperation.GET_MARKET_ORDERBOOK, allowed)
+        self.assertEqual(
+            sorted(o.value for o in allowed),
+            ["GET_BALANCE", "GET_EXCHANGE_STATUS", "GET_FILLS", "GET_MARKET", "GET_ORDER", "GET_ORDERS",
+             "GET_POSITIONS", "GET_USER_DATA_TIMESTAMP"])
+        transport = runner._LiveDemoSignedReadTransport(
+            wall_clock=DeterministicInputs().clock, monotonic_clock_ns=lambda: 0, env=_d07_synthetic_env())
+        prepared = runner._prepare_active_v2_request(
+            runner.ActivePreReleaseReadOperationV2.GET_MARKET_ORDERBOOK, subaccount=1, ticker=CURRENT_TICKER,
+            request_ordinal=1, uuid_factory=_F03UuidFactory())
+        with self.assertRaises(RunnerError) as ctx:
+            transport._require_policy(RunnerOperation.GET_MARKET_ORDERBOOK, prepared)
+        self.assertEqual(ctx.exception.code, RunnerFailureCode.LIVE_READ_TRANSPORT_POLICY_VIOLATION)
+        # the active-V2 adapter still drives the orderbook ONLY through the
+        # closed two-phase seam, never through send_operation_request
+        src = inspect.getsource(runner._ActiveV2OperationAdapter.issue_orderbook)
+        self.assertIn("seam.prepare(ticker)", src)
+        self.assertIn("seam.execute(prepared, deadline)", src)
+        self.assertNotIn("send_operation_request", src)
+        self.assertTrue(issubclass(runner._LiveDemoOrderbookSeam, runner._ActiveV2OrderbookSeam))
+        self.assertIs(
+            runner._ACTIVE_V2_OP_TO_RUNNER_OP[runner.ActivePreReleaseReadOperationV2.GET_MARKET_ORDERBOOK],
+            RunnerOperation.GET_MARKET_ORDERBOOK)
+
+    def test_br_frozen_003_no_new_signer_transport_credential_or_retry_surface(self) -> None:
+        import ast
+
+        section = "".join(
+            inspect.getsource(obj) for obj in (
+                runner.prepare_f03_balance_read_request_v1, runner.f03_balance_read_request_identity_sha256_v1,
+                runner.read_f03_balance_snapshot_v1, runner._require_f03_balance_read_transport_policy,
+                runner._require_f03_balance_request_shape, runner._validate_f03_get_balance_response,
+                runner.evaluate_f03_balance_checkpoint_v1, runner.project_f03_balance_snapshot_evidence_v1,
+            ))
+        tree = ast.parse(textwrap_dedent(section))
+        names = {n.id for n in ast.walk(tree) if isinstance(n, ast.Name)}
+        attrs = {n.attr for n in ast.walk(tree) if isinstance(n, ast.Attribute)}
+        for banned in ("socket", "ssl", "http", "urllib", "requests", "os", "environ",
+                       "_d07_demo_signed_auth_headers", "load_pem_private_key", "_perform_get",
+                       "_auth_headers", "getaddrinfo", "sleep"):
+            self.assertNotIn(banned, names, banned)
+            self.assertNotIn(banned, attrs, banned)
+        loops = [n for n in ast.walk(ast.parse(textwrap_dedent(inspect.getsource(runner.read_f03_balance_snapshot_v1))))
+                 if isinstance(n, (ast.For, ast.While, ast.AsyncFor))]
+        self.assertEqual(loops, [], "the balance consumer has no loop -> no retry path")
+
+
+def textwrap_dedent(src):
+    import textwrap
+    return textwrap.dedent(src)
+
+
+class F03BalanceSourceBindingTests(_F03OfflineGuard, unittest.TestCase):
+    """BR-T10 / BR-SRC-001..003."""
+
+    def setUp(self) -> None:
+        self._install_offline_guard()
+
+    def test_br_t10_source_binding_constants_match_the_approved_binding_artifact(self) -> None:
+        # Values transcribed from F03_BALANCE_SOURCE_BINDING_V1.json (4861 bytes /
+        # sha256 a57e6d0aaf281054a60bcd93da64fae61ae4cd093ddf3e904b8016f845dc8068).
+        record = runner._F03_BALANCE_SOURCE_BINDING_RECORD_V1
+        self.assertEqual(
+            hashlib.sha256(canonical_json_bytes(dict(record))).hexdigest(),
+            "5ea7353de067a027c6ea74baec942bfb953d663bc4fbd67e2e49d417c04198fa")
+        self.assertEqual(runner.F03_BALANCE_SOURCE_BINDING_RECORD_SHA256,
+                         "5ea7353de067a027c6ea74baec942bfb953d663bc4fbd67e2e49d417c04198fa")
+        self.assertEqual(record["schema"], "ARB_F03_BALANCE_SOURCE_BINDING_V1")
+        self.assertEqual(runner.F03_BALANCE_SOURCE_BINDING_ID, "KALSHI_OPENAPI_3_29_0_GET_BALANCE_CANONICAL_BINDING_01")
+        self.assertEqual(runner.F03_BALANCE_SOURCE_URL, "https://docs.kalshi.com/openapi.yaml")
+        self.assertEqual(runner.F03_BALANCE_SOURCE_OPENAPI_VERSION, "3.0.0")
+        self.assertEqual(runner.F03_BALANCE_SOURCE_INFO_VERSION, "3.29.0")
+        self.assertEqual(runner.F03_BALANCE_SOURCE_RAW_BYTES, 325930)
+        self.assertEqual(runner.F03_BALANCE_SOURCE_RAW_SHA256,
+                         "99bdf4093d7eced607ba8b48cc99e3da862c35d99afa2a0c0f63f14eab9237ed")
+        self.assertEqual(runner.F03_BALANCE_SOURCE_RETRIEVAL_TASK,
+                         "KALSHI_DEMO_ROUTE_B_B1_CURRENT_OPENAPI_SOURCE_RESOLUTION_01")
+        self.assertEqual(runner.F03_BALANCE_SOURCE_REPORT_GIT_BLOB, "3d1d45b0a53dedba1e054456fb498040d8c7deac")
+        self.assertEqual(runner.F03_BALANCE_SOURCE_RETRIEVED_AT_UTC, "NOT_RECORDED_IN_CANONICAL_REPORT")
+        self.assertEqual(record["official_raw_source"]["precise_retrieved_at_utc"],
+                         "NOT_RECORDED_IN_CANONICAL_REPORT__DO_NOT_INVENT")
+        self.assertIs(record["official_raw_source"]["raw_bytes_materialized_in_this_task"], False)
+        self.assertEqual(record["canonical_source_resolution_report"]["raw_sha256"],
+                         "85a6f371dbbe026198cff39366978b133a67c41b15f4abfd180b2077a268577a")
+        op = record["operation"]
+        self.assertEqual((op["operation_id"], op["method"], op["path"], op["full_demo_path"]),
+                         ("GetBalance", "GET", "/portfolio/balance", _F03_PATH))
+        self.assertEqual(op["required_top_level"], ["balance", "balance_dollars", "portfolio_value", "updated_ts"])
+        self.assertEqual(op["optional_top_level"], ["balance_breakdown"])
+        self.assertEqual(op["fields"]["balance_breakdown"]["items_required"], ["exchange_index", "balance"])
+        self.assertEqual(op["security"], ["kalshiAccessKey", "kalshiAccessSignature", "kalshiAccessTimestamp"])
+        self.assertEqual(sorted(op["query"]), ["exchange_index", "subaccount"])
+        self.assertEqual(runner.F03_BALANCE_REQUIRED_FIELDS,
+                         ("balance", "balance_dollars", "portfolio_value", "updated_ts"))
+        self.assertEqual(runner.F03_BALANCE_QUERY_KEYS, ("subaccount", "exchange_index"))
+        self.assertEqual(runner.F03_BALANCE_FULL_PATH, _F03_PATH)
+        # a corrupted embedded record is an import-time defect, never tolerated
+        with mock.patch.object(runner, "F03_BALANCE_SOURCE_BINDING_RECORD_SHA256", "0" * 64):
+            with self.assertRaises(RunnerError) as ctx:
+                runner._verify_f03_balance_source_binding()
+        self.assertEqual(ctx.exception.code, RunnerFailureCode.OPERATION_BINDING_INDEX_MISMATCH)
+
+
+class F03BalancePreparationTests(_F03OfflineGuard, unittest.TestCase):
+    """BR-T06..BR-T09 (BR-ARCH-002/003/005)."""
+
+    def setUp(self) -> None:
+        self._install_offline_guard()
+        self.binding = _f03_binding()
+        self.uuids = _F03UuidFactory()
+        self.transport = runner._LiveDemoSignedReadTransport(
+            wall_clock=DeterministicInputs().clock, monotonic_clock_ns=lambda: 0, env=_d07_synthetic_env())
+
+    def _prepared(self, binding=None, ordinal=7):
+        return runner.prepare_f03_balance_read_request_v1(
+            domain_binding=binding or self.binding, request_ordinal=ordinal, uuid_factory=self.uuids)
+
+    def _policy_rejects(self, prepared, operation=RunnerOperation.GET_BALANCE, *, detail=None):
+        with self.assertRaises(RunnerError) as ctx:
+            self.transport._require_policy(operation, prepared)
+        self.assertEqual(ctx.exception.code, RunnerFailureCode.LIVE_READ_TRANSPORT_POLICY_VIOLATION)
+        if detail is not None:
+            self.assertEqual(ctx.exception.detail, detail)
+        # rejected BEFORE any signing or I/O through the real __call__ too
+        with mock.patch.object(runner._LiveDemoSignedReadTransport, "_auth_headers",
+                               side_effect=AssertionError("no signing on a policy violation")), \
+             mock.patch.object(runner._LiveDemoSignedReadTransport, "_perform_get",
+                               side_effect=AssertionError("no I/O on a policy violation")):
+            deadline = OperationDeadlineV1.create(
+                process_instance_id="proc_" + "0" * 32, operation_name="GET_BALANCE", request_ordinal=7,
+                started_monotonic_ns=0, experiment_absolute_end_monotonic_ns=10 ** 18, uuid_factory=self.uuids)
+            with self.assertRaises(RunnerError) as ctx2:
+                self.transport(operation, prepared, deadline)
+        self.assertEqual(ctx2.exception.code, RunnerFailureCode.LIVE_READ_TRANSPORT_POLICY_VIOLATION)
+
+    # --- BR-T06 ---------------------------------------------------------------
+    def test_br_t06_dedicated_preparer_emits_the_exact_demo_request(self) -> None:
+        # fixture BR01_PREPARED_REQUEST_EXACT
+        prepared = self._prepared(ordinal=7)
+        self.assertIs(type(prepared), runner.F03BalancePreparedRequestV1)
+        self.assertIsInstance(prepared, runner.PreparedRunnerOperationRequestV1)
+        self.assertIs(prepared.operation, RunnerOperation.GET_BALANCE)
+        self.assertEqual(prepared.method, "GET")
+        self.assertEqual(prepared.host, _F03_DEMO_HOST)
+        self.assertEqual(prepared.full_path, _F03_PATH)
+        self.assertEqual(prepared.query, (("subaccount", "1"), ("exchange_index", "0")))
+        self.assertEqual(prepared.signed_path_without_query, _F03_PATH)
+        self.assertIsNone(prepared.body)
+        self.assertEqual(prepared.auth_mode, "AUTHENTICATED")
+        self.assertEqual(
+            prepared.wire_request_url,
+            "https://external-api.demo.kalshi.co/trade-api/v2/portfolio/balance?subaccount=1&exchange_index=0")
+        self.assertRegex(prepared.request_id, r"^req_[0-9a-f]{32}$")
+        self.assertEqual(prepared.request_id, "req_" + uuid.UUID(int=0xF04, version=4).hex)
+        self.assertIs(prepared.balance_domain_binding, self.binding)
+        self.assertEqual(prepared.balance_request_ordinal, 7)
+        self.transport._require_policy(RunnerOperation.GET_BALANCE, prepared)  # accepted
+        self.assertEqual(runner._LiveDemoSignedReadTransport._request_target(prepared),
+                         _F03_PATH + "?subaccount=1&exchange_index=0")
+
+    def test_br_t06_br_arch_003_request_identity_is_the_exact_spec_preimage(self) -> None:
+        prepared = self._prepared(ordinal=7)
+        identity = runner.f03_balance_read_request_identity_sha256_v1(
+            domain_binding=self.binding, prepared_request=prepared, request_ordinal=7)
+        preimage = {
+            "schema": "ARB_KALSHI_DEMO_F03_BALANCE_READ_REQUEST_IDENTITY_V1",
+            "source_binding_id": "KALSHI_OPENAPI_3_29_0_GET_BALANCE_CANONICAL_BINDING_01",
+            "source_raw_sha256": "99bdf4093d7eced607ba8b48cc99e3da862c35d99afa2a0c0f63f14eab9237ed",
+            "operation": "GET_BALANCE",
+            "method": "GET",
+            "path": _F03_PATH,
+            "auth_class": "AUTHENTICATED",
+            "canonical_query": [["subaccount", "1"], ["exchange_index", "0"]],
+            "domain_binding_id": self.binding.binding_id,
+            "domain_binding_sha256": self.binding.binding_sha256,
+            "subaccount": 1,
+            "exchange_index": 0,
+            "request_ordinal": 7,
+        }
+        self.assertEqual(identity, hashlib.sha256(canonical_json_bytes(preimage)).hexdigest())
+        self.assertEqual(prepared.balance_request_identity_sha256, identity)
+        # the request UUID is excluded: a second preparation differs only in request_id
+        again = self._prepared(ordinal=7)
+        self.assertNotEqual(again.request_id, prepared.request_id)
+        self.assertEqual(again.balance_request_identity_sha256, identity)
+        # ordinal and domain are committed
+        self.assertNotEqual(self._prepared(ordinal=8).balance_request_identity_sha256, identity)
+        self.assertNotEqual(
+            self._prepared(binding=_f03_binding(exchange_index=3)).balance_request_identity_sha256, identity)
+        # the helper rejects a request that does not belong to the stated domain/ordinal
+        for kwargs in ({"request_ordinal": 8}, {"domain_binding": _f03_binding(subaccount=2)}):
+            args = dict(domain_binding=self.binding, prepared_request=prepared, request_ordinal=7)
+            args.update(kwargs)
+            with self.assertRaises(RunnerError) as ctx:
+                runner.f03_balance_read_request_identity_sha256_v1(**args)
+            self.assertEqual(ctx.exception.code, RunnerFailureCode.OPERATION_REQUEST_POLICY_VIOLATION)
+
+    # --- BR-T07 ---------------------------------------------------------------
+    def test_br_t07_subaccount_and_exchange_index_derive_only_from_the_exact_domain(self) -> None:
+        params = list(inspect.signature(runner.prepare_f03_balance_read_request_v1).parameters)
+        self.assertEqual(params, ["domain_binding", "request_ordinal", "uuid_factory"])
+        consumer_params = list(inspect.signature(runner.read_f03_balance_snapshot_v1).parameters)
+        self.assertEqual(consumer_params, ["runtime", "request_ordinal"])
+        for subaccount, exchange_index in ((0, 0), (63, 0), (1, 7), (5, 2147483647)):
+            with self.subTest(subaccount=subaccount, exchange_index=exchange_index):
+                p = self._prepared(binding=_f03_binding(subaccount, exchange_index))
+                self.assertEqual(p.query, (("subaccount", str(subaccount)), ("exchange_index", str(exchange_index))))
+                self.transport._require_policy(RunnerOperation.GET_BALANCE, p)
+
+        def _tampered(**changes):
+            b = _f03_binding()
+            for name, value in changes.items():
+                object.__setattr__(b, name, value)
+            return b
+
+        cases = {
+            "bool subaccount (fixture BR02)": _tampered(subaccount=True),
+            "bool exchange_index": _tampered(exchange_index=False),
+            "subaccount 64": _tampered(subaccount=64),
+            "subaccount -1": _tampered(subaccount=-1),
+            "exchange_index -1": _tampered(exchange_index=-1),
+            "production environment": _tampered(environment="KALSHI_PRODUCTION"),
+            "altered binding hash": _tampered(binding_sha256="0" * 64),
+            "subaccount changed after hashing": _tampered(subaccount=2),
+            "not a binding (mapping)": {"subaccount": 1, "exchange_index": 0},
+            "not a binding (mock)": mock.Mock(spec=ledger_binding.ExecutionDomainBindingV1),
+        }
+        for label, bad in cases.items():
+            with self.subTest(case=label):
+                with self.assertRaises(RunnerError) as ctx:
+                    runner.prepare_f03_balance_read_request_v1(
+                        domain_binding=bad, request_ordinal=1, uuid_factory=self.uuids)
+                self.assertEqual(ctx.exception.code, RunnerFailureCode.OPERATION_REQUEST_POLICY_VIOLATION)
+        for ordinal in (0, -1, True, 1.0, "1", None):
+            with self.subTest(ordinal=ordinal):
+                with self.assertRaises(RunnerError) as ctx:
+                    runner.prepare_f03_balance_read_request_v1(
+                        domain_binding=self.binding, request_ordinal=ordinal, uuid_factory=self.uuids)
+                self.assertEqual(ctx.exception.code, RunnerFailureCode.OPERATION_REQUEST_POLICY_VIOLATION)
+        # no network / credential / ledger side effect: the patched-out network
+        # and credential surfaces were never touched (guard would have raised)
+
+    # --- BR-T08 ---------------------------------------------------------------
+    def test_br_t08_tampered_balance_query_never_passes_the_balance_policy(self) -> None:
+        good = self._prepared()
+        q = good.query
+        tampers = {
+            "missing exchange_index": ((q[0],), None),
+            "missing subaccount": ((q[1],), None),
+            "extra limit (fixture BR03)": (q + (("limit", "1000"),), None),
+            "extra cursor": (q + (("cursor", "abc"),), None),
+            "reordered": ((q[1], q[0]), None),
+            "subaccount value changed": ((("subaccount", "2"), q[1]), None),
+            "exchange_index value changed": ((q[0], ("exchange_index", "1")), None),
+            "key renamed": ((("sub_account", "1"), q[1]), None),
+            "duplicate pair": ((q[0], q[0]), None),
+            "list not tuple": ([q[0], q[1]], None),
+            "int value": ((("subaccount", 1), q[1]), None),
+            "empty": ((), None),
+        }
+        for label, (query, _unused) in tampers.items():
+            with self.subTest(case=label):
+                self._policy_rejects(dataclasses.replace(good, query=query))
+        # consistently re-derived query/URL for ANOTHER domain while the carried
+        # commitment still names this one -> commitment mismatch
+        other = self._prepared(binding=_f03_binding(subaccount=2))
+        self._policy_rejects(dataclasses.replace(
+            good, query=other.query, wire_request_url=other.wire_request_url))
+        # swapping the carried domain without recomputing the identity
+        self._policy_rejects(dataclasses.replace(good, balance_domain_binding=_f03_binding(subaccount=2)),
+                             detail="f03 balance query")
+        self._policy_rejects(dataclasses.replace(
+            good, balance_domain_binding=other.balance_domain_binding, query=other.query,
+            wire_request_url=other.wire_request_url), detail="f03 balance domain commitment")
+        self._policy_rejects(dataclasses.replace(good, balance_request_ordinal=8),
+                             detail="f03 balance domain commitment")
+        self._policy_rejects(dataclasses.replace(good, balance_request_identity_sha256="f" * 64),
+                             detail="f03 balance domain commitment")
+        # path / signed path / auth / body / method / request-id tampering
+        for label, changes in {
+            "path suffix": {"full_path": _F03_PATH + "/", "signed_path_without_query": _F03_PATH + "/"},
+            "path plural": {"full_path": _F03_PATH + "s", "signed_path_without_query": _F03_PATH + "s"},
+            "path case": {"full_path": _F03_PATH.upper(), "signed_path_without_query": _F03_PATH.upper()},
+            "other portfolio path": {"full_path": "/trade-api/v2/portfolio/orders",
+                                     "signed_path_without_query": "/trade-api/v2/portfolio/orders"},
+            "signed path with query": {"signed_path_without_query": _F03_PATH + "?subaccount=1&exchange_index=0"},
+            "public auth": {"auth_mode": "PUBLIC_UNSIGNED_FOR_THIS_OPERATION"},
+            "unknown auth": {"auth_mode": "PRODUCTION_SIGNED"},
+            "body present": {"body": {}},
+            "method POST": {"method": "POST"},
+            "method DELETE": {"method": "DELETE"},
+            "operation field mismatch": {"operation": RunnerOperation.GET_ORDERS},
+            "request id grammar": {"request_id": "not-a-request-id"},
+            "wire url extra query": {"wire_request_url": good.wire_request_url + "&limit=1000"},
+        }.items():
+            with self.subTest(case=label):
+                self._policy_rejects(dataclasses.replace(good, **changes))
+        # a balance carrier presented as another operation, and a base-type
+        # request presented as GET_BALANCE
+        self._policy_rejects(good, RunnerOperation.GET_ORDERS)
+        self._policy_rejects(good, RunnerOperation.CREATE_ORDER_V2)
+        base_fields = {f.name: getattr(good, f.name) for f in dataclasses.fields(runner.PreparedRunnerOperationRequestV1)}
+        self._policy_rejects(runner.PreparedRunnerOperationRequestV1(**base_fields), detail="prepared type")
+        # no ordinary caller can construct the carrier: the issuance key is private
+        forged_fields = {f.name: getattr(good, f.name) for f in dataclasses.fields(good) if f.name != "_issuance_key"}
+        for key in (None, object()):
+            with self.assertRaises(RunnerError) as ctx:
+                runner.F03BalancePreparedRequestV1(**forged_fields, _issuance_key=key)
+            self.assertEqual(ctx.exception.code, RunnerFailureCode.OPERATION_REQUEST_POLICY_VIOLATION)
+        # object.__setattr__ mutation of a genuine carrier is still re-checked
+        mutated = self._prepared()
+        object.__setattr__(mutated, "query", (("subaccount", "9"), ("exchange_index", "0")))
+        self._policy_rejects(mutated)
+
+    # --- BR-T09 ---------------------------------------------------------------
+    def test_br_t09_production_host_path_or_arbitrary_url_cannot_pass(self) -> None:
+        good = self._prepared()
+        query_text = "?subaccount=1&exchange_index=0"
+        for label, changes in {
+            "production host": {"host": "api.elections.kalshi.com"},
+            "legacy production host": {"host": "trading-api.kalshi.com"},
+            "production wire url": {"wire_request_url": "https://api.elections.kalshi.com" + _F03_PATH + query_text},
+            "arbitrary url": {"wire_request_url": "https://evil.example" + _F03_PATH + query_text},
+            "plain http": {"wire_request_url": "http://external-api.demo.kalshi.co" + _F03_PATH + query_text},
+            "demo origin with port": {"wire_request_url": "https://external-api.demo.kalshi.co:8443" + _F03_PATH + query_text},
+            "userinfo url": {"wire_request_url": "https://x@external-api.demo.kalshi.co" + _F03_PATH + query_text},
+            "production api root": {"full_path": "/trade-api/v1/portfolio/balance",
+                                    "signed_path_without_query": "/trade-api/v1/portfolio/balance"},
+        }.items():
+            with self.subTest(case=label):
+                self._policy_rejects(dataclasses.replace(good, **changes))
+
+
+class F03BalanceResponseTests(_F03RuntimeHarness):
+    """BR-T11..BR-T21 through the REAL consumer -> shared strict decoder ->
+    balance validator (fake runtime transport only)."""
+
+    # --- BR-T11 ---------------------------------------------------------------
+    def test_br_t11_valid_200_parses_exact_decimal_lexical_and_canonical_values(self) -> None:
+        snap, calls = self._read(_f03_raw())  # fixture BR04_VALID_RESPONSE
+        self.assertEqual(len(calls), 1)
+        self.assertIs(type(snap), runner.F03BalanceSnapshotV1)
+        self.assertEqual(snap.balance_dollars_lexeme, "1.2345")
+        self.assertIs(type(snap.balance_decimal), Decimal)
+        self.assertEqual(snap.balance_decimal, Decimal("1.2345"))
+        self.assertEqual(str(snap.balance_decimal), "1.2345")
+        self.assertEqual(snap.balance_canonical_text, "1.2345")
+        self.assertEqual((snap.balance_legacy_cents, snap.portfolio_value_legacy_cents), (123, 456))
+        self.assertEqual(snap.updated_ts, 1791378000)
+        self.assertTrue(snap.balance_breakdown_present)
+        self.assertEqual(snap.balance_breakdown, ((0, "1.2345"),))
+        self.assertEqual(snap.schema_revision, 1)
+        self.assertEqual(snap.operation, "GET_BALANCE")
+        self.assertEqual(snap.source_binding_id, runner.F03_BALANCE_SOURCE_BINDING_ID)
+        self.assertEqual(snap.source_raw_sha256, runner.F03_BALANCE_SOURCE_RAW_SHA256)
+        self.assertEqual((snap.subaccount, snap.exchange_index), (1, 0))
+        rt_binding = self._base_rt.domain_binding
+        self.assertEqual((snap.domain_binding_id, snap.domain_binding_sha256),
+                         (rt_binding.binding_id, rt_binding.binding_sha256))
+        self.assertEqual(snap.process_instance_id, self._base_rt.normal_gate.process_instance_id)
+        self.assertEqual(snap.request_identity_sha256, calls[0][1].balance_request_identity_sha256)
+        self.assertEqual(snap.request_id, calls[0][1].request_id)
+        self.assertRegex(snap.observation_id, r"^f03bal_[0-9a-f]{32}$")
+        # sub-cent precision is never truncated to cents; no cent/dollar equality is imposed
+        for lexeme, canonical in (("10.123456", "10.123456"), ("1.20", "1.2"), ("0", "0"), ("-0.50", "-0.5"),
+                                  ("-0", "0"), ("0.000001", "0.000001"), ("100", "100"), ("99999999999.5", "99999999999.5")):
+            with self.subTest(lexeme=lexeme):
+                s, _ = self._read(_f03_raw(_f03_body(balance_dollars=lexeme, balance=7)))
+                self.assertEqual(s.balance_dollars_lexeme, lexeme)
+                self.assertEqual(s.balance_decimal, Decimal(lexeme))
+                self.assertEqual(s.balance_canonical_text, canonical)
+                self.assertEqual(s.balance_legacy_cents, 7)
+
+    # --- BR-T12 ---------------------------------------------------------------
+    def test_br_t12_required_field_omission_rejects(self) -> None:
+        for name in ("balance", "balance_dollars", "portfolio_value", "updated_ts"):
+            with self.subTest(missing=name):
+                exc, _ = self._read_fail(_f03_raw(_f03_body(drop=(name,))),
+                                         code=RunnerFailureCode.RESPONSE_SCHEMA_INVALID)
+                self.assertEqual(exc.detail, f"missing field: {name}")
+        # fixture BR05_MISSING_REQUIRED
+        self._read_fail(_f03_raw({"balance": 123, "portfolio_value": 456, "updated_ts": 1791378000}),
+                        code=RunnerFailureCode.RESPONSE_SCHEMA_INVALID)
+
+    # --- BR-T13 ---------------------------------------------------------------
+    def test_br_t13_balance_dollars_lexical_grammar_rejections(self) -> None:
+        bad_values = (
+            1.2345, 1, "1e-4", "1E2", "1e5", "+1.00", " 1.00", "1.00 ", "\t1.00", "1,000.00", "1 000",
+            "01.00", "00", "-01", "1.0000001", "0.1234567", "NaN", "nan", "Infinity", "-Infinity", "inf",
+            "", "1.", ".5", "-", "--1", "1..0", "0x10", "١٢٣", "1.2.3", None, True, False, [], {},
+        )
+        for value in bad_values:
+            with self.subTest(value=repr(value)):
+                exc, _ = self._read_fail(_f03_raw(_f03_body(balance_dollars=value)),
+                                         code=RunnerFailureCode.RESPONSE_SCHEMA_INVALID)
+                self.assertEqual(exc.detail, "balance_dollars")
+        # fixtures BR06 / BR07 / BR08 explicitly
+        for value in (1.2345, "1e-4", "1.0000001"):
+            self._read_fail(_f03_raw(_f03_body(balance_dollars=value)), code=RunnerFailureCode.RESPONSE_SCHEMA_INVALID)
+
+    # --- BR-T14 ---------------------------------------------------------------
+    def test_br_t14_bool_or_out_of_int64_integer_fields_reject(self) -> None:
+        for name in ("balance", "portfolio_value", "updated_ts"):
+            for value in (True, False, 2 ** 63, -(2 ** 63) - 1, 1.0, "1", None, [1], {"v": 1}):
+                with self.subTest(field=name, value=repr(value)):
+                    exc, _ = self._read_fail(_f03_raw(_f03_body(**{name: value})),
+                                             code=RunnerFailureCode.RESPONSE_SCHEMA_INVALID)
+                    self.assertEqual(exc.detail, name)
+        self._read_fail(_f03_raw(_f03_body(updated_ts=-1)), code=RunnerFailureCode.RESPONSE_SCHEMA_INVALID)
+        # fixture BR13_UPDATED_TS_BOOL_REJECT
+        self._read_fail(_f03_raw(_f03_body(updated_ts=True)), code=RunnerFailureCode.RESPONSE_SCHEMA_INVALID)
+        # exact int64 boundaries are accepted (compatibility values only)
+        for value in (2 ** 63 - 1, -(2 ** 63), 0):
+            with self.subTest(boundary=value):
+                s, _ = self._read(_f03_raw(_f03_body(balance=value, portfolio_value=value)))
+                self.assertEqual((s.balance_legacy_cents, s.portfolio_value_legacy_cents), (value, value))
+        s, _ = self._read(_f03_raw(_f03_body(updated_ts=0)))
+        self.assertEqual(s.updated_ts, 0)
+        s, _ = self._read(_f03_raw(_f03_body(updated_ts=2 ** 63 - 1)))
+        self.assertEqual(s.updated_ts, 2 ** 63 - 1)
+
+    # --- BR-T15 ---------------------------------------------------------------
+    def test_br_t15_absent_breakdown_accepts(self) -> None:
+        # fixture BR11_BREAKDOWN_ABSENT_ACCEPT
+        s, _ = self._read(_f03_raw(_f03_body(drop=("balance_breakdown",), balance_dollars="1.23")))
+        self.assertFalse(s.balance_breakdown_present)
+        self.assertEqual(s.balance_breakdown, ())
+        self.assertEqual(s.balance_decimal, Decimal("1.23"))
+        s, _ = self._read(_f03_raw(_f03_body(balance_breakdown=[])))
+        self.assertTrue(s.balance_breakdown_present)
+        self.assertEqual(s.balance_breakdown, ())
+
+    # --- BR-T16 ---------------------------------------------------------------
+    def test_br_t16_valid_breakdown_accepts_and_conflicting_duplicate_rejects(self) -> None:
+        rows = [{"exchange_index": 3, "balance": "0.5"}, {"exchange_index": 0, "balance": "1.2345"},
+                {"exchange_index": 1, "balance": "-2.000001"}, {"exchange_index": 0, "balance": "1.2345"}]
+        s, _ = self._read(_f03_raw(_f03_body(balance_breakdown=rows)))
+        self.assertEqual(s.balance_breakdown, ((0, "1.2345"), (1, "-2.000001"), (3, "0.5")))
+        # fixture BR12_BREAKDOWN_CONFLICTING_DUPLICATE (+ lexically different equal value)
+        for conflicting in ([{"balance": "1.23", "exchange_index": 0}, {"balance": "1.24", "exchange_index": 0}],
+                            [{"balance": "1.23", "exchange_index": 0}, {"balance": "1.230", "exchange_index": 0}]):
+            with self.subTest(rows=conflicting):
+                exc, _ = self._read_fail(_f03_raw(_f03_body(balance_breakdown=conflicting)),
+                                         code=RunnerFailureCode.RESPONSE_SCHEMA_INVALID)
+                self.assertEqual(exc.detail, "balance_breakdown conflicting duplicate exchange_index")
+        for label, value in {
+            "null": None, "object": {"exchange_index": 0, "balance": "1"}, "string": "[]",
+            "row not object": [["0", "1.00"]], "row missing exchange_index": [{"balance": "1.00"}],
+            "row missing balance": [{"exchange_index": 0}], "bool index": [{"exchange_index": True, "balance": "1"}],
+            "string index": [{"exchange_index": "0", "balance": "1"}],
+            "float index": [{"exchange_index": 0.0, "balance": "1"}],
+            "numeric balance": [{"exchange_index": 0, "balance": 1.5}],
+            "exponent balance": [{"exchange_index": 0, "balance": "1e2"}],
+            "seven decimals": [{"exchange_index": 0, "balance": "1.0000001"}],
+        }.items():
+            with self.subTest(case=label):
+                self._read_fail(_f03_raw(_f03_body(balance_breakdown=value)),
+                                code=RunnerFailureCode.RESPONSE_SCHEMA_INVALID)
+
+    # --- BR-T17 ---------------------------------------------------------------
+    def test_br_t17_unknown_fields_are_ignored_and_never_promoted(self) -> None:
+        # fixture BR10_UNKNOWN_FIELD_IGNORED
+        payload = _f03_body(balance_dollars="1.23", future_field={"x": 1}, subaccount=9, exchange_index=4,
+                            balance_breakdown=[{"exchange_index": 0, "balance": "5.00", "row_extra": "zz"}])
+        s, _ = self._read(_f03_raw(payload))
+        self.assertFalse(hasattr(s, "future_field"))
+        # a response never supplies the domain: the prepared query is authoritative
+        self.assertEqual((s.subaccount, s.exchange_index), (1, 0))
+        # the breakdown is diagnostic only and never replaces top-level balance_dollars
+        self.assertEqual(s.balance_decimal, Decimal("1.23"))
+        self.assertEqual(s.balance_breakdown, ((0, "5.00"),))
+        evidence = runner.project_f03_balance_snapshot_evidence_v1(s).canonical_object()
+        blob = json.dumps(evidence, sort_keys=True)
+        for absent in ("future_field", "row_extra", "zz"):
+            self.assertNotIn(absent, blob)
+
+    # --- BR-T18 ---------------------------------------------------------------
+    def test_br_t18_duplicate_keys_and_nonfinite_reject_through_the_shared_strict_decoder(self) -> None:
+        cases = {
+            # fixture BR09_DUPLICATE_JSON_REJECT
+            "top-level duplicate": b'{"balance":123,"balance":124,"balance_dollars":"1.23","portfolio_value":1,"updated_ts":1}',
+            "nested breakdown duplicate": (
+                b'{"balance":1,"balance_dollars":"1.23","portfolio_value":1,"updated_ts":1,'
+                b'"balance_breakdown":[{"exchange_index":0,"balance":"1","balance":"2"}]}'),
+            "NaN constant": b'{"balance":NaN,"balance_dollars":"1.23","portfolio_value":1,"updated_ts":1}',
+            "Infinity constant": b'{"balance":1,"balance_dollars":"1.23","portfolio_value":Infinity,"updated_ts":1}',
+            "invalid utf-8": b'{"balance":1,"balance_dollars":"\xff","portfolio_value":1,"updated_ts":1}',
+            "truncated json": b'{"balance":1,',
+        }
+        for label, raw_body in cases.items():
+            with self.subTest(case=label):
+                self._read_fail(_f03_raw(raw_body=raw_body), code=RunnerFailureCode.RESPONSE_JSON_INVALID)
+        for raw_body in (b"[]", b'"x"', b"1", b"null"):
+            with self.subTest(top_level=raw_body):
+                self._read_fail(_f03_raw(raw_body=raw_body), code=RunnerFailureCode.RESPONSE_SCHEMA_INVALID)
+        # the consumer never owns a second json.loads path
+        import ast
+        tree = ast.parse(textwrap_dedent(inspect.getsource(runner.read_f03_balance_snapshot_v1))
+                         + textwrap_dedent(inspect.getsource(runner._validate_f03_get_balance_response)))
+        attrs = {n.attr for n in ast.walk(tree) if isinstance(n, ast.Attribute)}
+        names = {n.id for n in ast.walk(tree) if isinstance(n, ast.Name)}
+        self.assertNotIn("loads", attrs)
+        self.assertNotIn("json", names)
+        self.assertIn("_decode_and_validate_runner_json_response", names)
+
+    # --- BR-T19 ---------------------------------------------------------------
+    def test_br_t19_wrong_media_type_rejects(self) -> None:
+        # fixture BR15_WRONG_MEDIA
+        for content_type in ("text/plain", "application/problem+json", "text/json", "", "application/jsonx",
+                             "application/x-json"):
+            with self.subTest(content_type=content_type):
+                exc, _ = self._read_fail(_f03_raw(content_type=content_type),
+                                         code=RunnerFailureCode.RESPONSE_SCHEMA_INVALID)
+                self.assertEqual(exc.detail, "media type")
+        for content_type in ("application/json", "application/json; charset=utf-8", " Application/JSON "):
+            with self.subTest(accepted=content_type):
+                self._read(_f03_raw(content_type=content_type))
+
+    # --- BR-T20 ---------------------------------------------------------------
+    def test_br_t20_body_cap_boundary(self) -> None:
+        compact = json.dumps(_f03_body(), separators=(",", ":")).encode("utf-8")
+        exact = compact[:-1] + b" " * (runner.MAX_RESPONSE_BODY_BYTES - len(compact)) + b"}"
+        self.assertEqual(len(exact), 65536)
+        s, _ = self._read(_f03_raw(raw_body=exact))
+        self.assertEqual(s.balance_decimal, Decimal("1.2345"))
+        # exactly at the cap but invalid -> rejected on its own merits
+        self._read_fail(_f03_raw(raw_body=b"{" + b" " * 65535), code=RunnerFailureCode.RESPONSE_JSON_INVALID)
+        # fixture BR14_BODY_CAP: 65537 rejects before decode
+        self._read_fail(_f03_raw(raw_body=exact + b" "), code=RunnerFailureCode.RESPONSE_BODY_TOO_LARGE)
+
+    # --- BR-T21 ---------------------------------------------------------------
+    def test_br_t21_non_200_status_and_transport_unknown_keep_fail_closed_semantics(self) -> None:
+        for status in (201, 204, 202, 401, 404, 500):
+            with self.subTest(status=status):
+                exc, _ = self._read_fail(_f03_raw(status=status), code=RunnerFailureCode.RESPONSE_SCHEMA_INVALID)
+                self.assertEqual(exc.detail, f"http_status={status}")
+        exc, _ = self._read_fail(_f03_raw(transport_unknown=True), code=RunnerFailureCode.DEADLINE_EXCEEDED)
+        self.assertEqual(exc.detail, "transport result unknown")
+        # the inherited live transport's terminal classifications + status evidence are preserved
+        for code, status in ((RunnerFailureCode.LIVE_READ_TRANSPORT_NON_2XX, 401),
+                             (RunnerFailureCode.LIVE_READ_TRANSPORT_NON_2XX, 500),
+                             (RunnerFailureCode.LIVE_READ_TRANSPORT_REDIRECT_NOT_FOLLOWED, 302)):
+            terminal = RunnerError(code, detail="terminal")
+            terminal._arb_http_status = status
+            with self.subTest(code=code, status=status):
+                exc, _ = self._read_fail(terminal, code=code)
+                self.assertIs(exc, terminal)
+                self.assertEqual(exc._arb_http_status, status)
+        for code in (RunnerFailureCode.LIVE_READ_TRANSPORT_TLS_FAILED, RunnerFailureCode.LIVE_READ_TRANSPORT_IO_FAILED,
+                     RunnerFailureCode.LIVE_READ_TRANSPORT_PROTOCOL_FAILED, RunnerFailureCode.CREDENTIAL_SOURCE_UNRESOLVED):
+            with self.subTest(code=code):
+                self._read_fail(RunnerError(code, detail="fixed"), code=code)
+        # a wrong transport return type is an existing fixed classification
+        self._read_fail({"balance": 1}, code=RunnerFailureCode.RESPONSE_SCHEMA_INVALID)
+        # an unclassified transport exception is never converted into success or reclassified
+        transport, calls = self._recorder(RuntimeError("unclassified"))
+        with self.assertRaises(RuntimeError):
+            runner.read_f03_balance_snapshot_v1(self._rt(transport), request_ordinal=1)
+        self.assertEqual(len(calls), 1)
+
+
+class F03BalanceConsumerTests(_F03RuntimeHarness):
+    """BR-T22..BR-T27 (BR-ARCH-004 / BR-NET-001..002 / BR-RESULT-001..002)."""
+
+    # --- BR-T22 ---------------------------------------------------------------
+    def test_br_t22_one_exact_deadline_identity_spans_pre_prepare_through_result(self) -> None:
+        seen_checks = []
+        seen_decoder = []
+        real_check = runner.check_deadline
+        real_decode = runner._decode_and_validate_runner_json_response
+
+        def _check(deadline, now, *, checkpoint):
+            seen_checks.append((deadline, checkpoint))
+            return real_check(deadline, now, checkpoint=checkpoint)
+
+        def _decode(operation, *, raw_response, deadline, now_monotonic_ns):
+            seen_decoder.append(deadline)
+            return real_decode(operation, raw_response=raw_response, deadline=deadline,
+                               now_monotonic_ns=now_monotonic_ns)
+
+        with mock.patch.object(runner, "check_deadline", _check), \
+             mock.patch.object(runner, "_decode_and_validate_runner_json_response", _decode), \
+             mock.patch.object(runner.OperationDeadlineV1, "create",
+                               wraps=runner.OperationDeadlineV1.create) as create:
+            snap, calls = self._read(_f03_raw(), ordinal=3)
+        self.assertEqual(create.call_count, 1)
+        deadline = calls[0][2]
+        self.assertIs(type(deadline), OperationDeadlineV1)
+        self.assertTrue(all(d is deadline for d, _ in seen_checks))
+        self.assertEqual(seen_decoder, [deadline])
+        self.assertEqual(deadline.operation_name, "GET_BALANCE")
+        self.assertEqual(deadline.request_ordinal, 3)
+        self.assertEqual(deadline.process_instance_id, self._base_rt.normal_gate.process_instance_id)
+        self.assertEqual(deadline.absolute_deadline_monotonic_ns,
+                         deadline.started_monotonic_ns + runner.OPERATION_DEADLINE_MS * 1_000_000)
+        self.assertEqual(snap.request_started_monotonic_ns, deadline.started_monotonic_ns)
+        checkpoints = [c for _, c in seen_checks]
+        expected_order = [
+            runner.DeadlineCheckpoint.BEFORE_PREPARATION, runner.DeadlineCheckpoint.AFTER_PREPARATION,
+            runner.DeadlineCheckpoint.AFTER_TRANSPORT, runner.DeadlineCheckpoint.AFTER_MEDIA_TYPE_VALIDATION,
+            runner.DeadlineCheckpoint.AFTER_BODY_SIZE_VALIDATION, runner.DeadlineCheckpoint.AFTER_UTF8_DECODE,
+            runner.DeadlineCheckpoint.AFTER_PARSING, runner.DeadlineCheckpoint.AFTER_SCHEMA_VALIDATION,
+            runner.DeadlineCheckpoint.AFTER_RESULT_CONSTRUCTION,
+        ]
+        self.assertEqual(checkpoints, expected_order)
+        # no budget widening: the absolute deadline is capped by the runtime's
+        # experiment end and is never later than start + 10 s
+        transport, calls2 = self._recorder(_f03_raw())
+        clock = {"now": 7_000_000_000}
+
+        def _mono():
+            clock["now"] += 1_000
+            return clock["now"]
+
+        rt = self._rt(transport, monotonic_clock_ns=_mono, experiment_absolute_end_monotonic_ns=7_002_000_000)
+        runner.read_f03_balance_snapshot_v1(rt, request_ordinal=1)
+        d2 = calls2[0][2]
+        self.assertEqual(d2.absolute_deadline_monotonic_ns, 7_002_000_000)
+        self.assertEqual(d2.experiment_absolute_end_monotonic_ns, 7_002_000_000)
+        self.assertLess(d2.absolute_deadline_monotonic_ns,
+                        d2.started_monotonic_ns + runner.OPERATION_DEADLINE_MS * 1_000_000)
+
+    # --- BR-T23 ---------------------------------------------------------------
+    def test_br_t23_pre_boundary_exhaustion_zero_calls_post_boundary_timeout_consumes_one(self) -> None:
+        # fixture BR16_DEADLINE_NO_RETRY: exhausted before send -> zero transport calls
+        exc, calls = self._read_fail(_f03_raw(), code=RunnerFailureCode.DEADLINE_EXCEEDED, consumed=0,
+                                     experiment_absolute_end_monotonic_ns=0)
+        self.assertEqual(exc.detail, "BEFORE_PREPARATION")
+        # exhausted between preparation and the boundary -> still zero calls
+        state = {"now": 1_000, "calls": 0}
+
+        def _jumping_clock():
+            state["calls"] += 1
+            if state["calls"] >= 3:  # create sample, BEFORE_PREPARATION, then AFTER_PREPARATION
+                state["now"] += 11 * 10 ** 9
+            return state["now"]
+
+        exc, calls = self._read_fail(_f03_raw(), code=RunnerFailureCode.DEADLINE_EXCEEDED, consumed=0,
+                                     monotonic_clock_ns=_jumping_clock)
+        self.assertEqual(exc.detail, "AFTER_PREPARATION")
+        # a local policy failure before the boundary consumes nothing either
+        with mock.patch.object(runner, "_require_f03_balance_read_transport_policy",
+                               side_effect=RunnerError(RunnerFailureCode.LIVE_READ_TRANSPORT_POLICY_VIOLATION)):
+            self._read_fail(_f03_raw(), code=RunnerFailureCode.LIVE_READ_TRANSPORT_POLICY_VIOLATION, consumed=0)
+        # post-boundary: the transport itself consumes the budget -> one consumed request
+        clock = {"now": 2_000_000_000}
+
+        def _clock():
+            return clock["now"]
+
+        def _slow(op, prepared, deadline):
+            clock["now"] = deadline.absolute_deadline_monotonic_ns + 1
+            return _f03_raw()
+
+        exc, calls = self._read_fail(_slow, code=RunnerFailureCode.DEADLINE_EXCEEDED, consumed=1,
+                                     monotonic_clock_ns=_clock)
+        self.assertEqual(exc.detail, "AFTER_TRANSPORT")
+        # a transport-side deadline classification also stays consumed (no refund)
+        self._read_fail(RunnerError(RunnerFailureCode.DEADLINE_EXCEEDED, detail="response-read"),
+                        code=RunnerFailureCode.DEADLINE_EXCEEDED, consumed=1)
+
+    # --- BR-T24 ---------------------------------------------------------------
+    def test_br_t24_zero_automatic_retries_and_zero_followed_redirects(self) -> None:
+        self.assertEqual((runner.AUTOMATIC_RETRIES, runner.REDIRECTS), (0, 0))
+        s, calls = self._read(_f03_raw())
+        self.assertEqual((s.automatic_retry_count, s.followed_redirect_count, len(calls)), (0, 0, 1))
+        for failure in (RunnerError(RunnerFailureCode.LIVE_READ_TRANSPORT_IO_FAILED, detail="io"),
+                        RunnerError(RunnerFailureCode.LIVE_READ_TRANSPORT_REDIRECT_NOT_FOLLOWED, detail="3xx"),
+                        _f03_raw(status=500), _f03_raw(raw_body=b"{"), _f03_raw(_f03_body(balance_dollars="x"))):
+            with self.subTest(failure=repr(failure)[:60]):
+                # the recorder raises AssertionError on any second call (a retry)
+                transport, calls = self._recorder(failure)
+                with self.assertRaises(RunnerError):
+                    runner.read_f03_balance_snapshot_v1(self._rt(transport), request_ordinal=1)
+                self.assertEqual(len(calls), 1)
+
+    # --- BR-T25 ---------------------------------------------------------------
+    def test_br_t25_live_signed_transport_signs_and_gets_exactly_once(self) -> None:
+        env = _g1_env()
+        self.now_ns = 9_000_000_000_000
+        mono = lambda: self.now_ns  # noqa: E731
+        body = json.dumps(_f03_body()).encode("utf-8")
+        stack = _LowLevelPhaseStack(self, status=200, body=body)
+        transport = runner._LiveDemoSignedReadTransport(wall_clock=self._base_rt.wall_clock,
+                                                       monotonic_clock_ns=mono, env=env)
+        real_auth = runner._LiveDemoSignedReadTransport._auth_headers
+        real_get = runner._LiveDemoSignedReadTransport._perform_get
+        with mock.patch.object(runner, "_d07_live_signed_get_resolve_addresses", stack.resolve), \
+             mock.patch("socket.socket", stack.make_socket), \
+             mock.patch("ssl.create_default_context", stack.make_context), \
+             mock.patch.object(runner._LiveDemoSignedReadTransport, "_auth_headers", autospec=True,
+                               side_effect=real_auth) as auth_spy, \
+             mock.patch.object(runner._LiveDemoSignedReadTransport, "_perform_get", autospec=True,
+                               side_effect=real_get) as get_spy:
+            snap = runner.read_f03_balance_snapshot_v1(
+                self._rt(transport, monotonic_clock_ns=mono), request_ordinal=1)
+        self.assertEqual(auth_spy.call_count, 1)
+        self.assertEqual(get_spy.call_count, 1)
+        self.assertEqual((stack.resolve_calls, stack.socket_ctor_calls, stack.connect_calls), (1, 1, 1))
+        self.assertEqual(stack.server_hostname, _F03_DEMO_HOST)
+        request_line, headers, req_body = _g1_parse_request(stack.sent)
+        self.assertEqual(request_line, "GET " + _F03_PATH + "?subaccount=1&exchange_index=0 HTTP/1.1")
+        self.assertEqual(headers["Host"], _F03_DEMO_HOST)
+        self.assertEqual(headers["KALSHI-ACCESS-KEY"], _G1_API_KEY_ID)
+        self.assertEqual(req_body, b"")
+        # the signature covers timestamp + GET + the path WITHOUT the query
+        _g1_verify_signature(headers, "GET", _F03_PATH)
+        self.assertEqual(snap.balance_decimal, Decimal("1.2345"))
+        # nothing credential-derived is retained on the result or its evidence
+        evidence_blob = runner.project_f03_balance_snapshot_evidence_v1(snap).canonical_json_bytes().decode("ascii")
+        for secret in (_G1_API_KEY_ID, headers["KALSHI-ACCESS-SIGNATURE"], "PRIVATE KEY", "KALSHI-ACCESS"):
+            self.assertNotIn(secret, repr(snap))
+            self.assertNotIn(secret, evidence_blob)
+        # the consumer never calls _perform_get / _auth_headers directly
+        import ast
+        tree = ast.parse(textwrap_dedent(inspect.getsource(runner.read_f03_balance_snapshot_v1)))
+        attrs = {n.attr for n in ast.walk(tree) if isinstance(n, ast.Attribute)}
+        names = {n.id for n in ast.walk(tree) if isinstance(n, ast.Name)}
+        self.assertFalse({"_perform_get", "_auth_headers"} & (attrs | names))
+        self.assertIn("send_operation_request", attrs)
+
+    def test_br_t24_t25_live_redirect_and_expired_deadline_paths(self) -> None:
+        env = _g1_env()
+        self.now_ns = 9_000_000_000_000
+        mono = lambda: self.now_ns  # noqa: E731
+        transport = runner._LiveDemoSignedReadTransport(wall_clock=self._base_rt.wall_clock,
+                                                       monotonic_clock_ns=mono, env=env)
+        # 3xx is terminal and never followed: one resolve / socket / connect
+        stack = _LowLevelPhaseStack(self, status=302, extra_headers={"Location": "https://evil.example/"})
+        with mock.patch.object(runner, "_d07_live_signed_get_resolve_addresses", stack.resolve), \
+             mock.patch("socket.socket", stack.make_socket), \
+             mock.patch("ssl.create_default_context", stack.make_context):
+            with self.assertRaises(RunnerError) as ctx:
+                runner.read_f03_balance_snapshot_v1(self._rt(transport, monotonic_clock_ns=mono), request_ordinal=1)
+        self.assertEqual(ctx.exception.code, RunnerFailureCode.LIVE_READ_TRANSPORT_REDIRECT_NOT_FOLLOWED)
+        self.assertEqual(ctx.exception._arb_http_status, 302)
+        self.assertEqual(ctx.exception._arb_f03_balance_request_count, 1)
+        self.assertEqual((stack.resolve_calls, stack.socket_ctor_calls, stack.connect_calls), (1, 1, 1))
+        self.assertNotIn("recv_body", stack.phase_calls)
+        # the body read exhausting the SAME absolute deadline never succeeds
+        body = json.dumps(_f03_body()).encode("utf-8")
+        stack2 = _LowLevelPhaseStack(self, status=200, body=body, advance_at={"recv_body": 20 * 10 ** 9})
+        with mock.patch.object(runner, "_d07_live_signed_get_resolve_addresses", stack2.resolve), \
+             mock.patch("socket.socket", stack2.make_socket), \
+             mock.patch("ssl.create_default_context", stack2.make_context):
+            with self.assertRaises(RunnerError) as ctx:
+                runner.read_f03_balance_snapshot_v1(self._rt(transport, monotonic_clock_ns=mono), request_ordinal=2)
+        self.assertEqual(ctx.exception.code, RunnerFailureCode.DEADLINE_EXCEEDED)
+        self.assertEqual(ctx.exception._arb_f03_balance_request_count, 1)
+        self.assertEqual(stack2.connect_calls, 1)
+        # an already-exhausted runtime deadline reaches no transport phase at all
+        with mock.patch.object(runner._LiveDemoSignedReadTransport, "_perform_get",
+                               side_effect=AssertionError("no I/O")), \
+             mock.patch.object(runner._LiveDemoSignedReadTransport, "_auth_headers",
+                               side_effect=AssertionError("no signing")):
+            with self.assertRaises(RunnerError) as ctx:
+                runner.read_f03_balance_snapshot_v1(
+                    self._rt(transport, monotonic_clock_ns=mono,
+                             experiment_absolute_end_monotonic_ns=self.now_ns), request_ordinal=3)
+        self.assertEqual(ctx.exception.code, RunnerFailureCode.DEADLINE_EXCEEDED)
+        self.assertEqual(ctx.exception._arb_f03_balance_request_count, 0)
+
+    # --- BR-T26 ---------------------------------------------------------------
+    def test_br_t26_repr_str_and_evidence_carry_no_balances_or_credentials(self) -> None:
+        # fixture BR17_SANITIZED_EVIDENCE (distinctive synthetic sentinels)
+        payload = _f03_body(balance_dollars="8642.97531", balance=86429753, portfolio_value=97531086420,
+                            balance_breakdown=[{"exchange_index": 0, "balance": "7531.864297"}])
+        snap, _ = self._read(_f03_raw(payload))
+        evidence = runner.project_f03_balance_snapshot_evidence_v1(snap)
+        canonical = evidence.canonical_object()
+        blobs = [repr(snap), str(snap), repr(evidence), str(evidence),
+                 evidence.canonical_json_bytes().decode("ascii"), json.dumps(canonical)]
+        for blob in blobs:
+            for sentinel in ("8642.97531", "86429753", "97531086420", "7531.864297"):
+                self.assertNotIn(sentinel, blob)
+        for key in ("balance_dollars", "balance", "portfolio_value", "raw_response_sha256", "balance_breakdown",
+                    "balance_dollars_lexeme", "balance_decimal", "balance_legacy_cents",
+                    "portfolio_value_legacy_cents", "request_id", "headers", "signature", "api_key_id"):
+            self.assertNotIn(key, canonical)
+        self.assertEqual(
+            sorted(canonical),
+            sorted(["schema_revision", "observation_id", "source_binding_id", "source_raw_sha256", "operation",
+                    "request_identity_sha256", "process_instance_id", "domain_binding_id",
+                    "domain_binding_sha256", "subaccount", "exchange_index", "request_ordinal", "balance_scale",
+                    "updated_ts", "request_started_utc", "response_completed_utc",
+                    "request_started_monotonic_ns", "response_completed_monotonic_ns", "request_count",
+                    "automatic_retry_count", "followed_redirect_count", "parse_state", "result_state"]))
+        self.assertEqual(canonical["balance_scale"], 5)
+        self.assertEqual(canonical["updated_ts"], 1791378000)
+        # schema-failure details never echo the offending response value
+        exc, _ = self._read_fail(_f03_raw(_f03_body(balance_dollars="1e8642975")),
+                                 code=RunnerFailureCode.RESPONSE_SCHEMA_INVALID)
+        self.assertNotIn("8642975", f"{exc}|{exc.detail}|{exc.args}")
+        exc, _ = self._read_fail(_f03_raw(_f03_body(portfolio_value=2 ** 64 + 864297)),
+                                 code=RunnerFailureCode.RESPONSE_SCHEMA_INVALID)
+        self.assertNotIn("864297", f"{exc}|{exc.detail}|{exc.args}")
+        # the checkpoint result also hides the stable balance from repr
+        snap2, _ = self._read(_f03_raw(payload), ordinal=2)
+        checkpoint = runner.evaluate_f03_balance_checkpoint_v1((snap, snap2), boundary="B0")
+        self.assertEqual(checkpoint.state, "STABLE")
+        self.assertNotIn("8642.97531", repr(checkpoint))
+
+    # --- BR-T27 ---------------------------------------------------------------
+    def test_br_t27_request_count_is_exactly_one_per_successful_call(self) -> None:
+        transport, calls = self._recorder(_f03_raw(), _f03_raw())
+        rt = self._rt(transport)
+        first = runner.read_f03_balance_snapshot_v1(rt, request_ordinal=1)
+        self.assertEqual((first.request_count, len(calls)), (1, 1))
+        self.assertIs(calls[0][0], RunnerOperation.GET_BALANCE)
+        self.assertIs(type(calls[0][1]), runner.F03BalancePreparedRequestV1)
+        second = runner.read_f03_balance_snapshot_v1(rt, request_ordinal=2)
+        self.assertEqual((second.request_count, len(calls)), (1, 2))
+        self.assertNotEqual(first.request_identity_sha256, second.request_identity_sha256)
+        self.assertNotEqual(first.observation_id, second.observation_id)
+        self.assertEqual(runner.project_f03_balance_snapshot_evidence_v1(first).request_count, 1)
+        # a malformed runtime / ordinal consumes nothing
+        for bad_runtime in (object(), None, mock.Mock(spec=runner.ExperimentRunnerRuntimeV2)):
+            with self.assertRaises(RunnerError) as ctx:
+                runner.read_f03_balance_snapshot_v1(bad_runtime, request_ordinal=1)
+            self.assertEqual(ctx.exception.code, RunnerFailureCode.OPERATION_REQUEST_POLICY_VIOLATION)
+            self.assertEqual(ctx.exception._arb_f03_balance_request_count, 0)
+        for ordinal in (0, True, "1"):
+            self._read_fail(_f03_raw(), code=RunnerFailureCode.OPERATION_REQUEST_POLICY_VIOLATION,
+                            consumed=0, ordinal=ordinal)
+
+
+class F03BalanceCheckpointTests(_F03RuntimeHarness):
+    """BR-T28 (BR-MEAS-001/002)."""
+
+    def _snaps(self, *bodies, start_ordinal=1):
+        transport, _calls = self._recorder(*[_f03_raw(b) for b in bodies])
+        rt = self._rt(transport)
+        return tuple(runner.read_f03_balance_snapshot_v1(rt, request_ordinal=start_ordinal + i)
+                     for i in range(len(bodies)))
+
+    def test_br_t28_checkpoint_stability_and_timestamp_regression(self) -> None:
+        self.assertEqual((runner.F03_BALANCE_CHECKPOINT_READ_MAX, runner.F03_BALANCE_CHECKPOINTS_PER_RUN_MAX,
+                          runner.F03_BALANCE_READS_PER_RUN_MAX), (3, 3, 9))
+        self.assertEqual(runner.F03_BALANCE_CHECKPOINT_BOUNDARIES, ("B0", "B1", "B2"))
+        ts = 1791378000
+        # fixture M07_CHECKPOINT_NOT_STABLE
+        reads = self._snaps(*[_f03_body(balance_dollars=v, updated_ts=ts) for v in ("9.5000", "9.4999", "9.4998")])
+        cp = runner.evaluate_f03_balance_checkpoint_v1(reads, boundary="B1")
+        self.assertEqual((cp.state, cp.read_count), ("NOT_STABLE", 3))
+        self.assertIsNone(cp.stable_balance_canonical_text)
+        # final two equal after exact Decimal normalization -> STABLE
+        reads = self._snaps(_f03_body(balance_dollars="9.5000", updated_ts=ts),
+                            _f03_body(balance_dollars="9.50", updated_ts=ts + 1))
+        cp = runner.evaluate_f03_balance_checkpoint_v1(reads, boundary="B0")
+        self.assertEqual((cp.state, cp.stable_balance_canonical_text, cp.final_updated_ts), ("STABLE", "9.5", ts + 1))
+        self.assertEqual(cp.observation_ids, tuple(r.observation_id for r in reads))
+        reads = self._snaps(*[_f03_body(balance_dollars=v, updated_ts=ts) for v in ("9.4", "9.5", "9.5")])
+        self.assertEqual(runner.evaluate_f03_balance_checkpoint_v1(reads, boundary="B2").state, "STABLE")
+        # equal updated_ts with a CHANGED value is not a conflict (only NOT_STABLE)
+        reads = self._snaps(_f03_body(balance_dollars="9.5", updated_ts=ts), _f03_body(balance_dollars="9.4", updated_ts=ts))
+        self.assertEqual(runner.evaluate_f03_balance_checkpoint_v1(reads, boundary="B1").state, "NOT_STABLE")
+        # fixture M08_TIMESTAMP_REGRESSION
+        reads = self._snaps(_f03_body(updated_ts=1791378002), _f03_body(updated_ts=1791378001))
+        with self.assertRaises(RunnerError) as ctx:
+            runner.evaluate_f03_balance_checkpoint_v1(reads, boundary="B1")
+        self.assertEqual(ctx.exception.code, RunnerFailureCode.F03_BALANCE_TIMESTAMP_REGRESSION)
+        # one read, or any failed read in the checkpoint, can never be STABLE
+        single = self._snaps(_f03_body())
+        self.assertEqual(runner.evaluate_f03_balance_checkpoint_v1(single, boundary="B0").state, "NOT_STABLE")
+        pair = self._snaps(_f03_body(), _f03_body())
+        self.assertEqual(runner.evaluate_f03_balance_checkpoint_v1(pair, boundary="B0").state, "STABLE")
+        cp = runner.evaluate_f03_balance_checkpoint_v1(pair, boundary="B0", failed_read_count=1)
+        self.assertEqual((cp.state, cp.failed_read_count), ("NOT_STABLE", 1))
+        # bounds: <= 3 reads per checkpoint including failed reads; exact boundary label
+        triple = self._snaps(_f03_body(), _f03_body(), _f03_body())
+        for kwargs in ({"failed_read_count": 1}, {"boundary": "B3"}, {"failed_read_count": -1},
+                       {"failed_read_count": True}):
+            args = {"boundary": "B0"}
+            args.update(kwargs)
+            with self.subTest(**{k: repr(v) for k, v in kwargs.items()}):
+                with self.assertRaises(RunnerError) as ctx:
+                    runner.evaluate_f03_balance_checkpoint_v1(triple, **args)
+                self.assertEqual(ctx.exception.code, RunnerFailureCode.OPERATION_REQUEST_POLICY_VIOLATION)
+        for bad in ((), triple + (triple[0],), (object(),), "not-a-sequence"):
+            with self.assertRaises(RunnerError):
+                runner.evaluate_f03_balance_checkpoint_v1(bad, boundary="B0")
+
+    def test_br_t28_fill_watermark_domain_identity_and_no_client_wall_gate(self) -> None:
+        ts = 1791378000
+        fill_at = datetime.fromtimestamp(ts, tz=timezone.utc) + timedelta(microseconds=999_999)
+        reads = self._snaps(_f03_body(updated_ts=ts), _f03_body(updated_ts=ts))
+        cp = runner.evaluate_f03_balance_checkpoint_v1(reads, boundary="B1", latest_fill_execution_utc=fill_at)
+        self.assertEqual((cp.state, cp.stale_by_fill_watermark), ("STABLE", False))
+        later_fill = fill_at + timedelta(seconds=1)
+        cp = runner.evaluate_f03_balance_checkpoint_v1(reads, boundary="B1", latest_fill_execution_utc=later_fill)
+        self.assertEqual((cp.state, cp.stale_by_fill_watermark), ("NOT_STABLE", True))
+        with self.assertRaises(RunnerError):
+            runner.evaluate_f03_balance_checkpoint_v1(
+                reads, boundary="B1", latest_fill_execution_utc=datetime(2026, 1, 1))  # naive -> rejected
+        # reads that are not domain-identical, repeated or unordered never form a checkpoint
+        other_domain = dataclasses.replace(reads[1], subaccount=2)
+        repeated = (reads[0], reads[0])
+        unordered = (reads[1], reads[0])
+        for label, bad in (("domain", (reads[0], other_domain)), ("repeated", repeated), ("unordered", unordered)):
+            with self.subTest(case=label):
+                with self.assertRaises(RunnerError) as ctx:
+                    runner.evaluate_f03_balance_checkpoint_v1(bad, boundary="B1")
+                self.assertEqual(ctx.exception.code, RunnerFailureCode.F03_BALANCE_CHECKPOINT_NOT_STABLE)
+        # updated_ts is an ordering watermark only: a value far from the client
+        # wall clock (past or future) is never a freshness gate
+        for value in (0, 4_102_444_800):
+            with self.subTest(updated_ts=value):
+                rs = self._snaps(_f03_body(updated_ts=value), _f03_body(updated_ts=value))
+                self.assertEqual(runner.evaluate_f03_balance_checkpoint_v1(rs, boundary="B0").state, "STABLE")
+
+
+class F03BalanceTestMatrixTests(unittest.TestCase):
+    """BR-T01..BR-T30 -> concrete test mapping.  BR-T29 (complete targeted
+    runner file) and BR-T30 (full offline discovery) are recorded commands in
+    the review package TEST_RESULTS.txt."""
+
+    MATRIX = {
+        "BR-T01": [("F03BalanceFrozenSurfaceTests", "test_br_t01_get_balance_exists_but_is_absent_from_every_frozen_set")],
+        "BR-T02": [("F03BalanceFrozenSurfaceTests", "test_br_t02_operation_binding_index_bytes_hash_and_order_unchanged")],
+        "BR-T03": [("F03BalanceFrozenSurfaceTests", "test_br_t03_generic_prepare_runner_operation_request_rejects_balance")],
+        "BR-T04": [("F03BalanceFrozenSurfaceTests", "test_br_t04_prepare_active_v2_request_cannot_accept_balance")],
+        "BR-T05": [("F03BalanceFrozenSurfaceTests",
+                    "test_br_t05_orderbook_stays_off_the_generic_reader_and_on_the_protected_seam")],
+        "BR-T06": [("F03BalancePreparationTests", "test_br_t06_dedicated_preparer_emits_the_exact_demo_request"),
+                   ("F03BalancePreparationTests", "test_br_t06_br_arch_003_request_identity_is_the_exact_spec_preimage")],
+        "BR-T07": [("F03BalancePreparationTests",
+                    "test_br_t07_subaccount_and_exchange_index_derive_only_from_the_exact_domain")],
+        "BR-T08": [("F03BalancePreparationTests", "test_br_t08_tampered_balance_query_never_passes_the_balance_policy")],
+        "BR-T09": [("F03BalancePreparationTests", "test_br_t09_production_host_path_or_arbitrary_url_cannot_pass")],
+        "BR-T10": [("F03BalanceSourceBindingTests",
+                    "test_br_t10_source_binding_constants_match_the_approved_binding_artifact")],
+        "BR-T11": [("F03BalanceResponseTests", "test_br_t11_valid_200_parses_exact_decimal_lexical_and_canonical_values")],
+        "BR-T12": [("F03BalanceResponseTests", "test_br_t12_required_field_omission_rejects")],
+        "BR-T13": [("F03BalanceResponseTests", "test_br_t13_balance_dollars_lexical_grammar_rejections")],
+        "BR-T14": [("F03BalanceResponseTests", "test_br_t14_bool_or_out_of_int64_integer_fields_reject")],
+        "BR-T15": [("F03BalanceResponseTests", "test_br_t15_absent_breakdown_accepts")],
+        "BR-T16": [("F03BalanceResponseTests", "test_br_t16_valid_breakdown_accepts_and_conflicting_duplicate_rejects")],
+        "BR-T17": [("F03BalanceResponseTests", "test_br_t17_unknown_fields_are_ignored_and_never_promoted")],
+        "BR-T18": [("F03BalanceResponseTests",
+                    "test_br_t18_duplicate_keys_and_nonfinite_reject_through_the_shared_strict_decoder")],
+        "BR-T19": [("F03BalanceResponseTests", "test_br_t19_wrong_media_type_rejects")],
+        "BR-T20": [("F03BalanceResponseTests", "test_br_t20_body_cap_boundary")],
+        "BR-T21": [("F03BalanceResponseTests",
+                    "test_br_t21_non_200_status_and_transport_unknown_keep_fail_closed_semantics")],
+        "BR-T22": [("F03BalanceConsumerTests",
+                    "test_br_t22_one_exact_deadline_identity_spans_pre_prepare_through_result")],
+        "BR-T23": [("F03BalanceConsumerTests",
+                    "test_br_t23_pre_boundary_exhaustion_zero_calls_post_boundary_timeout_consumes_one"),
+                   ("F03BalanceConsumerTests", "test_br_t24_t25_live_redirect_and_expired_deadline_paths")],
+        "BR-T24": [("F03BalanceConsumerTests", "test_br_t24_zero_automatic_retries_and_zero_followed_redirects"),
+                   ("F03BalanceConsumerTests", "test_br_t24_t25_live_redirect_and_expired_deadline_paths"),
+                   ("F03BalanceFrozenSurfaceTests",
+                    "test_br_frozen_003_no_new_signer_transport_credential_or_retry_surface")],
+        "BR-T25": [("F03BalanceConsumerTests", "test_br_t25_live_signed_transport_signs_and_gets_exactly_once")],
+        "BR-T26": [("F03BalanceConsumerTests", "test_br_t26_repr_str_and_evidence_carry_no_balances_or_credentials")],
+        "BR-T27": [("F03BalanceConsumerTests", "test_br_t27_request_count_is_exactly_one_per_successful_call")],
+        "BR-T28": [("F03BalanceCheckpointTests", "test_br_t28_checkpoint_stability_and_timestamp_regression"),
+                   ("F03BalanceCheckpointTests",
+                    "test_br_t28_fill_watermark_domain_identity_and_no_client_wall_gate")],
+    }
+
+    def test_br_t01_t28_every_case_maps_to_an_existing_test(self) -> None:
+        self.assertEqual(set(self.MATRIX), {f"BR-T{i:02d}" for i in range(1, 29)})
+        for case, targets in self.MATRIX.items():
+            for cls_name, method in targets:
+                with self.subTest(case=case, method=method):
+                    self.assertTrue(callable(getattr(globals()[cls_name], method, None)), (cls_name, method))
+
+
 if __name__ == "__main__":
     unittest.main()

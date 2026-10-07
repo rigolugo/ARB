@@ -372,6 +372,17 @@ class RunnerOperation(enum.StrEnum):
     GET_USER_DATA_TIMESTAMP = "GET_USER_DATA_TIMESTAMP"
     CREATE_ORDER_V2 = "CREATE_ORDER_V2"
     CANCEL_ORDER_V2 = "CANCEL_ORDER_V2"
+    # KALSHI_DEMO_R1_D07_F03_BALANCE_READ_BRIDGE_PREREQUISITE_SPEC_01
+    # BR-ARCH-001: ONE closed internal transport identifier for the F03-only
+    # GetBalance read.  It is NOT a Stage-3 semantic member
+    # (``ActivePreReleaseReadOperationV2`` keeps exactly eight), NOT a legacy
+    # pre-release capability member, NOT in ``_GENERIC_REQUEST_OPERATIONS`` /
+    # ``_ROUTE_TEMPLATES`` / the operation-binding index, and NOT in the
+    # active-V2 transport mapping.  Membership here grants no capability; the
+    # only producer of a GET_BALANCE request is
+    # ``prepare_f03_balance_read_request_v1`` and the only consumer is
+    # ``read_f03_balance_snapshot_v1``.
+    GET_BALANCE = "GET_BALANCE"
 
 
 # Preserved legacy V1 six-read allowlist -- byte/semantically UNCHANGED.
@@ -635,6 +646,16 @@ class RunnerFailureCode(enum.StrEnum):
     LIVE_WRITE_TRANSPORT_POLICY_VIOLATION = "LIVE_WRITE_TRANSPORT_POLICY_VIOLATION"
     LIVE_WRITE_TRANSPORT_BINDING_INVALID = "LIVE_WRITE_TRANSPORT_BINDING_INVALID"
     LIVE_WRITE_TRANSPORT_PRE_SEND_FAILED = "LIVE_WRITE_TRANSPORT_PRE_SEND_FAILED"
+
+    # KALSHI_DEMO_R1_D07_F03_BALANCE_READ_BRIDGE_PREREQUISITE_SPEC_01 Section 11
+    # -- the two narrow balance-checkpoint ANALYZER outcomes (BR-MEAS-001).  No
+    # existing code unambiguously represents a GetBalance ``updated_ts``
+    # regression or a non-coherent checkpoint (the UDT / dynamic-freshness
+    # codes belong to other surfaces).  They are not transport capability;
+    # every transport / HTTP / decode / schema / deadline failure of the
+    # balance read keeps its existing classification.
+    F03_BALANCE_TIMESTAMP_REGRESSION = "F03_BALANCE_TIMESTAMP_REGRESSION"
+    F03_BALANCE_CHECKPOINT_NOT_STABLE = "F03_BALANCE_CHECKPOINT_NOT_STABLE"
 
 
 class RunnerError(RuntimeError):
@@ -13312,6 +13333,9 @@ class _LiveDemoSignedReadTransport:
         RunnerOperation.GET_POSITIONS,
         RunnerOperation.GET_EXCHANGE_STATUS,
         RunnerOperation.GET_USER_DATA_TIMESTAMP,
+        # F03 BR-ARCH-005: admitted ONLY through the dedicated exact-equality
+        # balance policy branch in ``_require_policy`` below.
+        RunnerOperation.GET_BALANCE,
     })
 
     def __init__(
@@ -13358,6 +13382,18 @@ class _LiveDemoSignedReadTransport:
         return self._perform_get(prepared.host, request_target, headers, deadline)
 
     def _require_policy(self, operation: object, prepared: object) -> None:
+        # F03 BR-ARCH-005: a GET_BALANCE operation, or any request carried by
+        # the balance-only ``F03BalancePreparedRequestV1`` subtype, is decided
+        # EXCLUSIVELY by the dedicated exact-equality balance policy (which
+        # also re-proves every generic invariant below).  Every other
+        # operation falls through to the unchanged generic checks, whose exact
+        # ``PreparedRunnerOperationRequestV1`` type check rejects the balance
+        # carrier.
+        if operation is RunnerOperation.GET_BALANCE or type(prepared) is F03BalancePreparedRequestV1:
+            if operation not in self._ALLOWED_OPERATIONS:
+                raise RunnerError(RunnerFailureCode.LIVE_READ_TRANSPORT_POLICY_VIOLATION, detail="operation")
+            _require_f03_balance_read_transport_policy(operation, prepared)
+            return
         if type(prepared) is not PreparedRunnerOperationRequestV1:
             raise RunnerError(RunnerFailureCode.LIVE_READ_TRANSPORT_POLICY_VIOLATION, detail="prepared type")
         if operation not in self._ALLOWED_OPERATIONS or operation in WRITE_OPERATIONS:
@@ -13601,6 +13637,894 @@ class _LiveDemoSignedReadTransport:
         lines.append("Accept-Encoding: identity")
         lines.append("Connection: close")
         return ("\r\n".join(lines) + "\r\n\r\n").encode("ascii")
+
+
+# ===========================================================================
+# 40.2a-F03 -- KALSHI_DEMO_R1_D07_F03_BALANCE_READ_BRIDGE_PREREQUISITE_SPEC_01
+# (28930 bytes / sha256
+# 9371d1bff411534cbefe94e940d9428c57be8ef260e7edc20654847b31ea1ec4): the ONE
+# F03-only authenticated Kalshi Demo GetBalance read bridge.
+#
+#   prepare_f03_balance_read_request_v1      pure/offline dedicated preparer
+#   f03_balance_read_request_identity_sha256_v1   deterministic identity
+#   read_f03_balance_snapshot_v1             the ONLY supported entrypoint
+#   F03BalanceSnapshotV1 / F03BalanceSnapshotEvidenceV1   result carriers
+#   evaluate_f03_balance_checkpoint_v1       bounded BR-MEAS-001 checkpoint
+#
+# The balance read is NOT a Stage-3 semantic operation and NOT a legacy
+# pre-release operation: ``ActivePreReleaseReadOperationV2`` (8 members), the
+# active-V2 maps/sets/query/identity/preparer, ``PRE_RELEASE_READ_OPERATIONS``,
+# ``_GENERIC_REQUEST_OPERATIONS``, ``_ROUTE_TEMPLATES``, the operation-binding
+# index, ``PreReleaseReadCapabilityV1`` and ``prepare_runner_operation_request``
+# are untouched, and the protected orderbook seam is untouched.
+#
+# Request-carrier design (BR-ARCH-005 design B): the balance request travels in
+# the strict balance-only subtype ``F03BalancePreparedRequestV1`` of
+# ``PreparedRunnerOperationRequestV1``.  The base dataclass is byte/behaviour
+# unchanged; every existing ``type(prepared) is PreparedRunnerOperationRequestV1``
+# check therefore rejects the balance carrier, and
+# ``_LiveDemoSignedReadTransport._require_policy`` routes GET_BALANCE to an
+# exact-equality policy that re-derives path / query / wire URL / auth / body
+# from the carried immutable ``ExecutionDomainBindingV1`` commitment and
+# recomputes the deterministic request identity.  The carrier is constructible
+# only with the module-private issuance key held by the dedicated preparer.
+#
+# Physical transport is the unchanged ``_LiveDemoSignedReadTransport.__call__``
+# -> ``_auth_headers`` -> ``_perform_get`` (Demo host, GET, one connection, one
+# absolute deadline, retries 0, redirects 0, body cap 65536, successful-2xx
+# completeness guard).  No signer, credential source, socket/DNS/TLS path,
+# retry or redirect mechanism is added here.  Nothing in this section is
+# executed live by the offline implementation task or its tests.
+# ===========================================================================
+
+# BR-SRC-001 -- the exact approved source-binding record
+# ``F03_BALANCE_SOURCE_BINDING_V1.json`` (4861 bytes / sha256
+# a57e6d0aaf281054a60bcd93da64fae61ae4cd093ddf3e904b8016f845dc8068), reproduced
+# verbatim WITHOUT its self-hash member.  Its ``binding_record_sha256`` is the
+# SHA-256 of ``canonical_json_bytes`` of exactly this record and is verified at
+# import time (a corrupted literal is a defect in this file, not a runtime
+# condition to tolerate).  The raw OpenAPI 3.29.0 bytes remain LOCAL_ONLY
+# external evidence; this module asserts no new raw-byte retrieval.
+_F03_BALANCE_SOURCE_BINDING_RECORD_V1: Mapping[str, object] = MappingProxyType({
+    "binding_id": "KALSHI_OPENAPI_3_29_0_GET_BALANCE_CANONICAL_BINDING_01",
+    "canonical_base_commit": "4c94077c6a80d8023d8c77fcdad4f5804de51756",
+    "canonical_repository": "rigolugo/ARB",
+    "canonical_source_resolution_report": {
+        "git_blob": "3d1d45b0a53dedba1e054456fb498040d8c7deac",
+        "path": "project_archive/kalshi_sources/KALSHI_CURRENT_OPENAPI_SOURCE_RESOLUTION_01_REPORT.json",
+        "raw_bytes": 1151,
+        "raw_sha256": "85a6f371dbbe026198cff39366978b133a67c41b15f4abfd180b2077a268577a",
+    },
+    "historical_raw_corroboration": {
+        "openapi_version": "3.28.0",
+        "raw_bytes": 333315,
+        "raw_sha256": "cb853ffc47262646b96bba7b1a8925c9c344128fd498cdaa8dbcf9a0b3b8211b",
+        "role": "NONCONTROLLING_HISTORICAL_CORROBORATION",
+    },
+    "official_raw_source": {
+        "checkpoint_date": "2026-08-28",
+        "info_version": "3.29.0",
+        "note": (
+            "Exact raw identity is canonically recorded. The matching 325930-byte Library copy "
+            "was text-index readable but not authorized for raw-byte materialization in this task."
+        ),
+        "openapi": "3.0.0",
+        "precise_retrieved_at_utc": "NOT_RECORDED_IN_CANONICAL_REPORT__DO_NOT_INVENT",
+        "raw_bytes": 325930,
+        "raw_bytes_materialized_in_this_task": False,
+        "raw_sha256": "99bdf4093d7eced607ba8b48cc99e3da862c35d99afa2a0c0f63f14eab9237ed",
+        "retrieval_task": "KALSHI_DEMO_ROUTE_B_B1_CURRENT_OPENAPI_SOURCE_RESOLUTION_01",
+        "storage": "LOCAL_ONLY_EXTERNAL_SOURCE_EVIDENCE",
+        "url": "https://docs.kalshi.com/openapi.yaml",
+    },
+    "operation": {
+        "fields": {
+            "balance": {
+                "format": "int64",
+                "measurement_role": "COMPATIBILITY_ONLY__NOT_PRIMARY_SUBCENT_MEASUREMENT",
+                "semantic": "available balance in cents for requested account/exchange index",
+                "type": "integer",
+            },
+            "balance_breakdown": {
+                "items_required": ["exchange_index", "balance"],
+                "items_schema": "IndexedBalance",
+                "measurement_role": "COMPATIBILITY_DIAGNOSTIC_ONLY",
+                "omission_semantic": "may be omitted for a subaccount-restricted API key",
+                "required": False,
+                "type": "array",
+            },
+            "balance_dollars": {
+                "measurement_role": "PRIMARY",
+                "schema": "FixedPointDollars",
+                "semantic": "available balance fixed-point dollars for requested account/exchange index",
+                "source_precision": "responses emit up to 6 fractional decimal places",
+                "type": "string",
+            },
+            "portfolio_value": {
+                "format": "int64",
+                "measurement_role": "COMPATIBILITY_ONLY",
+                "type": "integer",
+            },
+            "updated_ts": {
+                "format": "int64",
+                "measurement_role": "ORDERING_WATERMARK_ONLY__NO_CLIENT_WALL_FRESHNESS_GATE",
+                "semantic": "Unix timestamp of last update to the balance",
+                "type": "integer",
+            },
+        },
+        "full_demo_path": "/trade-api/v2/portfolio/balance",
+        "http_statuses_explicit_in_source": [200, 401, 500],
+        "method": "GET",
+        "operation_id": "GetBalance",
+        "optional_top_level": ["balance_breakdown"],
+        "path": "/portfolio/balance",
+        "query": {
+            "exchange_index": {
+                "description": "scopes balance and portfolio value; omission includes all exchange indexes",
+                "f03_requirement": "MUST_BE_EXPLICIT__NO_AGGREGATE_DEFAULT_USE",
+                "source_component": "ExchangeIndex",
+                "type": "integer",
+            },
+            "subaccount": {
+                "description": "0 primary, 1-63 subaccounts; defaults to 0",
+                "f03_requirement": "MUST_BE_EXPLICIT__NO_DEFAULT_USE",
+                "source_component": "SubaccountQueryDefaultPrimary",
+                "type": "integer",
+            },
+        },
+        "request_body": "NONE",
+        "required_top_level": ["balance", "balance_dollars", "portfolio_value", "updated_ts"],
+        "response_200_media_type": "application/json",
+        "response_schema": "GetBalanceResponse",
+        "security": ["kalshiAccessKey", "kalshiAccessSignature", "kalshiAccessTimestamp"],
+    },
+    "schema": "ARB_F03_BALANCE_SOURCE_BINDING_V1",
+    "task_current_rendered_corroboration": {
+        "controlling": False,
+        "corroborated": [
+            "GET /portfolio/balance",
+            "required authentication headers",
+            "subaccount query semantics",
+            "exchange_index scoping semantics",
+            "required balance/balance_dollars/portfolio_value/updated_ts",
+            "optional balance_breakdown",
+        ],
+        "documentation_index_url": "https://docs.kalshi.com/llms.txt",
+        "observed_on_utc_date": "2026-10-07",
+        "raw_byte_identity_captured": False,
+        "raw_markdown_url_listed_by_index": "https://docs.kalshi.com/api-reference/portfolio/get-balance.md",
+        "url": "https://docs.kalshi.com/api-reference/portfolio/get-balance",
+    },
+})
+F03_BALANCE_SOURCE_BINDING_RECORD_SHA256 = (
+    "5ea7353de067a027c6ea74baec942bfb953d663bc4fbd67e2e49d417c04198fa"
+)
+
+# BR-SRC-001..003 constants, each re-proved against the record below.
+F03_BALANCE_SOURCE_BINDING_ID = "KALSHI_OPENAPI_3_29_0_GET_BALANCE_CANONICAL_BINDING_01"
+F03_BALANCE_SOURCE_URL = "https://docs.kalshi.com/openapi.yaml"
+F03_BALANCE_SOURCE_OPENAPI_VERSION = "3.0.0"
+F03_BALANCE_SOURCE_INFO_VERSION = "3.29.0"
+F03_BALANCE_SOURCE_RAW_BYTES = 325930
+F03_BALANCE_SOURCE_RAW_SHA256 = "99bdf4093d7eced607ba8b48cc99e3da862c35d99afa2a0c0f63f14eab9237ed"
+F03_BALANCE_SOURCE_RETRIEVAL_TASK = "KALSHI_DEMO_ROUTE_B_B1_CURRENT_OPENAPI_SOURCE_RESOLUTION_01"
+F03_BALANCE_SOURCE_REPORT_GIT_BLOB = "3d1d45b0a53dedba1e054456fb498040d8c7deac"
+# BR-SRC-001: preserved exactly as not recorded -- no retrieval time is invented.
+F03_BALANCE_SOURCE_RETRIEVED_AT_UTC = "NOT_RECORDED_IN_CANONICAL_REPORT"
+F03_BALANCE_OPERATION_ID = "GetBalance"
+F03_BALANCE_METHOD = "GET"
+F03_BALANCE_FULL_PATH = "/trade-api/v2/portfolio/balance"
+F03_BALANCE_AUTH_MODE = "AUTHENTICATED"
+F03_BALANCE_QUERY_KEYS: Tuple[str, str] = ("subaccount", "exchange_index")
+F03_BALANCE_REQUIRED_FIELDS: Tuple[str, ...] = ("balance", "balance_dollars", "portfolio_value", "updated_ts")
+F03_BALANCE_RESPONSE_MEDIA_TYPE = "application/json"
+_F03_BALANCE_DEMO_ORIGIN = "https://external-api.demo.kalshi.co"
+_F03_BALANCE_REQUEST_IDENTITY_SCHEMA = "ARB_KALSHI_DEMO_F03_BALANCE_READ_REQUEST_IDENTITY_V1"
+
+# BR-SRC-003 -- the already-repository-established FixedPointDollars response
+# grammar (``account_subaccount_probe`` B1-SCHEMA-003): ``[0-9]`` never ``\d``,
+# always ``fullmatch``.  No exponent, ``+``, whitespace, comma, NaN, infinity,
+# empty string, leading-zero integer, or more than six fractional digits.
+_F03_FIXED_POINT_DOLLARS_PATTERN = re.compile(r"-?(0|[1-9][0-9]*)(\.[0-9]{1,6})?")
+_F03_INT64_MIN = -(2 ** 63)
+_F03_INT64_MAX = 2 ** 63 - 1
+_F03_SUBACCOUNT_MAX = 63
+_F03_REQUEST_ID_PATTERN = re.compile(r"req_[0-9a-f]{32}")
+
+# BR-MEAS-001 bounds for the later F03 experiment's balance checkpoints.
+F03_BALANCE_CHECKPOINT_READ_MAX = 3
+F03_BALANCE_CHECKPOINTS_PER_RUN_MAX = 3
+F03_BALANCE_READS_PER_RUN_MAX = F03_BALANCE_CHECKPOINT_READ_MAX * F03_BALANCE_CHECKPOINTS_PER_RUN_MAX
+F03_BALANCE_CHECKPOINT_BOUNDARIES: Tuple[str, ...] = ("B0", "B1", "B2")
+
+# Module-private issuance key: only ``prepare_f03_balance_read_request_v1``
+# holds it, so an ordinary caller cannot construct the balance carrier.
+_F03_BALANCE_PREPARED_ISSUANCE_KEY = object()
+
+
+def _verify_f03_balance_source_binding() -> None:
+    """Import-time proof that the embedded record is the approved binding
+    and that every BR-SRC constant is derived from it."""
+    record = _F03_BALANCE_SOURCE_BINDING_RECORD_V1
+    fail = RunnerError(RunnerFailureCode.OPERATION_BINDING_INDEX_MISMATCH, detail="f03 balance source binding")
+    if sha256_hex(canonical_json_bytes(dict(record))) != F03_BALANCE_SOURCE_BINDING_RECORD_SHA256:
+        raise fail
+    raw = record["official_raw_source"]
+    operation = record["operation"]
+    if (
+        record["schema"] != "ARB_F03_BALANCE_SOURCE_BINDING_V1"
+        or record["binding_id"] != F03_BALANCE_SOURCE_BINDING_ID
+        or record["canonical_source_resolution_report"]["git_blob"] != F03_BALANCE_SOURCE_REPORT_GIT_BLOB
+        or raw["url"] != F03_BALANCE_SOURCE_URL
+        or raw["openapi"] != F03_BALANCE_SOURCE_OPENAPI_VERSION
+        or raw["info_version"] != F03_BALANCE_SOURCE_INFO_VERSION
+        or raw["raw_bytes"] != F03_BALANCE_SOURCE_RAW_BYTES
+        or raw["raw_sha256"] != F03_BALANCE_SOURCE_RAW_SHA256
+        or raw["retrieval_task"] != F03_BALANCE_SOURCE_RETRIEVAL_TASK
+        or not raw["precise_retrieved_at_utc"].startswith(F03_BALANCE_SOURCE_RETRIEVED_AT_UTC)
+        or operation["operation_id"] != F03_BALANCE_OPERATION_ID
+        or operation["method"] != F03_BALANCE_METHOD
+        or operation["full_demo_path"] != F03_BALANCE_FULL_PATH
+        or DEMO_BASE_PATH + operation["path"] != F03_BALANCE_FULL_PATH
+        or operation["request_body"] != "NONE"
+        or tuple(operation["required_top_level"]) != F03_BALANCE_REQUIRED_FIELDS
+        or tuple(operation["optional_top_level"]) != ("balance_breakdown",)
+        or set(operation["query"]) != set(F03_BALANCE_QUERY_KEYS)
+        or operation["response_200_media_type"] != F03_BALANCE_RESPONSE_MEDIA_TYPE
+        or DEMO_ORIGIN != _F03_BALANCE_DEMO_ORIGIN
+        or DEMO_ORIGIN != "https://" + DEMO_HOST
+    ):
+        raise fail
+
+
+_verify_f03_balance_source_binding()
+
+
+@dataclass(frozen=True, slots=True)
+class F03BalancePreparedRequestV1(PreparedRunnerOperationRequestV1):
+    """BR-ARCH-005 design B -- the strict balance-only request carrier.
+
+    Adds a closed nonsecret balance-domain commitment to the unchanged base
+    request fields: the exact immutable ``ExecutionDomainBindingV1`` that
+    produced the query, the request ordinal, and the deterministic BR-ARCH-003
+    request identity.  Accepted by ``_LiveDemoSignedReadTransport`` ONLY for
+    ``RunnerOperation.GET_BALANCE``; every other operation's exact base-type
+    check rejects it.  Construction requires the module-private issuance key,
+    which only ``prepare_f03_balance_read_request_v1`` holds."""
+
+    balance_domain_binding: ExecutionDomainBindingV1
+    balance_request_ordinal: int
+    balance_request_identity_sha256: str
+    _issuance_key: object = field(default=None, repr=False, compare=False)
+
+    def __post_init__(self) -> None:
+        if self._issuance_key is not _F03_BALANCE_PREPARED_ISSUANCE_KEY:
+            raise RunnerError(
+                RunnerFailureCode.OPERATION_REQUEST_POLICY_VIOLATION,
+                detail="f03 balance request carrier is issued only by the dedicated preparer",
+            )
+
+
+def _require_f03_balance_domain(domain_binding: object, *, code: RunnerFailureCode) -> ExecutionDomainBindingV1:
+    """BR-ARCH-002 steps 1-5 plus binding integrity: exact
+    ``ExecutionDomainBindingV1``, ``KALSHI_DEMO``, exact (non-bool) int
+    subaccount 0..63 and exchange index >= 0, and an unaltered binding
+    hash/id.  Never echoes a value."""
+    if type(domain_binding) is not ExecutionDomainBindingV1:
+        raise RunnerError(code, detail="f03 balance domain binding type")
+    if domain_binding.environment != "KALSHI_DEMO" or domain_binding.venue != "KALSHI":
+        raise RunnerError(code, detail="f03 balance domain environment")
+    subaccount = domain_binding.subaccount
+    if type(subaccount) is not int or not 0 <= subaccount <= _F03_SUBACCOUNT_MAX:
+        raise RunnerError(code, detail="f03 balance subaccount")
+    exchange_index = domain_binding.exchange_index
+    if type(exchange_index) is not int or exchange_index < 0:
+        raise RunnerError(code, detail="f03 balance exchange_index")
+    try:
+        recomputed = sha256_hex(canonical_json_bytes(domain_binding.canonical_object()))
+    except (LedgerError, TypeError, ValueError, AttributeError):
+        raise RunnerError(code, detail="f03 balance domain binding integrity") from None
+    if domain_binding.binding_sha256 != recomputed or domain_binding.binding_id != "KEDB1_" + recomputed:
+        raise RunnerError(code, detail="f03 balance domain binding integrity")
+    return domain_binding
+
+
+def _require_f03_positive_ordinal(request_ordinal: object, *, code: RunnerFailureCode) -> int:
+    if type(request_ordinal) is not int or request_ordinal < 1:
+        raise RunnerError(code, detail="f03 balance request_ordinal")
+    return request_ordinal
+
+
+def _f03_balance_query(domain_binding: ExecutionDomainBindingV1) -> Tuple[Tuple[str, str], Tuple[str, str]]:
+    """BR-SRC-002 -- both query keys ALWAYS explicit, in exactly this order;
+    no source default / aggregate behaviour is ever relied on."""
+    return (
+        ("subaccount", str(domain_binding.subaccount)),
+        ("exchange_index", str(domain_binding.exchange_index)),
+    )
+
+
+def _f03_balance_wire_request_url(query: Sequence[Tuple[str, str]]) -> str:
+    return _F03_BALANCE_DEMO_ORIGIN + F03_BALANCE_FULL_PATH + "?" + _canonical_query_string(list(query))
+
+
+def _f03_balance_request_identity(
+    domain_binding: ExecutionDomainBindingV1, query: Sequence[Tuple[str, str]], request_ordinal: int,
+) -> str:
+    """BR-ARCH-003 -- the exact canonical identity preimage.  The request UUID
+    is intentionally excluded; no secret, signature or header is committed."""
+    return sha256_hex(canonical_json_bytes({
+        "schema": _F03_BALANCE_REQUEST_IDENTITY_SCHEMA,
+        "source_binding_id": F03_BALANCE_SOURCE_BINDING_ID,
+        "source_raw_sha256": F03_BALANCE_SOURCE_RAW_SHA256,
+        "operation": RunnerOperation.GET_BALANCE.value,
+        "method": F03_BALANCE_METHOD,
+        "path": F03_BALANCE_FULL_PATH,
+        "auth_class": F03_BALANCE_AUTH_MODE,
+        "canonical_query": [[key, value] for key, value in query],
+        "domain_binding_id": domain_binding.binding_id,
+        "domain_binding_sha256": domain_binding.binding_sha256,
+        "subaccount": domain_binding.subaccount,
+        "exchange_index": domain_binding.exchange_index,
+        "request_ordinal": request_ordinal,
+    }))
+
+
+def prepare_f03_balance_read_request_v1(
+    *,
+    domain_binding: ExecutionDomainBindingV1,
+    request_ordinal: int,
+    uuid_factory: Callable[[], "uuid.UUID"],
+) -> PreparedRunnerOperationRequestV1:
+    """BR-ARCH-002 -- the ONE dedicated pure/offline GetBalance preparation
+    boundary.  No network, filesystem, credential, signing, ledger or
+    persistence side effect.  No arbitrary path / query / body / method
+    parameter exists: account/subaccount/exchange-index selection comes ONLY
+    from the exact ``domain_binding``.  Returns the balance-only
+    ``F03BalancePreparedRequestV1`` carrier."""
+    code = RunnerFailureCode.OPERATION_REQUEST_POLICY_VIOLATION
+    domain = _require_f03_balance_domain(domain_binding, code=code)
+    ordinal = _require_f03_positive_ordinal(request_ordinal, code=code)
+    if not callable(uuid_factory):
+        raise RunnerError(code, detail="f03 balance uuid_factory")
+    query = _f03_balance_query(domain)
+    request_uuid = uuid_factory()
+    if type(request_uuid) is not uuid.UUID:
+        raise RunnerError(code, detail="f03 balance request uuid")
+    return F03BalancePreparedRequestV1(
+        operation=RunnerOperation.GET_BALANCE,
+        method=F03_BALANCE_METHOD,
+        host=DEMO_HOST,
+        full_path=F03_BALANCE_FULL_PATH,
+        wire_request_url=_f03_balance_wire_request_url(query),
+        signed_path_without_query=F03_BALANCE_FULL_PATH,
+        query=query,
+        body=None,
+        auth_mode=F03_BALANCE_AUTH_MODE,
+        request_id=f"req_{request_uuid.hex}",
+        balance_domain_binding=domain,
+        balance_request_ordinal=ordinal,
+        balance_request_identity_sha256=_f03_balance_request_identity(domain, query, ordinal),
+        _issuance_key=_F03_BALANCE_PREPARED_ISSUANCE_KEY,
+    )
+
+
+def _require_f03_balance_request_shape(
+    prepared: object, domain_binding: ExecutionDomainBindingV1, *, code: RunnerFailureCode,
+) -> None:
+    """Exact equality -- never prefix containment -- of every request field
+    against the values re-derived from ``domain_binding``."""
+    if type(prepared) is not F03BalancePreparedRequestV1:
+        raise RunnerError(code, detail="f03 balance prepared type")
+    if prepared._issuance_key is not _F03_BALANCE_PREPARED_ISSUANCE_KEY:
+        raise RunnerError(code, detail="f03 balance carrier issuance")
+    if prepared.operation is not RunnerOperation.GET_BALANCE:
+        raise RunnerError(code, detail="operation mismatch")
+    if prepared.method != "GET":
+        raise RunnerError(code, detail="method")
+    if prepared.body is not None:
+        raise RunnerError(code, detail="body")
+    if prepared.host != DEMO_HOST:
+        raise RunnerError(code, detail="host")
+    if prepared.full_path != F03_BALANCE_FULL_PATH:
+        raise RunnerError(code, detail="path")
+    if prepared.signed_path_without_query != prepared.full_path:
+        raise RunnerError(code, detail="signed path")
+    if prepared.auth_mode != F03_BALANCE_AUTH_MODE:
+        raise RunnerError(code, detail="auth mode")
+    expected_query = _f03_balance_query(domain_binding)
+    query = prepared.query
+    if (
+        type(query) is not tuple or len(query) != 2
+        or any(type(pair) is not tuple or len(pair) != 2 for pair in query)
+        or any(type(part) is not str for pair in query for part in pair)
+        or query != expected_query
+    ):
+        raise RunnerError(code, detail="f03 balance query")
+    if prepared.wire_request_url != _f03_balance_wire_request_url(expected_query):
+        raise RunnerError(code, detail="origin")
+    if type(prepared.request_id) is not str or _F03_REQUEST_ID_PATTERN.fullmatch(prepared.request_id) is None:
+        raise RunnerError(code, detail="f03 balance request id")
+
+
+def f03_balance_read_request_identity_sha256_v1(
+    *,
+    domain_binding: ExecutionDomainBindingV1,
+    prepared_request: PreparedRunnerOperationRequestV1,
+    request_ordinal: int,
+) -> str:
+    """BR-ARCH-003 -- pure helper: validates that ``prepared_request`` is the
+    exact balance request for ``domain_binding`` / ``request_ordinal`` and
+    returns the deterministic request identity SHA-256."""
+    code = RunnerFailureCode.OPERATION_REQUEST_POLICY_VIOLATION
+    domain = _require_f03_balance_domain(domain_binding, code=code)
+    ordinal = _require_f03_positive_ordinal(request_ordinal, code=code)
+    _require_f03_balance_request_shape(prepared_request, domain, code=code)
+    if prepared_request.balance_domain_binding is not domain or prepared_request.balance_request_ordinal != ordinal:
+        raise RunnerError(code, detail="f03 balance domain commitment")
+    return _f03_balance_request_identity(domain, prepared_request.query, ordinal)
+
+
+def _require_f03_balance_read_transport_policy(operation: object, prepared: object) -> None:
+    """BR-ARCH-005 -- the GET_BALANCE branch of
+    ``_LiveDemoSignedReadTransport._require_policy``.  Re-proves the generic
+    invariants and additionally proves EXACT equality of path / signed path /
+    auth / body / two-pair ordered query / Demo wire URL against the values
+    re-derived from the carried domain commitment, plus the issuance key and
+    the recomputed request identity."""
+    code = RunnerFailureCode.LIVE_READ_TRANSPORT_POLICY_VIOLATION
+    if operation is not RunnerOperation.GET_BALANCE or operation in WRITE_OPERATIONS:
+        raise RunnerError(code, detail="operation")
+    if type(prepared) is not F03BalancePreparedRequestV1:
+        raise RunnerError(code, detail="prepared type")
+    domain = _require_f03_balance_domain(prepared.balance_domain_binding, code=code)
+    ordinal = _require_f03_positive_ordinal(prepared.balance_request_ordinal, code=code)
+    _require_f03_balance_request_shape(prepared, domain, code=code)
+    if not prepared.full_path.startswith(DEMO_BASE_PATH + "/") or not prepared.wire_request_url.startswith(
+        DEMO_ORIGIN + DEMO_BASE_PATH + "/"
+    ):
+        raise RunnerError(code, detail="origin")
+    if prepared.balance_request_identity_sha256 != _f03_balance_request_identity(domain, prepared.query, ordinal):
+        raise RunnerError(code, detail="f03 balance domain commitment")
+
+
+def _f03_canonical_decimal_text(value: Decimal) -> str:
+    """Deterministic canonical decimal text: plain notation, no exponent, no
+    trailing fractional zeros, no negative zero."""
+    if value.is_zero():
+        return "0"
+    text = format(value, "f")
+    if "." in text:
+        text = text.rstrip("0").rstrip(".")
+    return text
+
+
+def _f03_fixed_point_dollars(value: object, *, detail: str) -> Tuple[str, Decimal]:
+    """BR-SRC-003 / BR-RESP-002 -- exact nonempty built-in string matching the
+    established grammar, parsed with ``Decimal`` from the ORIGINAL string."""
+    code = RunnerFailureCode.RESPONSE_SCHEMA_INVALID
+    if type(value) is not str or value == "" or _F03_FIXED_POINT_DOLLARS_PATTERN.fullmatch(value) is None:
+        raise RunnerError(code, detail=detail)
+    try:
+        parsed = Decimal(value)
+    except InvalidOperation:  # pragma: no cover - the grammar precludes this
+        raise RunnerError(code, detail=detail) from None
+    if not parsed.is_finite():  # pragma: no cover - the grammar precludes this
+        raise RunnerError(code, detail=detail)
+    return value, parsed
+
+
+def _f03_exact_int64(value: object, *, detail: str) -> int:
+    if type(value) is not int or not _F03_INT64_MIN <= value <= _F03_INT64_MAX:
+        raise RunnerError(RunnerFailureCode.RESPONSE_SCHEMA_INVALID, detail=detail)
+    return value
+
+
+@dataclass(frozen=True, slots=True)
+class _F03ValidatedBalanceResponseV1:
+    balance_dollars_lexeme: str = field(repr=False)
+    balance_decimal: Decimal = field(repr=False)
+    balance_legacy_cents: int = field(repr=False)
+    portfolio_value_legacy_cents: int = field(repr=False)
+    updated_ts: int
+    balance_breakdown_present: bool
+    balance_breakdown: Tuple[Tuple[int, str], ...] = field(repr=False)
+
+
+def _validate_f03_get_balance_response(parsed: Mapping[str, object]) -> _F03ValidatedBalanceResponseV1:
+    """BR-RESP-002/003 -- exact ``GetBalanceResponse`` validation of the dict
+    returned by the shared strict decoder.  Unknown top-level / nested fields
+    are ignored and never copied.  No detail ever carries a response value."""
+    code = RunnerFailureCode.RESPONSE_SCHEMA_INVALID
+    if type(parsed) is not dict:
+        raise RunnerError(code, detail="GET_BALANCE top level")
+    for name in F03_BALANCE_REQUIRED_FIELDS:
+        _require_field(parsed, name, code=code)
+    balance_cents = _f03_exact_int64(parsed["balance"], detail="balance")
+    portfolio_cents = _f03_exact_int64(parsed["portfolio_value"], detail="portfolio_value")
+    updated_ts = _f03_exact_int64(parsed["updated_ts"], detail="updated_ts")
+    if updated_ts < 0:
+        raise RunnerError(code, detail="updated_ts")
+    lexeme, balance_decimal = _f03_fixed_point_dollars(parsed["balance_dollars"], detail="balance_dollars")
+    breakdown_present = "balance_breakdown" in parsed
+    rows: dict[int, str] = {}
+    if breakdown_present:
+        raw_rows = parsed["balance_breakdown"]
+        if type(raw_rows) is not list:
+            raise RunnerError(code, detail="balance_breakdown")
+        for row in raw_rows:
+            if type(row) is not dict:
+                raise RunnerError(code, detail="balance_breakdown row")
+            index = _require_field(row, "exchange_index", code=code)
+            if type(index) is not int:
+                raise RunnerError(code, detail="balance_breakdown exchange_index")
+            row_lexeme, _row_decimal = _f03_fixed_point_dollars(
+                _require_field(row, "balance", code=code), detail="balance_breakdown balance",
+            )
+            if index in rows and rows[index] != row_lexeme:
+                raise RunnerError(code, detail="balance_breakdown conflicting duplicate exchange_index")
+            rows[index] = row_lexeme
+    return _F03ValidatedBalanceResponseV1(
+        balance_dollars_lexeme=lexeme,
+        balance_decimal=balance_decimal,
+        balance_legacy_cents=balance_cents,
+        portfolio_value_legacy_cents=portfolio_cents,
+        updated_ts=updated_ts,
+        balance_breakdown_present=breakdown_present,
+        balance_breakdown=tuple(sorted(rows.items())),
+    )
+
+
+@dataclass(frozen=True, slots=True)
+class F03BalanceSnapshotV1:
+    """BR-RESULT-001 -- the immutable in-process exact GetBalance result.
+
+    Exact absolute balance / portfolio values and the breakdown are
+    process-local measurement data: they are excluded from ``repr`` / ``str``
+    and are never emitted by ``project_f03_balance_snapshot_evidence_v1``."""
+
+    schema_revision: int
+    observation_id: str
+    operation: str
+    source_binding_id: str
+    source_raw_sha256: str
+    request_id: str
+    request_identity_sha256: str
+    process_instance_id: str
+    domain_binding_id: str
+    domain_binding_sha256: str
+    subaccount: int
+    exchange_index: int
+    request_ordinal: int
+    balance_dollars_lexeme: str = field(repr=False)
+    balance_decimal: Decimal = field(repr=False)
+    balance_canonical_text: str = field(repr=False)
+    balance_legacy_cents: int = field(repr=False)
+    portfolio_value_legacy_cents: int = field(repr=False)
+    updated_ts: int
+    balance_breakdown_present: bool
+    balance_breakdown: Tuple[Tuple[int, str], ...] = field(repr=False)
+    request_started_monotonic_ns: int
+    response_completed_monotonic_ns: int
+    request_started_utc: str
+    response_completed_utc: str
+    request_count: int
+    automatic_retry_count: int
+    followed_redirect_count: int
+
+    def __post_init__(self) -> None:
+        code = RunnerFailureCode.RESPONSE_SCHEMA_INVALID
+        if (
+            self.schema_revision != 1
+            or self.operation != RunnerOperation.GET_BALANCE.value
+            or self.source_binding_id != F03_BALANCE_SOURCE_BINDING_ID
+            or self.source_raw_sha256 != F03_BALANCE_SOURCE_RAW_SHA256
+            or not _is_hex64(self.request_identity_sha256)
+            or type(self.subaccount) is not int or type(self.exchange_index) is not int
+            or type(self.request_ordinal) is not int or self.request_ordinal < 1
+            or type(self.balance_decimal) is not Decimal
+            or self.balance_canonical_text != _f03_canonical_decimal_text(self.balance_decimal)
+            or type(self.updated_ts) is not int or self.updated_ts < 0
+            or type(self.balance_breakdown) is not tuple
+            or self.request_count != 1
+            or self.automatic_retry_count != AUTOMATIC_RETRIES
+            or self.followed_redirect_count != REDIRECTS
+        ):
+            raise RunnerError(code, detail="f03 balance snapshot malformed")
+        validate_canonical_timestamp(self.request_started_utc)
+        validate_canonical_timestamp(self.response_completed_utc)
+
+
+@dataclass(frozen=True, slots=True)
+class F03BalanceSnapshotEvidenceV1:
+    """BR-RESULT-002 -- the sanitized evidence projection.  Allow-listed fields
+    only: no absolute balance / legacy cents / portfolio value / breakdown
+    value / raw body / raw-response hash / request id / credential or header
+    material exists on this type."""
+
+    schema_revision: int
+    observation_id: str
+    source_binding_id: str
+    source_raw_sha256: str
+    operation: str
+    request_identity_sha256: str
+    process_instance_id: str
+    domain_binding_id: str
+    domain_binding_sha256: str
+    subaccount: int
+    exchange_index: int
+    request_ordinal: int
+    balance_scale: int
+    updated_ts: int
+    request_started_utc: str
+    response_completed_utc: str
+    request_started_monotonic_ns: int
+    response_completed_monotonic_ns: int
+    request_count: int
+    automatic_retry_count: int
+    followed_redirect_count: int
+    parse_state: str
+    result_state: str
+
+    def canonical_object(self) -> dict[str, object]:
+        return {item.name: getattr(self, item.name) for item in fields(self)}
+
+    def canonical_json_bytes(self) -> bytes:
+        return canonical_json_bytes(self.canonical_object())
+
+
+def project_f03_balance_snapshot_evidence_v1(snapshot: F03BalanceSnapshotV1) -> F03BalanceSnapshotEvidenceV1:
+    """Pure projection of one snapshot to the BR-RESULT-002 allow-list."""
+    if type(snapshot) is not F03BalanceSnapshotV1:
+        raise RunnerError(RunnerFailureCode.RESPONSE_SCHEMA_INVALID, detail="f03 balance snapshot type")
+    _whole, _dot, fraction = snapshot.balance_dollars_lexeme.partition(".")
+    return F03BalanceSnapshotEvidenceV1(
+        schema_revision=snapshot.schema_revision,
+        observation_id=snapshot.observation_id,
+        source_binding_id=snapshot.source_binding_id,
+        source_raw_sha256=snapshot.source_raw_sha256,
+        operation=snapshot.operation,
+        request_identity_sha256=snapshot.request_identity_sha256,
+        process_instance_id=snapshot.process_instance_id,
+        domain_binding_id=snapshot.domain_binding_id,
+        domain_binding_sha256=snapshot.domain_binding_sha256,
+        subaccount=snapshot.subaccount,
+        exchange_index=snapshot.exchange_index,
+        request_ordinal=snapshot.request_ordinal,
+        balance_scale=len(fraction),
+        updated_ts=snapshot.updated_ts,
+        request_started_utc=snapshot.request_started_utc,
+        response_completed_utc=snapshot.response_completed_utc,
+        request_started_monotonic_ns=snapshot.request_started_monotonic_ns,
+        response_completed_monotonic_ns=snapshot.response_completed_monotonic_ns,
+        request_count=snapshot.request_count,
+        automatic_retry_count=snapshot.automatic_retry_count,
+        followed_redirect_count=snapshot.followed_redirect_count,
+        parse_state="RESPONSE_VALIDATED",
+        result_state="SNAPSHOT_CONSTRUCTED",
+    )
+
+
+def _f03_balance_failure(exc: RunnerError, *, request_count: int) -> RunnerError:
+    """Attach the exact consumed-request count (0 before the consumption
+    boundary, 1 after) to an escaping classification.  The classification
+    itself is never changed or collapsed."""
+    exc._arb_f03_balance_request_count = request_count  # type: ignore[attr-defined]
+    return exc
+
+
+def read_f03_balance_snapshot_v1(
+    runtime: "ExperimentRunnerRuntimeV2",
+    *,
+    request_ordinal: int,
+) -> F03BalanceSnapshotV1:
+    """BR-ARCH-004 -- the ONLY supported F03 balance entrypoint.
+
+    One ``OperationDeadlineV1`` (``OPERATION_DEADLINE_MS`` ceiling, capped at
+    the runtime's absolute experiment end) flows from BEFORE_PREPARATION
+    through preparation, the single consumption boundary, the runtime's
+    ``send_operation_request`` (signing / DNS / connect / TLS / send / read
+    inside the inherited signed transport), the shared strict decoder, the
+    balance schema validation, and result construction -- never refreshed,
+    floored upward, replaced, or widened.
+
+    A local failure before the consumption boundary consumes ZERO balance
+    requests.  Once the boundary is crossed the one request stays consumed on
+    every transport / HTTP / decode / schema / deadline failure: no refund, no
+    automatic retry, no followed redirect.  Every escaping ``RunnerError``
+    carries ``_arb_f03_balance_request_count`` (0 or 1)."""
+    request_count = 0
+    try:
+        if type(runtime) is not ExperimentRunnerRuntimeV2:
+            raise RunnerError(RunnerFailureCode.OPERATION_REQUEST_POLICY_VIOLATION, detail="f03 balance runtime type")
+        ordinal = _require_f03_positive_ordinal(
+            request_ordinal, code=RunnerFailureCode.OPERATION_REQUEST_POLICY_VIOLATION,
+        )
+        domain = _require_f03_balance_domain(
+            runtime.domain_binding, code=RunnerFailureCode.OPERATION_REQUEST_POLICY_VIOLATION,
+        )
+        clock = runtime.monotonic_clock_ns
+        process_instance_id = runtime.normal_gate.process_instance_id
+        deadline = OperationDeadlineV1.create(
+            process_instance_id=process_instance_id,
+            operation_name=RunnerOperation.GET_BALANCE.value,
+            request_ordinal=ordinal,
+            started_monotonic_ns=clock(),
+            experiment_absolute_end_monotonic_ns=runtime.experiment_absolute_end_monotonic_ns,
+            uuid_factory=runtime.uuid_factory,
+        )
+        request_started_utc = canonical_timestamp(runtime.wall_clock())
+        check_deadline(deadline, clock(), checkpoint=DeadlineCheckpoint.BEFORE_PREPARATION)
+        prepared = prepare_f03_balance_read_request_v1(
+            domain_binding=domain, request_ordinal=ordinal, uuid_factory=runtime.uuid_factory,
+        )
+        request_identity_sha256 = f03_balance_read_request_identity_sha256_v1(
+            domain_binding=domain, prepared_request=prepared, request_ordinal=ordinal,
+        )
+        # BR-RESP-004: the authoritative scope is the exact prepared query; the
+        # same exact-equality transport policy is proven BEFORE consumption so
+        # a commitment mismatch consumes nothing.
+        _require_f03_balance_read_transport_policy(RunnerOperation.GET_BALANCE, prepared)
+        check_deadline(deadline, clock(), checkpoint=DeadlineCheckpoint.AFTER_PREPARATION)
+        # ---- request-consumption boundary: crossed exactly once ----------
+        request_count = 1
+        raw = runtime.send_operation_request(RunnerOperation.GET_BALANCE, prepared, deadline)
+        response_completed_monotonic_ns = clock()
+        check_deadline(deadline, response_completed_monotonic_ns, checkpoint=DeadlineCheckpoint.AFTER_TRANSPORT)
+        parsed = _decode_and_validate_runner_json_response(
+            RunnerOperation.GET_BALANCE, raw_response=raw, deadline=deadline, now_monotonic_ns=clock,
+        )
+        validated = _validate_f03_get_balance_response(parsed)
+        check_deadline(deadline, clock(), checkpoint=DeadlineCheckpoint.AFTER_SCHEMA_VALIDATION)
+        observation_uuid = runtime.uuid_factory()
+        if type(observation_uuid) is not uuid.UUID:
+            raise RunnerError(RunnerFailureCode.OPERATION_REQUEST_POLICY_VIOLATION, detail="f03 balance observation uuid")
+        snapshot = F03BalanceSnapshotV1(
+            schema_revision=1,
+            observation_id=f"f03bal_{observation_uuid.hex}",
+            operation=RunnerOperation.GET_BALANCE.value,
+            source_binding_id=F03_BALANCE_SOURCE_BINDING_ID,
+            source_raw_sha256=F03_BALANCE_SOURCE_RAW_SHA256,
+            request_id=prepared.request_id,
+            request_identity_sha256=request_identity_sha256,
+            process_instance_id=process_instance_id,
+            domain_binding_id=domain.binding_id,
+            domain_binding_sha256=domain.binding_sha256,
+            subaccount=domain.subaccount,
+            exchange_index=domain.exchange_index,
+            request_ordinal=ordinal,
+            balance_dollars_lexeme=validated.balance_dollars_lexeme,
+            balance_decimal=validated.balance_decimal,
+            balance_canonical_text=_f03_canonical_decimal_text(validated.balance_decimal),
+            balance_legacy_cents=validated.balance_legacy_cents,
+            portfolio_value_legacy_cents=validated.portfolio_value_legacy_cents,
+            updated_ts=validated.updated_ts,
+            balance_breakdown_present=validated.balance_breakdown_present,
+            balance_breakdown=validated.balance_breakdown,
+            request_started_monotonic_ns=deadline.started_monotonic_ns,
+            response_completed_monotonic_ns=response_completed_monotonic_ns,
+            request_started_utc=request_started_utc,
+            response_completed_utc=canonical_timestamp(runtime.wall_clock()),
+            request_count=request_count,
+            automatic_retry_count=AUTOMATIC_RETRIES,
+            followed_redirect_count=REDIRECTS,
+        )
+        check_deadline(deadline, clock(), checkpoint=DeadlineCheckpoint.AFTER_RESULT_CONSTRUCTION)
+        return snapshot
+    except RunnerError as exc:
+        raise _f03_balance_failure(exc, request_count=request_count)
+    except LedgerError:
+        # canonical timestamp / encoding failures are local construction
+        # failures; classified fixed and secret-free.
+        raise _f03_balance_failure(
+            RunnerError(RunnerFailureCode.RESPONSE_SCHEMA_INVALID, detail="f03 balance local encoding"),
+            request_count=request_count,
+        ) from None
+
+
+@dataclass(frozen=True, slots=True)
+class F03BalanceCheckpointV1:
+    """BR-MEAS-001 -- one bounded balance checkpoint (1..3 reads) at a
+    normative terminal boundary (``B0`` / ``B1`` / ``B2``).  ``STABLE`` only
+    when every BR-MEAS-001 predicate holds; the stable balance is
+    process-local measurement data and excluded from ``repr``."""
+
+    boundary: str
+    state: str
+    read_count: int
+    failed_read_count: int
+    observation_ids: Tuple[str, ...]
+    domain_binding_id: str
+    subaccount: int
+    exchange_index: int
+    final_updated_ts: int
+    stale_by_fill_watermark: bool
+    stable_balance_canonical_text: "str | None" = field(default=None, repr=False)
+
+
+def _f03_epoch_seconds_floor(value: datetime) -> int:
+    """Integer floor of an aware datetime's Unix epoch seconds (no float)."""
+    if type(value) is not datetime or value.tzinfo is None:
+        raise RunnerError(RunnerFailureCode.OPERATION_REQUEST_POLICY_VIOLATION, detail="f03 fill execution time")
+    return (value - datetime(1970, 1, 1, tzinfo=timezone.utc)) // timedelta(seconds=1)
+
+
+def evaluate_f03_balance_checkpoint_v1(
+    snapshots: Sequence[F03BalanceSnapshotV1],
+    *,
+    boundary: str,
+    failed_read_count: int = 0,
+    latest_fill_execution_utc: "datetime | None" = None,
+) -> F03BalanceCheckpointV1:
+    """BR-MEAS-001 -- pure evaluation of one checkpoint's successful reads in
+    acquisition order.  ``failed_read_count`` counts this checkpoint's reads
+    that raised; total reads are bounded by ``F03_BALANCE_CHECKPOINT_READ_MAX``.
+
+    STABLE iff: >= 2 successful reads, all domain-identical, no failed read,
+    the final two ``balance_dollars`` are identical after exact Decimal
+    normalization, ``updated_ts`` is nondecreasing, and -- when the interval
+    contains newly reconciled fills (``latest_fill_execution_utc`` supplied)
+    -- the final ``updated_ts`` >= floor(epoch seconds of that latest fill).
+    A strictly decreasing ``updated_ts`` raises
+    ``F03_BALANCE_TIMESTAMP_REGRESSION``; reads from different domains /
+    processes or a repeated observation raise
+    ``F03_BALANCE_CHECKPOINT_NOT_STABLE``.  Equal ``updated_ts`` with an equal
+    or changed value is not a conflict.  No client-wall freshness gate."""
+    if boundary not in F03_BALANCE_CHECKPOINT_BOUNDARIES:
+        raise RunnerError(RunnerFailureCode.OPERATION_REQUEST_POLICY_VIOLATION, detail="f03 checkpoint boundary")
+    if type(failed_read_count) is not int or failed_read_count < 0:
+        raise RunnerError(RunnerFailureCode.OPERATION_REQUEST_POLICY_VIOLATION, detail="f03 checkpoint failed_read_count")
+    reads = tuple(snapshots) if isinstance(snapshots, (list, tuple)) else None
+    if reads is None or any(type(item) is not F03BalanceSnapshotV1 for item in reads):
+        raise RunnerError(RunnerFailureCode.OPERATION_REQUEST_POLICY_VIOLATION, detail="f03 checkpoint reads")
+    if not reads or len(reads) + failed_read_count > F03_BALANCE_CHECKPOINT_READ_MAX:
+        raise RunnerError(RunnerFailureCode.OPERATION_REQUEST_POLICY_VIOLATION, detail="f03 checkpoint read bound")
+    first = reads[0]
+    domain_key = (
+        first.process_instance_id, first.domain_binding_id, first.domain_binding_sha256,
+        first.subaccount, first.exchange_index,
+    )
+    for item in reads[1:]:
+        if (
+            item.process_instance_id, item.domain_binding_id, item.domain_binding_sha256,
+            item.subaccount, item.exchange_index,
+        ) != domain_key:
+            raise RunnerError(
+                RunnerFailureCode.F03_BALANCE_CHECKPOINT_NOT_STABLE, detail="checkpoint reads are not domain-identical",
+            )
+    observation_ids = tuple(item.observation_id for item in reads)
+    ordinals = [item.request_ordinal for item in reads]
+    if len(set(observation_ids)) != len(reads) or any(b <= a for a, b in zip(ordinals, ordinals[1:])):
+        raise RunnerError(
+            RunnerFailureCode.F03_BALANCE_CHECKPOINT_NOT_STABLE, detail="checkpoint reads repeated or unordered",
+        )
+    for previous, current in zip(reads, reads[1:]):
+        if current.updated_ts < previous.updated_ts:
+            raise RunnerError(RunnerFailureCode.F03_BALANCE_TIMESTAMP_REGRESSION, detail="updated_ts decreased")
+    final = reads[-1]
+    stale = False
+    if latest_fill_execution_utc is not None:
+        stale = final.updated_ts < _f03_epoch_seconds_floor(latest_fill_execution_utc)
+    stable = (
+        len(reads) >= 2
+        and failed_read_count == 0
+        and not stale
+        and reads[-2].balance_canonical_text == final.balance_canonical_text
+        and reads[-2].balance_decimal == final.balance_decimal
+    )
+    return F03BalanceCheckpointV1(
+        boundary=boundary,
+        state="STABLE" if stable else "NOT_STABLE",
+        read_count=len(reads),
+        failed_read_count=failed_read_count,
+        observation_ids=observation_ids,
+        domain_binding_id=first.domain_binding_id,
+        subaccount=first.subaccount,
+        exchange_index=first.exchange_index,
+        final_updated_ts=final.updated_ts,
+        stale_by_fill_watermark=stale,
+        stable_balance_canonical_text=final.balance_canonical_text if stable else None,
+    )
 
 
 # ---------------------------------------------------------------------------
