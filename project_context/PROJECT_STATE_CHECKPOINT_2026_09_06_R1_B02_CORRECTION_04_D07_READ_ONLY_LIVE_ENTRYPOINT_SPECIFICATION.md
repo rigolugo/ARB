@@ -7513,3 +7513,193 @@ NEXT_BOUNDED_ACTION (after this continuity candidate is accepted and installed) 
 ```
 
 This is routing only. It authorizes neither that future specification task nor operator launch nor any Demo write, and it selects no market, spread, G, account, fee rule or trading policy. Capability is not authorization. This continuity candidate performed zero Kalshi/venue, credential, deployed/persistent-state, production, project-test/import, package-installation and remote Git write activity.
+
+### A42 R1-D07 F03 GetBalance read-bridge prerequisite (O-1) — RETROSPECTIVE CONTINUITY CAPTURE / MARCO APPROVED / CANONICALLY INSTALLED / FULL SUITE NOT CLEAN
+
+This retrospective continuity overlay was prepared by `R1-D07_O1_GETBALANCE_BRIDGE_CANONICAL_CONTINUITY_01` (implementer `CLAUDE_CODE`; documentation-only; reviewer Marco; technical specification author Bruno) as one local candidate commit whose sole parent is canonical `rigolugo/ARB/main` commit `7e06e2b488a88ba74c43ca41d207162c385ae876` (tree `8dd30eccc2b4118d7764f4cab38cde4c89cc0377`, sole parent `1e90a9fdb96f56d75ecf29c5971733681f5bc6af`). **A42 controls only if this exact reviewed documentation candidate is later installed on canonical `main` under a separately authorized installation task.** Until then it is a review candidate only and `O1_BRIDGE_CANONICALIZATION_PENDING` remains true. A1-A41 remain historical provenance and are not rewritten. The candidate commit identity is recorded in the review package and any later installation record, not inside this commit.
+
+**A42.0 Why this matters and ordering.**
+
+The GetBalance read-bridge prerequisite was Marco-approved and canonically installed at `700745828c4d823a3f963f2fff8455d00ff2d739` on 2026-10-07, before the F03 Correction-02 substrate (`1e90a9fdb96f56d75ecf29c5971733681f5bc6af`, A41) was installed on top of it. Its installation wrote no continuity record (the Marco installation acceptance states so explicitly). A42 backfills only that omitted O-1 continuity. It is not a rollback, reinstallation, new implementation, additional fee experiment, closure of F03 fee research, or alteration of A41. A41 (with ART-0163/ART-0164 and its `START_HERE.md` overlay) is itself installed at `7e06e2b488a88ba74c43ca41d207162c385ae876` and accepted by Marco (`APPROVE / CANONICAL_INSTALLATION_ACCEPTED`; record `MARCO_CONTINUITY_INSTALLATION_APPROVAL.md` 6620 bytes / sha256 `d3afdab5590dc74bd23e463965a75051aed9d3eb2591c2bbf54af3e7db4f0041`); A41's facts and its A41.10 next route remain controlling and unchanged.
+
+**A42.1 Supersession scope.**
+
+A42 supersedes nothing in A1-A41. It adds the bridge milestone record and states (A42.4) which shadow-test protection-pin identity is current. A40's historical byte content is preserved unchanged.
+
+**A42.2 Accepted approvals and installation (controlling reviewed theorem).**
+
+```text
+implementation task  = R1-D07_F03_BALANCE_READ_BRIDGE_PREREQUISITE_IMPLEMENTATION_01_CORRECTION_01
+installation task    = R1-D07_F03_BALANCE_READ_BRIDGE_PREREQUISITE_IMPLEMENTATION_01_CORRECTION_01_CANONICAL_INSTALLATION_01
+implementer / installation executor = CLAUDE_CODE (local) ; reviewer = Marco ; spec author = Bruno
+blocked predecessor  = R1-D07_F03_BALANCE_READ_BRIDGE_PREREQUISITE_IMPLEMENTATION_01
+  candidate 89ccf1cc62462e0cb056a3ba7714209fee96f199 (tree 00555bfe81e412574b4ea0ebdf6330f55e238b48)
+  Marco BLOCK 2026-10-07T20:42:27.858804+00:00 : F01 REQUIRED_FULL_OFFLINE_REGRESSION_BLOCKED_BY_STALE_A40_PINS
+  historical evidence only ; never ancestry of canonical main
+Marco implementation decision = APPROVE (implementation conformance only)
+  reviewed 2026-10-07T21:15:00.686487+00:00
+  record 4683 bytes / sha256 7eccba180596b70009691b685349986c3bad35d59775f7c862296ff60043d82d
+Marco installation decision = APPROVE (installation accepted; exact approved commit is canonical)
+  reviewed 2026-10-07T21:36:37.550269+00:00
+  record 2871 bytes / sha256 83804ac24fbabfff2d74aa583ebf6647c91d0f415eb0d0987327cfdb10aa9f84
+```
+
+The Marco installation `APPROVE` is the controlling reviewed theorem for this milestone.
+
+Provenance boundary: Marco independently read back public remote `main`, the commit/tree/sole parent, the recursive tree and the complete raw bytes of all three installed paths. Windows-local cleanliness, the local ff-only sync and command transcripts are executor-supplied evidence accepted by Marco; Marco did not directly access the user's Windows filesystem, and this record claims no direct Windows access or complete host/network audit.
+
+**A42.3 Installed target and installed paths.**
+
+```text
+installed commit = 700745828c4d823a3f963f2fff8455d00ff2d739
+tree             = b20ede8e9a17abc95284a46792824ba9b09c8f85
+sole parent      = 4c94077c6a80d8023d8c77fcdad4f5804de51756
+  (old main tree fc393fecd79924009fe541a9a427eba8bd740b30, sole parent 6c3f64fdc8da9d1562fde1aa0f1cc7fd2efcaf67)
+topology = exactly one commit above the old base ; exactly three changed paths ; ancestor of current main
+controlling technical contract (Bruno; unchanged by this task) =
+  KALSHI_DEMO_R1_D07_F03_BALANCE_READ_BRIDGE_PREREQUISITE_SPEC_01.md
+    28930 bytes / sha256 9371d1bff411534cbefe94e940d9428c57be8ef260e7edc20654847b31ea1ec4
+  HANDOFF_KALSHI_DEMO_R1_D07_F03_BALANCE_READ_BRIDGE_PREREQUISITE_SPEC_01.md
+    3204 bytes / sha256 03ba3127faebee2b3c1122d45a1998282a95cc5fe8e185e46a1db307a4b548f9
+  Marco specification APPROVE 2026-10-07T16:25:29.303441+00:00
+    record MARCO_DECISION.md 2728 bytes / sha256 cd1116509c871a1cace8a61e23f1e8869fc78b20c7423e9dae305d5fc20c937e
+```
+
+Installed paths (identical in the approved candidate, the remote readback, and at canonical base `7e06e2b488a88ba74c43ca41d207162c385ae876`):
+
+```text
+src/arb/venues/kalshi/minimal_market_maker_experiment_runner.py
+  bytes = 858181
+  sha256 = b82e34c8804d343d028800ccd3e40d5c7de073c791f2fcd5d319d60fb45f97cf
+  git_blob = eb455d9467448fcb2435abd3465bdf08e68b10fd
+
+tests/test_kalshi_minimal_market_maker_experiment_runner.py
+  bytes = 1199827
+  sha256 = e42dc1ebfdb184ea48e6fde0168899b72c3917ce90d269762bbbd4f2aa817d1d
+  git_blob = a92508c22029285e013a02f98c24779f6c4a895e
+
+tests/test_kalshi_shadow_experiment.py
+  bytes = 123051
+  sha256 = ddd4e9b13810628382349aeda6849bc84dd890aa6555f5cb95d6e90e903fd66d
+  git_blob = 93d0e0fce8e8fe7d1de3b4f62e562c1b70cfb7a1
+```
+
+**A42.4 Shadow-test protection-pin supersession (not rewritten history).**
+
+```text
+A40 historical snapshot (preserved unchanged; not a current protection pin):
+  tests/test_kalshi_shadow_experiment.py
+    123051 bytes / sha256 b67c7eb6ebc77b29a7fafc93bd52f248ba1e11b3077944b8734e2ffee4127a81
+    git_blob fcb9bcbc02344d727750e3562c7990aa8633283a
+approved correction = exactly two PROTECTED_BASE_BLOBS value substitutions ; all other bytes unchanged :
+  src/arb/venues/kalshi/minimal_market_maker_experiment_runner.py
+    6deef5dc60e66e992a92efe6c004786ef85240e4 -> eb455d9467448fcb2435abd3465bdf08e68b10fd
+  tests/test_kalshi_minimal_market_maker_experiment_runner.py
+    9262029d0d557516b9bcdacd7957725ca2474688 -> a92508c22029285e013a02f98c24779f6c4a895e
+current accepted shadow-test identity = git_blob 93d0e0fce8e8fe7d1de3b4f62e562c1b70cfb7a1
+```
+
+No other pin change is approved or implied.
+
+**A42.5 Installed bridge behavior and boundaries (technical capability only).**
+
+One F03-only dedicated GET_BALANCE read surface (`GET /trade-api/v2/portfolio/balance`; internal `RunnerOperation.GET_BALANCE`; dedicated `prepare_f03_balance_read_request_v1` and `read_f03_balance_snapshot_v1`) with bounded signed transport, preparer, deadline and request accounting; zero retries and zero redirects; strict shared `GetBalanceResponse` decoder; sanitized/redacted bridge result and a bounded checkpoint helper; exact runtime-domain match enforced before request consumption; explicit `subaccount` and `exchange_index` (no default or aggregate use). It is not promoted into the frozen active Stage-3 / legacy generic operation sets or exports (`ActivePreReleaseReadOperationV2`, `PRE_RELEASE_READ_OPERATIONS`, `_GENERIC_REQUEST_OPERATIONS`, `PreReleaseReadCapabilityV1`, generic `prepare_runner_operation_request`), the orderbook seam is unchanged, and it creates no writer, release, Gate-D or venue permission.
+
+```text
+source binding = F03_BALANCE_SOURCE_BINDING_V1.json
+  4861 bytes / sha256 a57e6d0aaf281054a60bcd93da64fae61ae4cd093ddf3e904b8016f845dc8068
+  official OpenAPI raw identity = https://docs.kalshi.com/openapi.yaml ; OpenAPI 3.0.0 / info.version 3.29.0
+    325930 bytes / sha256 99bdf4093d7eced607ba8b48cc99e3da862c35d99afa2a0c0f63f14eab9237ed
+  precise source retrieval timestamp = NOT_RECORDED (not invented) ; no new source fetch performed or permitted
+offline fixtures = F03_BALANCE_READ_BRIDGE_AND_MEASUREMENT_OFFLINE_FIXTURES.json
+  10023 bytes / sha256 88b66b3b5027324e9805d999be996eb4fc6cca4e7925ff8b786ee03cba2d0e7c
+  synthetic offline only ; never Demo or account observations
+```
+
+**A42.6 Installation sequence and audit qualifications.**
+
+```text
+preflight = 19/19 PASS (run 1 2026-10-07T21:23:07Z ; run 2 21:25:27Z)
+permission denial = an earlier permission denial preceded execution: 0 push attempts, no state effect ;
+  the user later explicitly permitted the single push
+pre-push ls-remote refs/heads/main = 4c94077c6a80d8023d8c77fcdad4f5804de51756 (21:25:40Z)
+push = git -C C:\b1\kals\ARB push origin 700745828c4d823a3f963f2fff8455d00ff2d739:refs/heads/main
+  21:25:40Z-21:25:44Z ; exit 0 ; attempts 1 ; retries 0 ; ordinary non-force fast-forward ; main ref only
+remote readback = 21:25:56Z ; main / tree / sole parent / three blobs exact ; 1 commit above old base
+local sync = exactly one git -C C:\b1\kals\ARB merge --ff-only 700745828c4d823a3f963f2fff8455d00ff2d739
+  21:26:10Z ; exit 0 ; branch main ; HEAD exact ; clean including untracked ; installed bytes exact
+no continuity / project_context record written during installation (backfilled by A42)
+```
+
+**A42.7 Historical implementation test results (not executed by this continuity task).**
+
+```text
+bridge (BR) tests              = 33 passed / 225 subtests
+protected whole runner suite   = 1705 passed / 2 pre-existing skips / 921 subtests
+whole shadow suite             = 70 passed / 3773 subtests (including t30/t42)
+full offline suite             = NOT CLEAN : 4340 passed / 2 skips / 5796 subtests / 1 failed (exit 1)
+  failure = PROTECTED_LEDGER_PARALLEL_CONSUMPTION_FLAKE (zero-winner UNAVAILABLE / LEDGER_BUSY ; OPEN / FIXED=NO)
+  not retried, skipped, waived or fixed ; no clean-suite theorem
+blocked-predecessor F01 (stale A40 pins) = RESOLVED_BY_INSTALLED_IMPLEMENTATION
+this continuity task = project tests / imports NOT_RUN_PROHIBITED_BY_TASK
+```
+
+These bridge-implementation results are distinct from the later F03 Correction-02 full-suite run recorded in A41.6 (NOT CLEAN: 3911 run / 1 failure / 2 skips); the two runs are not conflated.
+
+**A42.8 Finding dispositions, holds and no-escalation state.**
+
+```text
+fee-semantics research F03                         OPEN
+P01-P09 profitability-foundation prerequisites     OPEN
+F07                                                OPEN
+ACTIVE_DOMAIN_ORDINARY_CANCEL_ROUTE_MISMATCH       OPEN / FIXED=NO / fail-closed
+GATE_D_POST_UNRESOLVED_NEXT_CYCLE_TERMINATION      OPEN / FIXED=NO / fail-closed
+PROTECTED_LEDGER_PARALLEL_CONSUMPTION_FLAKE        OPEN / FIXED=NO
+
+market = UNSELECTED ; minimum_spread_usd = UNSELECTED ; canonical_G_selection = UNSELECTED
+operator package = NONE ; Demo run = NONE ; production = NONE ; account / credential authorization = NONE
+release / writer admission NOT_GRANTED ; Gate-D NOT_ENTERED ; Step-Q NOT RUN
+```
+
+Historical unresolved exposure and holds remain governed by their canonical contracts; nothing here implies release. Installed code grants technical read capability only: no live use, writer/release readiness, fee-policy proof or profitability. Demo results would not prove production profitability, and no arbitrage theorem is claimed.
+
+**A42.9 Raw-artifact storage and retrieval classification.**
+
+```text
+RAW_BYTES_EMBEDDED_AND_VERIFIED in the O-1 continuity dispatch bundle (LOCAL_ONLY; SUCCESSOR_BUNDLE_EMBEDDED; not repository-resident):
+  bridge installation evidence bundle (outer)
+    R1-D07_F03_BALANCE_READ_BRIDGE_PREREQUISITE_IMPLEMENTATION_01_CORRECTION_01_CANONICAL_INSTALLATION_01_EVIDENCE_BUNDLE.zip
+    36288387 bytes / sha256 fbd101de3c6e03a8242ed7ac4060edc3273383ab6746c024c322e47165dfe613
+  bridge installation review (inner)
+    R1-D07_F03_BALANCE_READ_BRIDGE_PREREQUISITE_IMPLEMENTATION_01_CORRECTION_01_CANONICAL_INSTALLATION_01_MARCO_INSTALLATION_REVIEW.zip
+    11586 bytes / sha256 906a3b211f9f79785dab157fe542376b2f0c19a1a407350fc1ae2fa16233d295
+  both dated Marco bridge approvals and the Marco specification approval (A42.2, A42.3) ;
+  Bruno spec and handoff (A42.3) ; source binding and fixtures (A42.5) ;
+  Marco BLOCK review 3919 bytes / sha256 9e25e80f2bce3568ddd16c5787dcc08f15b42f3938f2d0a4182b41b52bf5ffee ;
+  correction dispatch 4347 bytes / sha256 9c3ccf39146224e9f6b7f67fc105fd2e8d2aa33b24875c60786f958f7926c7b5 ;
+  exact allowed pin replacements 413 bytes / sha256 f54cfe129309543ffef4c0b1f5781567aa74852d301dd9b53f2da2f242b933a9
+  nested in the outer bundle (hash-verified by this task):
+    approved implementation submission bundle 17540614 bytes / sha256 85f33a9a3b880b416c8d0a0ba1f5ccc0774e87c2af9f59c49fe212de22eaf953
+    approved candidate.patch 129382 bytes / sha256 1ee73314ed3daeeec37eb10636193ceccfd8d32f3ddab740c0f8cd3980e5f70a
+
+IDENTITY_ONLY_SUFFICIENT for this task (raw bytes not freshly retrieved; permanent retrievability NOT claimed):
+  official OpenAPI 3.29.0 raw source 325930 bytes / sha256 99bdf4093d7eced607ba8b48cc99e3da862c35d99afa2a0c0f63f14eab9237ed
+  approved implementation inner review ZIP 508019 bytes / sha256 085dbd5e15718494658f44fef3b3238244a615f88f654727cc4e8004a5780159
+
+installed source/test bytes = repository-resident ; retrievable by commit/blob identity
+```
+
+The evidence proves an approved, exactly installed three-file bridge at the identities above with the recorded test counts. It does not prove a clean full suite, live readiness, fee semantics, profitability, or any Demo/account observation. Local-only archives are not durable in Git merely because their hashes are recorded here; later tasks requiring identity-only bytes must actually retrieve, hash and embed them, and unresolved availability is never license to reconstruct.
+
+**A42.10 O-1 disposition and next bounded route.**
+
+```text
+before Marco acceptance and separately authorized installation of this candidate:
+  O1_BRIDGE_CANONICALIZATION_PENDING (unchanged)
+after independent Marco review AND separately authorized canonical installation:
+  O-1 = CAPTURED (bridge milestone canonically recorded) ; no other state changes
+NEXT_BOUNDED_ACTION (unchanged from A41.10) =
+  BRUNO_F03_OPERATOR_PACKAGE_SPEC_ONLY_PLANNING against then-current canonical main
+```
+
+A local candidate, review ZIP, approval report or later dispatch does not by itself mark O-1 closed. This is routing only: it authorizes no specification task, operator launch, Demo write, or selection of market, spread, G, account, fee rule or trading policy. This continuity candidate performed zero Kalshi/venue, credential, account, deployed/persistent-state, production, project-test/import, package-installation and remote Git write activity.
