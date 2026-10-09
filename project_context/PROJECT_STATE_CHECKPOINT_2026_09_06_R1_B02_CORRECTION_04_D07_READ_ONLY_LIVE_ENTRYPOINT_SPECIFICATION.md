@@ -7319,3 +7319,197 @@ R1-D07_PROFITABILITY_FOUNDATION_P01_P02_P03_STATIC_CONTRACT_WORK
 ```
 
 This canonicalization closes none of P01-P09. The route selects no market, G, minimum spread, selector threshold, fee rule, profitability rule or trading policy, and grants no live run, Step-Q, release, writer admission, Gate-D entry, G1 execution, Demo write, production, Kalshi, credential, or N1/deployed-state capability. Any next action requires its own separately dispatched and authorized task.
+
+### A41 R1-D07 F03 Demo fee-semantics test implementation Correction-02 — MARCO APPROVED / CANONICALLY INSTALLED / FEE RESEARCH F03 OPEN / FULL SUITE NOT CLEAN
+
+This continuity overlay was prepared by `R1-D07_F03_DEMO_FEE_SEMANTICS_CORRECTION_02_CANONICAL_CONTINUITY_01` (implementer `CLAUDE_CODE`; documentation-only) as one local candidate commit whose sole parent is canonical `rigolugo/ARB/main` commit `1e90a9fdb96f56d75ecf29c5971733681f5bc6af` (tree `07a1fdcf610c8d584c72636bc22ac79f762d250d`, sole parent `700745828c4d823a3f963f2fff8455d00ff2d739`). **A41 controls only if this exact reviewed documentation candidate is later installed on canonical `main` under a separately authorized installation task.** Until then it is a review candidate only, and canonical continuity for the F03 installation remains `CANONICALIZATION_PENDING`. A1-A40 remain historical provenance and are not rewritten (A40's own historical candidate phrasing is intentionally left unchanged). The candidate commit identity is recorded in the review package and any later installation record, not inside this commit.
+
+**A41.0 Why this matters.**
+
+The F03 Correction-02 installation places a bounded, offline-tested Demo fee-semantics experiment substrate (analyzer, runner and their tests) on canonical `main`. It is installed code only. It does not resolve fee research: fee-semantics research finding F03 remains OPEN, no fee rule or market-specific fee binding is established, and installed code grants no runtime capability. The next fee-research step is a Bruno-authored operator specification (A41.10), not execution.
+
+**A41.1 Supersession scope.**
+
+A41 supersedes A40 only for the current next-route statement (`R1-D07_PROFITABILITY_FOUNDATION_P01_P02_P03_STATIC_CONTRACT_WORK`), which is replaced by the A41.10 route. Every A40 fact and every A39 finding disposition is preserved unchanged. P01-P09 remain OPEN.
+
+**A41.2 Accepted installation and approval authority (controlling reviewed theorem).**
+
+```text
+installation task =
+  R1-D07_F03_DEMO_FEE_SEMANTICS_TEST_IMPLEMENTATION_01_CORRECTION_02_CANONICAL_INSTALLATION_01
+installation executor = CLAUDE_CODE (local)
+installation reviewer = Marco ; technical specification author = Bruno (unchanged)
+Marco installation decision = APPROVE / CANONICAL_INSTALLATION_ACCEPTED
+  reviewed 2026-10-09T06:17:43.988707-04:00
+  record F03_CANONICAL_INSTALLATION_MARCO_APPROVAL.md
+    7696 bytes / sha256 4ff17bf4e615050765b6ad08034c4b390be5d31ee48039c105c62e9592ae64b2
+    (hash derived by this task from the embedded raw bytes)
+latest Marco implementation approval (incorporated by the installation acceptance) =
+  11671 bytes / sha256 0449836a570618a8bd20e078871d8057aa4893a88b61f21a85ecf0cfc91c5f85
+  (identity as recorded in the verified installation evidence; raw bytes not embedded in this task)
+```
+
+The latest acceptance (the Marco installation `APPROVE` above) is the controlling reviewed theorem for this milestone.
+
+Provenance boundary: Marco independently verified remote canonical `main`, the target/base commit objects, both recursive trees and all four installed blobs through public read-only GitHub calls. The canonical Windows local-main readback and cleanliness evidence is executor-supplied evidence accepted by Marco; Marco did not directly access the user's Windows filesystem, and this record does not claim direct Windows access. Executor network/activity declarations are executor-supplied records, not a complete independent host/network audit.
+
+**A41.3 Installed target and predecessor base.**
+
+```text
+installed commit = 1e90a9fdb96f56d75ecf29c5971733681f5bc6af
+tree             = 07a1fdcf610c8d584c72636bc22ac79f762d250d
+sole parent      = 700745828c4d823a3f963f2fff8455d00ff2d739
+predecessor base = 700745828c4d823a3f963f2fff8455d00ff2d739
+  (tree b20ede8e9a17abc95284a46792824ba9b09c8f85, sole parent 4c94077c6a80d8023d8c77fcdad4f5804de51756)
+topology = exactly one commit above the predecessor base; exactly four added paths;
+  all 119 base files unchanged; 123 files total; 30 protected dependency blobs unchanged
+```
+
+Installed payload (mode `100644`; identical in the approved candidate, the remote readback and the canonical local checkout per the accepted evidence):
+
+```text
+src/arb/venues/kalshi/f03_fee_semantics_analyzer.py
+  bytes = 121137
+  sha256 = df29b5246a423db340793ff2cf95cb62233f2496e0e80d1488d1545c06359c2a
+  git_blob = 895b0dff15cf7b8690b3339b8a0382840d4b86d8
+
+src/arb/venues/kalshi/f03_fee_semantics_runner.py
+  bytes = 136022
+  sha256 = 11c472190ecdb329719449d7d3ffb9b34c9ae96a6b629f5d7b49ee6caf3f3abe
+  git_blob = f947d5b7f43c815b90303aa42313ca2600a5e2eb
+
+tests/test_kalshi_f03_fee_semantics_analyzer.py
+  bytes = 84884
+  sha256 = 2b17ade25a3e141d2e9e2b89666539e651dc7e65f4af6fd8756987624dd70510
+  git_blob = 897243f5027785ebdab8f370a6d5248876d06891
+
+tests/test_kalshi_f03_fee_semantics_runner.py
+  bytes = 125742
+  sha256 = 8e5fa5562451fa93a3fbf02ace15d2d4cd1362ebdee6934beec2b3a57b48e2de
+  git_blob = ba9f469ae635dd0e49c2d33e4bbb5f312021b039
+```
+
+**A41.4 Installation sequence (one non-force push; one ff-only local sync).**
+
+```text
+pre-push ls-remote refs/heads/main = 700745828c4d823a3f963f2fff8455d00ff2d739 (2026-10-08T23:57:13Z)
+push = git -C C:\b1\kals\ARB push origin 1e90a9fdb96f56d75ecf29c5971733681f5bc6af:refs/heads/main
+  2026-10-08T23:57:14Z-23:57:17Z ; exit 0 ; attempts 1 ; retries 0
+  ordinary non-force; no force / force-with-lease; target to refs/heads/main only; no PR/merge/squash/tag
+remote readback = fresh shallow bare clone + ls-remote before/after (2026-10-08T23:58:15Z-23:58:23Z)
+local sync = pre-sync ls-remote + fetch of refs/heads/main, then exactly one
+  git -C C:\b1\kals\ARB merge --ff-only 1e90a9fdb96f56d75ecf29c5971733681f5bc6af
+  2026-10-08T23:59:29Z ; exit 0 ; one attempt
+final local predicates (14 recorded, L01-L11) = PASS
+  (branch main; HEAD/tree/parent exact; clean including untracked; on-disk identities exact;
+   old paths unchanged; protected pins exact)
+no commit, amend, rebuild, reset, stash, clean, config change or source edit during installation
+```
+
+**A41.5 Installation check failures preserved (failures remain failures).**
+
+```text
+P09b (preflight patch-apply check)
+  original raw preflight predicate file = 44 PASS / 1 FAIL (P09b) ; original FAIL row retained, never relabelled
+  cause (D2) = Git-for-Windows system core.autocrlf=true converted LF->CRLF in an out-of-repository git apply
+  separate successful correction = fresh LF-configured artifact recheck (per-command
+    -c core.autocrlf=false -c core.eol=lf) reproduced all four payloads byte-exactly BEFORE the push;
+    no Git configuration changed ; P09a (regenerated patch byte-identical) passed independently
+R07 (remote readback, base sole-parent check)
+  original raw remote predicate file = 15 PASS / 1 FAIL (R07) ; original FAIL row retained, never relabelled
+  cause (D3) = case-insensitive PowerShell variable collision corrupted the expected parent string
+  separate successful correction = offline re-evaluation on the same readback clone objects
+    (no extra network) with the expected value repaired ; Marco's independent base-commit read
+    confirms actual parent 4c94077c6a80d8023d8c77fcdad4f5804de51756 ; no extra remote write
+D1 (aborted first preflight)
+  first read-only preflight aborted (PowerShell parameter prefix binding; case-insensitive index-tag match);
+  corrected complete preflight preceded the push ; original partial machine outputs were overwritten ;
+  only a console transcription survives (first_run_console_transcript.txt), not original raw output
+  = ACCEPTED AUDIT LIMITATION ; not represented as original raw evidence
+classification = evidence check-script defects and checking-environment repairs only ;
+  NOT project-test retries ; NOT source changes ; establish no wrong commit, altered source or extra push
+```
+
+**A41.6 Historical implementation test results (not executed by this continuity task).**
+
+```text
+official full offline suite = NOT CLEAN : 3911 run / 1 failure / 2 pre-existing skips
+  failure = PROTECTED_LEDGER_PARALLEL_CONSUMPTION_FLAKE (OPEN / FIXED=NO)
+    test_kalshi_ledger_binding.AuthorizationConsumptionBindingTests
+      .test_parallel_consumption_has_at_most_one_winner_and_never_retries
+    zero-winner signature: 0 != 1 : [('UNAVAILABLE', False, 'LEDGER_BUSY'), ('UNAVAILABLE', False, 'LEDGER_BUSY')]
+  no rerun, retry, skip, waiver or repair ; installation does not make the suite clean
+official F03 suite = 139 OK
+official protected runner/shadow suite = 1777 OK / 2 pre-existing skips
+this continuity task = project tests NOT_RUN / PROHIBITED / documentation-only
+```
+
+**A41.7 IF01 correction evidence (synthetic offline evidence only).**
+
+```text
+live protected acquirer = 9 actual Stage-3 reads
+Order2 decision = 36 used / 164 remaining ; reservation 163 passes
+  refusal = BASELINE_UNKNOWN_EXPOSURE (from position conflict) ; separability not reached
+fake test seam charges 72 = 101 remaining versus 163 -> capacity refusal
+```
+
+This is synthetic offline evidence only. It establishes no universal capacity refusal and no real Demo outcome, and it authorizes no behavior or specification change.
+
+**A41.8 Finding dispositions, holds and no-escalation state.**
+
+```text
+implementation findings F01-F05                    CLOSED (per the latest Marco implementation approval)
+fee-semantics research F03                         OPEN
+P01-P09 profitability-foundation prerequisites     OPEN (unchanged from A40)
+F07                                                OPEN
+ACTIVE_DOMAIN_ORDINARY_CANCEL_ROUTE_MISMATCH       OPEN / FIXED=NO / fail-closed (unchanged)
+GATE_D_POST_UNRESOLVED_NEXT_CYCLE_TERMINATION      OPEN / FIXED=NO / fail-closed (unchanged)
+PROTECTED_LEDGER_PARALLEL_CONSUMPTION_FLAKE        OPEN / FIXED=NO (unchanged)
+READ_TRANSPORT_INCOMPLETE_CONTENT_LENGTH           RESOLVED_BY_INSTALLED_IMPLEMENTATION / FIXED=YES (unchanged from A39)
+
+market = UNSELECTED ; minimum_spread_usd = UNSELECTED ; canonical_G_selection = UNSELECTED
+operator package approval = NONE ; operator launch = NOT_AUTHORIZED
+Demo execution under this F03 package = NONE / NOT_AUTHORIZED
+production = NONE ; credentials = NONE ; account authorization = NONE
+Step-Q NOT RUN ; release / writer admission NOT_GRANTED ; Gate-D NOT_ENTERED ; G1 NOT_AUTHORIZED / NOT RUN
+```
+
+All prior safety holds are preserved. Installed code grants no runtime capability. Historical shadow observations (A40.6) are never reinterpreted as current market inputs.
+
+**A41.9 Raw-artifact storage and retrieval classification.**
+
+```text
+RAW_BYTES_EMBEDDED_AND_VERIFIED in the continuity dispatch bundle (LOCAL_ONLY; not repository-resident):
+  F03_CANONICAL_INSTALLATION_MARCO_APPROVAL.md
+    7696 bytes / sha256 4ff17bf4e615050765b6ad08034c4b390be5d31ee48039c105c62e9592ae64b2
+  R1-D07_F03_DEMO_FEE_SEMANTICS_TEST_IMPLEMENTATION_01_CORRECTION_02_CANONICAL_INSTALLATION_01_MARCO_INSTALLATION_REVIEW.zip
+    164743 bytes / sha256 b3b95c9591196719582074adf08ca2f33418aec52b7c4986e59dcbb03c175a5d
+
+IDENTITY_ONLY for this task (raw bytes not embedded, not freshly inspected; permanent
+repository retrievability NOT claimed):
+  R1-D07_F03_DEMO_FEE_SEMANTICS_TEST_IMPLEMENTATION_01_CORRECTION_02_CANONICAL_INSTALLATION_01_EVIDENCE_BUNDLE.zip
+    221826495 bytes / sha256 830812ed3071d62a57eb21a3b528683575c7c555b3c5b1bc82b1c0680b3eca52
+  R1-D07_F03_DEMO_FEE_SEMANTICS_TEST_IMPLEMENTATION_01_CORRECTION_02_MARCO_SUBMISSION_BUNDLE.zip
+    219637543 bytes / sha256 23f2b251aa105b48eff632cffa265631ac31b389c1d8727e9cde9e44cc8ae35f
+  KALSHI_DEMO_R1_D07_F03_DEMO_FEE_SEMANTICS_TEST_SPEC_01_CORRECTION_02.md (governing Bruno spec; unchanged)
+    72523 bytes / sha256 de75554e381c0ab521878ac780ec84749fa54f68237ad9db51480e33527c93a4
+
+installed source/test bytes = repository-resident; retrievable by commit/blob identity
+```
+
+Later tasks requiring identity-only bytes must actually retrieve, hash and embed them; unresolved availability is never license to reconstruct.
+
+**A41.10 Next bounded route.**
+
+```text
+NEXT_BOUNDED_ACTION (after this continuity candidate is accepted and installed) =
+  BRUNO_F03_OPERATOR_PACKAGE_SPEC_ONLY_PLANNING
+  against then-current canonical main
+  Bruno owns the operator specification, including exact run-artifact-root wiring;
+  later market / spread / G / account decisions explicitly scoped;
+  source-currentness gaps and terminal-credit observability preserved
+  sequence: Bruno spec -> Marco review -> separately dispatched Claude launch package
+            -> separate exact Demo execution authorization
+```
+
+This is routing only. It authorizes neither that future specification task nor operator launch nor any Demo write, and it selects no market, spread, G, account, fee rule or trading policy. Capability is not authorization. This continuity candidate performed zero Kalshi/venue, credential, deployed/persistent-state, production, project-test/import, package-installation and remote Git write activity.
