@@ -1572,10 +1572,10 @@ REQUIRED_BASE_TREE = "a49a5c969a07c1f2d9262630365f07cc206b7d12"
 REQUIRED_BASE_PARENT = "9f0dae4ffd3cfa807ec0ea47f8949fc0029c1da4"
 PROTECTED_BASE_BLOBS = {
     "project_context/GUARDRAILS.md": "d5b6e2ea986d651a8bdc6309b432389e72b17f3b",
-    "project_context/START_HERE.md": "d36ab5543dc6883704599c49049afa27d8b295da",
+    "project_context/START_HERE.md": "0e354d183cc476b6fe48bb4860139fc49912db80",
     "src/arb/venues/kalshi/d07_market_selector.py": "46d0e4904c3d8342a54a89fa7e685b40ede24ea4",
     "src/arb/venues/kalshi/minimal_market_maker.py": "be1bbfa31c7d814d48751f9b2399ef62c866d36e",
-    "src/arb/venues/kalshi/minimal_market_maker_experiment_runner.py": "eb455d9467448fcb2435abd3465bdf08e68b10fd",
+    "src/arb/venues/kalshi/minimal_market_maker_experiment_runner.py": "a169b8ebe13e7d8717966b8cabcba1495e0a8641",
     "src/arb/venues/kalshi/orderbook.py": "4d0c8b8407ddb941decaa5cf6a493ac6ab3063c5",
     "src/arb/venues/kalshi/risk_control.py": "111685c8c1dc7735a53b45830d93844c329f23e3",
     "tests/test_kalshi_d07_market_selector.py": "02dc6a12bd8883cd7c24fd8f9e3c1fba28c74096",

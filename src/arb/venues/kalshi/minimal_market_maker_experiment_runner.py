@@ -11113,6 +11113,20 @@ _ORCH_E_KEYS = frozenset({
 _ORCH_B_FROM_O_RENAMES = (("authorization_id", "orchestration_authorization_id"),
                           ("authorization_class", "orchestration_authorization_class"))
 
+# Route A CORRECTION_01 (RA-04-004): the ONE closed internal consumer tag.  It
+# is selected only by this optional closed section of the launcher-pinned,
+# durably consumed ``E`` document and only through
+# ``run_f03_release_orchestration_v1``; it is never a caller function, import
+# path or runtime JSON flag, and it never alters the D07 read-only layer.
+_ORCH_E_F03_SECTION = "f03_route_a"
+_ORCH_F03_CONSUMER_TAG = "F03_ISOLATED_FEE_PROBE"
+_ORCH_E_F03_SECTION_KEYS = frozenset({
+    "consumer", "plan_binding_sha256", "timing_profile_bytes", "timing_profile_sha256",
+})
+_ORCH_F03_TIMING_FILENAME = "F03_ROUTE_A_TIMING_CONFIG_V1.json"
+# Module-private key sealing the F03 protected context to this orchestration.
+_F03_PROTECTED_CONTEXT_KEY = object()
+
 
 def _orch_fail(code: "RunnerFailureCode", detail: str | None = None) -> "RunnerError":
     return RunnerError(code, detail=detail)
@@ -11349,8 +11363,18 @@ def _orch_validate_expectations_object(e: object) -> dict:
     bad = RunnerFailureCode.AUTHORIZATION_EXPECTATION_UNTRUSTED
     if _orch_contains_not_issued(e):
         raise _orch_fail(RunnerFailureCode.TRUSTED_EXECUTION_PACKAGE_NOT_ISSUED, "placeholder value")
-    if type(e) is not dict or set(e) != _ORCH_E_KEYS:
+    if type(e) is not dict or set(e) not in (_ORCH_E_KEYS, _ORCH_E_KEYS | {_ORCH_E_F03_SECTION}):
         raise _orch_fail(bad, "expectations keys")
+    if _ORCH_E_F03_SECTION in e:
+        section = e[_ORCH_E_F03_SECTION]
+        if (
+            type(section) is not dict or set(section) != _ORCH_E_F03_SECTION_KEYS
+            or section["consumer"] != _ORCH_F03_CONSUMER_TAG
+            or not _orch_is_sha(section["plan_binding_sha256"])
+            or not _orch_is_sha(section["timing_profile_sha256"])
+            or type(section["timing_profile_bytes"]) is not int or section["timing_profile_bytes"] <= 0
+        ):
+            raise _orch_fail(bad, _ORCH_E_F03_SECTION)
     if type(e["schema_version"]) is not int or e["schema_version"] != 1:
         raise _orch_fail(bad, "schema_version")
     if e["carrier_class"] != _ORCH_E_CARRIER_CLASS:
@@ -12563,6 +12587,9 @@ def run_release_orchestration_v1(
     launcher_constants = object.__getattribute__(trusted_expectations, "_constants")
     if type(launcher_constants) is not _LauncherEmbeddedConstantsV1:
         raise _orch_fail(RunnerFailureCode.AUTHORIZATION_EXPECTATION_UNTRUSTED, "trusted expectations carrier contents")
+    if _ORCH_E_F03_SECTION in trusted_expectations.document:
+        # Route A: an F03-consumer authorization can never feed this consumer.
+        raise _orch_fail(RunnerFailureCode.AUTHORIZATION_EXPECTATION_UNTRUSTED, "F03 route-A carrier on the ordinary Gate-D consumer")
     mono = time.monotonic_ns if monotonic_clock_ns is None else monotonic_clock_ns
     # Row 0: ONE monotonic sample, before any authorization-file work.
     start_ns = mono()
@@ -12742,6 +12769,385 @@ def run_release_orchestration_v1(
         # Terminal state of the invocation: the live receipt is retired.  The
         # DURABLE consumed event is permanent regardless.
         receipt.revoke()
+
+
+# ---------------------------------------------------------------------------
+# 41.8 -- Route A CORRECTION_01: the sealed F03 isolated-fee-probe consumer of
+# the SAME protected orchestration (RA-04-004..006).  It repeats the exact
+# row 0 / rows 1-8 / row 9 / row 10 / single-credential-scope / phase / bridge
+# / receipt-bound Stage-3 / linkage sequence above and replaces ONLY the
+# ordinary Gate-D loop with the one-shot F03 consumer.  No new signer,
+# transport, credential loader, authority, domain or write capability.
+# ---------------------------------------------------------------------------
+
+
+@dataclass(frozen=True, slots=True)
+class F03OrchestrationInputsV1:
+    """Nonsecret F03 operator inputs.  Data only: the plan must hash to the
+    plan binding inside the launcher-pinned ``E`` section, so it can never
+    select, widen or mint authority."""
+
+    plan: object
+    observed_identity: object
+    run_artifact_root: "str | os.PathLike[str]"
+    prohibited_roots: "Tuple[str | os.PathLike[str], ...]"
+
+
+@dataclass(frozen=True, slots=True)
+class F03ReleaseOrchestrationResultV1:
+    """Secret-free classification of a completed F03 Route-A invocation.  The
+    held F03 result travels unchanged; ``route_a_feasibility`` is always
+    ``ROUTE_A_FEASIBILITY_UNPROVEN`` (offline fakes prove no live timing)."""
+
+    entry_state_class: str
+    route: str
+    process_instance_id: str
+    consumption_event_id: str
+    consumption_sequence: int
+    invocation_started_monotonic_ns: int
+    absolute_deadline_monotonic_ns: int
+    phase_requests: "Tuple[int, ...]"
+    aggregate_requests: int
+    trusted_dynamic_read_set_ids: "Tuple[str, ...]"
+    bridge_reconciliation_appended: "bool | None"
+    release_id: "str | None"
+    normal_writer_session_id: "str | None"
+    f03_result: object
+    route_a_timing: "Mapping[str, object]"
+    orchestration_timeline: "Mapping[str, int]"
+    writer_cleanup: str
+    route_a_feasibility: str
+
+
+def _orch_f03_mark(timeline: "dict[str, int]", name: str, mono: "Callable[[], int]") -> int:
+    """Causal monotonicity of the orchestration milestones in the ONE row-0
+    clock domain; a retrograde / invalid sample stops before transport."""
+    value = mono()
+    if type(value) is not int or type(value) is bool or value < 0 or (timeline and value < max(timeline.values())):
+        raise _orch_fail(RunnerFailureCode.BRIDGE_AUTHORIZATION_DEADLINE_MISMATCH, "monotonic clock continuity: " + name)
+    timeline[name] = value
+    return value
+
+
+def _orch_f03_profile_recheck(root: "_ProtectedExecutionRoot", section: "Mapping[str, object]", stage: str) -> None:
+    """RA-03-002/004: reopen and rehash the authorized timing profile at each
+    protected boundary; a changed file is never reloaded or rescued."""
+    try:
+        raw = (object.__getattribute__(root, "_root") / _ORCH_F03_TIMING_FILENAME).read_bytes()
+    except OSError:
+        raise _orch_fail(RunnerFailureCode.AUTHORIZATION_EXPECTATION_IDENTITY_MISMATCH, "F03 timing profile unavailable at " + stage) from None
+    if len(raw) != section["timing_profile_bytes"] or hashlib.sha256(raw).hexdigest() != section["timing_profile_sha256"]:
+        raise _orch_fail(RunnerFailureCode.AUTHORIZATION_EXPECTATION_IDENTITY_MISMATCH, "F03 timing profile changed at " + stage)
+
+
+def _orch_f03_require_n1_history_context() -> None:
+    """R1-D07 F03 Route A Stage A (Marco D-02): UNCONDITIONAL pre-row-9 hold.
+
+    No accepted N1 history context, enrollment, serial issuer current tip,
+    root/host/volume continuity carrier or admission-link integration is
+    installed, so every sanctioned F03 route stops here -- before the durable
+    authorization consumption, any persistent admission mutation, credential
+    scope or signed read -- whatever the plan, U equality, timing profile,
+    reserve registry, package contents or caller inputs.  It takes no input:
+    no flag, capsule, witness, carrier or fresh ID can satisfy it."""
+    raise _orch_fail(
+        RunnerFailureCode.AUTHORIZATION_EXPECTATION_MISSING,
+        "F03_N1_HISTORY_CONTEXT_UNAVAILABLE|no accepted N1 history context / enrollment / issuer current tip / "
+        "admission link is installed (Stage A hold before row 9)")
+
+
+def run_f03_release_orchestration_v1(
+    *,
+    trusted_expectations: TrustedExecutionExpectationsV1,
+    runtime_builder: "Callable[[OrchestrationRuntimeContextV1], ExperimentRunnerRuntimeV2]",
+    f03_inputs: F03OrchestrationInputsV1,
+    monotonic_clock_ns: "Callable[[], int] | None" = None,
+    wall_clock: "Callable[[], datetime] | None" = None,
+    uuid_factory: "Callable[[], uuid.UUID] | None" = None,
+    credential_bridge: object = None,
+    fault_hook: "Callable[[str], None] | None" = None,
+) -> F03ReleaseOrchestrationResultV1:
+    """The sanctioned protected F03 Route-A entrypoint (RA-04-005 causal graph).
+
+    Row 0 samples ``T0`` (``TA = T0 + 300 s``, never reset) before any
+    authorization-artifact verification; rows 1-8 are the unchanged admission;
+    the F03 inputs, authorized timing profile and accepted reserve policy are
+    then verified with ZERO persistent effect (a non-executable profile stops
+    here as ``ROUTE_A_FEASIBILITY_UNPROVEN``); row 9 durably consumes the set
+    once; row 10 builds the sealed runtime.  Before the ONE credential scope
+    the F03 run claim and OPERATOR_ATTEMPT marker are made durable; inside it:
+    phase 1 [-> BOOT_HOLD bridge -> fresh phase 2] -> F03 preflight + stable
+    B0 -> receipt-bound Stage 3 -> linkage -> the one-shot F03 consumer
+    (never ``run_gate_d_ordinary_decision_loop``) -> canonical writer cleanup
+    exactly once.  Exit order: writer cleanup -> bridge removes its PEM ->
+    receipt revoked.  ``credential_bridge=None`` (production) binds the
+    existing PATH->PEM bridge and REQUIRES the sanctioned
+    ``_DemoNormalWriteTransport``; a supplied factory is the offline tests'
+    visibly test-only synthetic scope.
+
+    R1-D07 F03 Windows-storage STAGE A (incomplete, non-admitting): after the
+    unchanged pre-row-9 verification plus exact U equality, this entrypoint
+    ALWAYS stops with ``F03_N1_HISTORY_CONTEXT_UNAVAILABLE`` before row 9; the
+    post-marker ``N1_ADMISSION_LINK_UNAVAILABLE`` stop is defense in depth.
+    The later rows are reachable only through synthetic test fixtures.
+    F03_ADMISSION_HELD."""
+    if type(trusted_expectations) is not TrustedExecutionExpectationsV1:
+        raise _orch_fail(RunnerFailureCode.AUTHORIZATION_EXPECTATION_UNTRUSTED, "trusted expectations carrier")
+    launcher_constants = object.__getattribute__(trusted_expectations, "_constants")
+    if type(launcher_constants) is not _LauncherEmbeddedConstantsV1:
+        raise _orch_fail(RunnerFailureCode.AUTHORIZATION_EXPECTATION_UNTRUSTED, "trusted expectations carrier contents")
+    section = trusted_expectations.document.get(_ORCH_E_F03_SECTION)
+    if section is None or section.get("consumer") != _ORCH_F03_CONSUMER_TAG:
+        raise _orch_fail(RunnerFailureCode.AUTHORIZATION_EXPECTATION_UNTRUSTED, "carrier is not an F03 route-A authorization")
+    if type(f03_inputs) is not F03OrchestrationInputsV1:
+        raise _orch_fail(RunnerFailureCode.ORCHESTRATION_PHASE_STATE_INVALID, "F03 inputs type")
+    from arb.venues.kalshi import f03_fee_semantics_runner as _f03  # bound lazily (the F03 module imports this one)
+
+    mono = time.monotonic_ns if monotonic_clock_ns is None else monotonic_clock_ns
+    # Row 0: ONE monotonic sample, before any authorization-file work.
+    start_ns = mono()
+    if type(start_ns) is not int or type(start_ns) is bool or start_ns < 0:
+        raise _orch_fail(RunnerFailureCode.BRIDGE_AUTHORIZATION_DEADLINE_MISMATCH, "monotonic start")
+    end_ns = start_ns + _ORCH_ABSOLUTE_DEADLINE_SECONDS * 1_000_000_000
+    if end_ns - start_ns != _AUTH_DEADLINE_NS:
+        raise _orch_fail(RunnerFailureCode.BRIDGE_AUTHORIZATION_DEADLINE_MISMATCH, "deadline arithmetic")
+    timeline: "dict[str, int]" = {"T0": start_ns}
+    wall = (lambda: datetime.now(timezone.utc)) if wall_clock is None else wall_clock
+    make_uuid = uuid.uuid4 if uuid_factory is None else uuid_factory
+
+    # Rows 1-8 (unchanged admission, no persistent mutation).
+    admitted = _orch_admit_authorization_set(
+        trusted_expectations, mono=mono, end_ns=end_ns, wall_clock=wall, uuid_factory=make_uuid,
+    )
+    entry_class = admitted.entry_state_class
+    orchestration = admitted.orchestration
+    binding = admitted.binding
+    _orch_f03_mark(timeline, "T8", mono)
+
+    # F03 data verification (zero persistent effect; before consumption).
+    root = object.__getattribute__(trusted_expectations, "_root")
+    timing_raw = root.read_once(_ORCH_F03_TIMING_FILENAME)
+    try:
+        schedule = _f03.admit_route_a_timing_profile_v1(
+            timing_raw, expected_bytes=section["timing_profile_bytes"], expected_sha256=section["timing_profile_sha256"])
+    except _f03.F03RouteATimingError as exc:
+        if exc.classification == _f03.ROUTE_A_FEASIBILITY_UNPROVEN:
+            raise _orch_fail(RunnerFailureCode.BRIDGE_AUTHORIZATION_DEADLINE_MISMATCH, exc.classification + "|" + exc.detail) from None
+        raise _orch_fail(RunnerFailureCode.AUTHORIZATION_EXPECTATION_IDENTITY_MISMATCH, exc.classification + "|" + exc.detail) from None
+    plan = f03_inputs.plan
+    try:
+        plan_binding = _f03.route_a_plan_binding_sha256(plan)
+        _f03.verify_source_binding(plan, f03_inputs.observed_identity)
+    except _f03.F03Halt as exc:
+        raise _orch_fail(RunnerFailureCode.BRIDGE_AUTHORIZATION_IMPLEMENTATION_MISMATCH, "F03 source binding|" + exc.code.value) from None
+    if plan_binding != section["plan_binding_sha256"]:
+        raise _orch_fail(RunnerFailureCode.AUTHORIZATION_EXPECTATION_IDENTITY_MISMATCH, "F03 plan binding")
+    # NH-04-001/005: exact typed U = plan.run_id = admitted binding.invocation_id
+    # = typed expectation binding.invocation_id (canonical lowercase UUID4, no
+    # normalization or fresh UUID); inequality halts before row 9.
+    try:
+        _f03._route_a_require_u_equality(
+            plan.run_id, binding["invocation_id"], admitted.typed_expectation.binding["invocation_id"])
+    except _f03.F03Halt as exc:
+        raise _orch_fail(RunnerFailureCode.BRIDGE_AUTHORIZATION_INVOCATION_MISMATCH, "F03 run/invocation identity|" + exc.detail) from None
+    if (
+        plan.ticker != admitted.market_ticker
+        or (plan.expected_commit, plan.expected_tree, plan.expected_parent) != (
+            binding["required_implementation_commit"], binding["required_implementation_tree"],
+            binding["required_implementation_parent"])
+    ):
+        raise _orch_fail(RunnerFailureCode.BRIDGE_AUTHORIZATION_IMPLEMENTATION_MISMATCH, "F03 plan market/implementation identity")
+    _orch_f03_profile_recheck(root, section, "row 9")
+    # Stage A: the sanctioned route is unconditionally held here (never row 9).
+    _orch_f03_require_n1_history_context()
+
+    normal_gate = WriterEligibilityGate(monotonic_clock_ns=mono, wall_clock=wall, uuid_factory=make_uuid)
+    _orch_require_before_deadline(mono, end_ns, "row 9")
+
+    # Row 9: durable consumption of the whole O+G set (linearization point).
+    outcome = consume_active_execution_authorization_set_v1(
+        admitted.authority_binding,
+        canonical_repository_root=launcher_constants.canonical_repository_root,
+        active_contract=admitted.active_contract,
+        expectation=admitted.typed_expectation,
+        process_instance_id=normal_gate.process_instance_id,
+        invocation_started_monotonic_ns=start_ns,
+        absolute_deadline_monotonic_ns=end_ns,
+        monotonic_clock_ns=mono,
+        expected_ledger_path=launcher_constants.expected_ledger_path,
+        clock=wall,
+        uuid_factory=make_uuid,
+        fault_hook=fault_hook,
+    )
+    if outcome.outcome != "CONSUMED" or outcome.receipt is None:
+        _orch_raise_for_consumption(outcome)
+    receipt = outcome.receipt
+    try:
+        _orch_f03_mark(timeline, "T9", mono)
+        # Row 10: runtime construction with NO constructor-induced session, anchor
+        # repair or append (the durable tail is proved unchanged across the build).
+        context = OrchestrationRuntimeContextV1(
+            normal_gate=normal_gate, experiment_absolute_end_monotonic_ns=end_ns,
+            risk_config=admitted.risk_config, authority_binding=admitted.authority_binding,
+            canonical_repository_root=launcher_constants.canonical_repository_root,
+            expected_ledger_path=launcher_constants.expected_ledger_path,
+            domain_binding=admitted.domain_binding, active_contract=admitted.active_contract,
+            market_ticker=admitted.market_ticker, d07_authorization_envelope=admitted.d07_envelope,
+            monotonic_clock_ns=mono, wall_clock=wall, uuid_factory=make_uuid,
+            gate_d_max_ordinary_write_sends=admitted.gate_d["max_ordinary_write_sends"],
+        )
+        before_build = _orch_read_tail_no_repair(admitted, wall, make_uuid)
+        runtime = runtime_builder(context)
+        after_build = _orch_read_tail_no_repair(admitted, wall, make_uuid)
+        if before_build != after_build:
+            raise _orch_fail(RunnerFailureCode.ORCHESTRATION_RUNTIME_CONSTRUCTION_MUTATED_STATE, "runtime builder moved the durable tail")
+        if (
+            type(runtime) is not ExperimentRunnerRuntimeV2
+            or runtime.normal_gate is not normal_gate
+            or runtime.experiment_absolute_end_monotonic_ns != end_ns
+            or runtime.no_repair_local_reads is not True
+            or runtime.risk_config is not admitted.risk_config
+            or runtime.active_contract.contract_sha256 != admitted.active_contract.contract_sha256
+            or runtime.domain_binding.binding_sha256 != admitted.domain_binding.binding_sha256
+            or runtime.canonical_repository_root != launcher_constants.canonical_repository_root
+            or runtime.expected_ledger_path != launcher_constants.expected_ledger_path
+            or runtime.authority_binding != admitted.authority_binding
+        ):
+            raise _orch_fail(RunnerFailureCode.ORCHESTRATION_PHASE_STATE_INVALID, "runtime does not match the verified context")
+        if not callable(runtime.normal_write_transport):
+            raise _orch_fail(RunnerFailureCode.ORCHESTRATION_PHASE_STATE_INVALID, "normal write transport not constructed")
+        # RA-04-006 / RA-T18: the production route accepts ONLY the sanctioned
+        # write transport and the existing credential bridge.
+        if credential_bridge is None and type(runtime.normal_write_transport) is not _DemoNormalWriteTransport:
+            raise _orch_fail(RunnerFailureCode.ORCHESTRATION_PHASE_STATE_INVALID, "unsanctioned normal write transport")
+        _orch_f03_mark(timeline, "T10", mono)
+        f03_context = _f03.F03ProtectedContextV1(
+            _F03_PROTECTED_CONTEXT_KEY, receipt=receipt, schedule=schedule, plan_binding_sha256=plan_binding,
+            max_ordinary_write_sends=admitted.gate_d["max_ordinary_write_sends"],
+        )
+        try:
+            experiment = _f03.F03FeeExperimentRunnerV1(
+                runtime=runtime, plan=plan, observed_identity=f03_inputs.observed_identity,
+                run_artifact_root=f03_inputs.run_artifact_root, prohibited_roots=f03_inputs.prohibited_roots,
+                invocation_id=binding["invocation_id"],
+            )
+            experiment._route_a_attach(f03_context)
+            _orch_require_before_deadline(mono, end_ns, "F03 run claim")
+            # RA-04-005 step 5: claim + durable attempt marker BEFORE any signed read.
+            experiment._route_a_claim_and_mark(f03_context)
+            # WF-08 step 6 / NH-07-003: the N1 admission link must precede the
+            # credential scope; Stage A has none, so this is a mandatory stop.
+            experiment._route_a_admission_link(f03_context)
+        except _f03.F03Halt as exc:
+            raise _orch_fail(RunnerFailureCode.ORCHESTRATION_PHASE_STATE_INVALID, "F03 claim/attempt|" + exc.code.value + "|" + exc.detail) from None
+        _orch_f03_profile_recheck(root, section, "credential scope entry")
+        invocation = ExperimentRunnerInvocationV2(
+            invocation_id=binding["invocation_id"], market_ticker=admitted.market_ticker,
+        )
+        accounting = _PhaseAccounting(
+            authorized_phases=orchestration["authorized_stage3_phase_count"],
+            per_phase_max=orchestration["per_phase_pre_release_read_request_max_v2"],
+            aggregate_ceiling=orchestration["aggregate_pre_release_read_request_ceiling"],
+        )
+        bridge = _demo_path_to_pem_credential_bridge if credential_bridge is None else credential_bridge
+        entry_eligible = admitted.typed_expectation.entry_checkpoint["writer_proof_release_eligible"]
+        receipt.assert_live(process_instance_id=runtime.normal_gate.process_instance_id)
+        _orch_require_before_deadline(runtime.monotonic_clock_ns, receipt.absolute_deadline_monotonic_ns, "credential scope entry")
+
+        stage3: "_Stage3ActiveReleaseAndNormalWriterResultV1 | None" = None
+        writer_cleanup = "NOT_ACQUIRED"
+        with bridge():
+            _orch_f03_mark(timeline, "Tcred", mono)
+            phase1 = _orch_run_read_phase(
+                stage="PHASE_1_READ", invocation=invocation, runtime=runtime, receipt=receipt,
+                accounting=accounting,
+            )
+            _orch_f03_mark(timeline, "TP1", mono)
+            read_set_ids = [phase1.trusted_dynamic_read_set_id]
+            bridge_outcome: "_BridgeOutcomeV1 | None" = None
+            if entry_class == _ACTIVE_ENTRY_CLASS_BOOT_HOLD:
+                bridge_outcome = _orch_run_boot_hold_bridge(
+                    admitted=admitted, runtime=runtime, receipt=receipt, phase1=phase1,
+                    entry_eligible=entry_eligible,
+                )
+                release_phase = _orch_run_read_phase(
+                    stage="PHASE_2_READ", invocation=invocation, runtime=runtime, receipt=receipt,
+                    accounting=accounting,
+                )
+                if release_phase.trusted_dynamic_read_set_id == phase1.trusted_dynamic_read_set_id:
+                    raise _orch_fail(RunnerFailureCode.BRIDGE_POST_CLOSE_REFRESH_UNAVAILABLE, "phase 2 reused the phase-1 read set")
+                read_set_ids.append(release_phase.trusted_dynamic_read_set_id)
+                _orch_f03_mark(timeline, "TP2", mono)
+            else:
+                release_phase = phase1
+            primary_error: "BaseException | None" = None
+            try:
+                # RA-04-005 step 7: F03 preflight + stable B0 in the same scope,
+                # charged once into the whole-run ledger, BEFORE any release.
+                ready = experiment._route_a_pre_writer(f03_context, protected_phase_charges=accounting.charges)
+                if not ready:
+                    f03_result = experiment._route_a_finish_without_writer(f03_context)
+                else:
+                    _orch_f03_profile_recheck(root, section, "first potential write")
+                    try:
+                        stage3 = _complete_stage3_active_release_and_normal_writer_v2(
+                            release_phase, runtime, orchestration_receipt=receipt,
+                        )
+                        _orch_verify_gate_d_linkage(
+                            admitted=admitted, stage3=stage3, runtime=runtime, receipt=receipt,
+                            last_read_set_id=release_phase.trusted_dynamic_read_set_id, invocation=invocation,
+                        )
+                    except (RunnerError, LedgerError) as exc:
+                        f03_result = experiment._route_a_writer_admission_failed(
+                            f03_context, str(getattr(getattr(exc, "code", None), "value", "UNCLASSIFIED")))
+                    else:
+                        # RA-04-005 step 9: the dedicated one-shot F03 consumer.
+                        f03_result = experiment._route_a_consume(f03_context, stage3)
+            except BaseException as exc:
+                primary_error = exc
+                raise
+            finally:
+                # Single orchestration-owned canonical writer cleanup, inside the
+                # credential scope, before the bridge removes its PEM; a cleanup
+                # failure never masks the primary error and is raised otherwise.
+                if stage3 is not None:
+                    cleanup_error: "BaseException | None" = None
+                    try:
+                        _fail_closed_end_writer_session(
+                            stage3.normal_writer_acquisition.handle, stage3.normal_writer_session_id,
+                        )
+                    except BaseException as exc:  # noqa: BLE001 - classified below
+                        cleanup_error = exc
+                    timeline["Twriter_cleanup"] = mono()
+                    if cleanup_error is not None and primary_error is None:
+                        raise _orch_fail(RunnerFailureCode.ORCHESTRATION_WRITER_CLEANUP_FAILED, "canonical writer cleanup") from cleanup_error
+                    writer_cleanup = "ENDED" if cleanup_error is None else "FAILED"
+        timeline["Tcredential_removed"] = mono()
+        # Local, secret-free result assembly; delivered only after the bridge
+        # removed its PEM and (in ``finally``) the receipt is revoked.
+        return F03ReleaseOrchestrationResultV1(
+            entry_state_class=entry_class,
+            route=(bridge_outcome.route if bridge_outcome is not None else "CLEAN_SAFE_HELD"),
+            process_instance_id=normal_gate.process_instance_id,
+            consumption_event_id=receipt.consumption_event_id,
+            consumption_sequence=receipt.consumption_sequence,
+            invocation_started_monotonic_ns=start_ns,
+            absolute_deadline_monotonic_ns=end_ns,
+            phase_requests=accounting.charges,
+            aggregate_requests=sum(accounting.charges),
+            trusted_dynamic_read_set_ids=tuple(read_set_ids),
+            bridge_reconciliation_appended=(bridge_outcome.reconciliation_appended if bridge_outcome is not None else None),
+            release_id=(stage3.release_id if stage3 is not None else None),
+            normal_writer_session_id=(stage3.normal_writer_session_id if stage3 is not None else None),
+            f03_result=f03_result,
+            route_a_timing=MappingProxyType(experiment.route_a_timing_record()),
+            orchestration_timeline=MappingProxyType(timeline),
+            writer_cleanup=writer_cleanup,
+            route_a_feasibility=_f03.ROUTE_A_FEASIBILITY_UNPROVEN,
+        )
+    finally:
+        receipt.revoke()
+        timeline["Treceipt_revoked"] = mono()
 
 
 @contextmanager
