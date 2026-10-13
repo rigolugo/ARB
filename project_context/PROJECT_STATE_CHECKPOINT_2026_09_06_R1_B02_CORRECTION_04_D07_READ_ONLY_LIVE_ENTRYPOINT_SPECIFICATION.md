@@ -7703,3 +7703,77 @@ NEXT_BOUNDED_ACTION (unchanged from A41.10) =
 ```
 
 A local candidate, review ZIP, approval report or later dispatch does not by itself mark O-1 closed. This is routing only: it authorizes no specification task, operator launch, Demo write, or selection of market, spread, G, account, fee rule or trading policy. This continuity candidate performed zero Kalshi/venue, credential, account, deployed/persistent-state, production, project-test/import, package-installation and remote Git write activity.
+
+### A43 F03 N1 run-history binding and continuity specification — APPROVED PROSPECTIVE CONTRACT / CONDITIONAL PROOF / ADMISSION HELD
+
+This overlay is prepared by `R1-D07_F03_N1_SPEC_APPROVAL_CANONICAL_CONTINUITY_01` against `rigolugo/ARB/main` commit `c1a7bc2e4356c65323b7675e5808a4fa8244bf2a` (tree `7076bde58cf8823d109da85b84a62479c38182fc`, sole parent `7e06e2b488a88ba74c43ca41d207162c385ae876`). It records the already externally reviewed specification and the user's 2026-10-13 acceptance of its limited APPROVE disposition. **This documentation overlay is a candidate until independently reviewed and separately integrated.** It does not install the specification's proposed enforcement, change a schema, enroll history, issue a package, admit an F03 run or grant execution. A14/A15/A41/A42 and all earlier bytes remain unchanged; no new checkpoint is created.
+
+**A43.1 Accepted decision and exact scope.**
+
+Marco's `MARCO_FORMAL_REVIEW.md`, dated 2026-10-13 06:06 AM UTC-04:00, returns **APPROVE the prospective specification and conditional proof, within its explicit unresolved prerequisites** for `R1-D07_F03_N1_RUN_HISTORY_BINDING_AND_CONTINUITY_SPEC_ONLY_01`. The user explicitly accepts that disposition in the current documentation task. No material controlling-contract defect requiring correction was found. Approval is not positive admission feasibility, installed enforcement, history enrollment, implementation authorization or runtime qualification. It preserves `F03_ADMISSION_HELD` and requires separate positive resolution of every relevant prerequisite before any higher-risk promotion.
+
+The accepted prospective contract uses the full canonical lowercase F03 UUID as the existing top-level authorization `invocation_id`, with exact equality through O/G/E, admitted binding, consumption, live receipt, protected invocation, F03 plan/runner, claim, marker and proposed link. It preserves per-command execution-attempt/client-order/request identities. Existing identifier grammar admits that UUID; existing selected-history consumption compares and persists invocation_id. **Conditional theorem:** with complete intact selected history and sealed end-to-end equality, a previously consumed UUID cannot classify UNUSED even when the other six uniqueness keys and plan hash change. This does not retrofit old events or establish that the necessary equality/root/issuer checks are installed.
+
+One fixed N1 claim-history lineage, conservative permanent occupation of issued/legacy/consumed/partial/unknown histories, serial complete issuer-prefix custody and positive enrollment/continuity are required. Equal paths/instance IDs/tails and a self-consistent local hash chain alone are not freshness or complete-history proof. A classifier component result is not a writer grant, and no sanctioned live bypass is established. This approval does not require or select Bruno's deferred global SQLite registry.
+
+**A43.2 Exact external controlling/review identities (ART-0167/ART-0168).**
+
+| Artifact | Raw bytes | SHA-256 |
+|---|---:|---|
+| `R1-D07_F03_N1_RUN_HISTORY_BINDING_AND_CONTINUITY_SPEC_ONLY_01.md` | 44940 | `60c1eaafbb716ef531d29aebe859d47262c581dd53106f894248811296a12c56` |
+| `MARCO_FORMAL_REVIEW.md` | 12181 | `d071986cadf48de9c7d76f15c757fa42dded44db5252f7461bdaa2343223fa77` |
+| `R1-D07_F03_N1_RUN_HISTORY_BINDING_AND_CONTINUITY_SPEC_ONLY_01_MARCO_REVIEW.zip` | 2068024 | `0a766325707824ca9c20c4afc2dd096bf4e9d7808de6d7d8686c701986d1250b` |
+| `MARCO_F03_N1_FORMAL_SPEC_REVIEW_CONTINUITY.zip` | 2060509 | `8f62e00e09aa435fc36b83a3c654cf0caea85738a40d9d46dc48416f6020dc88` |
+
+The complete continuity archive contains the formal review and original specification-review archive, including its full predecessor chain. The earlier independent assessment review accepted `MATERIAL_AUTHORITY_HISTORY_GAP`; its exact review and historical evidence remain embedded. All required raw specifications, source snapshots, policy and sanitized reconciliation/coverage evidence are preserved there; identity-only referenced earlier implementation packages remain identity-only, not newly supplied or reviewed code.
+
+Current task independently verified the outer continuity manifest 3/3 and nested specification review 59/59, independent assessment review 6/6, original transfer 59/59 and bounded feasibility checkpoint 16/16, with exact member sets and lengths/SHA-256. These are artifact checks, not project tests or fresh observation of the underlying runtime history.
+
+**A43.3 Source/compatibility and amendment boundary.**
+
+The specification and formal review remain pinned to the base above. Canonical L/B/R/F/A source snapshots and relevant canonical state identities are preserved in the original archive. Existing authority/active-ledger revisions, SQL/event/binding/receipt fields, historical event meanings/hashes, claim and marker schemas remain unchanged. Proposed additions are separately versioned private F03 context/enforcement plus two explicitly named external record formats, `F03_N1_HISTORY_CONTEXT_V1.json` and `F03_N1_ADMISSION_LINK_V1.json`, requiring exact package/exporter/private-type amendment and implementation review. Their schemas are paper contracts, not installed files or live custody/enrollment records. Preserve original anchored consumption -> claim -> distinct marker, with the proposed immutable link before credentials; RA-08-001 exclusive/file-and-directory durability/no-reuse remains controlling. No root override, default empty history, repair-to-proceed, replayed receipt, fresh-ID retry or implicit witness technology is authorized.
+
+**A43.4 Unresolved prerequisites and holds.**
+
+```text
+F03_ADMISSION_HELD                                      CONTROLLING
+historical absence / complete F03 admission inventory   UNVERIFIED
+positive N1 history enrollment and coverage             UNRESOLVED
+universal sanctioned issuer prefix / custody            UNRESOLVED
+independent current-tip / root-host-volume continuity   UNRESOLVED
+Windows directory/power-loss persistence qualification  UNRESOLVED / F03 NOT RUNNABLE
+accepted conservative 300s timing reserve registry      EMPTY / ROUTE_A_FEASIBILITY_UNPROVEN
+exact private-type/package/exporter integration         UNINSTALLED / SEPARATE REVIEW REQUIRED
+Route A candidate 6f4d492c24bb8042e7f38080ba1ae46471041828 UNINSTALLED / NONCANONICAL
+exact Route A implementation-anchor/package retrieval   REQUIRED BEFORE FUTURE IMPLEMENTATION DISPATCH
+Bruno global SQLite proposal                            DEFERRED / NONOPERATIVE
+```
+
+No positive history/issuer/continuity witness, current target root/host/volume, timing values or operator package is selected. No backing antirollback technology is adopted; if existing evidence/custody cannot satisfy the accepted narrower policy, return the precise missing capability for separate review. Generic consistency is not a coherent-restore freshness proof. Target-specific empirical assumptions must be resolved through separately scoped evidence/probes when needed; this documentation task performs none.
+
+U1/U2/U6, `PROTECTED_LEDGER_PARALLEL_CONSUMPTION_FLAKE`, `ACTIVE_DOMAIN_ORDINARY_CANCEL_ROUTE_MISMATCH`, `GATE_D_POST_UNRESOLVED_NEXT_CYCLE_TERMINATION`, fee research F03/F07 and P01-P09 remain OPEN under their controlling records. No regression was rerun or declared clean. No profitability, arbitrage or production conclusion follows.
+
+**A43.5 Historical evidence and coverage limits preserved.**
+
+The prior N1 inspection is historical sanitized evidence: 11 identity/integrity checks, 22 ledger events and no observed consumption/write-intent events in the inspected pair; not full semantic replay, continuous freshness, power-loss proof or complete all-location history. Six claims/four markers remain classified synthetic. The 20 named archive depth/size gaps remain historically closed; selected-document coverage is not every-payload conformance or universal execution history. No completed reconciliation, classifier/Windows probe or investigation is repeated.
+
+Three recorded denied directories remain unknown: `C:\b1\kals\claude-temp-files\R1-D07_F03_BALANCE_READ_BRIDGE_PREREQUISITE_IMPLEMENTATION_01_CORRECTION_01\work\f03c01_patchcheck_qn8n_0ta`; `C:\b1\kals\claude-temp-files\R1-D07_KALSHI_DEMO_UDT_CLOCK_RELATION_DIAGNOSTIC_01_PREPARATION_01\work\pytest_tmp`; and `C:\b1\kals\claude-temp-files\R1-D07_KALSHI_DEMO_UDT_CLOCK_RELATION_DIAGNOSTIC_01_PREPARATION_01_CORRECTION_01\work\pytest_tmp`. INFO/private/key/state exclusions, other hosts/drives and lost/deleted records remain coverage limits. No absence inference, access workaround, raw private-store read or historical waiver is authorized.
+
+**A43.6 Tested raw-artifact retrieval and retention scope.**
+
+Required future exact bytes have been preserved in an explicit user-custody, content-addressed archive outside the repository, worktrees, task outputs and temporary attachments:
+
+```text
+DURABLE_RAW_ARCHIVE / LOCAL_ONLY / SAME_HOST
+root = C:\b1\kals\ARB_LOCAL\ARTIFACT_ARCHIVE\sha256\8f62e00e09aa435fc36b83a3c654cf0caea85738a40d9d46dc48416f6020dc88
+```
+
+All four A43.2 artifacts are stored directly under that root, with `ARCHIVE_MANIFEST.json`. After closing the copy operation, a fresh full-byte read from each archive path on 2026-10-13T10:14:05.5134385Z verified its exact length/SHA-256. This is tested byte retrieval, not a claim derived from filenames/hashes or temporary paths. The full continuity ZIP also provides lossless nested retrieval of predecessor evidence.
+
+Archive retention is user-custody; preserve until explicitly replaced by an equally verified archive. Cross-host availability, independent backup and power-loss persistence of the archive are **not proved**. Every cross-host or otherwise archive-inaccessible successor requiring raw bytes must embed those exact verified artifacts; source identities alone never substitute. If local retrieval later fails, report `CANONICAL_RAW_ARTIFACT_RETRIEVABILITY_GAP` and stop the affected packaging/derivation, without repeating accepted research. These external bytes are not repository-resident; the three-file documentation scope adds references, not raw archives.
+
+**A43.7 Next bounded route and no promotion.**
+
+Immediate route: independent review of this exact documentation candidate, then separately authorized canonical integration only after approval. This candidate does not perform integration. After integration, the narrow planning route is a separately authorized nonexecuting prerequisite/evidence and enrollment-scope adjudication against the existing accepted corpus. It must identify which positive enrollment/issuer/continuity facts are available and which remain unavailable, and require tested exact Route A candidate/package retrieval and explicit anchor/base rules before any implementation dispatch/topology freeze. No implementation is dispatched by this route. Unknowns remain HOLD; no automatic new search, probe, root/witness choice, migration or admission release.
+
+This milestone grants no credential/signing, real SQLite access, tests/imports/runtime, venue/Demo/F03 action, production or remote Git write capability. Future credential-bearing execution remains exclusively manual by Gustavo in a separately authorized local PowerShell session. Documentation/reference installation does not install executable enforcement or authorize a run.
