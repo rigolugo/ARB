@@ -26,6 +26,7 @@ import os
 import pickle as pickle_module
 import socket
 import stat
+import sys
 import tempfile
 import types
 import unittest
@@ -37,6 +38,8 @@ from unittest import mock
 
 from arb.execution_ledger import (
     AuthorityNamespaceBinding,
+    FailureCode,
+    LedgerError,
     canonical_json_bytes,
     end_writer_session,
     initialize_authority_namespace,
@@ -4904,6 +4907,899 @@ class RouteAWriteAndTailTests(RouteAHarnessTestCase):
         self.assertEqual(q["QF03-01"]["scoped_conclusion"], "NO_ELIGIBLE_POSITIVE_DISCRIMINATOR")
         self.assertEqual({r["status"] for r in q.values()} - set(A.QuestionStatus), set())
         A.validate_fee_experiment_run_v1(json.loads(json.dumps(result.f03_result.shared_record)))
+
+
+# ---------------------------------------------------------------------------
+# Stage B SB-IN-001..003 (+ pure SB-IN-004) DRAFT-ONLY input decoder --
+# R1-D07_F03_STAGE_B_CLOSED_INPUT_DRAFT_PARSER_IMPLEMENTATION_01.  Every input
+# document and comparison pin below is SYNTHETIC MODEL INPUT built in memory:
+# no fixture pin is actual source-applicability proof, no draft is admission,
+# eligibility, observation, history, physical-identity or terminal-credit
+# evidence, and no test here reads an evidence source, store, credential or the
+# network.  Stale/unsupported real provenance is outside this structural slice;
+# no runnable consumer of the draft exists.
+# ---------------------------------------------------------------------------
+
+DRAFT_RUN_ID = "1b4e28ba-2fa1-41d2-883f-0016d3cca427"
+DRAFT_RUNNER_PATH = "src/arb/venues/kalshi/f03_fee_semantics_runner.py"
+DRAFT_ANALYZER_PATH = "src/arb/venues/kalshi/f03_fee_semantics_analyzer.py"
+DRAFT_SOURCES = {DRAFT_RUNNER_PATH: "4" * 64, DRAFT_ANALYZER_PATH: "5" * 64}  # SYNTHETIC comparison pins
+DRAFT_REF_NAMES = ("market", "account_class", "fee_epoch", "fee_source", "risk", "domain", "source_snapshot", "timing",
+                   "operator_selection", "terminal_credit")
+DRAFT_TERMINAL_ID = "SYNTHETIC-TERMINAL-CREDIT-REF"
+INVALID, PIN = F.F03_INPUTS_DRAFT_SCHEMA_INVALID, F.F03_INPUTS_DRAFT_PIN_MISMATCH
+_DELETE = object()
+
+
+def draft_ref(name, **over) -> dict:
+    ref = {"logical_id": "SYNTHETIC-" + name.upper().replace("_", "-") + "-REF", "bytes": 2048, "sha256": "c" * 64}
+    ref.update(over)
+    return ref
+
+
+def draft_doc() -> dict:
+    """A closed, otherwise well-formed SYNTHETIC ``F03OperatorRuntimeInputsV1``
+    (paired-null terminal credit, one order, DIRECT class)."""
+    refs = {name: draft_ref(name) for name in DRAFT_REF_NAMES}
+    refs["terminal_credit"] = None
+    return {
+        "schema": "F03OperatorRuntimeInputsV1",
+        "run": {"run_id": DRAFT_RUN_ID, "private_evidence_permission": False},
+        "market": {"ticker": TICKER, "event_ticker": EVENT, "series_ticker": SERIES,
+                   "market_metadata_evidence_id": "SYNTHETIC-MARKET-REF"},
+        "fee": {"account_class": "DIRECT", "account_class_evidence_id": "SYNTHETIC-ACCOUNT-CLASS-REF",
+                "fee_epoch_id": "FEE-SCHEDULE-2026-07-07", "fee_type": "quadratic", "taker_multiplier": "1",
+                "maker_multiplier": "1", "fee_regime_change_pending": False,
+                "terminal_credit_exclusion_evidence_id": None},
+        "orders": {"order1_limit_price": "0.5000", "order2_limit_price": None, "planned_order_count": 1},
+        "implementation": {"expected_commit": "1" * 40, "expected_tree": "2" * 40, "expected_parent": "3" * 40,
+                           "implementation_artifacts": {DRAFT_RUNNER_PATH: "4" * 64}},
+        "source_and_scope": {
+            "environment": "KALSHI_DEMO", "origin": "https://external-api.demo.kalshi.co",
+            "authority_namespace_id": "ARB_KALSHI_DEMO_PRIMARY_AUTHORITY_V1", "subaccount": 1, "exchange_index": 0,
+            "domain_binding_sha256": "d" * 64, "active_contract_sha256": "a" * 64, "risk_config_sha256": "b" * 64,
+            "fee_source_binding_sha256": "e" * 64, "timing_profile_sha256": "f" * 64, "route": "ROUTE_A_300S",
+            "canonical_strategy_G": "NOT_APPLICABLE_TO_ISOLATED_F03_PROBE"},
+        "evidence_refs": refs,
+    }
+
+
+def draft_with(*changes, doc=None) -> dict:
+    """``changes`` are ``(dotted_path, value)``; ``_DELETE`` removes the key."""
+    doc = copy_module.deepcopy(draft_doc() if doc is None else doc)
+    for path, value in changes:
+        *parents, leaf = path.split(".") if path else [""]
+        target = doc
+        for part in parents:
+            target = target[part]
+        if value is _DELETE:
+            del target[leaf]
+        else:
+            target[leaf] = value
+    return doc
+
+
+def draft_text_bytes(document) -> bytes:
+    """``canonical_json_bytes`` layout WITHOUT its secret denylist (only to
+    craft refused prohibited-field inputs)."""
+    return json.dumps(document, sort_keys=True, separators=(",", ":"), ensure_ascii=True, allow_nan=False).encode("utf-8")
+
+
+def draft_bytes(doc=None) -> bytes:
+    return canonical_json_bytes(draft_doc() if doc is None else doc)
+
+
+def draft_parse(raw, *, sources=None, expected_bytes=None, expected_sha=None):
+    """The real pure decoder with explicit comparison pins (defaulting, in the
+    TEST helper only, to the exact pins of ``raw`` and ``DRAFT_SOURCES``)."""
+    return F.parse_f03_operator_runtime_inputs_draft_v1(
+        raw, expected_raw_bytes=len(raw) if expected_bytes is None else expected_bytes,
+        expected_raw_sha256=hashlib.sha256(raw).hexdigest() if expected_sha is None else expected_sha,
+        expected_participating_sources=DRAFT_SOURCES if sources is None else sources)
+
+
+def _thaw(value):
+    if isinstance(value, types.MappingProxyType):
+        return {key: _thaw(child) for key, child in value.items()}
+    return value
+
+
+def _replace_once(raw: bytes, old: bytes, new: bytes) -> bytes:
+    assert raw.count(old) == 1, old
+    return raw.replace(old, new, 1)
+
+
+class _F03DraftAssertions(unittest.TestCase):
+    def assert_refused(self, raw, classification, detail=None, **kwargs):
+        with self.assertRaises(F.F03OperatorInputsDraftError) as ctx:
+            draft_parse(raw, **kwargs)
+        self.assertEqual(ctx.exception.classification, classification, ctx.exception.detail)
+        if detail is not None:
+            self.assertIn(detail, ctx.exception.detail)
+        return ctx.exception
+
+    def assert_doc_refused(self, doc, classification=INVALID, detail=None, **kwargs):
+        return self.assert_refused(draft_bytes(doc), classification, detail, **kwargs)
+
+
+class F03InputsDraftMappingTests(_F03DraftAssertions):
+    """SB-IN-001/003 + dispatch evidence 1: exact one/two-order drafts, every
+    mapped field and derived property, raw/source pin comparison.  A draft is
+    never an admission or eligibility grant."""
+
+    EXPECTED_PLAN = {
+        "run_id": DRAFT_RUN_ID, "ticker": TICKER, "event_ticker": EVENT, "series_ticker": SERIES,
+        "account_class": "DIRECT", "account_class_evidence_id": "SYNTHETIC-ACCOUNT-CLASS-REF",
+        "fee_epoch_id": "FEE-SCHEDULE-2026-07-07", "fee_type": "quadratic", "taker_multiplier": D("1"),
+        "maker_multiplier": D("1"), "fee_regime_change_pending": False, "order1_limit_price": D("0.5000"),
+        "order2_limit_price": None, "expected_commit": "1" * 40, "expected_tree": "2" * 40,
+        "expected_parent": "3" * 40, "implementation_artifacts": {DRAFT_RUNNER_PATH: "4" * 64},
+        "terminal_credit_exclusion_evidence_id": None, "private_evidence_permission": False,
+    }
+
+    def test_one_order_draft_maps_all_19_plan_fields_exactly(self) -> None:
+        raw = draft_bytes()
+        draft = draft_parse(raw)
+        plan = draft.plan
+        self.assertIs(type(draft), F.F03OperatorRuntimeInputsDraftV1)
+        self.assertIs(type(plan), F.F03RunPlanV1)
+        self.assertEqual([item.name for item in dataclasses.fields(F.F03RunPlanV1)], list(self.EXPECTED_PLAN))
+        for name, value in self.EXPECTED_PLAN.items():
+            actual = getattr(plan, name)
+            if name == "implementation_artifacts":
+                self.assertIs(type(actual), types.MappingProxyType)
+                self.assertEqual(dict(actual), value)
+            else:
+                self.assertEqual(actual, value, name)
+                self.assertIs(type(actual), type(value), name)
+        self.assertEqual(plan.order1_limit_price.as_tuple().exponent, -4)
+        self.assertEqual(plan, F.F03RunPlanV1(**self.EXPECTED_PLAN))  # original constructor unchanged
+        self.assertEqual((plan.planned_order_count, plan.quantum), (1, A.QUANTUM_DIRECT))
+        self.assertIs(draft.raw, raw)
+        self.assertEqual((draft.raw_bytes, draft.raw_sha256), (len(raw), hashlib.sha256(raw).hexdigest()))
+        self.assertEqual(draft.plan_binding_sha256, F.route_a_plan_binding_sha256(plan))
+        self.assertEqual(_thaw(draft.fields), json.loads(raw))
+        self.assertEqual(draft.terminal_credit_reference, F.F03_INPUTS_TERMINAL_CREDIT_PAIRED_NULL)
+
+    def test_two_order_and_class_variants_derive_count_and_quantum_by_existing_properties(self) -> None:
+        cases = (
+            ("0.7000", "DIRECT", 2, A.QUANTUM_DIRECT),
+            ("0.0001", "NON_DIRECT", 2, A.QUANTUM_NON_DIRECT),
+            ("0.8000", "NON_DIRECT", 2, A.QUANTUM_NON_DIRECT),
+        )
+        for order2, account_class, count, quantum in cases:
+            with self.subTest(order2=order2, account_class=account_class):
+                doc = draft_with(("orders.order2_limit_price", order2), ("orders.planned_order_count", 2),
+                                 ("fee.account_class", account_class))
+                plan = draft_parse(draft_bytes(doc)).plan
+                self.assertEqual(plan.order2_limit_price, D(order2))
+                self.assertEqual(plan.order2_limit_price.as_tuple().exponent, -4)
+                self.assertEqual((plan.planned_order_count, plan.quantum), (count, quantum))
+
+    def test_unresolved_class_remains_a_draft_with_no_quantum_and_no_grant(self) -> None:
+        draft = draft_parse(draft_bytes(draft_with(("fee.account_class", "UNRESOLVED"))))
+        self.assertEqual(draft.plan.account_class, "UNRESOLVED")
+        self.assertIsNone(draft.plan.quantum)
+        self.assertEqual([item.name for item in dataclasses.fields(F.F03OperatorRuntimeInputsDraftV1)],
+                         ["raw", "raw_sha256", "raw_bytes", "fields", "plan", "plan_binding_sha256",
+                          "terminal_credit_reference"])
+        for item in dataclasses.fields(draft):
+            self.assertIsNot(type(getattr(draft, item.name)), bool)  # no executable/admitted boolean
+            self.assertNotIsInstance(getattr(draft, item.name), F.F03ObservedIdentityV1)
+        for banned in ("admit", "eligib", "executable", "proof", "observed", "accepted"):
+            self.assertFalse([name for name in dir(draft) if banned in name.lower()], banned)
+
+    def test_raw_length_and_sha_pins_are_compared_and_must_be_well_formed(self) -> None:
+        raw = draft_bytes()
+        sha = hashlib.sha256(raw).hexdigest()
+        cases = {
+            "length_plus_one": dict(expected_bytes=len(raw) + 1), "length_minus_one": dict(expected_bytes=len(raw) - 1),
+            "other_sha": dict(expected_sha="0" * 64), "uppercase_sha": dict(expected_sha=sha.upper()),
+            "short_sha": dict(expected_sha=sha[:63]), "bool_length": dict(expected_bytes=True),
+            "zero_length": dict(expected_bytes=0), "string_length": dict(expected_bytes=str(len(raw))),
+            "over_cap_length": dict(expected_bytes=F.F03_INPUTS_RAW_MAX_BYTES + 1),
+        }
+        for label, kwargs in cases.items():
+            with self.subTest(label):
+                self.assert_refused(raw, PIN, **kwargs)
+        mutated = _replace_once(raw, b'"FEE-SCHEDULE-2026-07-07"', b'"FEE-SCHEDULE-2026-07-08"')
+        self.assert_refused(mutated, PIN, "length/sha256", expected_bytes=len(raw), expected_sha=sha)
+
+    def test_participating_source_pins_compare_only_and_never_select(self) -> None:
+        raw = draft_bytes()
+        # Superset pins: the plan map is the INPUT map, never the expected map.
+        draft = draft_parse(raw, sources=dict(DRAFT_SOURCES))
+        self.assertEqual(dict(draft.plan.implementation_artifacts), {DRAFT_RUNNER_PATH: "4" * 64})
+        refused = {
+            "path_not_expected": {DRAFT_ANALYZER_PATH: "5" * 64},
+            "hash_differs": {DRAFT_RUNNER_PATH: "6" * 64},
+            "no_case_folding": {DRAFT_RUNNER_PATH.upper(): "4" * 64},
+            "empty_pins": {}, "pins_not_mapping": [(DRAFT_RUNNER_PATH, "4" * 64)],
+            "absolute_pin_path": {"/" + DRAFT_RUNNER_PATH: "4" * 64},
+            "uppercase_pin_sha": {DRAFT_RUNNER_PATH: "A" * 64},
+            "case_alias_pins": {DRAFT_RUNNER_PATH: "4" * 64, DRAFT_RUNNER_PATH.replace("kalshi", "Kalshi"): "4" * 64},
+            "too_many_pins": {f"src/p{i}.py": "4" * 64 for i in range(257)},
+        }
+        for label, sources in refused.items():
+            with self.subTest(label):
+                self.assert_refused(raw, PIN, sources=sources)
+        mapped = draft_with(("implementation.implementation_artifacts", {DRAFT_RUNNER_PATH.upper(): "4" * 64}))
+        self.assert_doc_refused(mapped, PIN, "not an expected participating source")
+        signature = inspect.signature(F.parse_f03_operator_runtime_inputs_draft_v1)
+        self.assertEqual([(p.name, p.kind, p.default is inspect.Parameter.empty) for p in signature.parameters.values()],
+                         [("raw", inspect.Parameter.POSITIONAL_OR_KEYWORD, True),
+                          ("expected_raw_bytes", inspect.Parameter.KEYWORD_ONLY, True),
+                          ("expected_raw_sha256", inspect.Parameter.KEYWORD_ONLY, True),
+                          ("expected_participating_sources", inspect.Parameter.KEYWORD_ONLY, True)])
+        with self.assertRaises(TypeError):
+            F.parse_f03_operator_runtime_inputs_draft_v1(raw, expected_raw_bytes=len(raw),
+                                                         expected_raw_sha256=hashlib.sha256(raw).hexdigest())
+
+
+class F03InputsDraftClosedSchemaTests(_F03DraftAssertions):
+    """SB-IN-001/002 + dispatch evidence 2: closed keys at every level,
+    duplicates at every depth, integer/bool/null/shape domains, BOM/UTF-8 and
+    byte-exact canonical reproduction, resource edges without truncation."""
+
+    LEVELS = ("", "run", "market", "fee", "orders", "implementation", "source_and_scope", "evidence_refs",
+              "evidence_refs.market", "evidence_refs.account_class")
+
+    @staticmethod
+    def _at(doc, path):
+        target = doc
+        for part in filter(None, path.split(".")):
+            target = target[part]
+        return target
+
+    def test_unknown_and_missing_keys_refused_at_every_closed_level(self) -> None:
+        for level in self.LEVELS:
+            keys = list(self._at(draft_doc(), level))
+            prefix = level + "." if level else ""
+            with self.subTest(level=level, change="unknown"):
+                self.assert_doc_refused(draft_with((prefix + "unexpected_extra", "x")), detail="keys")
+            for key in keys:
+                with self.subTest(level=level, change="missing", key=key):
+                    self.assert_doc_refused(draft_with((prefix + key, _DELETE)), detail="keys")
+
+    def test_duplicate_keys_refused_at_every_depth_even_when_last_value_is_valid(self) -> None:
+        raw = draft_bytes()
+        fragments = (
+            b'"schema":"F03OperatorRuntimeInputsV1"', ('"run_id":"%s"' % DRAFT_RUN_ID).encode(),
+            b'"ticker":"' + TICKER.encode() + b'"', b'"fee_type":"quadratic"', b'"planned_order_count":1',
+            ('"%s":"%s"' % (DRAFT_RUNNER_PATH, "4" * 64)).encode(), b'"subaccount":1',
+            b'"logical_id":"SYNTHETIC-MARKET-REF"', b'"terminal_credit":null',
+        )
+        for fragment in fragments:
+            with self.subTest(fragment=fragment):
+                self.assert_refused(_replace_once(raw, fragment, fragment + b"," + fragment), INVALID, "duplicate key")
+        smuggled = _replace_once(raw, b'"private_evidence_permission":false',
+                                 b'"private_evidence_permission":true,"private_evidence_permission":false')
+        self.assert_refused(smuggled, INVALID, "duplicate key")
+
+    def test_integer_bool_null_and_shape_domains(self) -> None:
+        bad = [
+            *[("orders.planned_order_count", v) for v in (True, False, "1", None, 0, 2, 3)],
+            *[("source_and_scope.subaccount", v) for v in (True, 0, 2, "1", None)],
+            *[("source_and_scope.exchange_index", v) for v in (False, 1, "0", None)],
+            *[("evidence_refs.market.bytes", v) for v in (True, 0, "2048", None, (1 << 30) + 1)],
+            *[("run.private_evidence_permission", v) for v in (True, 0, None, "false")],
+            *[("fee.fee_regime_change_pending", v) for v in (True, 0, None, "false")],
+            ("orders.order2_limit_price", 0), ("fee.terminal_credit_exclusion_evidence_id", 0),
+            ("evidence_refs.terminal_credit", "SYNTHETIC-TERMINAL-CREDIT-REF"),
+        ]
+        nonnull_slots = (
+            "schema", "run", "market", "fee", "orders", "implementation", "source_and_scope", "evidence_refs",
+            "run.run_id", "market.ticker", "market.event_ticker", "market.series_ticker",
+            "market.market_metadata_evidence_id", "fee.account_class", "fee.account_class_evidence_id",
+            "fee.fee_epoch_id", "fee.fee_type", "fee.taker_multiplier", "fee.maker_multiplier",
+            "orders.order1_limit_price", "implementation.expected_commit", "implementation.expected_tree",
+            "implementation.expected_parent", "implementation.implementation_artifacts",
+            *("source_and_scope." + key for key in draft_doc()["source_and_scope"]),
+            *("evidence_refs." + name for name in DRAFT_REF_NAMES if name != "terminal_credit"),
+            "evidence_refs.market.logical_id", "evidence_refs.market.sha256",
+        )
+        bad += [(slot, None) for slot in nonnull_slots]
+        bad += [(slot, []) for slot in ("run", "market", "fee", "orders", "implementation", "source_and_scope",
+                                        "evidence_refs", "evidence_refs.market", "implementation.implementation_artifacts")]
+        bad += [("market.ticker", [TICKER]), ("implementation.implementation_artifacts", {}),
+                ("evidence_refs.market", "SYNTHETIC-MARKET-REF"), ("run", "run")]
+        for path, value in bad:
+            with self.subTest(path=path, value=value):
+                self.assert_doc_refused(draft_with((path, value)))
+        self.assert_doc_refused(draft_with(("orders.order2_limit_price", "0.7000")), INVALID, "planned_order_count")
+        for root in ([draft_doc()], None, "F03OperatorRuntimeInputsV1", 1, True):
+            with self.subTest(root=root):
+                self.assert_refused(canonical_json_bytes(root), INVALID)
+        for accepted in (1, 1 << 30):
+            with self.subTest(ref_bytes=accepted):
+                draft = draft_parse(draft_bytes(draft_with(("evidence_refs.market.bytes", accepted))))
+                self.assertEqual(draft.fields["evidence_refs"]["market"]["bytes"], accepted)
+
+    def test_floats_nonfinite_constants_and_noncanonical_or_overlong_integer_tokens(self) -> None:
+        raw = draft_bytes()
+        cases = {
+            b'"subaccount":1': (b'"subaccount":1.0', b'"subaccount":1e0', b'"subaccount":1E0', b'"subaccount":-1',
+                                b'"subaccount":NaN', b'"subaccount":Infinity', b'"subaccount":-Infinity'),
+            b'"exchange_index":0': (b'"exchange_index":-0', b'"exchange_index":0.0', b'"exchange_index":-0.0'),
+            b'"bytes":2048,"logical_id":"SYNTHETIC-MARKET-REF"': (
+                b'"bytes":99999999999,"logical_id":"SYNTHETIC-MARKET-REF"',
+                b'"bytes":' + b"9" * 5000 + b',"logical_id":"SYNTHETIC-MARKET-REF"'),
+        }
+        for old, replacements in cases.items():
+            for new in replacements:
+                with self.subTest(new=new[:40]):
+                    self.assert_refused(_replace_once(raw, old, new), INVALID)
+        overlong = _replace_once(raw, b'"bytes":2048,"logical_id":"SYNTHETIC-MARKET-REF"',
+                                 b'"bytes":' + b"9" * 5000 + b',"logical_id":"SYNTHETIC-MARKET-REF"')
+        self.assert_refused(overlong, INVALID, "integer token")  # refused before int conversion
+        self.assert_refused(_replace_once(raw, b'"subaccount":1', b'"subaccount":1.0'), INVALID, "float")
+
+    def test_bom_utf8_and_exact_canonical_byte_reproduction(self) -> None:
+        doc = draft_doc()
+        raw = draft_bytes(doc)
+        self.assert_refused(b"\xef\xbb\xbf" + raw, INVALID, "byte-order mark")
+        for bad in (b"\xff", b"\xc0\xaf", b"\xed\xa0\x80"):
+            with self.subTest(utf8=bad):
+                self.assert_refused(_replace_once(raw, b'"quadratic"', b'"quadratic' + bad + b'"'), INVALID, "utf-8")
+        reordered = dict(reversed(list(doc.items())))
+        noncanonical = {
+            "trailing_newline": raw + b"\n", "leading_space": b" " + raw,
+            "indented": json.dumps(doc, sort_keys=True, indent=1).encode(),
+            "unsorted_keys": json.dumps(reordered, separators=(",", ":")).encode(),
+            "spaced_separators": json.dumps(doc, sort_keys=True).encode(),
+            "escaped_letter": _replace_once(raw, b'"quadratic"', b'"quadr\\u0061tic"'),
+            "escaped_slash": _replace_once(raw, b'"https://external', b'"https:\\/\\/external'),
+        }
+        for label, variant in noncanonical.items():
+            with self.subTest(label):
+                self.assertNotEqual(variant, raw)
+                self.assertEqual(json.loads(variant), doc)  # semantically equivalent, still refused
+                self.assert_refused(variant, INVALID, "canonical_json_bytes")
+        for key in ("api_secret", "private_key_pem", "session_token", "authority_db_path", "claim_root"):
+            with self.subTest(prohibited=key):
+                self.assert_refused(draft_text_bytes(draft_with(("fee." + key, "x"))), INVALID)
+        pem = draft_with(("market.market_metadata_evidence_id", "-----BEGIN PRIVATE KEY-----"))
+        self.assert_refused(draft_text_bytes(pem), INVALID, "canonical encoding")
+        non_ascii = draft_with(("market.market_metadata_evidence_id", "SYNTHETIC-\u00e9"))
+        self.assert_doc_refused(non_ascii, INVALID, "market_metadata_evidence_id")
+
+    @staticmethod
+    def _path_of(total: int) -> str:
+        parts, remaining = [], total - len("src/") - len(".py")
+        while remaining > 0:
+            take = min(200, remaining)
+            if 0 < remaining - take < 2:
+                take -= 2
+            parts.append("a" * take)
+            remaining -= take + 1
+        path = "src/" + "/".join(parts) + ".py"
+        if len(path) != total:
+            path = path[:-3] + "b" * (total - len(path)) + ".py"
+        return path
+
+    def test_resource_edges_are_refused_never_truncated_or_normalized(self) -> None:
+        raw = draft_bytes()
+        self.assert_refused(b" " * (F.F03_INPUTS_RAW_MAX_BYTES + 1), INVALID, "resource cap")
+        self.assert_refused(b"[" * 200_000 + b"]" * 200_000, INVALID, "malformed JSON")  # nesting -> closed refusal
+        with self.assertRaises(TypeError):
+            F.F03OperatorInputsDraftError("SOME_OTHER_CLASSIFICATION", "x")  # closed classifications only
+        with mock.patch.object(F, "F03_INPUTS_RAW_MAX_BYTES", len(raw)):
+            self.assertEqual(draft_parse(raw).raw_bytes, len(raw))
+        with mock.patch.object(F, "F03_INPUTS_RAW_MAX_BYTES", len(raw) - 1):
+            self.assert_refused(raw, INVALID, "resource cap")
+        long_path, too_long = self._path_of(4096), self._path_of(4097)
+        self.assertEqual((len(long_path), len(too_long)), (4096, 4097))
+        sources = {**DRAFT_SOURCES, long_path: "7" * 64}
+        doc = draft_with(("implementation.implementation_artifacts", {DRAFT_RUNNER_PATH: "4" * 64, long_path: "7" * 64}))
+        self.assertIn(long_path, draft_parse(draft_bytes(doc), sources=sources).plan.implementation_artifacts)
+        doc = draft_with(("implementation.implementation_artifacts", {DRAFT_RUNNER_PATH: "4" * 64, too_long: "7" * 64}))
+        self.assert_doc_refused(doc, INVALID, "implementation_artifacts path", sources=sources)
+        for component, ok in (("c" * 255, True), ("c" * 256, False)):
+            with self.subTest(component=len(component)):
+                path = "src/" + component
+                doc = draft_with(("implementation.implementation_artifacts", {path: "7" * 64}))
+                if ok:
+                    self.assertEqual(dict(draft_parse(draft_bytes(doc), sources={path: "7" * 64}).plan
+                                          .implementation_artifacts), {path: "7" * 64})
+                else:
+                    self.assert_doc_refused(doc, INVALID, sources={DRAFT_RUNNER_PATH: "4" * 64})
+        full = {f"src/p{i:03d}.py": "8" * 64 for i in range(256)}
+        draft = draft_parse(draft_bytes(draft_with(("implementation.implementation_artifacts", full))), sources=full)
+        self.assertEqual(dict(draft.plan.implementation_artifacts), full)
+        over = {**full, "src/p256.py": "8" * 64}
+        self.assert_doc_refused(draft_with(("implementation.implementation_artifacts", over)), INVALID,
+                                "object entry count", sources=full)
+        for path, size in (("fee.fee_epoch_id", 128), ("evidence_refs.market.logical_id", 128),
+                           ("market.market_metadata_evidence_id", 128), ("market.ticker", 200)):
+            with self.subTest(path=path, size=size):
+                section, key = path.split(".")[0], path.split(".")[-1]
+                fields = draft_parse(draft_bytes(draft_with((path, "Z" * size)))).fields
+                target = fields[section]["market"] if section == "evidence_refs" else fields[section]
+                self.assertEqual(target[key], "Z" * size)  # accepted exactly, not truncated
+                self.assert_doc_refused(draft_with((path, "Z" * (size + 1))))
+
+    # -- CORRECTION_01 / Marco B-01: canonicalization-stage recursion ---------
+
+    @staticmethod
+    def _trapped_surfaces():
+        import builtins
+        import subprocess
+
+        def trap(*_args, **_kwargs):
+            raise AssertionError("pure draft parser touched a prohibited surface")
+        surfaces = [
+            (builtins, "open"), (os, "open"), (os, "stat"), (os, "lstat"), (os, "scandir"), (os, "listdir"),
+            (os, "getenv"), (os, "mkdir"), (Path, "read_bytes"), (Path, "exists"), (Path, "resolve"),
+            (socket, "socket"), (socket, "create_connection"), (socket, "getaddrinfo"), (subprocess, "Popen"),
+            (F, "_route_a_load_win32_directory_api"), (F, "_route_a_win32_flush_directory"),
+            (runner, "consume_active_execution_authorization_set_v1"), (ledger_binding, "read_active_local_safety_state_v1"),
+        ]
+        stack = contextlib.ExitStack()
+        for owner, name in surfaces:
+            stack.enter_context(mock.patch.object(owner, name, trap))
+        return stack
+
+    def _parse_observing_boundary(self, raw):
+        """Run the REAL parser with pass-through spies on the REAL decoder and
+        canonicalizer; return (refusal-or-None, first failing boundary, returned)."""
+        sha = hashlib.sha256(raw).hexdigest()  # pins prepared before any spy/trap
+        stages: list = []
+        real_loads, real_canonical = json.loads, F.canonical_json_bytes
+
+        def loads(*args, **kwargs):
+            try:
+                return real_loads(*args, **kwargs)
+            except RecursionError:
+                stages.append("decode")
+                raise
+
+        def canonical(document):
+            try:
+                return real_canonical(document)
+            except RecursionError:
+                stages.append("canonicalize")
+                raise
+        returned: list = []
+        refusal = None
+        with self._trapped_surfaces(), mock.patch.object(F.json, "loads", loads), \
+                mock.patch.object(F, "canonical_json_bytes", canonical):
+            try:
+                returned.append(F.parse_f03_operator_runtime_inputs_draft_v1(
+                    raw, expected_raw_bytes=len(raw), expected_raw_sha256=sha,
+                    expected_participating_sources=DRAFT_SOURCES))
+            except F.F03OperatorInputsDraftError as exc:
+                refusal = exc
+        return refusal, (stages[0] if stages else "shape"), returned
+
+    def test_c01_t01_modeled_canonicalization_recursion_is_the_closed_schema_refusal(self) -> None:
+        """MODELED (deterministic injection, not target behavior): JSON decoding
+        really succeeds; RecursionError is injected only at F's canonicalization
+        call.  The real parser must refuse with the existing closed schema
+        classification -- no draft, no raw RecursionError, no side effects."""
+        raw = draft_bytes()
+        sha = hashlib.sha256(raw).hexdigest()
+        self.assertIs(type(draft_parse(raw)), F.F03OperatorRuntimeInputsDraftV1)  # otherwise valid input
+        decoded: list = []
+        canonical_calls: list = []
+        real_loads = json.loads
+
+        def loads(*args, **kwargs):
+            decoded.append(real_loads(*args, **kwargs))
+            return decoded[-1]
+
+        def canonical(document):
+            canonical_calls.append(document)
+            raise RecursionError("MODELED canonicalizer recursion (test injection)")
+        returned: list = []
+        with self._trapped_surfaces(), mock.patch.object(F.json, "loads", loads), \
+                mock.patch.object(F, "canonical_json_bytes", canonical):
+            with self.assertRaises(F.F03OperatorInputsDraftError) as ctx:
+                returned.append(F.parse_f03_operator_runtime_inputs_draft_v1(
+                    raw, expected_raw_bytes=len(raw), expected_raw_sha256=sha,
+                    expected_participating_sources=DRAFT_SOURCES))
+        self.assertEqual(returned, [])
+        self.assertNotIsInstance(ctx.exception, RecursionError)
+        self.assertEqual(ctx.exception.classification, INVALID)
+        self.assertEqual(ctx.exception.detail, "canonical encoding nesting")
+        self.assertTrue(ctx.exception.__suppress_context__)
+        self.assertEqual(len(decoded), 1)
+        self.assertEqual(decoded[0], real_loads(raw))  # decoding really succeeded first
+        self.assertEqual(len(canonical_calls), 1)
+        self.assertIs(canonical_calls[0], decoded[0])  # injected at the decode's canonicalization call only
+        # Narrow boundary: LedgerError keeps its vocabulary; unrelated errors are not swallowed.
+        ledger_failure = LedgerError(FailureCode.LEDGER_CANONICAL_ENCODING_FAILURE)
+        with mock.patch.object(F, "canonical_json_bytes", mock.Mock(side_effect=ledger_failure)):
+            refusal = self.assert_refused(raw, INVALID)
+        self.assertEqual(refusal.detail, "canonical encoding")
+        with mock.patch.object(F, "canonical_json_bytes", mock.Mock(side_effect=ValueError("unrelated defect"))):
+            with self.assertRaises(ValueError):
+                draft_parse(raw)
+
+    NESTING_DEPTHS = (2, 10, 100, 500, 999, 1000, 1500, 2000, 5000, 20000, 100000)
+
+    def _nesting_family(self):
+        base = draft_bytes()
+        run_fragment = ('"run":{"private_evidence_permission":false,"run_id":"%s"}' % DRAFT_RUN_ID).encode()
+        for depth in self.NESTING_DEPTHS:
+            yield depth, "array_root", b"[" * depth + b"]" * depth
+            yield depth, "object_root", b'{"a":' * depth + b"1" + b"}" * depth
+            yield depth, "under_run_key", _replace_once(base, run_fragment, b'"run":' + b"[" * depth + b"]" * depth)
+
+    def test_c01_t02_bounded_malformed_nesting_family_through_real_helpers(self) -> None:
+        """ACTUAL decoder/canonicalizer execution over a predetermined finite
+        family (all <= 1 MiB).  Every shape is the closed schema refusal
+        whichever boundary fails first; reached boundaries are recorded, no
+        universal depth threshold is asserted."""
+        observed: dict = {}
+        for depth, shape, raw in self._nesting_family():
+            with self.subTest(depth=depth, shape=shape):
+                self.assertLessEqual(len(raw), F.F03_INPUTS_RAW_MAX_BYTES)
+                refusal, boundary, returned = self._parse_observing_boundary(raw)
+                self.assertEqual(returned, [])
+                self.assertIsNotNone(refusal)
+                self.assertEqual(refusal.classification, INVALID, refusal.detail)
+                self.assertIn(boundary, ("decode", "canonicalize", "shape"))
+                observed[f"{depth}/{shape}"] = boundary
+        print("\nC01-T02 observed first-failing boundaries (python %s, recursionlimit %d): %s" % (
+            sys.version.split()[0], sys.getrecursionlimit(), observed))
+
+    def test_c01_t02_actual_canonicalizer_recursion_fixture_environment_labelled(self) -> None:
+        """ACTUAL helper behavior, environment-labelled: fixed 2,000-deep
+        fixtures decode with the real JSON decoder and then overflow the real
+        protected canonicalizer on the recorded authoring runtime (CPython
+        3.12.14, recursion limit 1000, Windows).  If another runtime does not
+        reach that boundary the case is skipped, never treated as a depth
+        theorem; C01-T01 remains the deterministic model."""
+        environment = "python %s, recursionlimit %d" % (sys.version.split()[0], sys.getrecursionlimit())
+        for shape, raw in (("array_root", b"[" * 2000 + b"]" * 2000),
+                           ("object_root", b'{"a":' * 2000 + b"1" + b"}" * 2000)):
+            with self.subTest(shape=shape):
+                refusal, boundary, returned = self._parse_observing_boundary(raw)
+                if boundary != "canonicalize":
+                    self.skipTest(f"canonicalization-stage recursion not reached ({boundary}) on {environment}")
+                self.assertEqual(returned, [])
+                self.assertEqual((refusal.classification, refusal.detail), (INVALID, "canonical encoding nesting"))
+
+
+class F03InputsDraftLexicalBoundaryTests(_F03DraftAssertions):
+    """SB-IN-002 + dispatch evidence 3: UUID/Git/SHA/path/identifier and
+    four-decimal price boundaries; canonical finite maker/taker text with
+    adequate Decimal precision and no binary floats."""
+
+    def test_uuid_git_sha_identifier_and_ticker_grammars(self) -> None:
+        bad = [
+            *[("run.run_id", v) for v in (DRAFT_RUN_ID.upper(), DRAFT_RUN_ID.replace("-41d2-", "-11d2-"),
+                                           DRAFT_RUN_ID.replace("-883f-", "-c83f-"), "{" + DRAFT_RUN_ID + "}",
+                                           DRAFT_RUN_ID.replace("-", ""), DRAFT_RUN_ID + " ", "")],
+            *[("implementation." + k, v) for k in ("expected_commit", "expected_tree", "expected_parent")
+              for v in ("A" * 40, "1" * 39, "1" * 41, "g" * 40)],
+            *[("source_and_scope.domain_binding_sha256", v) for v in ("D" * 64, "d" * 63, "d" * 65, "z" * 64)],
+            *[("evidence_refs.risk.sha256", v) for v in ("C" * 64, "c" * 63)],
+            *[("fee.fee_epoch_id", v) for v in ("", "-LEAD", "A B", "A/B", "A\u00c4", "A\n")],
+            *[("market." + k, v) for k in ("ticker", "event_ticker", "series_ticker")
+              for v in ("", "A B", "A/B", "T" * 201, "A\u00c4")],
+        ]
+        for path, value in bad:
+            with self.subTest(path=path, value=value):
+                self.assert_doc_refused(draft_with((path, value)))
+        for path, value in (("fee.fee_epoch_id", "a:b.c_d-e"), ("market.ticker", "A.b_c~d-1")):
+            with self.subTest(accepted=value):
+                self.assertEqual(draft_parse(draft_bytes(draft_with((path, value)))).fields[path.split(".")[0]]
+                                 [path.split(".")[1]], value)
+
+    def test_repository_path_grammar_is_strict_and_never_normalized(self) -> None:
+        for path in ("/src/x.py", "C:/src/x.py", "src\\x.py", "src//x.py", "src/./x.py", "src/../x.py", "src/x.py/",
+                     "src/x.", "src/x..", "src/x y.py", "", ".", "..", "\\\\?\\C:\\x.py", "//server/share/x.py",
+                     "src/x.py:stream", "src/\u00e9.py"):
+            with self.subTest(path=path):
+                doc = draft_with(("implementation.implementation_artifacts", {path: "4" * 64}))
+                self.assert_refused(draft_text_bytes(doc), INVALID)
+
+    def test_four_decimal_limit_price_grammar_and_bounds(self) -> None:
+        for price in ("0.0001", "0.5000", "0.8000"):
+            with self.subTest(accepted=price):
+                plan = draft_parse(draft_bytes(draft_with(("orders.order1_limit_price", price)))).plan
+                self.assertEqual(str(plan.order1_limit_price), price)
+                self.assertEqual(plan.order1_limit_price.as_tuple().exponent, -4)
+        bad = ("0.5", "0.500", "0.50000", "0.0000", "0.8001", "1.0000", "00.5000", ".5000", "+0.5000", "-0.5000",
+               "5E-1", "5.000E-1", "0.5000 ", " 0.5000", "NaN", "Infinity", "0,5000", "")
+        for slot in ("orders.order1_limit_price", "orders.order2_limit_price"):
+            for price in bad:
+                with self.subTest(slot=slot, price=price):
+                    changes = [(slot, price)]
+                    if slot.endswith("order2_limit_price"):
+                        changes.append(("orders.planned_order_count", 2))
+                    self.assert_doc_refused(draft_with(*changes))
+        raw = _replace_once(draft_bytes(), b'"order1_limit_price":"0.5000"', b'"order1_limit_price":0.5000')
+        self.assert_refused(raw, INVALID, "float")
+
+    def test_canonical_maker_and_exact_taker_decimal_text(self) -> None:
+        tiny = "0." + "0" * 70 + "1"  # 73 significant characters: needs > default 28-digit context
+        for text in ("1", "0.5", "0.0001", "0.25", "0.9999999999999999999999999999999999999999999999999999", tiny):
+            with self.subTest(accepted=text):
+                plan = draft_parse(draft_bytes(draft_with(("fee.maker_multiplier", text)))).plan
+                self.assertIs(type(plan.maker_multiplier), D)
+                self.assertEqual(plan.maker_multiplier, D(text))
+                self.assertEqual(A.canonical_decimal_text(plan.maker_multiplier), text)
+        for value in ("1.0", "0.50", "0.10", "0", "-0", "0.0", "1.5", "1E0", "1e-1", "+1", ".5", "01", "NaN", "sNaN",
+                      "Infinity", " 1", "1 ", "", 1, True, None):
+            with self.subTest(maker=value):
+                self.assert_doc_refused(draft_with(("fee.maker_multiplier", value)))
+        for value in ("1.0", "1.00", "01", "+1", "0.5", "1E0", 1, True, None, ""):
+            with self.subTest(taker=value):
+                self.assert_doc_refused(draft_with(("fee.taker_multiplier", value)))
+        for path, value in (("fee.fee_type", "QUADRATIC"), ("fee.fee_type", "linear"), ("fee.account_class", "direct"),
+                            ("fee.account_class", "UNKNOWN"), ("schema", "F03OperatorRuntimeInputsV2"),
+                            ("source_and_scope.environment", "KALSHI_PRODUCTION"),
+                            ("source_and_scope.origin", "https://api.elections.kalshi.com"),
+                            ("source_and_scope.route", "ROUTE_B"), ("source_and_scope.canonical_strategy_G", "G1"),
+                            ("source_and_scope.authority_namespace_id", "OTHER_NS")):
+            with self.subTest(path=path, value=value):
+                self.assert_doc_refused(draft_with((path, value)))
+
+
+class F03InputsDraftDigestTests(_F03DraftAssertions):
+    """SB-IN-003 + dispatch evidence 4: full-field mapping and full/raw/subset
+    digest distinction; the installed ``_plan_sha256`` subset is unchanged."""
+
+    @staticmethod
+    def _subset(plan) -> str:
+        return F.F03FeeExperimentRunnerV1._plan_sha256(types.SimpleNamespace(plan=plan))
+
+    @staticmethod
+    def _documented_subset(plan) -> str:
+        price = lambda p: None if p is None else A.canonical_decimal_text(p)  # noqa: E731
+        return hashlib.sha256(canonical_json_bytes({
+            "schema": "F03_RUN_PLAN_V1", "run_id": plan.run_id, "ticker": plan.ticker,
+            "order1_limit_price": price(plan.order1_limit_price), "order2_limit_price": price(plan.order2_limit_price),
+            "account_class": plan.account_class, "fee_epoch_id": plan.fee_epoch_id})).hexdigest()
+
+    def test_subset_collision_keeps_full_binding_and_raw_digest_distinct(self) -> None:
+        base = draft_parse(draft_bytes())
+        self.assertEqual(self._subset(base.plan), self._documented_subset(base.plan))  # no subset semantic change
+        for path, value in (("market.event_ticker", "KXF03TEST-26AUG18"), ("fee.maker_multiplier", "0.5"),
+                            ("market.series_ticker", "KXF03OTHER"), ("fee.account_class_evidence_id", "OTHER-ID")):
+            with self.subTest(path=path):
+                changes = [(path, value)]
+                if path == "fee.account_class_evidence_id":
+                    changes.append(("evidence_refs.account_class.logical_id", value))
+                variant = draft_parse(draft_bytes(draft_with(*changes)))
+                self.assertEqual(self._subset(variant.plan), self._subset(base.plan))  # old subset collides
+                self.assertNotEqual(variant.plan_binding_sha256, base.plan_binding_sha256)  # full binding differs
+                self.assertNotEqual(variant.raw_sha256, base.raw_sha256)
+                self.assertEqual(variant.plan_binding_sha256, F.route_a_plan_binding_sha256(variant.plan))
+        changed = draft_parse(draft_bytes(draft_with(("market.ticker", "KXF03TEST-26AUG17-T51"))))
+        self.assertNotEqual(self._subset(changed.plan), self._subset(base.plan))
+        self.assertEqual(len({base.raw_sha256, base.plan_binding_sha256, self._subset(base.plan)}), 3)
+        as_dict = F.F03RunPlanV1(**{item.name: getattr(base.plan, item.name) for item in dataclasses.fields(base.plan)}
+                                 | {"implementation_artifacts": dict(base.plan.implementation_artifacts)})
+        self.assertEqual(F.route_a_plan_binding_sha256(as_dict), base.plan_binding_sha256)
+
+
+class F03InputsDraftTerminalCreditTests(_F03DraftAssertions):
+    """SB-IN-001/002/005 T-NULL / T-PROOF structural portion + dispatch
+    evidence 5.  Paired null parses with no new gate; a matching nonnull pair
+    is only an UNVERIFIED draft reference; half-null, mismatched or malformed
+    purported-positive references are refused.  Analyzer conclusion rules
+    (``SINGLE_FILL_IDENTIFIED`` / QF03) are untouched and not asserted here."""
+
+    def _nonnull(self, *extra):
+        return draft_with(("fee.terminal_credit_exclusion_evidence_id", DRAFT_TERMINAL_ID),
+                          ("evidence_refs.terminal_credit", draft_ref("terminal_credit")), *extra)
+
+    def test_paired_null_parses_and_maps_without_a_terminal_gate(self) -> None:
+        draft = draft_parse(draft_bytes())
+        self.assertIsNone(draft.plan.terminal_credit_exclusion_evidence_id)
+        self.assertIsNone(draft.fields["evidence_refs"]["terminal_credit"])
+        self.assertEqual(draft.terminal_credit_reference, F.F03_INPUTS_TERMINAL_CREDIT_PAIRED_NULL)
+        self.assertEqual(draft.plan.planned_order_count, 1)  # the complete plan is still derived
+
+    def test_matching_nonnull_pair_is_only_an_unverified_draft_reference(self) -> None:
+        draft = draft_parse(draft_bytes(self._nonnull()))
+        self.assertEqual(draft.plan.terminal_credit_exclusion_evidence_id, DRAFT_TERMINAL_ID)
+        self.assertEqual(draft.terminal_credit_reference, F.F03_INPUTS_TERMINAL_CREDIT_UNVERIFIED_REF)
+        self.assertEqual(_thaw(draft.fields["evidence_refs"]["terminal_credit"]), draft_ref("terminal_credit"))
+
+    def test_half_null_mismatched_or_malformed_purported_positive_refs_are_refused(self) -> None:
+        cases = {
+            "id_without_ref": draft_with(("fee.terminal_credit_exclusion_evidence_id", DRAFT_TERMINAL_ID)),
+            "ref_without_id": draft_with(("evidence_refs.terminal_credit", draft_ref("terminal_credit"))),
+            "id_differs": self._nonnull(("fee.terminal_credit_exclusion_evidence_id", "SYNTHETIC-OTHER-REF")),
+            "ref_missing_sha": self._nonnull(("evidence_refs.terminal_credit.sha256", _DELETE)),
+            "ref_extra_key": self._nonnull(("evidence_refs.terminal_credit.verified", True)),
+            "ref_zero_bytes": self._nonnull(("evidence_refs.terminal_credit.bytes", 0)),
+            "ref_bad_sha": self._nonnull(("evidence_refs.terminal_credit.sha256", "C" * 64)),
+            "ref_bad_logical_id": self._nonnull(("evidence_refs.terminal_credit.logical_id", "bad id"),
+                                                ("fee.terminal_credit_exclusion_evidence_id", "bad id")),
+            "ref_as_string": self._nonnull(("evidence_refs.terminal_credit", DRAFT_TERMINAL_ID)),
+            "ref_as_true": self._nonnull(("evidence_refs.terminal_credit", True)),
+            "id_empty": self._nonnull(("fee.terminal_credit_exclusion_evidence_id", "")),
+        }
+        details = {"id_without_ref": "both null or both nonnull", "ref_without_id": "both null or both nonnull",
+                   "id_differs": "differs from evidence_refs.terminal_credit"}
+        for label, doc in cases.items():
+            with self.subTest(label):
+                self.assert_doc_refused(doc, INVALID, details.get(label))
+        raw = draft_bytes(self._nonnull())
+        self.assert_refused(raw, PIN, expected_sha=hashlib.sha256(draft_bytes()).hexdigest())
+
+    def test_account_class_evidence_id_must_equal_its_cited_ref(self) -> None:
+        self.assert_doc_refused(draft_with(("fee.account_class_evidence_id", "SYNTHETIC-OTHER-REF")), INVALID,
+                                "evidence_refs.account_class")
+
+
+def _f03_draft_symbols():
+    names = [name for name in vars(F) if name.startswith("_f03_inputs_")]
+    return [getattr(F, name) for name in names] + [F.parse_f03_operator_runtime_inputs_draft_v1,
+                                                   F.F03OperatorRuntimeInputsDraftV1, F.F03OperatorInputsDraftError]
+
+
+class F03InputsDraftImmutabilityAndPurityTests(_F03DraftAssertions):
+    """SB-IN-004 pure portion + dispatch evidence 6: recursive immutability,
+    defensive copies, one raw snapshot; zero filesystem/native/Git/evidence/
+    credential/transport activity; absent from every runtime entry path."""
+
+    def test_draft_plan_and_fields_are_recursively_immutable(self) -> None:
+        draft = draft_parse(draft_bytes())
+        with self.assertRaises(dataclasses.FrozenInstanceError):
+            draft.plan = None
+        with self.assertRaises(dataclasses.FrozenInstanceError):
+            draft.plan.run_id = str(uuid.uuid4())
+        with self.assertRaises(TypeError):
+            draft.plan.implementation_artifacts[DRAFT_RUNNER_PATH] = "0" * 64
+        with self.assertRaises(TypeError):
+            draft.fields["run"]["run_id"] = str(uuid.uuid4())
+
+        def walk(value):
+            if isinstance(value, (dict, list)):
+                self.fail("mutable container in draft fields")
+            if isinstance(value, types.MappingProxyType):
+                for child in value.values():
+                    walk(child)
+        walk(draft.fields)
+        self.assertIs(type(draft.raw), bytes)
+        self.assertEqual(hashlib.sha256(draft.raw).hexdigest(), draft.raw_sha256)
+        for raw in (bytearray(draft.raw), memoryview(draft.raw), draft.raw.decode()):
+            with self.subTest(raw_type=type(raw).__name__):
+                with self.assertRaises(F.F03OperatorInputsDraftError) as ctx:
+                    F.parse_f03_operator_runtime_inputs_draft_v1(
+                        raw, expected_raw_bytes=draft.raw_bytes, expected_raw_sha256=draft.raw_sha256,
+                        expected_participating_sources=DRAFT_SOURCES)
+                self.assertEqual(ctx.exception.classification, INVALID)
+
+    def test_mutating_decoded_and_pin_maps_cannot_alter_the_result(self) -> None:
+        raw = draft_bytes()
+        decoded: list = []
+        real_loads = json.loads
+
+        def capture(*args, **kwargs):
+            decoded.append(real_loads(*args, **kwargs))
+            return decoded[-1]
+        sources = dict(DRAFT_SOURCES)
+        with mock.patch.object(F.json, "loads", capture):
+            draft = draft_parse(raw, sources=sources)
+        self.assertEqual(len(decoded), 1)
+        binding = draft.plan_binding_sha256
+        decoded[0]["run"]["run_id"] = str(uuid.uuid4())
+        decoded[0]["fee"]["maker_multiplier"] = "0.5"
+        decoded[0]["implementation"]["implementation_artifacts"]["src/extra.py"] = "9" * 64
+        sources[DRAFT_RUNNER_PATH] = "0" * 64
+        sources["src/extra.py"] = "9" * 64
+        self.assertEqual(_thaw(draft.fields), real_loads(raw))
+        self.assertEqual(dict(draft.plan.implementation_artifacts), {DRAFT_RUNNER_PATH: "4" * 64})
+        self.assertEqual((draft.plan.run_id, draft.plan.maker_multiplier), (DRAFT_RUN_ID, D("1")))
+        self.assertEqual(F.route_a_plan_binding_sha256(draft.plan), binding)
+
+        class FlippingPins(dict):  # a caller map whose later reads would differ
+            reads = 0
+
+            def items(self):
+                FlippingPins.reads += 1
+                return super().items() if FlippingPins.reads == 1 else {DRAFT_RUNNER_PATH: "0" * 64}.items()
+        flipped = draft_parse(raw, sources=FlippingPins(DRAFT_SOURCES))
+        self.assertEqual(FlippingPins.reads, 1)  # copied exactly once
+        self.assertEqual(flipped.plan_binding_sha256, binding)
+
+    def test_parser_performs_no_filesystem_native_git_env_or_transport_activity(self) -> None:
+        import builtins
+        import subprocess
+
+        def trap(*_args, **_kwargs):
+            raise AssertionError("pure draft parser touched a prohibited surface")
+        surfaces = [
+            (builtins, "open"), (os, "open"), (os, "stat"), (os, "lstat"), (os, "scandir"), (os, "listdir"),
+            (os, "getenv"), (os, "mkdir"), (Path, "read_bytes"), (Path, "exists"), (Path, "resolve"),
+            (socket, "socket"), (socket, "create_connection"), (socket, "getaddrinfo"), (subprocess, "Popen"),
+            (F, "_route_a_load_win32_directory_api"), (F, "_route_a_win32_flush_directory"),
+            (runner, "consume_active_execution_authorization_set_v1"), (ledger_binding, "read_active_local_safety_state_v1"),
+        ]
+        raw = draft_bytes(F03InputsDraftTerminalCreditTests._nonnull(None))
+        with contextlib.ExitStack() as stack:
+            for owner, name in surfaces:
+                stack.enter_context(mock.patch.object(owner, name, trap))
+            draft = draft_parse(raw)
+        self.assertEqual(draft.terminal_credit_reference, F.F03_INPUTS_TERMINAL_CREDIT_UNVERIFIED_REF)
+        for symbol in _f03_draft_symbols():
+            code = _code_only(inspect.getsource(symbol))
+            for banned in ("open(", "os.", "Path(", "pathlib", "subprocess", "socket", "ctypes", "environ", "getenv",
+                           "read_bytes", "float(", "eval(", "exec(", "__import__", "callable(", "_runner.run",
+                           "consume_", "F03ObservedIdentityV1(", "_route_a_win32", "sqlite"):
+                self.assertNotIn(banned, code, (symbol.__name__, banned))
+
+    def test_parser_is_absent_from_every_installed_runtime_entry_path(self) -> None:
+        f_code = _code_only(inspect.getsource(F))
+        self.assertEqual(f_code.count("parse_f03_operator_runtime_inputs_draft_v1("), 1)  # its definition only
+        self.assertEqual(F.__all__, [])  # no new export
+        r_code = _code_only(inspect.getsource(runner))
+        for name in ("parse_f03_operator_runtime_inputs_draft_v1", "F03OperatorRuntimeInputsDraftV1",
+                     "F03OperatorInputsDraftError", "_f03_inputs_"):
+            self.assertNotIn(name, r_code, name)
+            self.assertNotIn(name, _code_only(inspect.getsource(F.F03FeeExperimentRunnerV1)), name)
+            for entry in (F.F03RunPlanV1, F.verify_source_binding, F.route_a_plan_binding_sha256,
+                          F.parse_route_a_timing_config_v1, F.admit_route_a_timing_profile_v1):
+                self.assertNotIn(name, _code_only(inspect.getsource(entry)), (entry.__name__, name))
+
+
+class _F03InputsDraftHoldMixin(_StageAHarnessMixin):
+    """Dispatch evidence 7 / STAGE-A-HOLD preserved: a plan derived by the
+    draft decoder from otherwise structurally valid SYNTHETIC inputs is still
+    stopped by the UNPATCHED unconditional pre-row-9 N1 hold -- zero
+    consumption/append, receipt, credential bridge, signed GET, CREATE or
+    CANCEL.  Synthetic positive controls elsewhere are not real admission
+    proof; nothing here enables a live bypass."""
+
+    RA_FIXTURE_BYPASS_N1_HISTORY_HOLD = False
+    RA_FIXTURE_BYPASS_ADMISSION_LINK_STOP = False
+
+    def _draft(self, *, terminal_ref: bool):
+        doc = draft_with(("run.run_id", str(uuid.uuid4())), ("implementation.expected_commit", self.COMMIT),
+                         ("implementation.expected_tree", self.TREE), ("implementation.expected_parent", self.PARENT))
+        if terminal_ref:
+            doc = draft_with(("fee.terminal_credit_exclusion_evidence_id", DRAFT_TERMINAL_ID),
+                             ("evidence_refs.terminal_credit", draft_ref("terminal_credit")), doc=doc)
+        baseline = self._event_types()
+        draft = draft_parse(draft_bytes(doc))
+        self.assertEqual(self._event_types(), baseline)  # decoding has no durable effect
+        self.assertEqual(draft.plan, self._plan(
+            run_id=draft.plan.run_id, account_class_evidence_id="SYNTHETIC-ACCOUNT-CLASS-REF",
+            terminal_credit_exclusion_evidence_id=DRAFT_TERMINAL_ID if terminal_ref else None))
+        return draft
+
+    def _held_with(self, plan, **builder_kwargs):
+        baseline = self._event_types()
+        runs_before = [p.name for p in self.runs_root.iterdir()]
+        admitted = []
+        real_admit = F.admit_route_a_timing_profile_v1
+
+        def admit(*args, **kw):
+            admitted.append(real_admit(*args, **kw))
+            return admitted[-1]
+        venue = self._venue()
+        with self._consume_spy(), mock.patch.object(F, "admit_route_a_timing_profile_v1", admit):
+            with self.assertRaises(RunnerError) as ctx:
+                self._ra_run(venue, plan, builder=self._counting_builder(venue, **builder_kwargs),
+                             credential_bridge=self._scope())
+        self.assertEqual(len(admitted), 1)  # timing admitted: the input is otherwise passing
+        self._assert_n1_held(ctx, venue, plan, baseline, runs_before)
+
+
+class F03InputsDraftStageAHoldTests(_F03InputsDraftHoldMixin, RouteAHarnessTestCase):
+    def test_installed_entry_halts_before_consumption_with_valid_draft_plans(self) -> None:
+        for native in (False, True, None):
+            for terminal_ref in (False, True):
+                with self.subTest(native_windows=native, terminal_ref=terminal_ref):
+                    self.RA_NATIVE_WINDOWS = native
+                    self._held_with(self._draft(terminal_ref=terminal_ref).plan)
+
+
+class F03InputsDraftStageABootHoldTests(_F03InputsDraftHoldMixin, RouteAHarnessTestCase):
+    ENTRY = RA_BOOT
+
+    def test_boot_hold_entry_halts_before_consumption_with_a_valid_draft_plan(self) -> None:
+        for native in (False, True):
+            with self.subTest(native_windows=native):
+                self.RA_NATIVE_WINDOWS = native
+                self._held_with(self._draft(terminal_ref=False).plan, phases=2, implied=20)
 
 
 if __name__ == "__main__":  # pragma: no cover

@@ -45,7 +45,7 @@ import stat
 import uuid
 from dataclasses import dataclass, field
 from datetime import datetime, timezone
-from decimal import Decimal, InvalidOperation
+from decimal import Decimal, InvalidOperation, localcontext
 from pathlib import Path
 from types import MappingProxyType
 from typing import Callable, Mapping, Sequence, Tuple
@@ -1798,6 +1798,375 @@ def route_a_plan_binding_sha256(plan: "F03RunPlanV1") -> str:
             value = dict(sorted(value.items()))
         values[item.name] = value
     return sha256_hex(canonical_json_bytes(values))
+
+
+# ---------------------------------------------------------------------------
+# Stage B SB-IN-001..003 (and the pure part of SB-IN-004) -- DRAFT-ONLY closed
+# ``F03OperatorRuntimeInputsV1`` decoding and immutable raw-to-plan derivation.
+#
+# Pure: the decoder takes immutable raw bytes plus caller-supplied
+# COMPARISON-ONLY pins (raw length/SHA-256 and the expected participating-source
+# path -> SHA-256 map) as explicit data.  It performs no filesystem, Git,
+# native, evidence-source, credential or transport access and accepts no
+# callable.  A draft establishes exact shape/lexical/type/integrity comparisons
+# only; it never establishes source freshness, reviewer authenticity, history
+# completeness, observation, physical identity, custody, current tip,
+# eligibility or terminal-credit exclusion, and it never creates an
+# ``F03ObservedIdentityV1``.  Caller pins do not show that a reviewer approved
+# them.  Nothing here is called by orchestration or by any runner consumer; the
+# Stage A pre-row-9 N1 hold and the post-marker link stop are unchanged.
+# ---------------------------------------------------------------------------
+
+F03_OPERATOR_INPUTS_SCHEMA = "F03OperatorRuntimeInputsV1"
+F03_INPUTS_DRAFT_SCHEMA_INVALID = "F03_INPUTS_DRAFT_SCHEMA_INVALID"
+F03_INPUTS_DRAFT_PIN_MISMATCH = "F03_INPUTS_DRAFT_PIN_MISMATCH"
+# Draft terminal-credit reference dispositions (descriptions, never grants).
+F03_INPUTS_TERMINAL_CREDIT_PAIRED_NULL = "PAIRED_NULL_NO_EXCLUSION_EVIDENCE_SUPPLIED"
+F03_INPUTS_TERMINAL_CREDIT_UNVERIFIED_REF = "UNVERIFIED_DRAFT_REFERENCE_NOT_EXCLUSION_PROOF"
+# SB-IN-002 resource caps.  A legitimate input above any cap needs a separate
+# versioned limit review; nothing is truncated or normalized.
+F03_INPUTS_RAW_MAX_BYTES = 1_048_576
+_F03_INPUTS_STRING_MAX_BYTES = 4_096
+_F03_INPUTS_REF_ID_MAX_BYTES = 256
+_F03_INPUTS_MAP_MAX_ENTRIES = 256
+# Parser resource bound for artifact-ref ``bytes`` (NOT an enrollment or
+# evidence waiver): 1 .. 2**30.  Every supplied predecessor/evidence artifact
+# is far below it (the largest is under 80 MB).  JSON integer tokens are
+# refused before ``int`` conversion unless they are canonical and at most 10
+# digits.
+_F03_INPUTS_REF_BYTES_MAX = 1 << 30
+_F03_INPUTS_INT_TOKEN_RE = re.compile(r"0|[1-9][0-9]{0,9}")
+_F03_INPUTS_GIT_RE = re.compile(r"[0-9a-f]{40}")
+_F03_INPUTS_PRICE_RE = re.compile(r"(0|[1-9][0-9]*)\.[0-9]{4}")
+_F03_INPUTS_DECIMAL_RE = re.compile(r"(0|[1-9][0-9]*)(\.[0-9]*[1-9])?")
+_F03_INPUTS_PATH_RE = re.compile(r"[A-Za-z0-9_.-]{1,255}(/[A-Za-z0-9_.-]{1,255})*")
+_F03_INPUTS_EVIDENCE_REF_KEYS = ("market", "account_class", "fee_epoch", "fee_source", "risk", "domain",
+                                 "source_snapshot", "timing", "operator_selection", "terminal_credit")
+_F03_INPUTS_SCOPE_SHA256_KEYS = ("domain_binding_sha256", "active_contract_sha256", "risk_config_sha256",
+                                 "fee_source_binding_sha256", "timing_profile_sha256")
+_F03_INPUTS_SCOPE_CONSTANTS = MappingProxyType({
+    "environment": "KALSHI_DEMO", "origin": DEMO_ORIGIN,
+    "authority_namespace_id": "ARB_KALSHI_DEMO_PRIMARY_AUTHORITY_V1", "route": ROUTE_A_ROUTE,
+    "canonical_strategy_G": "NOT_APPLICABLE_TO_ISOLATED_F03_PROBE",
+})
+_F03_INPUTS_KEYS = MappingProxyType({
+    "root": frozenset({"schema", "run", "market", "fee", "orders", "implementation", "source_and_scope",
+                       "evidence_refs"}),
+    "run": frozenset({"run_id", "private_evidence_permission"}),
+    "market": frozenset({"ticker", "event_ticker", "series_ticker", "market_metadata_evidence_id"}),
+    "fee": frozenset({"account_class", "account_class_evidence_id", "fee_epoch_id", "fee_type", "taker_multiplier",
+                      "maker_multiplier", "fee_regime_change_pending", "terminal_credit_exclusion_evidence_id"}),
+    "orders": frozenset({"order1_limit_price", "order2_limit_price", "planned_order_count"}),
+    "implementation": frozenset({"expected_commit", "expected_tree", "expected_parent", "implementation_artifacts"}),
+    "source_and_scope": frozenset({"subaccount", "exchange_index", *_F03_INPUTS_SCOPE_CONSTANTS,
+                                   *_F03_INPUTS_SCOPE_SHA256_KEYS}),
+    "evidence_refs": frozenset(_F03_INPUTS_EVIDENCE_REF_KEYS),
+    "artifact_ref": frozenset({"logical_id", "bytes", "sha256"}),
+})
+
+
+class F03OperatorInputsDraftError(Exception):
+    """Closed draft-decoder refusal.  ``classification`` is
+    ``F03_INPUTS_DRAFT_SCHEMA_INVALID`` (malformed, noncanonical, out-of-domain
+    or inconsistent input) or ``F03_INPUTS_DRAFT_PIN_MISMATCH`` (malformed
+    comparison pins, raw length/SHA-256 or participating-source mismatch)."""
+
+    def __init__(self, classification: str, detail: str) -> None:
+        if classification not in (F03_INPUTS_DRAFT_SCHEMA_INVALID, F03_INPUTS_DRAFT_PIN_MISMATCH):
+            raise TypeError("closed draft-input classification required")
+        self.classification = classification
+        self.detail = detail
+        super().__init__(f"{classification}: {detail}")
+
+
+def _f03_inputs_invalid(detail: str) -> F03OperatorInputsDraftError:
+    return F03OperatorInputsDraftError(F03_INPUTS_DRAFT_SCHEMA_INVALID, detail)
+
+
+def _f03_inputs_pin_mismatch(detail: str) -> F03OperatorInputsDraftError:
+    return F03OperatorInputsDraftError(F03_INPUTS_DRAFT_PIN_MISMATCH, detail)
+
+
+def _f03_inputs_object(value: object, kind: str, name: str) -> dict:
+    if type(value) is not dict:
+        raise _f03_inputs_invalid(name + " must be an object")
+    if set(value) != _F03_INPUTS_KEYS[kind]:
+        raise _f03_inputs_invalid(name + " keys")
+    return value
+
+
+def _f03_inputs_text(value: object, name: str, pattern: "re.Pattern[str]",
+                     max_bytes: int = _F03_INPUTS_STRING_MAX_BYTES) -> str:
+    if type(value) is not str:
+        raise _f03_inputs_invalid(name + " must be a string")
+    try:
+        size = len(value.encode("utf-8"))
+    except UnicodeEncodeError:
+        raise _f03_inputs_invalid(name + " utf-8") from None
+    if size > max_bytes or pattern.fullmatch(value) is None:
+        raise _f03_inputs_invalid(name)
+    return value
+
+
+def _f03_inputs_identifier(value: object, name: str) -> str:
+    # Existing Route-A nonsecret identifier grammar (<=128 bytes) inside the
+    # SB-IN-002 256-byte evidence-id cap.
+    return _f03_inputs_text(value, name, _ROUTE_A_IDENTIFIER_RE, _F03_INPUTS_REF_ID_MAX_BYTES)
+
+
+def _f03_inputs_repository_path(value: object, name: str) -> str:
+    """Canonical repository-relative forward-slash path: no drive, absolute,
+    device, backslash, empty, ``.``/``..`` or trailing-dot component; never
+    normalized."""
+    path = _f03_inputs_text(value, name, _F03_INPUTS_PATH_RE)
+    if any(component.endswith(".") for component in path.split("/")):
+        raise _f03_inputs_invalid(name + " path component")
+    return path
+
+
+def _f03_inputs_limit_price(value: object, name: str) -> Decimal:
+    price = Decimal(_f03_inputs_text(value, name, _F03_INPUTS_PRICE_RE))
+    if not (Decimal("0") < price <= _an.MAX_LIMIT_PRICE) or price.as_tuple().exponent != -4:
+        raise _f03_inputs_invalid(name + " must be exact 4dp in (0, .8000]")
+    return price
+
+
+def _f03_inputs_maker_multiplier(value: object) -> Decimal:
+    text = _f03_inputs_text(value, "fee.maker_multiplier", _F03_INPUTS_DECIMAL_RE)
+    with localcontext() as context:
+        context.prec = max(50, len(text) + 2)
+        multiplier = Decimal(text)
+        if not (Decimal("0") < multiplier <= Decimal("1")) or _an.canonical_decimal_text(multiplier) != text:
+            raise _f03_inputs_invalid("fee.maker_multiplier must be canonical decimal text in (0, 1]")
+    return multiplier
+
+
+def _f03_inputs_integer(value: object, name: str, low: int, high: int) -> int:
+    if type(value) is not int or not (low <= value <= high):
+        raise _f03_inputs_invalid(name)
+    return value
+
+
+def _f03_inputs_artifact_ref(value: object, name: str) -> dict:
+    ref = _f03_inputs_object(value, "artifact_ref", name)
+    _f03_inputs_identifier(ref["logical_id"], name + ".logical_id")
+    _f03_inputs_integer(ref["bytes"], name + ".bytes", 1, _F03_INPUTS_REF_BYTES_MAX)
+    _f03_inputs_text(ref["sha256"], name + ".sha256", _an._HEX64_RE)
+    return ref
+
+
+def _f03_inputs_expected_sources(value: object) -> dict:
+    """Defensive copy and validation of the caller's comparison-only
+    participating-source pins (path -> SHA-256)."""
+    if not isinstance(value, Mapping):
+        raise _f03_inputs_pin_mismatch("expected participating sources must be a mapping")
+    pins = dict(value.items())
+    if not 1 <= len(pins) <= _F03_INPUTS_MAP_MAX_ENTRIES:
+        raise _f03_inputs_pin_mismatch("expected participating source count")
+    folded: set = set()
+    for path, digest in pins.items():
+        try:
+            _f03_inputs_repository_path(path, "expected participating source")
+            _f03_inputs_text(digest, "expected participating source sha256", _an._HEX64_RE)
+        except F03OperatorInputsDraftError as exc:
+            raise _f03_inputs_pin_mismatch(exc.detail) from None
+        if path.casefold() in folded:
+            raise _f03_inputs_pin_mismatch("expected participating sources contain a case alias")
+        folded.add(path.casefold())
+    return pins
+
+
+def _f03_inputs_decode(raw: bytes) -> object:
+    if raw.startswith(b"\xef\xbb\xbf"):
+        raise _f03_inputs_invalid("byte-order mark")
+    try:
+        text = raw.decode("utf-8")
+    except UnicodeDecodeError:
+        raise _f03_inputs_invalid("utf-8") from None
+
+    def _pairs(pairs):
+        if len(pairs) > _F03_INPUTS_MAP_MAX_ENTRIES:
+            raise _f03_inputs_invalid("object entry count")
+        seen: dict = {}
+        for key, value in pairs:
+            if key in seen:
+                raise _f03_inputs_invalid("duplicate key")
+            seen[key] = value
+        return seen
+
+    def _integer(token):
+        if _F03_INPUTS_INT_TOKEN_RE.fullmatch(token) is None:
+            raise _f03_inputs_invalid("integer token")
+        return int(token)
+
+    def _reject(_token):
+        raise _f03_inputs_invalid("numeric JSON float or non-finite constant")
+
+    try:
+        document = json.loads(text, object_pairs_hook=_pairs, parse_float=_reject, parse_int=_integer,
+                              parse_constant=_reject)
+    except F03OperatorInputsDraftError:
+        raise
+    except (ValueError, RecursionError):
+        raise _f03_inputs_invalid("malformed JSON") from None
+    try:
+        canonical = canonical_json_bytes(document)
+    except LedgerError:
+        raise _f03_inputs_invalid("canonical encoding") from None
+    except RecursionError:
+        # B-01: nesting that decodes but exceeds the recursive canonicalizer is
+        # the same closed refusal (no schema permits such nesting).
+        raise _f03_inputs_invalid("canonical encoding nesting") from None
+    if canonical != raw:
+        raise _f03_inputs_invalid("raw bytes are not canonical_json_bytes(parsed)")
+    return document
+
+
+def _f03_inputs_freeze(value: object) -> object:
+    if type(value) is dict:
+        return MappingProxyType({key: _f03_inputs_freeze(child) for key, child in value.items()})
+    return value
+
+
+@dataclass(frozen=True, slots=True)
+class F03OperatorRuntimeInputsDraftV1:
+    """DRAFT-ONLY structurally parsed ``F03OperatorRuntimeInputsV1``: the one
+    immutable raw snapshot, its exact length/SHA-256, recursively frozen parsed
+    fields, the exact SB-IN-003 derived plan and its complete
+    ``route_a_plan_binding_sha256``.  It is not an admission, eligibility,
+    observation or proof object, carries no executable flag and is consumed by
+    no runtime path.  A nonnull terminal-credit reference remains an
+    unverified draft reference, never independent exclusion evidence."""
+
+    raw: bytes = field(repr=False)
+    raw_sha256: str
+    raw_bytes: int
+    fields: Mapping[str, object] = field(repr=False)
+    plan: F03RunPlanV1
+    plan_binding_sha256: str
+    terminal_credit_reference: str
+
+
+def parse_f03_operator_runtime_inputs_draft_v1(
+    raw: bytes, *, expected_raw_bytes: int, expected_raw_sha256: str,
+    expected_participating_sources: Mapping[str, str],
+) -> F03OperatorRuntimeInputsDraftV1:
+    """SB-IN-001/002 closed strict decoder and SB-IN-003 exact plan mapping
+    (pure; draft only).  UTF-8 without BOM; ``raw`` must equal
+    ``canonical_json_bytes(parsed)`` byte for byte; duplicate/unknown/absent
+    keys at every level, JSON floats, non-finite constants, noncanonical or
+    overlong integers, bool in integer slots and any null outside the three
+    permitted slots are refused.  Every plan field is mapped explicitly (no
+    default); ``implementation_artifacts`` must be a sorted subset of the
+    caller's expected participating-source pins with identical SHA-256."""
+    if type(raw) is not bytes or not raw or len(raw) > F03_INPUTS_RAW_MAX_BYTES:
+        raise _f03_inputs_invalid("raw input must be nonempty bytes within the resource cap")
+    if (type(expected_raw_bytes) is not int or not 1 <= expected_raw_bytes <= F03_INPUTS_RAW_MAX_BYTES
+            or type(expected_raw_sha256) is not str or _an._HEX64_RE.fullmatch(expected_raw_sha256) is None):
+        raise _f03_inputs_pin_mismatch("expected raw pins")
+    expected_sources = _f03_inputs_expected_sources(expected_participating_sources)
+    raw_sha256 = sha256_hex(raw)
+    if len(raw) != expected_raw_bytes or raw_sha256 != expected_raw_sha256:
+        raise _f03_inputs_pin_mismatch("raw input length/sha256 differ from the expected pins")
+    root = _f03_inputs_object(_f03_inputs_decode(raw), "root", "root")
+    if root["schema"] != F03_OPERATOR_INPUTS_SCHEMA:
+        raise _f03_inputs_invalid("schema")
+
+    run = _f03_inputs_object(root["run"], "run", "run")
+    run_id = _f03_inputs_text(run["run_id"], "run.run_id", _an._UUID4_RE)
+    if run["private_evidence_permission"] is not False:
+        raise _f03_inputs_invalid("run.private_evidence_permission must be false")
+
+    market = _f03_inputs_object(root["market"], "market", "market")
+    tickers = {name: _f03_inputs_text(market[name], "market." + name, _runner._TICKER_PATTERN)
+               for name in ("ticker", "event_ticker", "series_ticker")}
+    _f03_inputs_identifier(market["market_metadata_evidence_id"], "market.market_metadata_evidence_id")
+
+    fee = _f03_inputs_object(root["fee"], "fee", "fee")
+    if type(fee["account_class"]) is not str or fee["account_class"] not in tuple(_an.AccountClass):
+        raise _f03_inputs_invalid("fee.account_class")
+    account_class_evidence_id = _f03_inputs_identifier(fee["account_class_evidence_id"], "fee.account_class_evidence_id")
+    fee_epoch_id = _f03_inputs_identifier(fee["fee_epoch_id"], "fee.fee_epoch_id")
+    if fee["fee_type"] != "quadratic":
+        raise _f03_inputs_invalid("fee.fee_type")
+    if fee["taker_multiplier"] != "1":
+        raise _f03_inputs_invalid("fee.taker_multiplier must be exactly '1'")
+    maker_multiplier = _f03_inputs_maker_multiplier(fee["maker_multiplier"])
+    if fee["fee_regime_change_pending"] is not False:
+        raise _f03_inputs_invalid("fee.fee_regime_change_pending must be false")
+    terminal_id = fee["terminal_credit_exclusion_evidence_id"]
+    if terminal_id is not None:
+        _f03_inputs_identifier(terminal_id, "fee.terminal_credit_exclusion_evidence_id")
+
+    orders = _f03_inputs_object(root["orders"], "orders", "orders")
+    order1 = _f03_inputs_limit_price(orders["order1_limit_price"], "orders.order1_limit_price")
+    order2 = (None if orders["order2_limit_price"] is None
+              else _f03_inputs_limit_price(orders["order2_limit_price"], "orders.order2_limit_price"))
+    planned_order_count = _f03_inputs_integer(orders["planned_order_count"], "orders.planned_order_count", 1, 2)
+    if planned_order_count != 1 + int(order2 is not None):
+        raise _f03_inputs_invalid("orders.planned_order_count disagrees with order2_limit_price")
+
+    implementation = _f03_inputs_object(root["implementation"], "implementation", "implementation")
+    git = {name: _f03_inputs_text(implementation[name], "implementation." + name, _F03_INPUTS_GIT_RE)
+           for name in ("expected_commit", "expected_tree", "expected_parent")}
+    artifacts = implementation["implementation_artifacts"]
+    if type(artifacts) is not dict or not 1 <= len(artifacts) <= _F03_INPUTS_MAP_MAX_ENTRIES:
+        raise _f03_inputs_invalid("implementation.implementation_artifacts must be a nonempty bounded map")
+    if list(artifacts) != sorted(artifacts):
+        raise _f03_inputs_invalid("implementation.implementation_artifacts keys must be sorted")
+    for path, digest in artifacts.items():
+        _f03_inputs_repository_path(path, "implementation.implementation_artifacts path")
+        _f03_inputs_text(digest, "implementation.implementation_artifacts sha256", _an._HEX64_RE)
+        if path not in expected_sources:
+            raise _f03_inputs_pin_mismatch("implementation artifact is not an expected participating source")
+        if expected_sources[path] != digest:
+            raise _f03_inputs_pin_mismatch("implementation artifact sha256 differs from the expected pin")
+
+    scope = _f03_inputs_object(root["source_and_scope"], "source_and_scope", "source_and_scope")
+    for name, constant in _F03_INPUTS_SCOPE_CONSTANTS.items():
+        if scope[name] != constant:
+            raise _f03_inputs_invalid("source_and_scope." + name)
+    _f03_inputs_integer(scope["subaccount"], "source_and_scope.subaccount", 1, 1)
+    _f03_inputs_integer(scope["exchange_index"], "source_and_scope.exchange_index", 0, 0)
+    for name in _F03_INPUTS_SCOPE_SHA256_KEYS:
+        _f03_inputs_text(scope[name], "source_and_scope." + name, _an._HEX64_RE)
+
+    refs = _f03_inputs_object(root["evidence_refs"], "evidence_refs", "evidence_refs")
+    for name in _F03_INPUTS_EVIDENCE_REF_KEYS:
+        if name == "terminal_credit" and refs[name] is None:
+            continue
+        _f03_inputs_artifact_ref(refs[name], "evidence_refs." + name)
+    if account_class_evidence_id != refs["account_class"]["logical_id"]:
+        raise _f03_inputs_invalid("fee.account_class_evidence_id differs from evidence_refs.account_class")
+    terminal_ref = refs["terminal_credit"]
+    if (terminal_id is None) != (terminal_ref is None):
+        raise _f03_inputs_invalid("terminal-credit exclusion id/ref must be both null or both nonnull")
+    if terminal_ref is not None and terminal_ref["logical_id"] != terminal_id:
+        raise _f03_inputs_invalid("terminal-credit exclusion id differs from evidence_refs.terminal_credit")
+
+    try:
+        plan = F03RunPlanV1(
+            run_id=run_id, ticker=tickers["ticker"], event_ticker=tickers["event_ticker"],
+            series_ticker=tickers["series_ticker"], account_class=fee["account_class"],
+            account_class_evidence_id=account_class_evidence_id, fee_epoch_id=fee_epoch_id, fee_type=fee["fee_type"],
+            taker_multiplier=Decimal(fee["taker_multiplier"]), maker_multiplier=maker_multiplier,
+            fee_regime_change_pending=fee["fee_regime_change_pending"], order1_limit_price=order1,
+            order2_limit_price=order2, expected_commit=git["expected_commit"], expected_tree=git["expected_tree"],
+            expected_parent=git["expected_parent"],
+            implementation_artifacts=MappingProxyType(dict(sorted(artifacts.items()))),
+            terminal_credit_exclusion_evidence_id=terminal_id,
+            private_evidence_permission=run["private_evidence_permission"],
+        )
+    except F03Halt as exc:
+        raise _f03_inputs_invalid("plan: " + str(exc)) from None
+    if plan.planned_order_count != planned_order_count:
+        raise _f03_inputs_invalid("planned order count")
+    return F03OperatorRuntimeInputsDraftV1(
+        raw=raw, raw_sha256=raw_sha256, raw_bytes=len(raw), fields=_f03_inputs_freeze(root), plan=plan,
+        plan_binding_sha256=route_a_plan_binding_sha256(plan),
+        terminal_credit_reference=(F03_INPUTS_TERMINAL_CREDIT_PAIRED_NULL if terminal_id is None
+                                   else F03_INPUTS_TERMINAL_CREDIT_UNVERIFIED_REF),
+    )
 
 
 # RA-08-001 / RA-IMP-F01: a directory-entry durability primitive is accepted
