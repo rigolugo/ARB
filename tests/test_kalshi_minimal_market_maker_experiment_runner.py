@@ -18417,7 +18417,7 @@ class G1StaticConformanceTests(unittest.TestCase):
     _BASE_BLOBS = {
         "src/arb/execution_ledger.py": "608f4cd281525a8bf53fafa2b19eb23cc5b669ac",
         "src/arb/venues/kalshi/emergency_cancel.py": "cb110f4821ff7bd77e13b7c69d2219528ea05105",
-        "src/arb/venues/kalshi/ledger_binding.py": "fac56b5555b48ee04da1753a4042b1f11debaf97",
+        "src/arb/venues/kalshi/ledger_binding.py": "6822511139a76fcede98ce833b7f7a62d0612aa2",
         "src/arb/venues/kalshi/minimal_market_maker.py": "be1bbfa31c7d814d48751f9b2399ef62c866d36e",
         "src/arb/venues/kalshi/order_lifecycle.py": "2ea2c40437626de7218dc318432db94e9bc9d4f5",
         "src/arb/venues/kalshi/quote_lifecycle.py": "8d857abc15aafb2601a549f0bd8bbd7ed05d679b",
@@ -18425,7 +18425,7 @@ class G1StaticConformanceTests(unittest.TestCase):
         "src/arb/venues/kalshi/write_result_reconciliation.py": "a26985c64c62fd7288724be52f050212d0fea97f",
         "tests/test_execution_ledger.py": "242566dd3146e1a8461e59f71c9e2c2f8b6dd701",
         "tests/test_kalshi_emergency_cancel.py": "7bea1f054eaec81383a369a5860f43f8dd2847a3",
-        "tests/test_kalshi_ledger_binding.py": "9786ce5d5fa609c5ed5f2d7ca9804cd736e8c3f5",
+        "tests/test_kalshi_ledger_binding.py": "52cb51a0dc78ceda39e60f120a742c049ea8846e",
         "tests/test_kalshi_minimal_market_maker.py": "43e2a7fdbdbcfd769713e6e04cbaa321d8313e44",
         "tests/test_kalshi_one_order_lifecycle.py": "850ed38cdb8fe526e9c947a003d8a1d5a433e3e5",
         "tests/test_kalshi_quote_lifecycle.py": "3d5cf1373a7282ebc6ad36809a8391ce1438ae30",

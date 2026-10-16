@@ -6188,5 +6188,1337 @@ class AccountAggregateReleaseSemanticsTestCase(unittest.TestCase):
         self.assertFalse(self._release_pass(self._risk(), None))
 
 
+# ===========================================================================
+# R1-D07 F03 HELD retained-root guard primitive -- PS-014 M01..M07/M09
+# recording-model coverage (PS-008..012 under WG-004..016/024).  The actual
+# B mechanics run unchanged; only B's five fixed private native operations
+# (and the observed-ABI fact) are replaced, per test, by the TEST-ONLY
+# recording model below.  No DLL, native API, filesystem target, credential,
+# network or store is touched.  Model success is MODEL_ONLY_OFFLINE evidence:
+# it proves no real native behavior, actor exclusion, history/currentness,
+# enrollment or timing calibration.  (M08 pin/protection evidence is the
+# unchanged G1/TS/TF regressions plus independent raw-blob verification; TB
+# deliberately pins nothing, so no reverse pin cycle is introduced.)
+# ===========================================================================
+
+import builtins as _builtins
+import contextlib as _contextlib
+import importlib.util as _importlib_util
+import inspect as _inspect
+import io as _io
+import itertools as _itertools
+import os as _os
+import re as _re
+import socket as _socket
+import struct as _struct
+import tokenize as _tokenize
+
+_RRG_T0 = 7_000_000_000
+_RRG_TA = _RRG_T0 + 300_000_000_000
+_RRG_PROC = "proc_" + "9" * 32
+_RRG_VOLUME_GUID = "0000aaaa-1111-2222-3333-444455556666"
+_RRG_SERIAL = 0x0123456789ABCDEF
+_RRG_BUDGET = _lb._F03RRGModelBudgetV1(open_ns=1_000, query_ns=1_000, close_ns=1_000, later_reserve_ns=1_000_000)
+_RRG_HANDLE_BASES = _itertools.count(1)
+_RRG_SECTION_HEADER = (
+    "# ===========================================================================\n"
+    "# R1-D07 F03 HELD retained-root guard primitive"
+)
+_RRG_BASE_B_SHA256 = "d3219a0dfbfc864b204de219420553861ae1ca2cb9162797697242f39d4dd63a"
+_RRG_B_PATH = Path(__file__).resolve().parents[1] / "src" / "arb" / "venues" / "kalshi" / "ledger_binding.py"
+_RRG_OPEN_FAILURE = ("status", 0xC0000022, 0, 1, True)  # ACCESS_DENIED with a returned handle
+
+
+def _rrg_join(parent: str, name: str) -> str:
+    return parent + name if parent.endswith("\\") else parent + "\\" + name
+
+
+def _rrg_code_only(source: str) -> str:
+    kept = []
+    for token in _tokenize.generate_tokens(_io.StringIO(source).readline):
+        if token.type in (_tokenize.STRING, _tokenize.COMMENT):
+            continue
+        kept.append(token.string)
+    return " ".join(kept).replace(" (", "(").replace(" .", ".").replace(". ", ".")
+
+
+def _rrg_section_source() -> str:
+    text = _RRG_B_PATH.read_text(encoding="utf-8")
+    section = text.split(_RRG_SECTION_HEADER, 1)[1]
+    return _RRG_SECTION_HEADER + section.split("\n\n\n__all__ = [", 1)[0]
+
+
+class _RecordingRootModel:
+    """TEST-ONLY recording model of B's fixed private native boundaries
+    (NtCreateFile, GetFileInformationByHandleEx, GetFinalPathNameByHandleW,
+    CloseHandle, GetLastError).  It decodes the actual owned call storage B
+    builds, keeps a synthetic directory tree and handle table, advances a
+    deterministic integer clock by ``step_ns`` per call and injects faults by
+    call ordinal.  It touches no filesystem, DLL or native API."""
+
+    ANCHOR = "\\??\\C:\\"
+
+    def __init__(self, components=("b1", "kals", "ARB_LOCAL"), root="F03_TESTS", *, reuse=False, step_ns=1_000):
+        self.base = 0x5A000000 + next(_RRG_HANDLE_BASES) * 0x1000
+        self.reuse = reuse
+        self.step_ns = step_ns
+        self.now = _RRG_T0 + 1
+        self.objects: dict = {}
+        self.handles: dict = {}
+        self.calls: list = []
+        self.opens: list = []
+        self.close_log: list = []
+        self.storages: list = []
+        self.violations: list = []
+        self.faults: dict = {}
+        self.expire_after: set = set()
+        self.last_error_mode = "value"
+        self.last_error_calls = 0
+        self._next = self.base
+        self.names = tuple(components) + (root,)
+        self.order = ["C:\\"]
+        self._add("C:\\", 1)
+        path = "C:\\"
+        for index, name in enumerate(self.names, start=2):
+            path = _rrg_join(path, name)
+            self._add(path, index)
+            self.order.append(path)
+
+    def _add(self, path: str, number: int) -> None:
+        self.objects[path] = {
+            "serial": _RRG_SERIAL, "id": bytes((number * 37 + k * 11) % 256 for k in range(16)),
+            "attributes": 0x10, "tag": 0, "dos": "\\\\?\\" + path,
+            "guid": "\\\\?\\Volume{" + _RRG_VOLUME_GUID + "}\\" + path[3:],
+        }
+
+    def identity(self, path: str):
+        obj = self.objects[path]
+        return _lb._F03RRGIdentityV1(
+            volume_serial_64=f"{obj['serial']:016x}", file_id_128=obj["id"].hex(), final_dos_path=obj["dos"],
+            final_guid_path=obj["guid"], attributes=obj["attributes"], reparse_tag=obj["tag"])
+
+    def enrollment(self):
+        edges = [_lb._F03RRGModelEdgeV1(self.ANCHOR, self.identity(self.order[0]))]
+        for name, path in zip(self.names, self.order[1:]):
+            edges.append(_lb._F03RRGModelEdgeV1(name, self.identity(path)))
+        return _lb._F03RRGModelEnrollmentV1(ancestors=tuple(edges[:-1]), root=edges[-1])
+
+    def clock(self) -> int:
+        return self.now
+
+    def _record(self, kind, *details):
+        ordinal = len(self.calls) + 1
+        self.calls.append((ordinal, kind) + details)
+        self.now += self.step_ns
+        return ordinal, self.faults.get(ordinal)
+
+    def _done(self, ordinal, result):
+        if ordinal in self.expire_after:
+            self.now = max(self.now, _RRG_TA)
+        return result
+
+    def _allocate(self) -> int:
+        if self.reuse:
+            raw = self.base + 4
+            while raw in self.handles:
+                raw += 4
+            return raw
+        self._next += 4
+        return self._next
+
+    def _observed(self, path, fault):
+        obj = dict(self.objects[path])
+        if fault == "reparse":
+            obj["attributes"] |= 0x400
+            obj["tag"] = 0xA0000003
+        elif fault == "tag":
+            obj["tag"] = 0x80000017
+        elif fault == "not_directory":
+            obj["attributes"] = 0x20
+        elif fault == "wrong_id":
+            obj["id"] = bytes(reversed(obj["id"]))
+        elif fault == "wrong_serial":
+            obj["serial"] ^= 1
+        elif fault == "wrong_dos":
+            obj["dos"] += "x"
+        elif fault == "case":
+            head, separator, last = obj["dos"].rpartition("\\")
+            obj["dos"] = head + separator + last[:1].swapcase() + last[1:]
+        elif fault == "wrong_guid":
+            obj["guid"] += "x"
+        elif fault == "wrong_volume_guid":
+            obj["guid"] = obj["guid"].replace(_RRG_VOLUME_GUID, "ffffffff-1111-2222-3333-444455556666")
+        elif fault == "overlong":
+            obj["dos"] = obj["dos"] + "\\" + "\u00e9" * 2100
+        return obj
+
+    # -- the five patched boundaries ----------------------------------------
+    def nt_create_file(self, storage, access, allocation, attributes, share, disposition, options, ea, ea_length):
+        length, maximum, buffer_ref = _struct.unpack_from("<HH4xQ", storage.unicode_string)
+        oa_length, root, name_ref, oa_attributes, descriptor, qos = _struct.unpack_from(
+            "<I4xQQI4xQQ", storage.object_attributes)
+        name = bytes(storage.name_buffer[:length]).decode("utf-16-le")
+        ordinal, fault = self._record("NtCreateFile", root, name)
+        self.opens.append({
+            "ordinal": ordinal, "root": root, "name": name,
+            "args": (access, allocation, attributes, share, disposition, options, ea, ea_length),
+            "length": length, "maximum": maximum, "buffer_ref": buffer_ref,
+            "oa": (oa_length, name_ref, oa_attributes, descriptor, qos), "buffer_len": len(storage.name_buffer),
+            "terminator": bytes(storage.name_buffer[length:]), "slot": bytes(storage.handle_slot),
+            "iosb": bytes(storage.io_status_block), "live": frozenset(self.handles),
+        })
+        self.storages.append(storage)
+        if fault == "exception":
+            raise OSError("synthetic open exception")
+        if isinstance(fault, tuple) and fault[0] == "raise" and fault[2] == "before":
+            raise fault[1]("synthetic open-boundary raise before output publication")
+        if fault == "malformed":
+            return self._done(ordinal, "malformed")
+        if root == 0:
+            path = "C:\\" if name == self.ANCHOR else None
+        else:
+            parent = self.handles.get(root)
+            path = None if parent is None else _rrg_join(parent, name)
+        if path is None or path not in self.objects or fault == "missing":
+            _struct.pack_into("<I4xQ", storage.io_status_block, 0, 0xC0000034, 0)
+            return self._done(ordinal, -0x3FFFFFCC)  # STATUS_OBJECT_NAME_NOT_FOUND as a signed NTSTATUS
+        status, iosb, information, raw = 0, 0, 1, None
+        if fault == "pending":
+            status = 0x103
+        elif fault == "iosb_pending":
+            iosb = 0x103
+        elif isinstance(fault, tuple) and fault[0] == "status":
+            status, iosb, information = fault[1:4]
+            if not fault[4]:
+                raw = 0
+        if fault == "null_handle":
+            raw = 0
+        elif fault == "invalid_handle":
+            raw = 0xFFFFFFFFFFFFFFFF
+        elif fault == "duplicate":
+            raw = next(iter(self.handles))
+        if raw is None:
+            raw = self._allocate()
+            self.handles[raw] = path
+        _struct.pack_into("<Q", storage.handle_slot, 0, raw)
+        if status != 0x103:
+            _struct.pack_into("<I4xQ", storage.io_status_block, 0, iosb, information)
+        if isinstance(fault, tuple) and fault[0] == "raise" and fault[2] == "after":
+            raise fault[1]("synthetic open-boundary raise after output publication")
+        return self._done(ordinal, status)
+
+    def get_info(self, handle, info_class, buffer, size):
+        ordinal, fault = self._record("GetFileInformationByHandleEx", handle, info_class, size, len(buffer),
+                                      handle in self.handles)
+        if fault == "exception":
+            raise OSError("synthetic query exception")
+        if isinstance(fault, tuple) and fault[0] == "raise":
+            raise fault[1]("synthetic query-boundary raise")
+        path = self.handles.get(handle)
+        if fault == "fail" or path is None:
+            return self._done(ordinal, 0)
+        obj = self._observed(path, fault)
+        if info_class == 18:
+            _struct.pack_into("<Q", buffer, 0, obj["serial"])
+            buffer[8:24] = obj["id"]
+        elif info_class == 9:
+            _struct.pack_into("<II", buffer, 0, obj["attributes"], obj["tag"])
+        else:
+            self.violations.append(("info_class", ordinal))
+            return self._done(ordinal, 0)
+        if fault == "resize":
+            buffer.append(0)
+        return self._done(ordinal, 1)
+
+    def get_final(self, handle, buffer, capacity, flags):
+        ordinal, fault = self._record("GetFinalPathNameByHandleW", handle, capacity, flags, len(buffer),
+                                      handle in self.handles)
+        if fault == "exception":
+            raise OSError("synthetic final-path exception")
+        if isinstance(fault, tuple) and fault[0] == "raise":
+            raise fault[1]("synthetic final-path-boundary raise")
+        path = self.handles.get(handle)
+        if fault == "zero" or path is None:
+            return self._done(ordinal, 0)
+        if fault == "truncated":
+            return self._done(ordinal, capacity)
+        if fault == "over":
+            return self._done(ordinal, capacity + 7)
+        obj = self._observed(path, fault)
+        encoded = (obj["dos"] if flags == 0 else obj["guid"]).encode("utf-16-le")
+        if fault == "lone_surrogate":
+            encoded += b"\x00\xd8"
+        buffer[: len(encoded)] = encoded
+        buffer[len(encoded): len(encoded) + 2] = b"\x01\x00" if fault == "unterminated" else b"\x00\x00"
+        if fault == "resize":
+            buffer.extend(b"\x00\x00")
+        return self._done(ordinal, len(encoded) // 2)
+
+    def close(self, handle):
+        ordinal, fault = self._record("CloseHandle", handle)
+        self.close_log.append(handle)
+        if fault == "exception":
+            raise OSError("synthetic close exception")
+        if isinstance(fault, tuple) and fault[0] == "raise":
+            if fault[2] == "after" and handle in self.handles:
+                del self.handles[handle]  # the close took effect, then the boundary was interrupted
+            raise fault[1]("synthetic close-boundary raise")
+        if fault == "fail":
+            return self._done(ordinal, 0)
+        if handle not in self.handles:
+            self.violations.append(("close_unknown", ordinal))
+            return self._done(ordinal, 0)
+        del self.handles[handle]
+        return self._done(ordinal, 1)
+
+    def last_error(self):
+        self.last_error_calls += 1
+        if self.last_error_mode == "exception":
+            raise OSError("synthetic last-error exception")
+        if self.last_error_mode == "bad":
+            return "not-an-integer"
+        if isinstance(self.last_error_mode, type):
+            raise self.last_error_mode("synthetic last-error-boundary raise")
+        return 0x57
+
+    @_contextlib.contextmanager
+    def installed(self):
+        with _contextlib.ExitStack() as stack:
+            for name, function in (
+                ("_f03_rrg_native_nt_create_file", self.nt_create_file),
+                ("_f03_rrg_native_get_file_information_by_handle_ex", self.get_info),
+                ("_f03_rrg_native_get_final_path_name_by_handle_w", self.get_final),
+                ("_f03_rrg_native_close_handle", self.close),
+                ("_f03_rrg_native_get_last_error", self.last_error),
+                ("_f03_rrg_observed_abi", lambda: ("nt", 8, True)),
+            ):
+                stack.enter_context(_mock.patch.object(_lb, name, function))
+            yield self
+
+    def ordinals(self, kind, **match):
+        selected = []
+        for call in self.calls:
+            if call[1] != kind:
+                continue
+            if "info_class" in match and call[3] != match["info_class"]:
+                continue
+            if "flags" in match and call[4] != match["flags"]:
+                continue
+            selected.append(call[0])
+        return selected
+
+
+class F03HeldRetainedRootGuardPrimitiveTests(unittest.TestCase):
+    """PS-014 M01..M07/M09 for the held retained-root guard primitive."""
+
+    # -- helpers -------------------------------------------------------------
+    _DEFAULT = object()
+
+    def _acquire(self, model, enrollment=_DEFAULT, **overrides):
+        kwargs = dict(process_instance_id=_RRG_PROC, t0_ns=_RRG_T0, ta_ns=_RRG_TA,
+                      monotonic_clock_ns=model.clock, budget=_RRG_BUDGET)
+        kwargs.update(overrides)
+        with model.installed():
+            return _lb._f03_rrg_acquire_model_chain_v1(
+                model.enrollment() if enrollment is self._DEFAULT else enrollment, **kwargs)
+
+    def _refused(self, model, enrollment=_DEFAULT, **overrides):
+        with self.assertRaises(_lb._F03RootGuardRefusal) as context:
+            self._acquire(model, enrollment, **overrides)
+        return context.exception
+
+    def _release(self, model, chain, pid=_RRG_PROC):
+        with model.installed():
+            return _lb._f03_rrg_release_model_chain_v1(chain, process_instance_id=pid)
+
+    def _revalidate(self, model, chain, pid=_RRG_PROC):
+        with model.installed():
+            return _lb._f03_rrg_revalidate_model_chain_v1(chain, process_instance_id=pid)
+
+    @staticmethod
+    def _attempt(chain):
+        return object.__getattribute__(chain, "_attempt")
+
+    def _nominal(self, **model_kwargs):
+        model = _RecordingRootModel(**model_kwargs)
+        chain = self._acquire(model)
+        acquisition = _RecordingRootModel(**model_kwargs)
+        acquisition.calls = list(model.calls)
+        self._release(model, chain)
+        return acquisition
+
+    def _assert_rollback(self, model, refusal, *, quarantined=False):
+        report = refusal.report
+        self.assertIsNotNone(report)
+        self.assertEqual(report.evidence_class, "MODEL_ONLY_OFFLINE")
+        self.assertEqual(report.primary, refusal.code)
+        self.assertEqual(model.violations, [])
+        self.assertEqual(report.close_attempts, report.close_successes + report.close_uncertain)
+        self.assertLessEqual(report.max_live, 66)
+        self.assertEqual(len(model.close_log), len(set(model.close_log)))  # close-once
+        self.assertIs(report.quarantined, quarantined)
+        if quarantined:
+            self.assertEqual(report.cleanup_outcome, "PENDING_QUARANTINED_NO_CLEAN_CLAIM")
+        elif report.close_uncertain == 0:
+            self.assertEqual(model.handles, {})
+            self.assertEqual(report.cleanup_outcome, "CLOSED_ALL_REGISTERED")
+        else:
+            self.assertEqual(report.cleanup_outcome, "CLOSE_UNCERTAIN")
+        # Rollback order: transient R first, then G deepest-first.
+        tail = []
+        for event in reversed(report.lifecycle):
+            if event[0] != "CLOSE":
+                break
+            tail.append(event)
+        tail.reverse()
+        roles = [event[2] for event in tail]
+        r_count = roles.count("R")
+        self.assertEqual(roles[:r_count], ["R"] * r_count)
+        g_generations = [event[1] for event in tail if event[2] != "R"]
+        self.assertEqual(g_generations, sorted(g_generations, reverse=True))
+        return report
+
+    # -- M01 names / ABI -----------------------------------------------------
+    def test_m01_component_names_boundaries_and_every_rejected_spelling(self) -> None:
+        valid = _lb._f03_rrg_valid_component
+        for name in ("a" * 128, "\U0001F600" * 64, "F03_TESTS", "a.b", "\u00e9t\u00e9", "x" * 127 + "y"):
+            self.assertTrue(valid(name), name[:12])
+        for name in (
+            "", ".", "..", "a/b", "a\\b", "a:", "x\x00", "x.", "x ", "a" * 129, "a" * 127 + "\U0001F600",
+            "\ud800", "\udc00", "a\ud800b", "\ud83d\ude00", "CON", "nul.txt", "com1", "LPT9", "CONIN$", "aux ",
+            "\\??\\C:", "\\\\server\\share", "C:", "\\\\.\\device", None, b"bytes", 5,
+        ):
+            self.assertFalse(valid(name), repr(name)[:24])
+
+    def test_m01_prevalidation_failure_makes_zero_model_opens(self) -> None:
+        base = _RecordingRootModel()
+        enrollment = base.enrollment()
+        bad_names = ("..", "a/b", "x.", "\ud800", "CON", "a" * 129)
+        for bad in bad_names:
+            model = _RecordingRootModel()
+            root = _lb._F03RRGModelEdgeV1(bad, enrollment.root.expected)
+            refusal = self._refused(model, _lb._F03RRGModelEnrollmentV1(ancestors=enrollment.ancestors, root=root))
+            self.assertIn(refusal.code, {"COMPONENT_NAME_REFUSED", "ENROLLMENT_LEXICAL_MISMATCH"})
+            self.assertIsNone(refusal.report)
+            self.assertEqual(model.calls, [])
+        for anchor_name in ("\\??\\c:\\", "\\??\\C:", "C:\\", "\\??\\D:\\", "\\\\?\\C:\\"):
+            model = _RecordingRootModel()
+            ancestors = (_lb._F03RRGModelEdgeV1(anchor_name, enrollment.ancestors[0].expected),) + enrollment.ancestors[1:]
+            refusal = self._refused(model, _lb._F03RRGModelEnrollmentV1(ancestors=ancestors, root=enrollment.root))
+            self.assertEqual(refusal.code, "ANCHOR_REFUSED")
+            self.assertEqual(model.calls, [])
+        for malformed in (None, {"ancestors": ()}, enrollment.root):
+            model = _RecordingRootModel()
+            self.assertEqual(self._refused(model, malformed).code, "ENROLLMENT_MALFORMED")
+            self.assertEqual(model.calls, [])
+        model = _RecordingRootModel()
+        self.assertEqual(self._refused(model, process_instance_id="").code, "PROCESS_INSTANCE_INVALID")
+        self.assertEqual(model.calls, [])
+
+    def test_m01_x64_abi_layout_and_pre_entry_rejection(self) -> None:
+        sizes = {name: (_struct.calcsize(layout), size) for name, layout, size, _ in _lb._F03_RRG_ABI_LAYOUTS}
+        self.assertEqual(sizes, {"UNICODE_STRING": (16, 16), "OBJECT_ATTRIBUTES": (48, 48), "IO_STATUS_BLOCK": (16, 16)})
+        offsets = {(name, field): _struct.calcsize(preceding)
+                   for name, _, _, fields_ in _lb._F03_RRG_ABI_LAYOUTS for field, preceding, _ in fields_}
+        self.assertEqual(offsets, {
+            ("UNICODE_STRING", "Length"): 0, ("UNICODE_STRING", "MaximumLength"): 2, ("UNICODE_STRING", "Buffer"): 8,
+            ("OBJECT_ATTRIBUTES", "Length"): 0, ("OBJECT_ATTRIBUTES", "RootDirectory"): 8,
+            ("OBJECT_ATTRIBUTES", "ObjectName"): 16, ("OBJECT_ATTRIBUTES", "Attributes"): 24,
+            ("OBJECT_ATTRIBUTES", "SecurityDescriptor"): 32, ("OBJECT_ATTRIBUTES", "SecurityQualityOfService"): 40,
+            ("IO_STATUS_BLOCK", "Status"): 0, ("IO_STATUS_BLOCK", "Information"): 8,
+        })
+        for observed in (("posix", 8, True), ("nt", 4, False), ("nt", 8, False), ("nt", 4, True)):
+            model = _RecordingRootModel()
+            with model.installed(), _mock.patch.object(_lb, "_f03_rrg_observed_abi", lambda value=observed: value):
+                with self.assertRaises(_lb._F03RootGuardRefusal) as context:
+                    _lb._f03_rrg_acquire_model_chain_v1(
+                        model.enrollment(), process_instance_id=_RRG_PROC, t0_ns=_RRG_T0, ta_ns=_RRG_TA,
+                        monotonic_clock_ns=model.clock, budget=_RRG_BUDGET)
+            self.assertEqual(context.exception.code, "ABI_UNSUPPORTED")
+            self.assertEqual(model.calls, [])
+        broken = (("UNICODE_STRING", "<HH4xQ", 16, (("Buffer", "<HH", 8),)),)
+        model = _RecordingRootModel()
+        with _mock.patch.object(_lb, "_F03_RRG_ABI_LAYOUTS", broken):
+            self.assertEqual(self._refused(model).code, "ABI_LAYOUT_REFUSED")
+        self.assertEqual(model.calls, [])
+
+    def test_m01_owned_terminated_storage_and_ushort_bounds(self) -> None:
+        storage = _lb._F03RRGCallStorageV1("b1", 0x5A5A0004)
+        self.assertEqual(_struct.unpack("<HH4xQ", bytes(storage.unicode_string)), (4, 6, 0x1))
+        self.assertEqual(bytes(storage.name_buffer), b"b\x001\x00\x00\x00")
+        self.assertEqual(_struct.unpack("<I4xQQI4xQQ", bytes(storage.object_attributes)), (48, 0x5A5A0004, 0x2, 0, 0, 0))
+        self.assertEqual(bytes(storage.io_status_block), bytes(16))
+        self.assertEqual(bytes(storage.handle_slot), bytes(8))
+        _lb._F03RRGCallStorageV1("a" * 32766, 0)  # Length 65532, MaximumLength 65534
+        for name, code in (("a" * 32767, "UNICODE_STRING_BOUNDS_REFUSED"), ("", "UNICODE_STRING_BOUNDS_REFUSED"),
+                           ("\ud800", "NAME_ENCODING_REFUSED")):
+            with self.assertRaises(_lb._F03RootGuardRefusal) as context:
+                _lb._F03RRGCallStorageV1(name, 0)
+            self.assertEqual(context.exception.code, code)
+
+    def test_m01_exact_g_and_r_argument_tuples_and_owned_call_storage(self) -> None:
+        model = _RecordingRootModel()
+        chain = self._acquire(model)
+        attempt = self._attempt(chain)
+        g_args = (0x001000A1, None, 0, 3, 1, 0x21, None, 0)
+        r_args = (0x001000A1, None, 0, 7, 1, 0x00200020, None, 0)
+        roles = [entry.role for entry in attempt.entries]
+        self.assertEqual(len(model.opens), len(roles))
+        self.assertEqual(model.opens[0]["root"], 0)
+        self.assertEqual(model.opens[0]["name"], "\\??\\C:\\")
+        for record, entry in zip(model.opens, attempt.entries):
+            self.assertEqual(record["args"], r_args if entry.role == "R" else g_args)
+            self.assertNotIn(record["args"][5], (0x00200021,))
+            self.assertEqual(record["maximum"], record["length"] + 2)
+            self.assertEqual(record["buffer_len"], record["maximum"])
+            self.assertEqual(record["terminator"], b"\x00\x00")
+            self.assertEqual(record["buffer_ref"], 0x1)
+            self.assertEqual(record["oa"], (48, 0x2, 0, 0, 0))
+            self.assertEqual(record["slot"], bytes(8))
+            self.assertEqual(record["iosb"], bytes(16))
+            if entry.role != "G_ANCHOR":
+                self.assertIn(record["root"], record["live"])  # exact registered live parent
+        for storage in model.storages:
+            self.assertEqual(storage.state, "RELEASED")
+        self._release(model, chain)
+
+    # -- M02 status / pending -------------------------------------------------
+    def test_m02_only_exact_zero_zero_one_success_is_accepted(self) -> None:
+        nominal = self._nominal()
+        open_points = nominal.ordinals("NtCreateFile")
+        cases = (
+            (("status", 0xC0000022, 0xC0000022, 0, False), "OPEN_REFUSED", False),
+            (("status", 0xC0000022, 0, 1, True), "OPEN_REFUSED", True),
+            (("status", -0x3FFFFFDE, 0, 1, True), "OPEN_REFUSED", True),  # signed NTSTATUS form
+            (("status", 0x40000000, 0, 1, True), "OPEN_REFUSED", True),  # informational
+            (("status", 0x80000005, 0, 1, True), "OPEN_REFUSED", True),  # warning
+            (("status", 0x00000001, 0, 1, True), "OPEN_REFUSED", True),  # nonnegative is not enough
+            (("status", 0, 0, 2, True), "OPEN_REFUSED", True),  # FILE_CREATED
+            (("status", 0, 0, 0, True), "OPEN_REFUSED", True),
+            (("status", 0, 0, 3, True), "OPEN_REFUSED", True),
+            (("status", 0, 0xC0000001, 1, True), "OPEN_REFUSED", True),
+            ("null_handle", "OPEN_REFUSED", False),
+            ("invalid_handle", "OPEN_REFUSED", False),
+            ("missing", "OPEN_OBJECT_MISSING", False),
+        )
+        for ordinal in (open_points[0], open_points[1], open_points[2], open_points[-1]):
+            for fault, code, registered in cases:
+                with self.subTest(ordinal=ordinal, fault=fault):
+                    model = _RecordingRootModel()
+                    model.faults[ordinal] = fault
+                    refusal = self._refused(model)
+                    self.assertEqual(refusal.code, code)
+                    report = self._assert_rollback(model, refusal)
+                    self.assertEqual(report.raw_statuses[-1][0], "OPEN")
+                    self.assertTrue(all(0 <= value <= 0xFFFFFFFF for value in report.raw_statuses[-1][1:3]))
+                    failed_raw = _struct.unpack("<Q", bytes(model.storages[-1].handle_slot))[0]
+                    closes = model.close_log.count(failed_raw)
+                    self.assertEqual(closes, 1 if registered else 0)
+                    self.assertTrue(all(call[1] == "CloseHandle" for call in model.calls[ordinal:]))
+
+    def test_m02_pending_quarantines_storage_and_ownership_without_clean_claim(self) -> None:
+        nominal = self._nominal()
+        for ordinal in nominal.ordinals("NtCreateFile")[:3] + nominal.ordinals("NtCreateFile")[-1:]:
+            for fault, code in (("pending", "OPEN_PENDING_QUARANTINED"), ("iosb_pending", "OPEN_PENDING_QUARANTINED"),
+                                ("exception", "OPEN_EXCEPTION_COMPLETION_UNKNOWN"),
+                                ("malformed", "OPEN_STATUS_MALFORMED")):
+                with self.subTest(ordinal=ordinal, fault=fault):
+                    model = _RecordingRootModel()
+                    model.faults[ordinal] = fault
+                    refusal = self._refused(model)
+                    self.assertEqual(refusal.code, code)
+                    report = self._assert_rollback(model, refusal, quarantined=True)
+                    self.assertEqual(model.calls[-1][0], ordinal)  # no wait/resume/retry/close afterwards
+                    storage = model.storages[-1]
+                    self.assertEqual(storage.state, "QUARANTINED")
+                    self.assertTrue(any(kept is storage for kept, _ in _lb._F03_RRG_PENDING_QUARANTINE))
+                    attempt = next(owner for kept, owner in _lb._F03_RRG_PENDING_QUARANTINE if kept is storage)
+                    for entry in attempt.entries:
+                        if entry.state in ("ACQUIRED_UNVALIDATED", "VALIDATED"):
+                            self.assertTrue(entry.quarantined)
+                            self.assertIs(_lb._F03_RRG_LIVE_HANDLES.get(entry.raw), entry)  # never freed
+                    self.assertNotIn(report.cleanup_outcome, {"CLOSED_ALL_REGISTERED"})
+
+    def test_m02_duplicate_live_handle_never_creates_a_second_owner(self) -> None:
+        nominal = self._nominal()
+        for ordinal in nominal.ordinals("NtCreateFile")[1:]:
+            with self.subTest(ordinal=ordinal):
+                model = _RecordingRootModel()
+                model.faults[ordinal] = "duplicate"
+                refusal = self._refused(model)
+                self.assertEqual(refusal.code, "DUPLICATE_LIVE_HANDLE")
+                report = self._assert_rollback(model, refusal)
+                self.assertEqual(report.registrations, len({entry for entry in model.close_log}))
+
+    # -- M03 queries ----------------------------------------------------------
+    def test_m03_exact_same_handle_query_classes_buffers_flags_and_native_order(self) -> None:
+        model = _RecordingRootModel()
+        chain = self._acquire(model)
+        attempt = self._attempt(chain)
+        queries = [call for call in model.calls if call[1] != "NtCreateFile" and call[1] != "CloseHandle"]
+        self.assertEqual(len(queries) % 4, 0)
+        for index in range(0, len(queries), 4):
+            group = queries[index:index + 4]
+            self.assertEqual([call[1] for call in group], [
+                "GetFileInformationByHandleEx", "GetFileInformationByHandleEx",
+                "GetFinalPathNameByHandleW", "GetFinalPathNameByHandleW"])
+            self.assertEqual(group[0][3:6], (18, 24, 24))
+            self.assertEqual(group[1][3:6], (9, 8, 8))
+            self.assertEqual(group[2][3:6], (32768, 0, 65536))
+            self.assertEqual(group[3][3:6], (32768, 1, 65536))
+            self.assertEqual(len({call[2] for call in group}), 1)  # one registered handle
+            self.assertTrue(all(call[-1] is True for call in group))  # live at every query
+        for entry, path in zip(attempt.chain, model.order):
+            self.assertEqual(entry.identity, model.identity(path))
+            self.assertEqual(entry.identity.file_id_128, model.objects[path]["id"].hex())  # native byte order
+            self.assertEqual(entry.identity.volume_serial_64, "0123456789abcdef")
+        self._release(model, chain)
+        reordered = _RecordingRootModel()
+        enrollment = reordered.enrollment()
+        root = enrollment.root.expected
+        swapped = _lb._F03RRGModelEdgeV1(enrollment.root.name, _lb._F03RRGIdentityV1(
+            volume_serial_64=root.volume_serial_64, file_id_128=bytes(reversed(bytes.fromhex(root.file_id_128))).hex(),
+            final_dos_path=root.final_dos_path, final_guid_path=root.final_guid_path, attributes=0x10, reparse_tag=0))
+        refusal = self._refused(reordered, _lb._F03RRGModelEnrollmentV1(ancestors=enrollment.ancestors, root=swapped))
+        self.assertEqual(refusal.code, "IDENTITY_MISMATCH")
+        self._assert_rollback(reordered, refusal)
+
+    def test_m03_every_query_refusal_is_terminal_without_retry_or_resize(self) -> None:
+        nominal = self._nominal()
+        file_id = nominal.ordinals("GetFileInformationByHandleEx", info_class=18)
+        attribute = nominal.ordinals("GetFileInformationByHandleEx", info_class=9)
+        dos = nominal.ordinals("GetFinalPathNameByHandleW", flags=0)
+        guid = nominal.ordinals("GetFinalPathNameByHandleW", flags=1)
+        # Index 1 = the first transient R query (edge 1); index 2 = its G; index -1 = final revalidation.
+        cases = (
+            (attribute, "not_directory", "NOT_DIRECTORY"), (attribute, "reparse", "REPARSE_REFUSED"),
+            (attribute, "tag", "REPARSE_REFUSED"), (file_id, "wrong_id", "IDENTITY_MISMATCH"),
+            (file_id, "wrong_serial", "VOLUME_CHANGED"), (dos, "wrong_dos", "IDENTITY_MISMATCH"),
+            (dos, "case", "IDENTITY_MISMATCH"), (guid, "wrong_guid", "IDENTITY_MISMATCH"),
+            (guid, "wrong_volume_guid", "VOLUME_CHANGED"), (dos, "overlong", "FINAL_PATH_MALFORMED"),
+            (dos, "zero", "FINAL_PATH_FAILED"), (guid, "truncated", "FINAL_PATH_TRUNCATED"),
+            (dos, "over", "FINAL_PATH_TRUNCATED"), (guid, "unterminated", "FINAL_PATH_MALFORMED"),
+            (dos, "lone_surrogate", "FINAL_PATH_MALFORMED"), (dos, "resize", "FINAL_PATH_MALFORMED"),
+            (file_id, "fail", "QUERY_FAILED"), (attribute, "exception", "QUERY_EXCEPTION"),
+            (guid, "exception", "QUERY_EXCEPTION"), (file_id, "resize", "QUERY_BUFFER_INVALID"),
+        )
+        for points, fault, code in cases:
+            for ordinal in (points[1], points[2], points[-1]):
+                with self.subTest(fault=fault, ordinal=ordinal):
+                    model = _RecordingRootModel()
+                    model.faults[ordinal] = fault
+                    refusal = self._refused(model)
+                    self.assertEqual(refusal.code, code)
+                    report = self._assert_rollback(model, refusal)
+                    self.assertTrue(all(call[1] == "CloseHandle" for call in model.calls[ordinal:]))
+                    if fault in {"zero", "fail"}:
+                        self.assertEqual(report.last_errors[-1][1], 0x57)  # captured immediately
+                    if fault == "exception":
+                        self.assertEqual(report.last_errors[-1][1], "UNAVAILABLE")
+        for mode in ("exception", "bad"):
+            model = _RecordingRootModel()
+            model.last_error_mode = mode
+            model.faults[file_id[1]] = "fail"
+            refusal = self._refused(model)
+            self.assertEqual(refusal.report.last_errors[-1], ("FileIdInfo", "UNAVAILABLE"))
+
+    # -- M04 descent / capacity -----------------------------------------------
+    def test_m04_one_ancestor_retained_descent_and_handoff_order(self) -> None:
+        model = _RecordingRootModel(components=())
+        chain = self._acquire(model)
+        attempt = self._attempt(chain)
+        self.assertEqual([entry.role for entry in attempt.chain], ["G_ANCHOR", "G"])
+        events = [(event[0], event[2]) for event in chain.report().lifecycle]
+        self.assertEqual(events, [
+            ("OPEN", "G_ANCHOR"), ("REGISTERED", "G_ANCHOR"), ("QUERIED", "G_ANCHOR"),
+            ("OPEN", "R"), ("REGISTERED", "R"), ("QUERIED", "R"),
+            ("OPEN", "G"), ("REGISTERED", "G"), ("QUERIED", "G"),
+            ("QUERIED", "G_ANCHOR"), ("QUERIED", "G"), ("CLOSE", "R"),
+            ("QUERIED", "G_ANCHOR"), ("QUERIED", "G"),
+        ])
+        report = self._release(model, chain)
+        self.assertEqual([event[2] for event in report.lifecycle[-2:]], ["G", "G_ANCHOR"])
+        self.assertEqual(model.handles, {})
+        self.assertEqual((report.close_attempts, report.close_successes, report.close_uncertain), (3, 3, 0))
+
+    def test_m04_sixty_four_ancestors_exact_65_persistent_66_native_bound(self) -> None:
+        components = tuple(f"d{index:02d}" for index in range(63))
+        model = _RecordingRootModel(components=components)
+        chain = self._acquire(model)
+        attempt = self._attempt(chain)
+        self.assertEqual(len(attempt.chain), 65)
+        self.assertEqual(chain.report().max_live, 66)
+        self.assertTrue(all(entry.state == "CLOSED" for entry in attempt.entries if entry.role == "R"))
+        chain_raws = [entry.raw for entry in attempt.chain]
+        # Every relative open happens while EVERY previously accepted G is live.
+        accepted = 1
+        for record in model.opens[1:]:
+            self.assertTrue(set(chain_raws[:accepted]) <= record["live"])
+            self.assertEqual(record["root"], chain_raws[accepted - 1])
+            if record["args"][3] == 3:
+                accepted += 1
+        report = self._release(model, chain)
+        g_closes = [event[1] for event in report.lifecycle if event[0] == "CLOSE" and event[2] != "R"]
+        self.assertEqual(g_closes, sorted(g_closes, reverse=True))
+        self.assertEqual(model.handles, {})
+        too_many = _RecordingRootModel(components=tuple(f"d{index:02d}" for index in range(64)))
+        self.assertEqual(self._refused(too_many).code, "ANCESTOR_COUNT_REFUSED")  # 65 ancestors: no truncation
+        self.assertEqual(too_many.calls, [])
+        empty = _RecordingRootModel()
+        self.assertEqual(self._refused(empty, _lb._F03RRGModelEnrollmentV1(
+            ancestors=(), root=empty.enrollment().root)).code, "ANCESTOR_COUNT_REFUSED")
+        self.assertEqual(empty.calls, [])
+        self.assertEqual((_lb._F03_RRG_MAX_ANCESTORS, _lb._F03_RRG_MAX_PERSISTENT_G, _lb._F03_RRG_MAX_B_HANDLES),
+                         (64, 65, 66))
+        self.assertEqual(set(_lb._F03_RRG_ROLE_PROFILES), {"G_ANCHOR", "G", "R"})  # no D/W role implemented
+
+    def test_m04_capacity_reserved_before_open_and_duplicate_objects_refused(self) -> None:
+        # Anchor G, edge-1 R and G, then edge-2 R: the next open would exceed the patched bound.
+        for limit_name, limit, expected_opens in (("_F03_RRG_MAX_B_HANDLES", 3, 4), ("_F03_RRG_MAX_PERSISTENT_G", 2, 4)):
+            model = _RecordingRootModel()
+            with _mock.patch.object(_lb, limit_name, limit):
+                refusal = self._refused(model)
+            self.assertEqual(refusal.code, "HANDLE_CAPACITY_REFUSED")
+            self.assertEqual(len(model.opens), expected_opens)  # refused BEFORE the over-limit open
+            self._assert_rollback(model, refusal)
+        model = _RecordingRootModel()
+        enrollment = model.enrollment()
+        clone = _lb._F03RRGModelEdgeV1(enrollment.root.name, _lb._F03RRGIdentityV1(
+            volume_serial_64=enrollment.root.expected.volume_serial_64,
+            file_id_128=enrollment.ancestors[1].expected.file_id_128,
+            final_dos_path=enrollment.root.expected.final_dos_path,
+            final_guid_path=enrollment.root.expected.final_guid_path, attributes=0x10, reparse_tag=0))
+        refusal = self._refused(model, _lb._F03RRGModelEnrollmentV1(ancestors=enrollment.ancestors, root=clone))
+        self.assertEqual(refusal.code, "ENROLLMENT_DUPLICATE_OBJECT")
+        self.assertEqual(model.calls, [])
+
+    # -- M05 ownership ----------------------------------------------------------
+    def test_m05_failure_at_every_recorded_boundary_rolls_back_once(self) -> None:
+        nominal = self._nominal()
+        modes = {
+            "NtCreateFile": ((_RRG_OPEN_FAILURE, "OPEN_REFUSED"), ("exception", "OPEN_EXCEPTION_COMPLETION_UNKNOWN")),
+            "GetFileInformationByHandleEx": (("fail", "QUERY_FAILED"), ("exception", "QUERY_EXCEPTION")),
+            "GetFinalPathNameByHandleW": (("zero", "FINAL_PATH_FAILED"), ("exception", "QUERY_EXCEPTION")),
+            "CloseHandle": (("fail", "CLOSE_FAILED"), ("exception", "CLOSE_EXCEPTION")),
+        }
+        self.assertEqual(len(nominal.calls), 101)
+        for ordinal, kind, *_ in nominal.calls:
+            for fault, code in modes[kind]:
+                with self.subTest(ordinal=ordinal, fault=fault):
+                    model = _RecordingRootModel()
+                    model.faults[ordinal] = fault
+                    refusal = self._refused(model)
+                    self.assertEqual(refusal.code, code)
+                    quarantined = kind == "NtCreateFile" and fault == "exception"
+                    report = self._assert_rollback(model, refusal, quarantined=quarantined)
+                    if kind == "CloseHandle":
+                        failed = model.calls[ordinal - 1][2]
+                        self.assertEqual(model.close_log.count(failed), 1)  # never retried
+                        self.assertIn(failed, model.handles)
+                        self.assertEqual(report.close_uncertain, 1)
+                    generations = [event[1] for event in report.lifecycle if event[0] == "REGISTERED"]
+                    self.assertEqual(len(generations), len(set(generations)))
+
+    def test_m05_primary_and_ordered_secondary_cleanup_failures_are_distinct(self) -> None:
+        nominal = self._nominal()
+        last_query = nominal.ordinals("GetFileInformationByHandleEx", info_class=18)[-1]
+        probe = _RecordingRootModel()
+        probe.faults[last_query] = "fail"
+        self._refused(probe)
+        rollback_closes = probe.ordinals("CloseHandle")[-5:]
+        self.assertEqual(len(rollback_closes), 5)
+        for position, close_ordinal in enumerate(rollback_closes):
+            with self.subTest(close=close_ordinal):
+                model = _RecordingRootModel()
+                model.faults[last_query] = "fail"
+                model.faults[close_ordinal] = "fail" if position % 2 else "exception"
+                refusal = self._refused(model)
+                self.assertEqual(refusal.code, "QUERY_FAILED")
+                report = self._assert_rollback(model, refusal)
+                self.assertEqual(report.secondary, ("CLOSE_EXCEPTION" if position % 2 == 0 else "CLOSE_FAILED",))
+                # Four earlier transient R closes plus five rollback G closes: every other owned G
+                # is still closed exactly once and the ambiguous one is not retried.
+                self.assertEqual(report.close_attempts, 9)
+                self.assertEqual((report.close_successes, report.close_uncertain), (8, 1))
+
+    def test_m05_release_close_failures_and_integer_reuse_generations(self) -> None:
+        probe = _RecordingRootModel()
+        self._release(probe, self._acquire(probe))
+        release_closes = probe.ordinals("CloseHandle")[-5:]
+        for close_ordinal in release_closes:
+            with self.subTest(close=close_ordinal):
+                model = _RecordingRootModel()
+                model.faults[close_ordinal] = "fail"
+                chain = self._acquire(model)
+                with self.assertRaises(_lb._F03RootGuardRefusal) as context:
+                    self._release(model, chain)
+                report = context.exception.report
+                self.assertEqual(context.exception.code, "RELEASE_CLOSE_UNCERTAIN")
+                self.assertEqual((report.close_uncertain, report.cleanup_outcome), (1, "CLOSE_UNCERTAIN"))
+                self.assertEqual(len(model.close_log), len(set(model.close_log)))
+                self.assertEqual(len(model.handles), 1)
+                calls = len(model.calls)
+                with self.assertRaises(_lb._F03RootGuardRefusal) as again:
+                    self._release(model, chain)
+                self.assertEqual(again.exception.code, "CHAIN_CLOSED")
+                self.assertEqual(len(model.calls), calls)
+        model = _RecordingRootModel(reuse=True)
+        first = self._acquire(model)
+        first_entries = list(self._attempt(first).entries)
+        raws = [entry.raw for entry in first_entries]
+        generations = [entry.generation for entry in first_entries]
+        self.assertLess(len(set(raws)), len(raws))  # closed R integers were reused by the model
+        self.assertEqual(len(set(generations)), len(generations))
+        self.assertEqual(generations, sorted(generations))
+        self._release(model, first)
+        second = self._acquire(model)
+        second_entries = list(self._attempt(second).entries)
+        self.assertGreater(min(entry.generation for entry in second_entries), max(generations))
+        stale = first_entries[0]
+        self.assertIs(_lb._F03_RRG_LIVE_HANDLES.get(stale.raw), second_entries[0])
+        with self.assertRaises(_lb._F03RootGuardRefusal) as context:
+            _lb._f03_rrg_require_live(self._attempt(first), stale)  # a reused integer never revives it
+        self.assertEqual(context.exception.code, "HANDLE_NOT_LIVE")
+        self._release(model, second)
+
+    # -- M06 isolation / holds ----------------------------------------------
+    def test_m06_production_entry_refuses_first_for_every_input_and_platform(self) -> None:
+        touched: list = []
+
+        def trap(*_args, **_kwargs):
+            touched.append(1)
+            raise AssertionError("held production entry touched a prohibited surface")
+
+        model = _RecordingRootModel()
+        surfaces = [
+            (_lb, "_f03_rrg_native_nt_create_file"), (_lb, "_f03_rrg_native_get_file_information_by_handle_ex"),
+            (_lb, "_f03_rrg_native_get_final_path_name_by_handle_w"), (_lb, "_f03_rrg_native_close_handle"),
+            (_lb, "_f03_rrg_native_get_last_error"), (_lb, "_f03_rrg_acquire_model_chain_v1"),
+            (_lb, "_f03_rrg_require_supported_abi"), (_lb, "_f03_rrg_observed_abi"),
+            (_lb, "_f03_rrg_validate_enrollment"), (_lb, "_F03RRGCallStorageV1"), (_lb, "_f03_rrg_register"),
+            (_builtins, "open"), (_os, "stat"), (_os, "lstat"), (_os, "listdir"), (_os, "scandir"), (_os, "mkdir"),
+            (_os, "getpid"), (Path, "resolve"), (_socket, "socket"), (_socket, "getaddrinfo"),
+        ]
+        inputs = (
+            ((), {}),
+            ((model.enrollment(),), dict(process_instance_id=_RRG_PROC, t0_ns=_RRG_T0, ta_ns=_RRG_TA,
+                                         monotonic_clock_ns=model.clock, budget=_RRG_BUDGET)),
+            (("\\??\\C:\\",), {"root": "C:\\b1\\kals\\ARB_LOCAL\\F03_TESTS"}),
+            ((None, 5, b"x"), {"native": True, "adapter": trap, "fault_hook": trap, "accepted": True}),
+            ((), {"enrollment_ref": {"logical_id": "x", "bytes": 1, "sha256": "0" * 64}, "lease": object()}),
+        )
+        quarantine_before = len(_lb._F03_RRG_PENDING_QUARANTINE)
+        registry_before = dict(_lb._F03_RRG_LIVE_HANDLES)
+        receipts_before = dict(_lb._live_receipt_registry)
+        for os_name in ("nt", "posix", "java"):
+            with _contextlib.ExitStack() as stack:
+                stack.enter_context(_mock.patch.object(_lb.os, "name", os_name))
+                for owner, name in surfaces:
+                    stack.enter_context(_mock.patch.object(owner, name, trap))
+                for args, kwargs in inputs:
+                    try:
+                        _lb._acquire_f03_retained_root_guard_v1(*args, **kwargs)
+                    except _lb._F03RootGuardRefusal as refusal:
+                        outcome = (refusal.code, refusal.report)
+                    else:
+                        outcome = ("RETURNED", None)
+                    self.assertEqual(outcome, ("F03_N1_ROOT_UNAVAILABLE", None))
+        self.assertEqual(touched, [])
+        self.assertEqual(model.calls, [])
+        self.assertEqual(len(_lb._F03_RRG_PENDING_QUARANTINE), quarantine_before)
+        self.assertEqual(dict(_lb._F03_RRG_LIVE_HANDLES), registry_before)
+        self.assertEqual(dict(_lb._live_receipt_registry), receipts_before)
+        entry_code = _rrg_code_only(_inspect.getsource(_lb._acquire_f03_retained_root_guard_v1))
+        for banned in ("_f03_rrg_", "native", "os.", "open(", "clock", "struct", "_attempt", "Chain", "return"):
+            self.assertNotIn(banned, entry_code, banned)
+
+    def test_m06_held_native_operations_refuse_before_entry_and_b_loads_no_library(self) -> None:
+        held = (
+            (_lb._f03_rrg_native_nt_create_file, (None,) * 9), (_lb._f03_rrg_native_close_handle, (1,)),
+            (_lb._f03_rrg_native_get_file_information_by_handle_ex, (1, 18, bytearray(24), 24)),
+            (_lb._f03_rrg_native_get_final_path_name_by_handle_w, (1, bytearray(4), 2, 0)),
+            (_lb._f03_rrg_native_get_last_error, ()),
+        )
+        for function, args in held:
+            with self.assertRaises(_lb._F03RRGNativeUnavailable):
+                function(*args)
+        # Unpatched mechanics refuse at the first boundary: nothing entered, nothing registered or quarantined.
+        model = _RecordingRootModel()
+        quarantine_before = len(_lb._F03_RRG_PENDING_QUARANTINE)
+        with _mock.patch.object(_lb, "_f03_rrg_observed_abi", lambda: ("nt", 8, True)):
+            with self.assertRaises(_lb._F03RootGuardRefusal) as context:
+                _lb._f03_rrg_acquire_model_chain_v1(
+                    model.enrollment(), process_instance_id=_RRG_PROC, t0_ns=_RRG_T0, ta_ns=_RRG_TA,
+                    monotonic_clock_ns=model.clock, budget=_RRG_BUDGET)
+        report = context.exception.report
+        self.assertEqual(context.exception.code, "NATIVE_BINDING_UNAVAILABLE")
+        self.assertEqual((report.open_calls, report.registrations, report.quarantined), (0, 0, False))
+        self.assertEqual(len(_lb._F03_RRG_PENDING_QUARANTINE), quarantine_before)
+        code = _rrg_code_only(_rrg_section_source())
+        for banned in ("ctypes", "WinDLL", "windll", "cdll", "CDLL", "LoadLibrary", "dlopen", "__import__",
+                       "importlib", "subprocess", "socket", "environ", "getenv", "sqlite", "Decimal", "float(",
+                       "CreateFileW", "FlushFileBuffers", "_append_authorization_consumption",
+                       "_acquire_consumption_state", "_AUTHORIZATION_RECEIPT_ISSUER_KEY"):
+            self.assertNotIn(banned, code, banned)
+        self.assertIsNone(_re.search(r"(?<![\w.])open\(", code))
+        whole = _rrg_code_only(_RRG_B_PATH.read_text(encoding="utf-8"))
+        self.assertNotIn("ctypes", whole)
+        import ctypes as _ctypes_module
+        import _ctypes as _ctypes_native
+        loads: list = []
+
+        def load_trap(*_args, **_kwargs):
+            loads.append(1)
+            raise AssertionError("B import attempted a native library load")
+
+        name = "_arb_tb_rrg_isolated_ledger_binding_copy"
+        with _contextlib.ExitStack() as stack:
+            stack.enter_context(_mock.patch.object(_ctypes_module.CDLL, "__init__", load_trap))
+            for loader in ("LoadLibrary", "dlopen"):
+                if hasattr(_ctypes_native, loader):
+                    stack.enter_context(_mock.patch.object(_ctypes_native, loader, load_trap))
+            spec = _importlib_util.spec_from_file_location(name, _RRG_B_PATH)
+            copy_module = _importlib_util.module_from_spec(spec)
+            sys.modules[name] = copy_module
+            try:
+                spec.loader.exec_module(copy_module)
+            finally:
+                sys.modules.pop(name, None)
+        self.assertEqual(loads, [])
+        with self.assertRaises(copy_module._F03RootGuardRefusal):
+            copy_module._acquire_f03_retained_root_guard_v1()
+
+    def test_m06_no_if_publication_wiring_or_export(self) -> None:
+        for absent in ("_F03PhysicalProjectionV1", "_F03RootLeaseV1", "_F03CustodyLeaseV1", "_F03N1AdmissionMaterialV1",
+                       "_mint_f03_n1_admission_material_v1", "_consume_active_execution_authorization_set_f03_n1_v1",
+                       "_validate_f03_n1_material_locked_v1", "_F03_MATERIAL_ISSUER_KEY"):
+            self.assertFalse(hasattr(_lb, absent), absent)
+        for name in _lb.__all__:
+            self.assertFalse(name.startswith("_"), name)
+            self.assertNotIn("rrg", name.lower())
+            self.assertNotIn("root_guard", name.lower())
+            self.assertNotIn("RetainedRoot", name)
+        repository = Path(__file__).resolve().parents[1]
+        for relative in ("src/arb/venues/kalshi/minimal_market_maker_experiment_runner.py",
+                         "src/arb/venues/kalshi/f03_fee_semantics_runner.py", "src/arb/execution_ledger.py"):
+            source = (repository / relative).read_text(encoding="utf-8")
+            for symbol in ("_f03_rrg", "_F03RRG", "_F03_RRG", "_acquire_f03_retained_root_guard",
+                           "_F03RootGuardRefusal", "_F03RetainedRootModelChainV1"):
+                self.assertNotIn(symbol, source, (relative, symbol))
+        b_code = _rrg_code_only(_RRG_B_PATH.read_text(encoding="utf-8"))
+        for definition in ("_f03_rrg_acquire_model_chain_v1(", "_f03_rrg_revalidate_model_chain_v1(",
+                           "_f03_rrg_release_model_chain_v1(", "_acquire_f03_retained_root_guard_v1("):
+            self.assertEqual(b_code.count(definition), 1, definition)  # definition only: no caller wiring
+        model = _RecordingRootModel()
+        receipts_before = dict(_lb._live_receipt_registry)
+        chain = self._acquire(model)
+        self.assertIs(type(chain), _lb._F03RetainedRootModelChainV1)
+        self.assertEqual(chain.evidence_class, "MODEL_ONLY_OFFLINE")
+        self.assertEqual(dict(_lb._live_receipt_registry), receipts_before)
+        with self.assertRaises(TypeError):
+            _lb._F03RetainedRootModelChainV1(object(), self._attempt(chain))
+        with self.assertRaises(AttributeError):
+            chain._attempt = None
+        self._release(model, chain)
+
+    def test_m06_process_copy_pickle_closed_and_identity_mismatches_refuse(self) -> None:
+        model = _RecordingRootModel()
+        chain = self._acquire(model)
+        attempt = self._attempt(chain)
+        for value in (chain, attempt, attempt.entries[0], model.storages[0]):
+            for operation in (copy.copy, copy.deepcopy, pickle.dumps):
+                with self.assertRaises(TypeError):
+                    operation(value)
+        calls = len(model.calls)
+        with self.assertRaises(_lb._F03RootGuardRefusal) as context:
+            self._release(model, chain, pid="proc_" + "8" * 32)
+        self.assertEqual(context.exception.code, "PROCESS_MISMATCH")
+        self.assertEqual(len(model.calls), calls)  # no side effect; the owner can still release
+        self._revalidate(model, chain)  # still live and unchanged
+        with _mock.patch.object(_lb.os, "getpid", lambda: attempt.os_process_id + 1):
+            with self.assertRaises(_lb._F03RootGuardRefusal) as context:
+                self._revalidate(model, chain)
+        self.assertEqual(context.exception.code, "PROCESS_MISMATCH")
+        self.assertEqual(context.exception.report.cleanup_outcome, "PROCESS_MISMATCH_NOT_CLOSED")
+        self.assertTrue(all(call[1] != "CloseHandle" for call in model.calls[calls:]))  # foreign process closes nothing
+        for operation in (self._revalidate, self._release):
+            with self.assertRaises(_lb._F03RootGuardRefusal) as context:
+                operation(model, chain)
+            self.assertEqual(context.exception.code, "CHAIN_CLOSED")
+        # Changed live evidence invalidates and rolls back immediately.
+        model = _RecordingRootModel()
+        chain = self._acquire(model)
+        model.faults[len(model.calls) + 1] = "wrong_id"
+        with self.assertRaises(_lb._F03RootGuardRefusal) as context:
+            self._revalidate(model, chain)
+        self.assertEqual(context.exception.code, "IDENTITY_MISMATCH")
+        self._assert_rollback(model, context.exception)
+        with self.assertRaises(_lb._F03RootGuardRefusal):
+            _lb._f03_rrg_revalidate_model_chain_v1(object(), process_instance_id=_RRG_PROC)
+
+    # -- M07 timing -----------------------------------------------------------
+    def test_m07_original_t0_ta_shape_start_deadline_and_clock_discipline(self) -> None:
+        for overrides, code in (
+            (dict(ta_ns=_RRG_TA + 1), "ORIGINAL_BUDGET_INVALID"), (dict(ta_ns=_RRG_TA - 1), "ORIGINAL_BUDGET_INVALID"),
+            (dict(t0_ns=True), "ORIGINAL_BUDGET_INVALID"), (dict(t0_ns=float(_RRG_T0)), "ORIGINAL_BUDGET_INVALID"),
+            (dict(monotonic_clock_ns=lambda: _RRG_TA), "DEADLINE_EXPIRED"),
+            (dict(monotonic_clock_ns=lambda: _RRG_TA + 1), "DEADLINE_EXPIRED"),
+            (dict(monotonic_clock_ns=lambda: _RRG_T0 - 1), "CLOCK_REGRESSED"),
+            (dict(monotonic_clock_ns=lambda: float(_RRG_T0 + 1)), "CLOCK_INVALID"),
+            (dict(monotonic_clock_ns=None), "CLOCK_INVALID"),
+            (dict(budget=_lb._F03RRGModelBudgetV1(1, 1, 1, -1)), "BUDGET_INVALID"),
+            (dict(budget=_lb._F03RRGModelBudgetV1(
+                open_ns=0, query_ns=0, close_ns=0, later_reserve_ns=_RRG_TA - _RRG_T0)), "RESERVE_INSUFFICIENT"),
+        ):
+            with self.subTest(code=code, overrides=sorted(overrides)):
+                model = _RecordingRootModel()
+                refusal = self._refused(model, **overrides)
+                self.assertEqual(refusal.code, code)
+                self.assertEqual(model.calls, [])
+        with self.assertRaises(TypeError):
+            _lb._F03RRGModelBudgetV1()  # no default runnable policy exists
+        model = _RecordingRootModel()
+        values = iter([_RRG_T0 + 10, _RRG_T0 + 5])
+        refusal = self._refused(model, monotonic_clock_ns=lambda: next(values, _RRG_T0 + 5))
+        self.assertEqual(refusal.code, "CLOCK_REGRESSED")  # no reset or refund
+
+    def test_m07_insufficient_reserve_mid_attempt_and_expiry_after_every_call(self) -> None:
+        model = _RecordingRootModel()
+        tight = _lb._F03RRGModelBudgetV1(open_ns=1_000, query_ns=1_000, close_ns=1_000,
+                                         later_reserve_ns=_RRG_TA - _RRG_T0 - 60_000)
+        refusal = self._refused(model, budget=tight)
+        self.assertEqual(refusal.code, "RESERVE_INSUFFICIENT")
+        report = self._assert_rollback(model, refusal)
+        self.assertGreater(report.open_calls, 0)
+        nominal = self._nominal()
+        for ordinal, kind, *_ in nominal.calls:
+            with self.subTest(ordinal=ordinal, kind=kind):
+                model = _RecordingRootModel()
+                model.expire_after.add(ordinal)
+                refusal = self._refused(model)
+                self.assertEqual(refusal.code, "DEADLINE_EXPIRED_AFTER_CALL")
+                report = self._assert_rollback(model, refusal)
+                self.assertTrue(report.overrun)
+                self.assertTrue(all(call[1] == "CloseHandle" for call in model.calls[ordinal:]))
+                self.assertGreaterEqual(model.now, _RRG_TA)  # cleanup still attempted after TA
+
+    def test_m07_cleanup_and_release_overrun_recorded_never_renewed(self) -> None:
+        nominal = self._nominal()
+        failing = nominal.ordinals("GetFinalPathNameByHandleW", flags=0)[-1]
+        model = _RecordingRootModel()
+        model.faults[failing] = "zero"
+        model.expire_after.add(failing)
+        refusal = self._refused(model)
+        self.assertEqual(refusal.code, "FINAL_PATH_FAILED")
+        report = self._assert_rollback(model, refusal)
+        self.assertTrue(report.overrun)
+        self.assertEqual(report.close_attempts, report.close_successes)
+        model = _RecordingRootModel()
+        chain = self._acquire(model)
+        model.now = _RRG_TA + 5
+        with self.assertRaises(_lb._F03RootGuardRefusal) as context:
+            self._release(model, chain)
+        self.assertEqual(context.exception.code, "RELEASE_OVERRUN")
+        self.assertTrue(context.exception.report.overrun)
+        self.assertEqual(model.handles, {})  # every owned G still closed once after TA
+        with self.assertRaises(_lb._F03RootGuardRefusal) as context:
+            self._revalidate(model, chain)
+        self.assertEqual(context.exception.code, "CHAIN_CLOSED")
+        model = _RecordingRootModel()
+        chain = self._acquire(model)
+        model.now = _RRG_TA
+        with self.assertRaises(_lb._F03RootGuardRefusal) as context:
+            self._revalidate(model, chain)
+        self.assertEqual(context.exception.code, "DEADLINE_EXPIRED")
+        self.assertEqual(model.handles, {})
+
+    # -- M09 legacy / privacy -------------------------------------------------
+    def test_m09_generic_b_bytes_unchanged_outside_the_additive_held_section(self) -> None:
+        text = _RRG_B_PATH.read_bytes().decode("utf-8")
+        head, rest = text.split(_RRG_SECTION_HEADER, 1)
+        tail = rest.split("\n\n\n__all__ = [", 1)[1]
+        reconstructed = head + "__all__ = [" + tail
+        self.assertEqual(reconstructed.count("import struct\nimport sys\n"), 1)
+        reconstructed = reconstructed.replace("import struct\nimport sys\n", "", 1)
+        self.assertEqual(hashlib.sha256(reconstructed.encode("utf-8")).hexdigest(), _RRG_BASE_B_SHA256)
+
+    def test_m09_public_evidence_excludes_raw_handles_paths_and_identifiers(self) -> None:
+        model = _RecordingRootModel()
+        chain = self._acquire(model)
+        attempt = self._attempt(chain)
+        secrets = {str(entry.raw) for entry in attempt.entries} | {hex(entry.raw) for entry in attempt.entries}
+        secrets |= {f"{entry.raw:x}" for entry in attempt.entries}
+        secrets |= {obj["id"].hex() for obj in model.objects.values()} | {"0123456789abcdef", _RRG_VOLUME_GUID}
+        secrets |= {"ARB_LOCAL", "F03_TESTS", "kals", "C:\\"}
+        texts = [repr(chain), str(chain), repr(chain.report()), repr(attempt), repr(attempt.entries[0]),
+                 repr(attempt.chain[0].identity), repr(model.enrollment()), repr(model.storages[0])]
+        report = self._release(model, chain)
+        texts.append(repr(report))
+        failing = _RecordingRootModel()
+        failing.faults[self._nominal().ordinals("GetFileInformationByHandleEx", info_class=18)[3]] = "fail"
+        refusal = self._refused(failing)
+        texts += [repr(refusal), str(refusal), repr(refusal.report)]
+        for text in texts:
+            for secret in secrets:
+                self.assertNotIn(secret, text)
+
+
+class F03HeldRetainedRootGuardInterruptionTests(unittest.TestCase):
+    """Correction 01 / Marco B-01: a non-Exception interruption (KeyboardInterrupt,
+    SystemExit) or an ordinary exception at a fixed operation boundary is
+    finalized conservatively BEFORE it propagates.  Unknown open completion
+    keeps strong storage/output ownership in process-lifetime quarantine; an
+    interrupted close is terminal CLOSE_UNCERTAIN, never retried and never
+    reported clean; every other safely closable registration is still closed
+    once; acquisition/revalidation/release are invalidated; the original
+    primary and ordered secondary failures are preserved; the interruption
+    object itself is re-raised, never swallowed."""
+
+    _P = F03HeldRetainedRootGuardPrimitiveTests
+    _DEFAULT = F03HeldRetainedRootGuardPrimitiveTests._DEFAULT
+    INTERRUPTIONS = (KeyboardInterrupt, SystemExit)
+
+    def _acquire(self, model, **overrides):
+        return self._P._acquire(self, model, **overrides)
+
+    def _release(self, model, chain):
+        return self._P._release(self, model, chain)
+
+    def _revalidate(self, model, chain):
+        return self._P._revalidate(self, model, chain)
+
+    def _nominal(self):
+        return self._P._nominal(self)
+
+    def _raised(self, exc_type, operation):
+        with self.assertRaises(exc_type) as context:
+            operation()
+        return context.exception
+
+    @staticmethod
+    def _report(exc):
+        return getattr(exc, "_f03_rrg_report", None)
+
+    @staticmethod
+    def _in_quarantine(storage):
+        return any(kept is storage for kept, _ in _lb._F03_RRG_PENDING_QUARANTINE)
+
+    def test_b01_open_boundary_interruption_before_and_after_output_publication(self) -> None:
+        nominal = self._nominal()
+        opens = nominal.ordinals("NtCreateFile")
+        for exc_type in self.INTERRUPTIONS:
+            for when in ("before", "after"):
+                for ordinal in (opens[0], opens[1], opens[2], opens[-1]):
+                    with self.subTest(exc=exc_type.__name__, when=when, ordinal=ordinal):
+                        model = _RecordingRootModel()
+                        model.faults[ordinal] = ("raise", exc_type, when)
+                        exc = self._raised(exc_type, lambda: self._acquire(model))
+                        storage = model.storages[-1]
+                        # Unknown completion: the call storage is retained in process-lifetime quarantine.
+                        self.assertEqual(storage.state, "QUARANTINED")
+                        self.assertTrue(self._in_quarantine(storage))
+                        raw = _struct.unpack("<Q", bytes(storage.handle_slot))[0]
+                        if when == "after":
+                            entry = _lb._F03_RRG_LIVE_HANDLES.get(raw)
+                            self.assertIsNotNone(entry)  # published output is owned, never orphaned
+                            self.assertTrue(entry.quarantined)
+                            self.assertIn(raw, model.handles)
+                        self.assertNotIn(raw, model.close_log)
+                        self.assertEqual(model.calls[-1][0], ordinal)  # no wait/retry/close afterwards
+                        for kept_storage, attempt in _lb._F03_RRG_PENDING_QUARANTINE:
+                            if kept_storage is storage:
+                                for registered in attempt.entries:
+                                    if registered.state in ("ACQUIRED_UNVALIDATED", "VALIDATED"):
+                                        self.assertTrue(registered.quarantined)
+                                        self.assertIs(_lb._F03_RRG_LIVE_HANDLES.get(registered.raw), registered)
+                                self.assertTrue(attempt.invalidated and attempt.closed)
+                        report = self._report(exc)
+                        self.assertIsNotNone(report)
+                        self.assertEqual(report.primary, "OPEN_INTERRUPTED_COMPLETION_UNKNOWN")
+                        self.assertEqual(report.interruption, exc_type.__name__)
+                        self.assertTrue(report.quarantined)
+                        self.assertEqual(report.cleanup_outcome, "PENDING_QUARANTINED_NO_CLEAN_CLAIM")
+
+    def test_b01_quarantined_ownership_survives_exception_and_traceback_disposal(self) -> None:
+        import gc
+        nominal = self._nominal()
+        ordinal = nominal.ordinals("NtCreateFile")[2]
+        for fault in (("raise", KeyboardInterrupt, "after"), ("raise", OSError, "after")):
+            with self.subTest(fault=fault[1].__name__):
+                model = _RecordingRootModel()
+                model.faults[ordinal] = fault
+                try:
+                    self._acquire(model)
+                except BaseException as caught:  # noqa: BLE001 - the injected boundary failure itself
+                    self.assertIs(type(caught), fault[1] if fault[1] is KeyboardInterrupt else _lb._F03RootGuardRefusal)
+                storage = model.storages[-1]
+                raw = _struct.unpack("<Q", bytes(storage.handle_slot))[0]
+                storage_id = id(storage)
+                del storage
+                model.storages.clear()
+                gc.collect()
+                self.assertTrue(any(id(kept) == storage_id for kept, _ in _lb._F03_RRG_PENDING_QUARANTINE))
+                entry = _lb._F03_RRG_LIVE_HANDLES.get(raw)
+                self.assertIsNotNone(entry)
+                self.assertTrue(entry.quarantined)
+                self.assertEqual(entry.state, "ACQUIRED_UNVALIDATED")
+                self.assertNotIn(raw, model.close_log)
+
+    def test_b01_transient_close_interruption_is_terminal_uncertain_and_never_clean(self) -> None:
+        nominal = self._nominal()
+        transient_closes = nominal.ordinals("CloseHandle")
+        self.assertEqual(len(transient_closes), 4)
+        for exc_type in self.INTERRUPTIONS:
+            for when in ("before", "after"):
+                for ordinal in transient_closes:
+                    with self.subTest(exc=exc_type.__name__, when=when, ordinal=ordinal):
+                        model = _RecordingRootModel()
+                        model.faults[ordinal] = ("raise", exc_type, when)
+                        exc = self._raised(exc_type, lambda: self._acquire(model))
+                        raw = model.calls[ordinal - 1][2]
+                        entry = _lb._F03_RRG_LIVE_HANDLES.get(raw)
+                        self.assertIsNotNone(entry)
+                        self.assertEqual(entry.state, "CLOSE_UNCERTAIN")
+                        self.assertEqual(model.close_log.count(raw), 1)  # never retried
+                        # Every other owned guard was still closed exactly once.
+                        expected_left = {raw} if when == "before" else set()
+                        self.assertEqual(set(model.handles), expected_left)
+                        self.assertEqual(len(model.close_log), len(set(model.close_log)))
+                        self.assertTrue(all(call[1] == "CloseHandle" for call in model.calls[ordinal:]))
+                        report = self._report(exc)
+                        self.assertIsNotNone(report)
+                        self.assertEqual(report.primary, "CLOSE_INTERRUPTED")
+                        self.assertEqual(report.interruption, exc_type.__name__)
+                        self.assertEqual(report.close_uncertain, 1)
+                        self.assertEqual(report.close_attempts, report.close_successes + 1)
+                        self.assertEqual(report.cleanup_outcome, "CLOSE_UNCERTAIN")
+                        self.assertNotEqual(report.cleanup_outcome, "CLOSED_ALL_REGISTERED")
+
+    def test_b01_rollback_close_interruption_keeps_primary_and_finishes_cleanup(self) -> None:
+        nominal = self._nominal()
+        last_query = nominal.ordinals("GetFileInformationByHandleEx", info_class=18)[-1]
+        probe = _RecordingRootModel()
+        probe.faults[last_query] = "fail"
+        with self.assertRaises(_lb._F03RootGuardRefusal):
+            self._acquire(probe)
+        rollback_closes = probe.ordinals("CloseHandle")[-5:]
+        for exc_type in self.INTERRUPTIONS:
+            for position, close_ordinal in enumerate(rollback_closes):
+                with self.subTest(exc=exc_type.__name__, close=close_ordinal):
+                    model = _RecordingRootModel()
+                    model.faults[last_query] = "fail"
+                    model.faults[close_ordinal] = ("raise", exc_type, "before")
+                    exc = self._raised(exc_type, lambda: self._acquire(model))
+                    raw = model.calls[close_ordinal - 1][2]
+                    self.assertEqual(set(model.handles), {raw})  # the remaining guards were still closed
+                    self.assertEqual(model.close_log.count(raw), 1)
+                    self.assertEqual(_lb._F03_RRG_LIVE_HANDLES.get(raw).state, "CLOSE_UNCERTAIN")
+                    report = self._report(exc)
+                    self.assertIsNotNone(report)
+                    self.assertEqual(report.primary, "QUERY_FAILED")  # original primary preserved
+                    self.assertEqual(report.secondary, ("CLOSE_INTERRUPTED",))
+                    self.assertEqual((report.close_attempts, report.close_successes, report.close_uncertain), (9, 8, 1))
+                    self.assertEqual(report.cleanup_outcome, "CLOSE_UNCERTAIN")
+
+    def test_b01_release_close_interruption_finalizes_every_other_guard(self) -> None:
+        probe = _RecordingRootModel()
+        self._release(probe, self._acquire(probe))
+        release_closes = probe.ordinals("CloseHandle")[-5:]
+        for exc_type in self.INTERRUPTIONS:
+            for when in ("before", "after"):
+                for close_ordinal in release_closes:
+                    with self.subTest(exc=exc_type.__name__, when=when, close=close_ordinal):
+                        model = _RecordingRootModel()
+                        model.faults[close_ordinal] = ("raise", exc_type, when)
+                        chain = self._acquire(model)
+                        exc = self._raised(exc_type, lambda: self._release(model, chain))
+                        raw = model.calls[close_ordinal - 1][2]
+                        self.assertEqual(set(model.handles), {raw} if when == "before" else set())
+                        self.assertEqual(len(model.close_log), len(set(model.close_log)))
+                        self.assertEqual(_lb._F03_RRG_LIVE_HANDLES.get(raw).state, "CLOSE_UNCERTAIN")
+                        calls = len(model.calls)
+                        for operation in (self._release, self._revalidate):
+                            with self.assertRaises(_lb._F03RootGuardRefusal) as again:
+                                operation(model, chain)
+                            self.assertEqual(again.exception.code, "CHAIN_CLOSED")
+                        self.assertEqual(len(model.calls), calls)
+                        report = self._report(exc)
+                        self.assertIsNotNone(report)
+                        self.assertEqual(report.primary, "RELEASE_INTERRUPTED")
+                        self.assertEqual(report.secondary, ("CLOSE_INTERRUPTED",))
+                        self.assertEqual(report.cleanup_outcome, "CLOSE_UNCERTAIN")
+
+    def test_b01_revalidation_interruption_invalidates_and_rolls_back(self) -> None:
+        for exc_type in self.INTERRUPTIONS:
+            for offset in range(4):  # FileIdInfo, AttributeTag, DOS and GUID boundaries of the first requery
+                with self.subTest(exc=exc_type.__name__, offset=offset):
+                    model = _RecordingRootModel()
+                    chain = self._acquire(model)
+                    model.faults[len(model.calls) + 1 + offset] = ("raise", exc_type, "before")
+                    exc = self._raised(exc_type, lambda: self._revalidate(model, chain))
+                    self.assertEqual(model.handles, {})  # owned guards closed once, before propagation
+                    self.assertEqual(len(model.close_log), len(set(model.close_log)))
+                    with self.assertRaises(_lb._F03RootGuardRefusal) as again:
+                        self._revalidate(model, chain)
+                    self.assertEqual(again.exception.code, "CHAIN_CLOSED")
+                    report = self._report(exc)
+                    self.assertIsNotNone(report)
+                    self.assertEqual(report.primary, "QUERY_INTERRUPTED")
+                    self.assertEqual(report.cleanup_outcome, "CLOSED_ALL_REGISTERED")
+
+    def test_b01_shared_last_error_and_clock_boundaries_never_swallow_interruption(self) -> None:
+        nominal = self._nominal()
+        failing_query = nominal.ordinals("GetFileInformationByHandleEx", info_class=18)[2]
+        for exc_type in self.INTERRUPTIONS:
+            with self.subTest(boundary="GetLastError", exc=exc_type.__name__):
+                model = _RecordingRootModel()
+                model.faults[failing_query] = "fail"
+                model.last_error_mode = exc_type
+                exc = self._raised(exc_type, lambda: self._acquire(model))
+                self.assertEqual(model.handles, {})  # finalized before propagation
+                report = self._report(exc)
+                self.assertIsNotNone(report)
+                self.assertEqual(report.primary, "QUERY_FAILED")
+                self.assertEqual(report.last_errors[-1], ("FileIdInfo", "UNAVAILABLE"))
+                self.assertEqual(report.interruption, exc_type.__name__)
+                self.assertEqual(report.cleanup_outcome, "CLOSED_ALL_REGISTERED")
+            with self.subTest(boundary="clock", exc=exc_type.__name__):
+                model = _RecordingRootModel()
+                samples = {"count": 0}
+
+                def clock(model=model, samples=samples, exc_type=exc_type):
+                    samples["count"] += 1
+                    if samples["count"] == 12:  # one sample in the middle of the first edge
+                        raise exc_type("synthetic clock-boundary raise")
+                    return model.now
+
+                exc = self._raised(exc_type, lambda: self._acquire(model, monotonic_clock_ns=clock))
+                self.assertEqual(model.handles, {})
+                self.assertEqual(len(model.close_log), len(set(model.close_log)))
+                report = self._report(exc)
+                self.assertIsNotNone(report)
+                self.assertEqual(report.primary, "CLOCK_INTERRUPTED")
+                self.assertEqual(report.interruption, exc_type.__name__)
+                self.assertEqual(report.cleanup_outcome, "CLOSED_ALL_REGISTERED")
+
+    def test_b01_ordinary_exception_after_output_publication_retains_ownership(self) -> None:
+        nominal = self._nominal()
+        for ordinal in nominal.ordinals("NtCreateFile")[:3]:
+            with self.subTest(ordinal=ordinal):
+                model = _RecordingRootModel()
+                model.faults[ordinal] = ("raise", OSError, "after")
+                with self.assertRaises(_lb._F03RootGuardRefusal) as context:
+                    self._acquire(model)
+                storage = model.storages[-1]
+                raw = _struct.unpack("<Q", bytes(storage.handle_slot))[0]
+                entry = _lb._F03_RRG_LIVE_HANDLES.get(raw)
+                self.assertIsNotNone(entry)
+                self.assertTrue(entry.quarantined)
+                self.assertNotIn(raw, model.close_log)
+                self.assertEqual(context.exception.code, "OPEN_EXCEPTION_COMPLETION_UNKNOWN")
+                self.assertIsNone(context.exception.report.interruption)
+                self.assertEqual(context.exception.report.cleanup_outcome, "PENDING_QUARANTINED_NO_CLEAN_CLAIM")
+
+
 if __name__ == "__main__":
     unittest.main()

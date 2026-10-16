@@ -13,6 +13,8 @@ import hashlib
 import json
 import os
 import re
+import struct
+import sys
 import threading
 import time
 import uuid
@@ -5168,6 +5170,1160 @@ def reconcile_retained_bootstrap_floor_v1(
     ):
         raise LedgerError(FailureCode.N1_RETAINED_POSITION_NOT_RECONCILED)
     return _RETAINED_FLOOR_RECONCILED
+
+
+# ===========================================================================
+# R1-D07 F03 HELD retained-root guard primitive (PS-008..012 under the full
+# WG-004..016/024 contract, prospective method `F03_B_RETAINED_ROOT_GUARD_V1`).
+#
+# INERT.  The production acquisition entry unconditionally refuses before any
+# DLL load, native call, filesystem/root/history observation or publication,
+# for every argument and platform.  No native adapter exists: every fixed
+# private native operation below refuses BEFORE native entry and nothing in
+# this module imports or loads a native library.  Nothing here mints an IF-01
+# projection, IF-02 root/custody lease, IF-03 admission material, a receipt,
+# an authority/ledger append or admission success; the generic consumption
+# path above is untouched.  The deterministic private mechanics (names, x64
+# ABI storage, strict synchronous status, same-handle queries, retained
+# R->G descent, registration generations, ordered rollback, pending storage
+# quarantine and original-T0/TA budget accounting) are exercised only by
+# offline recording-model tests that patch the fixed private native
+# operations.  A modeled chain is MODEL_ONLY_OFFLINE evidence, never a lease,
+# never native qualification and never enrollment.
+# ===========================================================================
+
+_F03_RRG_METHOD_CONTRACT = "F03_B_RETAINED_ROOT_GUARD_V1"  # proposed contract, not an installed rooted_access_method
+_F03_RRG_EVIDENCE_CLASS = "MODEL_ONLY_OFFLINE"
+_F03_RRG_ROOT_UNAVAILABLE = "F03_N1_ROOT_UNAVAILABLE"
+_F03_RRG_NATIVE_UNAVAILABLE = "NATIVE_BINDING_UNAVAILABLE"
+
+# WG-004 fixed profiles: (DesiredAccess, ShareAccess, CreateDisposition,
+# CreateOptions).  Access 0x001000A1 = LIST_DIRECTORY | TRAVERSE |
+# READ_ATTRIBUTES | SYNCHRONIZE.  G shares READ|WRITE (no DELETE) with
+# directory + synchronous-nonalert options; R shares READ|WRITE|DELETE with
+# OPEN_REPARSE_POINT + synchronous-nonalert.  No combined 0x00200021, create,
+# delete, overwrite, alertable/overlapped, privilege or fallback profile.
+_F03_RRG_ACCESS = 0x001000A1
+_F03_RRG_FILE_OPEN = 1
+_F03_RRG_PROFILE_G = (_F03_RRG_ACCESS, 0x00000003, _F03_RRG_FILE_OPEN, 0x00000021)
+_F03_RRG_PROFILE_R = (_F03_RRG_ACCESS, 0x00000007, _F03_RRG_FILE_OPEN, 0x00200020)
+_F03_RRG_G_ROLES = frozenset({"G_ANCHOR", "G"})
+_F03_RRG_ROLE_PROFILES = MappingProxyType({
+    "G_ANCHOR": _F03_RRG_PROFILE_G, "G": _F03_RRG_PROFILE_G, "R": _F03_RRG_PROFILE_R,
+})
+
+# WG-007 strict synchronous completion.
+_F03_RRG_STATUS_SUCCESS = 0x00000000
+_F03_RRG_STATUS_PENDING = 0x00000103
+_F03_RRG_STATUS_OBJECT_NAME_NOT_FOUND = 0xC0000034
+_F03_RRG_FILE_OPENED = 1
+_F03_RRG_INVALID_HANDLE_VALUE = 0xFFFFFFFFFFFFFFFF
+
+# WG-008 same-handle queries.
+_F03_RRG_FILE_ID_INFO = 18
+_F03_RRG_FILE_ID_INFO_SIZE = 24
+_F03_RRG_FILE_ATTRIBUTE_TAG_INFO = 9
+_F03_RRG_FILE_ATTRIBUTE_TAG_INFO_SIZE = 8
+_F03_RRG_FILE_ATTRIBUTE_DIRECTORY = 0x00000010
+_F03_RRG_FILE_ATTRIBUTE_REPARSE_POINT = 0x00000400
+_F03_RRG_FINAL_PATH_CAPACITY = 32768  # UTF-16 units; no resize/retry
+_F03_RRG_FINAL_PATH_DOS = 0  # FILE_NAME_NORMALIZED | VOLUME_NAME_DOS
+_F03_RRG_FINAL_PATH_GUID = 1  # FILE_NAME_NORMALIZED | VOLUME_NAME_GUID
+_F03_RRG_MAX_UTF8_BYTES = 4096
+
+# WG-005 / WG-013 general bounds.  IF-01 ancestor tuple 1..64 (the anchor
+# counts in it) plus the root gives at most 65 persistent G; one transient R
+# gives the root-only B native table maximum 66.  The prospective 67 (with
+# F's W) and the separately scoped child-D bounds 66/67/68 belong to later
+# R/F/B integration and are NOT implemented by this slice.
+_F03_RRG_MAX_COMPONENT_UNITS = 128
+_F03_RRG_MAX_ANCESTORS = 64
+_F03_RRG_MAX_PERSISTENT_G = 65
+_F03_RRG_MAX_B_HANDLES = 66
+
+# WG-024: original integer nanosecond budget; no reset/refund.
+_F03_RRG_ORIGINAL_BUDGET_NS = 300_000_000_000
+
+# WG-006 frozen x64 layouts: (structure, packing format, size, ((field,
+# preceding-fields format, offset), ...)).  Verified before native entry.
+_F03_RRG_UNICODE_STRING_FORMAT = "<HH4xQ"
+_F03_RRG_OBJECT_ATTRIBUTES_FORMAT = "<I4xQQI4xQQ"
+_F03_RRG_IO_STATUS_BLOCK_FORMAT = "<I4xQ"
+_F03_RRG_HANDLE_SLOT_FORMAT = "<Q"
+_F03_RRG_ABI_LAYOUTS = (
+    ("UNICODE_STRING", _F03_RRG_UNICODE_STRING_FORMAT, 16, (
+        ("Length", "<", 0), ("MaximumLength", "<H", 2), ("Buffer", "<HH4x", 8))),
+    ("OBJECT_ATTRIBUTES", _F03_RRG_OBJECT_ATTRIBUTES_FORMAT, 48, (
+        ("Length", "<", 0), ("RootDirectory", "<I4x", 8), ("ObjectName", "<I4xQ", 16),
+        ("Attributes", "<I4xQQ", 24), ("SecurityDescriptor", "<I4xQQI4x", 32),
+        ("SecurityQualityOfService", "<I4xQQI4xQ", 40))),
+    ("IO_STATUS_BLOCK", _F03_RRG_IO_STATUS_BLOCK_FORMAT, 16, (
+        ("Status", "<", 0), ("Information", "<I4x", 8))),
+)
+# Modeled pointer fields: nonzero references to the call's OWN storage (the
+# model has no addresses).  A real binding would place owned-buffer
+# addresses here; none exists.
+_F03_RRG_MODEL_NAME_BUFFER_REF = 0x1
+_F03_RRG_MODEL_UNICODE_STRING_REF = 0x2
+
+# Prospective FFI declarations: inert descriptive data only (DLL, return
+# type, parameter types).  Nothing loads, resolves or calls them.
+_F03_RRG_PROSPECTIVE_NATIVE_DECLARATIONS = MappingProxyType({
+    "NtCreateFile": ("ntdll", "NTSTATUS", (
+        "PHANDLE", "ACCESS_MASK", "POBJECT_ATTRIBUTES", "PIO_STATUS_BLOCK", "PLARGE_INTEGER",
+        "ULONG", "ULONG", "ULONG", "ULONG", "PVOID", "ULONG")),
+    "GetFileInformationByHandleEx": ("kernel32", "BOOL", (
+        "HANDLE", "FILE_INFO_BY_HANDLE_CLASS", "LPVOID", "DWORD")),
+    "GetFinalPathNameByHandleW": ("kernel32", "DWORD", ("HANDLE", "LPWSTR", "DWORD", "DWORD")),
+    "CloseHandle": ("kernel32", "BOOL", ("HANDLE",)),
+    "GetLastError": ("kernel32", "DWORD", ()),
+})
+
+_F03_RRG_DOS_DEVICE_NAMES = frozenset(
+    {"CON", "PRN", "AUX", "NUL", "CONIN$", "CONOUT$"}
+    | {f"COM{index}" for index in range(1, 10)}
+    | {f"LPT{index}" for index in range(1, 10)}
+)
+_F03_RRG_ANCHOR_NAME_RE = re.compile(
+    r"\\\?\?\\(?:(?P<drive>[A-Z]):|Volume\{(?P<volume>[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12})\})\\"
+)
+_F03_RRG_ANCHOR_DOS_RE = re.compile(r"\\\\\?\\(?P<drive>[A-Z]):\\")
+_F03_RRG_GUID_PREFIX_RE = re.compile(
+    r"\\\\\?\\Volume\{(?P<volume>[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12})\}\\"
+)
+_F03_RRG_LOWER_HEX_RE = re.compile(r"[0-9a-f]+")
+
+_F03_RRG_STATE_ACQUIRED = "ACQUIRED_UNVALIDATED"
+_F03_RRG_STATE_VALIDATED = "VALIDATED"
+_F03_RRG_STATE_CLOSE_ATTEMPTED = "CLOSE_ATTEMPTED"
+_F03_RRG_STATE_CLOSED = "CLOSED"
+_F03_RRG_STATE_CLOSE_UNCERTAIN = "CLOSE_UNCERTAIN"
+_F03_RRG_LIVE_STATES = frozenset({_F03_RRG_STATE_ACQUIRED, _F03_RRG_STATE_VALIDATED})
+
+# Process-local ownership registry.  A raw integer is registered at most once
+# while live; CLOSE_UNCERTAIN and quarantined registrations are retained for
+# the process lifetime so a reused OS integer can never revive or double-own
+# them.  Pending call storage is retained forever (never freed or reused).
+_F03_RRG_REGISTRY_LOCK = threading.Lock()
+_F03_RRG_LIVE_HANDLES: dict = {}
+_F03_RRG_GENERATION_COUNTER = [0]
+_F03_RRG_PENDING_QUARANTINE: list = []
+_F03_RRG_MODEL_CHAIN_KEY = object()
+
+
+class _F03RootGuardRefusal(Exception):
+    """Private fail-closed refusal of the held retained-root guard primitive.
+
+    ``code`` is a private detail string, not a FailureCode or enum member.
+    ``report`` is the sanitized attempt report when recording mechanics ran
+    (it carries no raw handle, path, identifier or pointer)."""
+
+    def __init__(self, code: str, report: "_F03RRGAttemptReportV1 | None" = None) -> None:
+        super().__init__(code)
+        self.code = code
+        self.report = report
+
+
+class _F03RRGNativeUnavailable(_F03RootGuardRefusal):
+    """Raised by a fixed private native operation BEFORE native entry."""
+
+
+# B-01 interruption policy.  Every fixed operation boundary (open, query,
+# final path, close, last-error and clock) catches BaseException.  The
+# boundary first records its conservative state (open: process-lifetime
+# quarantine of the call storage and any published output handle; close:
+# terminal CLOSE_UNCERTAIN, never retried) and then raises an ordinary
+# refusal so the normal invalidation/rollback path runs.  A non-Exception
+# interruption (KeyboardInterrupt, SystemExit, ...) is additionally kept on
+# the attempt; once invalidation, rollback or release finalization has
+# completed -- closing every other safely closable registration once -- the
+# ORIGINAL interruption object is re-raised (never swallowed into success or
+# refusal), carrying the sanitized report as ``_f03_rrg_report``.  Ownership
+# never depends on the propagating exception or its traceback: quarantine
+# and registrations are strong module-level references, and the attempt
+# drops its reference to the interruption object before re-raising it.
+def _f03_rrg_boundary_failure(attempt: "_F03RRGAttemptV1", exc: BaseException, exception_code: str,
+                              interruption_code: str) -> _F03RootGuardRefusal:
+    if isinstance(exc, Exception):
+        return _F03RootGuardRefusal(exception_code)
+    _f03_rrg_note_interruption(attempt, exc)
+    return _F03RootGuardRefusal(interruption_code)
+
+
+def _f03_rrg_note_interruption(attempt: "_F03RRGAttemptV1", exc: BaseException) -> None:
+    if attempt.interruption is None:
+        attempt.interruption = exc
+        attempt.interruption_kind = type(exc).__name__
+
+
+def _acquire_f03_retained_root_guard_v1(*args: object, **kwargs: object):
+    """HELD production acquisition entry (PS-008 / WG-002 / WG-025).
+
+    Unconditionally refuses first, for every argument and platform, before
+    any DLL load, native call, ABI check, clock read, filesystem/root/history
+    observation or object publication.  It never reaches the recording
+    mechanics and can never return a lease, projection or material."""
+    del args, kwargs
+    raise _F03RootGuardRefusal(_F03_RRG_ROOT_UNAVAILABLE)
+
+
+# -- fixed private native operations (HELD: no binding exists) ---------------
+
+def _f03_rrg_native_nt_create_file(storage, desired_access, allocation_size, file_attributes,
+                                   share_access, create_disposition, create_options, ea_buffer, ea_length):
+    """Fixed private ``ntdll.NtCreateFile`` boundary (WG-006).  HELD."""
+    raise _F03RRGNativeUnavailable(_F03_RRG_NATIVE_UNAVAILABLE)
+
+
+def _f03_rrg_native_get_file_information_by_handle_ex(handle, info_class, buffer, buffer_size):
+    """Fixed private ``GetFileInformationByHandleEx`` boundary (WG-008).  HELD."""
+    raise _F03RRGNativeUnavailable(_F03_RRG_NATIVE_UNAVAILABLE)
+
+
+def _f03_rrg_native_get_final_path_name_by_handle_w(handle, buffer, capacity, flags):
+    """Fixed private ``GetFinalPathNameByHandleW`` boundary (WG-008).  HELD."""
+    raise _F03RRGNativeUnavailable(_F03_RRG_NATIVE_UNAVAILABLE)
+
+
+def _f03_rrg_native_close_handle(handle):
+    """Fixed private ``CloseHandle`` boundary (WG-014).  HELD."""
+    raise _F03RRGNativeUnavailable(_F03_RRG_NATIVE_UNAVAILABLE)
+
+
+def _f03_rrg_native_get_last_error():
+    """Fixed private ``GetLastError`` diagnostic boundary.  HELD."""
+    raise _F03RRGNativeUnavailable(_F03_RRG_NATIVE_UNAVAILABLE)
+
+
+# -- names, identities and model-only enrollment ------------------------------
+
+def _f03_rrg_utf16_units(text: str) -> int:
+    return sum(2 if ord(character) > 0xFFFF else 1 for character in text)
+
+
+def _f03_rrg_has_surrogate(text: str) -> bool:
+    return any(0xD800 <= ord(character) <= 0xDFFF for character in text)
+
+
+def _f03_rrg_valid_component(name: object) -> bool:
+    """WG-005: one exact relative component, 1..128 UTF-16 units, no
+    normalization.  Python surrogate code points are rejected (unpaired, or
+    an alternate two-code-point spelling of a supplementary character)."""
+    if type(name) is not str or not name or _f03_rrg_has_surrogate(name):
+        return False
+    if _f03_rrg_utf16_units(name) > _F03_RRG_MAX_COMPONENT_UNITS:
+        return False
+    if name in {".", ".."} or name[-1] in {".", " "}:
+        return False
+    if any(character in "/\\:\x00" for character in name):
+        return False
+    # Conservative device-syntax refusal: reserved DOS device base names.
+    if name.split(".", 1)[0].rstrip(" ").upper() in _F03_RRG_DOS_DEVICE_NAMES:
+        return False
+    return True
+
+
+def _f03_rrg_valid_path_text(text: object) -> bool:
+    return (
+        type(text) is str and bool(text) and "\x00" not in text and not _f03_rrg_has_surrogate(text)
+        and _f03_rrg_utf16_units(text) < _F03_RRG_FINAL_PATH_CAPACITY
+        and len(text.encode("utf-8")) <= _F03_RRG_MAX_UTF8_BYTES
+    )
+
+
+def _f03_rrg_join(parent_path: str, name: str) -> str:
+    return parent_path + name if parent_path.endswith("\\") else parent_path + "\\" + name
+
+
+def _f03_rrg_is_uint32(value: object) -> bool:
+    return type(value) is int and 0 <= value <= 0xFFFFFFFF
+
+
+@dataclass(frozen=True, slots=True, repr=False)
+class _F03RRGIdentityV1:
+    """Private same-handle identity facts (WG-008); never public evidence."""
+
+    volume_serial_64: str
+    file_id_128: str
+    final_dos_path: str
+    final_guid_path: str
+    attributes: int
+    reparse_tag: int
+
+    def __repr__(self) -> str:
+        return "_F03RRGIdentityV1(<redacted>)"
+
+
+@dataclass(frozen=True, slots=True, repr=False)
+class _F03RRGModelEdgeV1:
+    """One MODEL-ONLY enrolled edge: exact component (or, for the anchor, the
+    fixed absolute NT volume-root path) and its expected identity."""
+
+    name: str
+    expected: _F03RRGIdentityV1
+
+    def __repr__(self) -> str:
+        return "_F03RRGModelEdgeV1(<redacted>)"
+
+
+@dataclass(frozen=True, slots=True, repr=False)
+class _F03RRGModelEnrollmentV1:
+    """MODEL-ONLY synthetic chain description for offline recording tests.
+
+    ``ancestors`` is the anchor-first tuple (1..64; the absolute anchor counts
+    in it) and ``root`` the final relative edge.  This is NOT IF-01
+    enrollment: it carries no host/volume/epoch/physical review, mints
+    nothing and is never accepted by the production entry."""
+
+    ancestors: tuple
+    root: _F03RRGModelEdgeV1
+
+    def __repr__(self) -> str:
+        return "_F03RRGModelEnrollmentV1(<redacted>)"
+
+
+@dataclass(frozen=True, slots=True)
+class _F03RRGModelBudgetV1:
+    """MODEL-ONLY fake per-call bounds and the mandatory later reserve.  It
+    is not a runnable timing policy and qualifies nothing (registry EMPTY)."""
+
+    open_ns: int
+    query_ns: int
+    close_ns: int
+    later_reserve_ns: int
+
+
+@dataclass(frozen=True, slots=True)
+class _F03RRGAttemptReportV1:
+    """Sanitized MODEL_ONLY_OFFLINE attempt evidence: first failure, ordered
+    secondary failures and separate ownership counts.  No raw handle, path,
+    identifier, digest or pointer is carried."""
+
+    evidence_class: str
+    primary: "str | None"
+    secondary: tuple
+    open_calls: int
+    registrations: int
+    close_attempts: int
+    close_successes: int
+    close_uncertain: int
+    quarantined: bool
+    overrun: bool
+    cleanup_outcome: str
+    max_live: int
+    raw_statuses: tuple
+    last_errors: tuple
+    lifecycle: tuple
+    interruption: "str | None" = None
+
+
+def _f03_rrg_refuse(code: str) -> None:
+    raise _F03RootGuardRefusal(code)
+
+
+def _f03_rrg_validate_identity(identity: object) -> _F03RRGIdentityV1:
+    if type(identity) is not _F03RRGIdentityV1:
+        _f03_rrg_refuse("ENROLLMENT_MALFORMED")
+    if (
+        type(identity.volume_serial_64) is not str or len(identity.volume_serial_64) != 16
+        or not _F03_RRG_LOWER_HEX_RE.fullmatch(identity.volume_serial_64)
+        or type(identity.file_id_128) is not str or len(identity.file_id_128) != 32
+        or not _F03_RRG_LOWER_HEX_RE.fullmatch(identity.file_id_128)
+        or not _f03_rrg_valid_path_text(identity.final_dos_path)
+        or not _f03_rrg_valid_path_text(identity.final_guid_path)
+        or not _f03_rrg_is_uint32(identity.attributes) or not _f03_rrg_is_uint32(identity.reparse_tag)
+    ):
+        _f03_rrg_refuse("ENROLLMENT_MALFORMED")
+    if (
+        not identity.attributes & _F03_RRG_FILE_ATTRIBUTE_DIRECTORY
+        or identity.attributes & _F03_RRG_FILE_ATTRIBUTE_REPARSE_POINT
+        or identity.reparse_tag != 0
+    ):
+        _f03_rrg_refuse("ENROLLMENT_NOT_PLAIN_DIRECTORY")
+    return identity
+
+
+def _f03_rrg_guid_volume(path: str) -> "str | None":
+    match = _F03_RRG_GUID_PREFIX_RE.match(path)
+    return None if match is None else match.group("volume")
+
+
+def _f03_rrg_validate_enrollment(enrollment: object) -> _F03RRGModelEnrollmentV1:
+    """Pre-entry descriptor validation: any failure refuses with zero opens."""
+    if type(enrollment) is not _F03RRGModelEnrollmentV1:
+        _f03_rrg_refuse("ENROLLMENT_MALFORMED")
+    ancestors = enrollment.ancestors
+    if type(ancestors) is not tuple:
+        _f03_rrg_refuse("ENROLLMENT_MALFORMED")
+    if not 1 <= len(ancestors) <= _F03_RRG_MAX_ANCESTORS:
+        _f03_rrg_refuse("ANCESTOR_COUNT_REFUSED")  # never truncated
+    edges = ancestors + (enrollment.root,)
+    for edge in edges:
+        if type(edge) is not _F03RRGModelEdgeV1:
+            _f03_rrg_refuse("ENROLLMENT_MALFORMED")
+        _f03_rrg_validate_identity(edge.expected)
+    anchor = edges[0]
+    match = _F03_RRG_ANCHOR_NAME_RE.fullmatch(anchor.name) if type(anchor.name) is str else None
+    dos = _F03_RRG_ANCHOR_DOS_RE.fullmatch(anchor.expected.final_dos_path)
+    guid = _F03_RRG_GUID_PREFIX_RE.fullmatch(anchor.expected.final_guid_path)
+    if match is None or dos is None or guid is None:
+        _f03_rrg_refuse("ANCHOR_REFUSED")
+    if match.group("drive") is not None and match.group("drive") != dos.group("drive"):
+        _f03_rrg_refuse("ANCHOR_REFUSED")
+    if match.group("volume") is not None and match.group("volume") != guid.group("volume"):
+        _f03_rrg_refuse("ANCHOR_REFUSED")
+    volume = guid.group("volume")
+    seen: set = set()
+    for index, edge in enumerate(edges):
+        if index and not _f03_rrg_valid_component(edge.name):
+            _f03_rrg_refuse("COMPONENT_NAME_REFUSED")
+        expected = edge.expected
+        if expected.volume_serial_64 != anchor.expected.volume_serial_64 or _f03_rrg_guid_volume(
+            expected.final_guid_path
+        ) != volume:
+            _f03_rrg_refuse("ENROLLMENT_VOLUME_MISMATCH")
+        key = (expected.volume_serial_64, expected.file_id_128)
+        if key in seen:
+            _f03_rrg_refuse("ENROLLMENT_DUPLICATE_OBJECT")
+        seen.add(key)
+        if index:
+            parent = edges[index - 1].expected
+            # Lexical relation is a comparison only, never containment proof.
+            if (
+                expected.final_dos_path != _f03_rrg_join(parent.final_dos_path, edge.name)
+                or expected.final_guid_path != _f03_rrg_join(parent.final_guid_path, edge.name)
+            ):
+                _f03_rrg_refuse("ENROLLMENT_LEXICAL_MISMATCH")
+    return enrollment
+
+
+def _f03_rrg_observed_abi() -> tuple:
+    return (os.name, struct.calcsize("P"), "(AMD64)" in sys.version)
+
+
+def _f03_rrg_require_supported_abi() -> None:
+    """WG-006 pre-entry ABI rejection: only Windows x64 and the frozen
+    structure sizes/offsets are accepted."""
+    if _f03_rrg_observed_abi() != ("nt", 8, True):
+        _f03_rrg_refuse("ABI_UNSUPPORTED")
+    for _structure, layout, size, offsets in _F03_RRG_ABI_LAYOUTS:
+        if struct.calcsize(layout) != size:
+            _f03_rrg_refuse("ABI_LAYOUT_REFUSED")
+        for _field, preceding, offset in offsets:
+            if struct.calcsize(preceding) != offset:
+                _f03_rrg_refuse("ABI_LAYOUT_REFUSED")
+
+
+# -- owned call storage, registrations and the attempt -----------------------
+
+class _F03RRGCallStorageV1:
+    """Strongly owned per-call storage (WG-006): terminated UTF-16LE name
+    buffer, UNICODE_STRING, OBJECT_ATTRIBUTES, zeroed IO_STATUS_BLOCK and a
+    NULL output-handle slot.  Pending/unknown completion moves it to the
+    process-lifetime quarantine; it is never freed or reused there."""
+
+    __slots__ = ("name_buffer", "unicode_string", "object_attributes", "io_status_block", "handle_slot", "state")
+
+    def __init__(self, name: str, root_directory: int) -> None:
+        try:
+            payload = name.encode("utf-16-le")
+        except UnicodeEncodeError:
+            raise _F03RootGuardRefusal("NAME_ENCODING_REFUSED") from None
+        length = len(payload)
+        maximum = length + 2
+        if length == 0 or maximum > 0xFFFF:
+            raise _F03RootGuardRefusal("UNICODE_STRING_BOUNDS_REFUSED")
+        self.name_buffer = bytearray(payload + b"\x00\x00")
+        self.unicode_string = bytearray(struct.pack(
+            _F03_RRG_UNICODE_STRING_FORMAT, length, maximum, _F03_RRG_MODEL_NAME_BUFFER_REF))
+        self.object_attributes = bytearray(struct.pack(
+            _F03_RRG_OBJECT_ATTRIBUTES_FORMAT, 48, root_directory, _F03_RRG_MODEL_UNICODE_STRING_REF, 0, 0, 0))
+        self.io_status_block = bytearray(16)
+        self.handle_slot = bytearray(8)
+        self.state = "BUILT"
+
+    def __copy__(self):
+        raise TypeError("_F03RRGCallStorageV1 cannot be copied")
+
+    __deepcopy__ = __copy__
+
+    def __reduce_ex__(self, protocol):
+        del protocol
+        raise TypeError("_F03RRGCallStorageV1 cannot be serialized")
+
+    def __repr__(self) -> str:
+        return f"_F03RRGCallStorageV1(state={self.state})"
+
+
+class _F03RRGHandleEntryV1:
+    """One B-owned registration: fresh process-local generation bound to
+    role, owner, process, state and (once validated) object identity."""
+
+    __slots__ = ("raw", "generation", "role", "owner", "os_process_id", "process_instance_id",
+                 "state", "identity", "quarantined")
+
+    def __init__(self, raw: int, generation: int, role: str, attempt: "_F03RRGAttemptV1") -> None:
+        self.raw = raw
+        self.generation = generation
+        self.role = role
+        self.owner = attempt.owner
+        self.os_process_id = attempt.os_process_id
+        self.process_instance_id = attempt.process_instance_id
+        self.state = _F03_RRG_STATE_ACQUIRED
+        self.identity = None
+        self.quarantined = False
+
+    def __copy__(self):
+        raise TypeError("_F03RRGHandleEntryV1 cannot be copied")
+
+    __deepcopy__ = __copy__
+
+    def __reduce_ex__(self, protocol):
+        del protocol
+        raise TypeError("_F03RRGHandleEntryV1 cannot be serialized")
+
+    def __repr__(self) -> str:
+        return f"_F03RRGHandleEntryV1(generation={self.generation}, role={self.role}, state={self.state})"
+
+
+class _F03RRGAttemptV1:
+    """Mutable private state of one acquisition attempt (never published)."""
+
+    __slots__ = ("owner", "process_instance_id", "os_process_id", "t0_ns", "ta_ns", "clock", "budget",
+                 "last_now", "entries", "chain", "primary", "secondary", "raw_statuses", "last_errors",
+                 "lifecycle", "open_calls", "close_attempts", "close_successes", "close_uncertain",
+                 "quarantined", "overrun", "invalidated", "closed", "cleanup_outcome", "max_live",
+                 "interruption", "interruption_kind")
+
+    def __init__(self, *, process_instance_id: str, t0_ns: int, ta_ns: int, clock, budget) -> None:
+        self.owner = object()
+        self.process_instance_id = process_instance_id
+        self.os_process_id = os.getpid()
+        self.t0_ns = t0_ns
+        self.ta_ns = ta_ns
+        self.clock = clock
+        self.budget = budget
+        self.last_now = t0_ns
+        self.entries: list = []
+        self.chain: list = []
+        self.primary = None
+        self.secondary: list = []
+        self.raw_statuses: list = []
+        self.last_errors: list = []
+        self.lifecycle: list = []
+        self.open_calls = 0
+        self.close_attempts = 0
+        self.close_successes = 0
+        self.close_uncertain = 0
+        self.quarantined = False
+        self.overrun = False
+        self.invalidated = False
+        self.closed = False
+        self.cleanup_outcome = "NOT_REQUIRED"
+        self.max_live = 0
+        self.interruption = None  # held only until finalization re-raises it
+        self.interruption_kind = None
+
+    def __copy__(self):
+        raise TypeError("_F03RRGAttemptV1 cannot be copied")
+
+    __deepcopy__ = __copy__
+
+    def __reduce_ex__(self, protocol):
+        del protocol
+        raise TypeError("_F03RRGAttemptV1 cannot be serialized")
+
+    def __repr__(self) -> str:
+        return "_F03RRGAttemptV1(<redacted>)"
+
+
+def _f03_rrg_report(attempt: _F03RRGAttemptV1) -> _F03RRGAttemptReportV1:
+    return _F03RRGAttemptReportV1(
+        evidence_class=_F03_RRG_EVIDENCE_CLASS, primary=attempt.primary, secondary=tuple(attempt.secondary),
+        open_calls=attempt.open_calls, registrations=len(attempt.entries),
+        close_attempts=attempt.close_attempts, close_successes=attempt.close_successes,
+        close_uncertain=attempt.close_uncertain, quarantined=attempt.quarantined, overrun=attempt.overrun,
+        cleanup_outcome=attempt.cleanup_outcome, max_live=attempt.max_live,
+        raw_statuses=tuple(attempt.raw_statuses), last_errors=tuple(attempt.last_errors),
+        lifecycle=tuple(attempt.lifecycle), interruption=attempt.interruption_kind,
+    )
+
+
+def _f03_rrg_now(attempt: _F03RRGAttemptV1) -> int:
+    """Original integer monotonic sample; no reset, refund or regression."""
+    try:
+        value = attempt.clock()
+    except BaseException as exc:
+        raise _f03_rrg_boundary_failure(attempt, exc, "CLOCK_INVALID", "CLOCK_INTERRUPTED") from None
+    if type(value) is not int:
+        _f03_rrg_refuse("CLOCK_INVALID")
+    if value < attempt.last_now:
+        _f03_rrg_refuse("CLOCK_REGRESSED")
+    attempt.last_now = value
+    return value
+
+
+def _f03_rrg_live_count(attempt: _F03RRGAttemptV1, *, persistent_only: bool = False) -> int:
+    return sum(
+        1 for entry in attempt.entries
+        if (entry.state in _F03_RRG_LIVE_STATES or entry.state == _F03_RRG_STATE_CLOSE_UNCERTAIN)
+        and (not persistent_only or entry.role in _F03_RRG_G_ROLES)
+    )
+
+
+def _f03_rrg_charge(attempt: _F03RRGAttemptV1, cost_ns: int, *, opening: bool) -> None:
+    """WG-024 before every native call: ``now < TA`` and the remaining time
+    covers this call's bound, cleanup of every owned handle (including the one
+    about to be opened) and the mandatory later reserve."""
+    now = _f03_rrg_now(attempt)
+    if now >= attempt.ta_ns:
+        _f03_rrg_refuse("DEADLINE_EXPIRED")
+    owned = sum(1 for entry in attempt.entries if entry.state in _F03_RRG_LIVE_STATES) + (1 if opening else 0)
+    budget = attempt.budget
+    if attempt.ta_ns - now < cost_ns + budget.close_ns * owned + budget.later_reserve_ns:
+        _f03_rrg_refuse("RESERVE_INSUFFICIENT")
+
+
+def _f03_rrg_after_call(attempt: _F03RRGAttemptV1) -> None:
+    """Recheck immediately after a native call returns; an overrun
+    invalidates the attempt (a synchronous call is not interruptible)."""
+    if _f03_rrg_now(attempt) >= attempt.ta_ns:
+        attempt.overrun = True
+        _f03_rrg_refuse("DEADLINE_EXPIRED_AFTER_CALL")
+
+
+def _f03_rrg_note_time(attempt: _F03RRGAttemptV1) -> None:
+    """Non-raising time note used on failure/cleanup paths: records overrun,
+    never renews validity."""
+    try:
+        if _f03_rrg_now(attempt) >= attempt.ta_ns:
+            attempt.overrun = True
+    except _F03RootGuardRefusal as refusal:
+        attempt.overrun = True
+        attempt.secondary.append(refusal.code)
+
+
+def _f03_rrg_capture_last_error(attempt: _F03RRGAttemptV1, operation: str) -> None:
+    """Immediate ``GetLastError`` capture after a failing call; diagnostic
+    only.  An unavailable value stays unavailable."""
+    try:
+        value = _f03_rrg_native_get_last_error()
+    except BaseException as exc:
+        value = "UNAVAILABLE"
+        if not isinstance(exc, Exception):
+            _f03_rrg_note_interruption(attempt, exc)  # re-raised after finalization
+    attempt.last_errors.append((operation, value if _f03_rrg_is_uint32(value) else "UNAVAILABLE"))
+
+
+def _f03_rrg_quarantine(attempt: _F03RRGAttemptV1, storage: _F03RRGCallStorageV1) -> None:
+    """WG-007: unknown/pending completion quarantines the call storage and
+    every ownership record of the attempt for the remaining process
+    lifetime; no free, reuse, wait, resume, retry or clean-close claim."""
+    storage.state = "QUARANTINED"
+    attempt.quarantined = True
+    with _F03_RRG_REGISTRY_LOCK:
+        _F03_RRG_PENDING_QUARANTINE.append((storage, attempt))
+
+
+def _f03_rrg_quarantine_unknown_open(attempt: _F03RRGAttemptV1, storage: _F03RRGCallStorageV1,
+                                     role: str) -> None:
+    """Completion of an entered open is unknown (exception, interruption or
+    malformed status): quarantine the storage and take quarantined ownership
+    of any handle already published in the output slot, so it can never be
+    orphaned, closed, reused or claimed by a second owner."""
+    _f03_rrg_quarantine(attempt, storage)
+    (raw,) = struct.unpack_from(_F03_RRG_HANDLE_SLOT_FORMAT, storage.handle_slot)
+    if raw in {0, _F03_RRG_INVALID_HANDLE_VALUE}:
+        return
+    try:
+        entry = _f03_rrg_register(attempt, raw, role)
+    except _F03RootGuardRefusal as refusal:
+        attempt.secondary.append(refusal.code)  # the existing owner keeps it
+        return
+    entry.quarantined = True
+
+
+def _f03_rrg_register(attempt: _F03RRGAttemptV1, raw: int, role: str) -> _F03RRGHandleEntryV1:
+    with _F03_RRG_REGISTRY_LOCK:
+        if raw in _F03_RRG_LIVE_HANDLES:
+            raise _F03RootGuardRefusal("DUPLICATE_LIVE_HANDLE")  # never a second owner
+        _F03_RRG_GENERATION_COUNTER[0] += 1
+        entry = _F03RRGHandleEntryV1(raw, _F03_RRG_GENERATION_COUNTER[0], role, attempt)
+        _F03_RRG_LIVE_HANDLES[raw] = entry
+    attempt.entries.append(entry)
+    attempt.lifecycle.append(("REGISTERED", entry.generation, role))
+    attempt.max_live = max(attempt.max_live, _f03_rrg_live_count(attempt))
+    return entry
+
+
+def _f03_rrg_require_live(attempt: _F03RRGAttemptV1, entry: object, *, validated: bool = False) -> None:
+    if type(entry) is not _F03RRGHandleEntryV1 or entry.owner is not attempt.owner:
+        _f03_rrg_refuse("HANDLE_NOT_OWNED")
+    if entry.os_process_id != os.getpid() or attempt.os_process_id != os.getpid():
+        _f03_rrg_refuse("PROCESS_MISMATCH")
+    with _F03_RRG_REGISTRY_LOCK:
+        registered = _F03_RRG_LIVE_HANDLES.get(entry.raw) is entry
+    if not registered or entry.quarantined or entry.state not in _F03_RRG_LIVE_STATES:
+        _f03_rrg_refuse("HANDLE_NOT_LIVE")
+    if validated and entry.state != _F03_RRG_STATE_VALIDATED:
+        _f03_rrg_refuse("HANDLE_NOT_VALIDATED")
+
+
+def _f03_rrg_open(attempt: _F03RRGAttemptV1, parent: "_F03RRGHandleEntryV1 | None", name: str,
+                  role: str) -> _F03RRGHandleEntryV1:
+    """One fixed-profile NtCreateFile with strict 0/0/1 classification."""
+    access, share, disposition, options = _F03_RRG_ROLE_PROFILES[role]
+    if parent is None:
+        if role != "G_ANCHOR" or attempt.entries:
+            _f03_rrg_refuse("PROFILE_REFUSED")
+        root_directory = 0
+    else:
+        if role not in {"G", "R"} or parent.role not in _F03_RRG_G_ROLES:
+            _f03_rrg_refuse("PROFILE_REFUSED")
+        _f03_rrg_require_live(attempt, parent, validated=True)
+        if not _f03_rrg_valid_component(name):
+            _f03_rrg_refuse("COMPONENT_NAME_REFUSED")
+        root_directory = parent.raw
+    # Reserve table capacity before the open (WG-013/014).
+    if _f03_rrg_live_count(attempt) + 1 > _F03_RRG_MAX_B_HANDLES or (
+        role in _F03_RRG_G_ROLES
+        and _f03_rrg_live_count(attempt, persistent_only=True) + 1 > _F03_RRG_MAX_PERSISTENT_G
+    ):
+        _f03_rrg_refuse("HANDLE_CAPACITY_REFUSED")
+    _f03_rrg_charge(attempt, attempt.budget.open_ns, opening=True)
+    storage = _F03RRGCallStorageV1(name, root_directory)
+    storage.state = "IN_CALL"
+    attempt.lifecycle.append(("OPEN", 0 if parent is None else parent.generation, role))
+    try:
+        status = _f03_rrg_native_nt_create_file(storage, access, None, 0, share, disposition, options, None, 0)
+    except _F03RRGNativeUnavailable:
+        storage.state = "RELEASED"  # refused before native entry
+        raise _F03RootGuardRefusal(_F03_RRG_NATIVE_UNAVAILABLE) from None
+    except BaseException as exc:
+        attempt.open_calls += 1
+        _f03_rrg_quarantine_unknown_open(attempt, storage, role)  # completion/ownership unknown after entry
+        raise _f03_rrg_boundary_failure(
+            attempt, exc, "OPEN_EXCEPTION_COMPLETION_UNKNOWN", "OPEN_INTERRUPTED_COMPLETION_UNKNOWN") from None
+    attempt.open_calls += 1
+    if type(status) is not int or not -0x80000000 <= status <= 0xFFFFFFFF:
+        _f03_rrg_quarantine_unknown_open(attempt, storage, role)
+        _f03_rrg_refuse("OPEN_STATUS_MALFORMED")
+    status &= 0xFFFFFFFF
+    iosb_status, information = struct.unpack_from(_F03_RRG_IO_STATUS_BLOCK_FORMAT, storage.io_status_block)
+    (raw,) = struct.unpack_from(_F03_RRG_HANDLE_SLOT_FORMAT, storage.handle_slot)
+    attempt.raw_statuses.append(("OPEN", status, iosb_status, information))
+    entry = None
+    duplicate = False
+    if raw not in {0, _F03_RRG_INVALID_HANDLE_VALUE}:
+        try:
+            entry = _f03_rrg_register(attempt, raw, role)  # registered even when status refuses
+        except _F03RootGuardRefusal:
+            duplicate = True
+    if _F03_RRG_STATUS_PENDING in {status, iosb_status}:
+        _f03_rrg_quarantine(attempt, storage)
+        _f03_rrg_refuse("OPEN_PENDING_QUARANTINED")
+    storage.state = "RELEASED"
+    if duplicate:
+        _f03_rrg_refuse("DUPLICATE_LIVE_HANDLE")
+    _f03_rrg_after_call(attempt)
+    if status == _F03_RRG_STATUS_OBJECT_NAME_NOT_FOUND:
+        _f03_rrg_refuse("OPEN_OBJECT_MISSING")
+    if (
+        status != _F03_RRG_STATUS_SUCCESS or iosb_status != _F03_RRG_STATUS_SUCCESS
+        or information != _F03_RRG_FILE_OPENED or entry is None
+    ):
+        _f03_rrg_refuse("OPEN_REFUSED")
+    return entry
+
+
+def _f03_rrg_query_info(attempt: _F03RRGAttemptV1, entry: _F03RRGHandleEntryV1, info_class: int,
+                        size: int, operation: str) -> bytes:
+    _f03_rrg_require_live(attempt, entry)
+    _f03_rrg_charge(attempt, attempt.budget.query_ns, opening=False)
+    buffer = bytearray(size)
+    try:
+        ok = _f03_rrg_native_get_file_information_by_handle_ex(entry.raw, info_class, buffer, size)
+    except _F03RRGNativeUnavailable:
+        raise _F03RootGuardRefusal(_F03_RRG_NATIVE_UNAVAILABLE) from None
+    except BaseException as exc:
+        attempt.last_errors.append((operation, "UNAVAILABLE"))
+        failure = _f03_rrg_boundary_failure(attempt, exc, "QUERY_EXCEPTION", "QUERY_INTERRUPTED")
+        _f03_rrg_note_time(attempt)
+        raise failure from None
+    if type(ok) is not int or ok == 0:
+        _f03_rrg_capture_last_error(attempt, operation)
+        _f03_rrg_note_time(attempt)
+        _f03_rrg_refuse("QUERY_FAILED")
+    _f03_rrg_after_call(attempt)
+    if len(buffer) != size:
+        _f03_rrg_refuse("QUERY_BUFFER_INVALID")
+    return bytes(buffer)
+
+
+def _f03_rrg_query_final_path(attempt: _F03RRGAttemptV1, entry: _F03RRGHandleEntryV1, flags: int,
+                              operation: str) -> str:
+    _f03_rrg_require_live(attempt, entry)
+    _f03_rrg_charge(attempt, attempt.budget.query_ns, opening=False)
+    buffer = bytearray(_F03_RRG_FINAL_PATH_CAPACITY * 2)
+    try:
+        length = _f03_rrg_native_get_final_path_name_by_handle_w(
+            entry.raw, buffer, _F03_RRG_FINAL_PATH_CAPACITY, flags)
+    except _F03RRGNativeUnavailable:
+        raise _F03RootGuardRefusal(_F03_RRG_NATIVE_UNAVAILABLE) from None
+    except BaseException as exc:
+        attempt.last_errors.append((operation, "UNAVAILABLE"))
+        failure = _f03_rrg_boundary_failure(attempt, exc, "QUERY_EXCEPTION", "QUERY_INTERRUPTED")
+        _f03_rrg_note_time(attempt)
+        raise failure from None
+    if type(length) is not int:
+        _f03_rrg_note_time(attempt)
+        _f03_rrg_refuse("FINAL_PATH_MALFORMED")
+    if length == 0:
+        _f03_rrg_capture_last_error(attempt, operation)
+        _f03_rrg_note_time(attempt)
+        _f03_rrg_refuse("FINAL_PATH_FAILED")
+    _f03_rrg_after_call(attempt)
+    if length < 0 or length >= _F03_RRG_FINAL_PATH_CAPACITY:
+        _f03_rrg_refuse("FINAL_PATH_TRUNCATED")  # no resize, no retry
+    if len(buffer) != _F03_RRG_FINAL_PATH_CAPACITY * 2 or buffer[2 * length: 2 * length + 2] != b"\x00\x00":
+        _f03_rrg_refuse("FINAL_PATH_MALFORMED")
+    try:
+        text = bytes(buffer[: 2 * length]).decode("utf-16-le")
+    except UnicodeDecodeError:
+        raise _F03RootGuardRefusal("FINAL_PATH_MALFORMED") from None
+    if "\x00" in text or len(text.encode("utf-8")) > _F03_RRG_MAX_UTF8_BYTES:
+        _f03_rrg_refuse("FINAL_PATH_MALFORMED")
+    return text
+
+
+def _f03_rrg_query(attempt: _F03RRGAttemptV1, entry: _F03RRGHandleEntryV1,
+                   expected: _F03RRGIdentityV1) -> _F03RRGIdentityV1:
+    """WG-008 same-registered-handle identity query, compared to ``expected``.
+    Each returned fact is checked as soon as it is read, so a refused object
+    receives no further query call."""
+    anchor = attempt.chain[0].identity if attempt.chain else None
+    file_id = _f03_rrg_query_info(
+        attempt, entry, _F03_RRG_FILE_ID_INFO, _F03_RRG_FILE_ID_INFO_SIZE, "FileIdInfo")
+    (serial,) = struct.unpack_from("<Q", file_id, 0)
+    volume_serial_64 = f"{serial:016x}"
+    file_id_128 = file_id[8:24].hex()  # FILE_ID_128 bytes in returned native order
+    if anchor is not None and volume_serial_64 != anchor.volume_serial_64:
+        _f03_rrg_refuse("VOLUME_CHANGED")
+    if (volume_serial_64, file_id_128) != (expected.volume_serial_64, expected.file_id_128):
+        _f03_rrg_refuse("IDENTITY_MISMATCH")
+    attribute_tag = _f03_rrg_query_info(
+        attempt, entry, _F03_RRG_FILE_ATTRIBUTE_TAG_INFO, _F03_RRG_FILE_ATTRIBUTE_TAG_INFO_SIZE,
+        "FileAttributeTagInfo")
+    attributes, tag = struct.unpack_from("<II", attribute_tag, 0)
+    if not attributes & _F03_RRG_FILE_ATTRIBUTE_DIRECTORY:
+        _f03_rrg_refuse("NOT_DIRECTORY")
+    if attributes & _F03_RRG_FILE_ATTRIBUTE_REPARSE_POINT or tag != 0:
+        _f03_rrg_refuse("REPARSE_REFUSED")
+    if (attributes, tag) != (expected.attributes, expected.reparse_tag):
+        _f03_rrg_refuse("IDENTITY_MISMATCH")
+    final_dos = _f03_rrg_query_final_path(attempt, entry, _F03_RRG_FINAL_PATH_DOS, "FinalPathDos")
+    if final_dos != expected.final_dos_path:
+        _f03_rrg_refuse("IDENTITY_MISMATCH")
+    final_guid = _f03_rrg_query_final_path(attempt, entry, _F03_RRG_FINAL_PATH_GUID, "FinalPathGuid")
+    if anchor is not None and _f03_rrg_guid_volume(final_guid) != _f03_rrg_guid_volume(anchor.final_guid_path):
+        _f03_rrg_refuse("VOLUME_CHANGED")
+    if final_guid != expected.final_guid_path:
+        _f03_rrg_refuse("IDENTITY_MISMATCH")
+    identity = _F03RRGIdentityV1(
+        volume_serial_64=volume_serial_64, file_id_128=file_id_128, final_dos_path=final_dos,
+        final_guid_path=final_guid, attributes=attributes, reparse_tag=tag,
+    )
+    if identity != expected:
+        _f03_rrg_refuse("IDENTITY_MISMATCH")
+    if entry.state == _F03_RRG_STATE_ACQUIRED:
+        entry.identity = identity
+        entry.state = _F03_RRG_STATE_VALIDATED
+    elif entry.identity != identity:
+        _f03_rrg_refuse("IDENTITY_CHANGED")
+    attempt.lifecycle.append(("QUERIED", entry.generation, entry.role))
+    return identity
+
+
+def _f03_rrg_close(attempt: _F03RRGAttemptV1, entry: _F03RRGHandleEntryV1, *, cleanup: bool) -> None:
+    """At most one CloseHandle per valid synchronous registration; an
+    ambiguous result is terminal CLOSE_UNCERTAIN and is never retried."""
+    if entry.state not in _F03_RRG_LIVE_STATES or entry.quarantined:
+        _f03_rrg_refuse("CLOSE_NOT_PERMITTED")
+    if entry.os_process_id != os.getpid():
+        _f03_rrg_refuse("PROCESS_MISMATCH")
+    entry.state = _F03_RRG_STATE_CLOSE_ATTEMPTED
+    attempt.close_attempts += 1
+    attempt.lifecycle.append(("CLOSE", entry.generation, entry.role))
+    try:
+        closed = _f03_rrg_native_close_handle(entry.raw)
+    except BaseException as exc:
+        entry.state = _F03_RRG_STATE_CLOSE_UNCERTAIN  # terminal: an interrupted close is never retried
+        attempt.close_uncertain += 1
+        attempt.last_errors.append(("CloseHandle", "UNAVAILABLE"))
+        failure = _f03_rrg_boundary_failure(attempt, exc, "CLOSE_EXCEPTION", "CLOSE_INTERRUPTED")
+        _f03_rrg_note_time(attempt)
+        raise failure from None
+    if type(closed) is not int or closed == 0:
+        entry.state = _F03_RRG_STATE_CLOSE_UNCERTAIN
+        attempt.close_uncertain += 1
+        _f03_rrg_capture_last_error(attempt, "CloseHandle")
+        _f03_rrg_note_time(attempt)
+        _f03_rrg_refuse("CLOSE_FAILED")
+    entry.state = _F03_RRG_STATE_CLOSED
+    attempt.close_successes += 1
+    with _F03_RRG_REGISTRY_LOCK:
+        if _F03_RRG_LIVE_HANDLES.get(entry.raw) is entry:
+            del _F03_RRG_LIVE_HANDLES[entry.raw]
+    if cleanup:
+        _f03_rrg_note_time(attempt)  # cleanup overrun is recorded, never renews validity
+    else:
+        _f03_rrg_after_call(attempt)
+
+
+def _f03_rrg_rollback(attempt: _F03RRGAttemptV1) -> None:
+    """Invalidate the whole attempt; close transient R then persistent G
+    deepest-first, each valid synchronous registration at most once.
+    Pending/unknown completion: no further native call, all records stay
+    quarantined; a foreign process never closes the owner's handles."""
+    attempt.invalidated = True
+    attempt.closed = True
+    if attempt.quarantined:
+        for entry in attempt.entries:
+            if entry.state in _F03_RRG_LIVE_STATES:
+                entry.quarantined = True
+        attempt.cleanup_outcome = "PENDING_QUARANTINED_NO_CLEAN_CLAIM"
+        return
+    if attempt.os_process_id != os.getpid():
+        attempt.secondary.append("PROCESS_MISMATCH")
+        attempt.cleanup_outcome = "PROCESS_MISMATCH_NOT_CLOSED"
+        return
+    ordered = [entry for entry in reversed(attempt.entries) if entry.role == "R"]
+    ordered += [entry for entry in reversed(attempt.entries) if entry.role in _F03_RRG_G_ROLES]
+    for entry in ordered:
+        if entry.state in _F03_RRG_LIVE_STATES:
+            _f03_rrg_close_for_cleanup(attempt, entry)
+    _f03_rrg_settle_cleanup(attempt)
+
+
+def _f03_rrg_close_for_cleanup(attempt: _F03RRGAttemptV1, entry: _F03RRGHandleEntryV1) -> None:
+    """One cleanup close whose failure or interruption is recorded as an
+    ordered secondary failure, so the remaining owned guards are still
+    closed once before any interruption propagates."""
+    try:
+        _f03_rrg_close(attempt, entry, cleanup=True)
+    except _F03RootGuardRefusal as refusal:
+        attempt.secondary.append(refusal.code)
+    except BaseException as exc:  # outside the fixed boundary: never lose it
+        attempt.secondary.append("UNEXPECTED_EXCEPTION" if isinstance(exc, Exception) else "INTERRUPTED")
+        if not isinstance(exc, Exception):
+            _f03_rrg_note_interruption(attempt, exc)
+
+
+def _f03_rrg_settle_cleanup(attempt: _F03RRGAttemptV1) -> None:
+    """Derive the cleanup outcome from every registration's actual state: a
+    close left CLOSE_ATTEMPTED becomes terminal CLOSE_UNCERTAIN, and nothing
+    is called clean while any owned registration is unresolved."""
+    for entry in attempt.entries:
+        if entry.state == _F03_RRG_STATE_CLOSE_ATTEMPTED:
+            entry.state = _F03_RRG_STATE_CLOSE_UNCERTAIN
+            attempt.close_uncertain += 1
+            attempt.secondary.append("CLOSE_STATE_UNRESOLVED")
+    if any(entry.state == _F03_RRG_STATE_CLOSE_UNCERTAIN for entry in attempt.entries):
+        attempt.cleanup_outcome = "CLOSE_UNCERTAIN"
+    elif any(entry.state != _F03_RRG_STATE_CLOSED for entry in attempt.entries):
+        attempt.cleanup_outcome = "OWNERSHIP_UNRESOLVED"
+    else:
+        attempt.cleanup_outcome = "CLOSED_ALL_REGISTERED"
+
+
+def _f03_rrg_raise_final(attempt: _F03RRGAttemptV1, code: str) -> None:
+    """Propagate after finalization: the original interruption object when
+    one occurred (with the sanitized report attached), otherwise a refusal.
+    The attempt drops its reference to the interruption before re-raising."""
+    report = _f03_rrg_report(attempt)
+    interruption = attempt.interruption
+    attempt.interruption = None
+    if interruption is not None:
+        try:
+            interruption._f03_rrg_report = report
+        except Exception:  # noqa: BLE001 - a report attachment failure never masks the interruption
+            pass
+        raise interruption
+    raise _F03RootGuardRefusal(code, report) from None
+
+
+def _f03_rrg_fail(attempt: _F03RRGAttemptV1, code: str) -> None:
+    if attempt.primary is None:
+        attempt.primary = code
+    _f03_rrg_rollback(attempt)
+    _f03_rrg_raise_final(attempt, attempt.primary)
+
+
+def _f03_rrg_edge(attempt: _F03RRGAttemptV1, parent: _F03RRGHandleEntryV1,
+                  edge: _F03RRGModelEdgeV1) -> _F03RRGHandleEntryV1:
+    """WG-011 retained descent: parent G stays live; R observes the child;
+    G opens the same child relative to the same parent while R lives; both
+    and the parent are requeried; only then is R closed once."""
+    parent_before = parent.identity
+    transient = _f03_rrg_open(attempt, parent, edge.name, "R")
+    observed = _f03_rrg_query(attempt, transient, edge.expected)
+    guard = _f03_rrg_open(attempt, parent, edge.name, "G")
+    _f03_rrg_query(attempt, guard, observed)
+    _f03_rrg_query(attempt, parent, parent_before)
+    _f03_rrg_query(attempt, guard, observed)
+    if any(
+        (held.identity.volume_serial_64, held.identity.file_id_128)
+        == (guard.identity.volume_serial_64, guard.identity.file_id_128)
+        for held in attempt.chain
+    ):
+        _f03_rrg_refuse("DUPLICATE_CHAIN_OBJECT")
+    _f03_rrg_close(attempt, transient, cleanup=False)
+    attempt.chain.append(guard)
+    return guard
+
+
+class _F03RetainedRootModelChainV1:
+    """MODEL_ONLY_OFFLINE retained G chain produced by the recording
+    mechanics.  It is not an IF-02 root lease, carries no projection or
+    custody, cannot be copied, serialized or reconstructed, and nothing
+    accepts it as admission material."""
+
+    __slots__ = ("_attempt",)
+    evidence_class = _F03_RRG_EVIDENCE_CLASS
+
+    def __init__(self, key: object, attempt: _F03RRGAttemptV1) -> None:
+        if key is not _F03_RRG_MODEL_CHAIN_KEY or type(attempt) is not _F03RRGAttemptV1:
+            raise TypeError("_F03RetainedRootModelChainV1 is issued only by the recording mechanics")
+        object.__setattr__(self, "_attempt", attempt)
+
+    def __setattr__(self, name: str, value: object) -> None:
+        raise AttributeError("_F03RetainedRootModelChainV1 is immutable")
+
+    def __copy__(self):
+        raise TypeError("_F03RetainedRootModelChainV1 cannot be copied")
+
+    __deepcopy__ = __copy__
+
+    def __reduce_ex__(self, protocol):
+        del protocol
+        raise TypeError("_F03RetainedRootModelChainV1 cannot be serialized")
+
+    def __repr__(self) -> str:
+        return "_F03RetainedRootModelChainV1(<redacted>)"
+
+    def report(self) -> _F03RRGAttemptReportV1:
+        return _f03_rrg_report(self._attempt)
+
+
+def _f03_rrg_acquire_model_chain_v1(enrollment: object, *, process_instance_id: object, t0_ns: object,
+                                    ta_ns: object, monotonic_clock_ns: object,
+                                    budget: object) -> _F03RetainedRootModelChainV1:
+    """Private recording mechanics (WG-010..016/024): anchor G, then for
+    every further edge the retained R->G handoff, then final revalidation of
+    the whole chain.  Publishes nothing until the full chain validates and
+    then only a MODEL_ONLY_OFFLINE chain.  Never called by any production
+    path; with the held native operations it refuses at the first boundary."""
+    _f03_rrg_validate_enrollment(enrollment)
+    if type(process_instance_id) is not str or not process_instance_id:
+        _f03_rrg_refuse("PROCESS_INSTANCE_INVALID")
+    if (
+        type(t0_ns) is not int or type(ta_ns) is not int
+        or ta_ns - t0_ns != _F03_RRG_ORIGINAL_BUDGET_NS
+    ):
+        _f03_rrg_refuse("ORIGINAL_BUDGET_INVALID")
+    if not callable(monotonic_clock_ns):
+        _f03_rrg_refuse("CLOCK_INVALID")
+    if type(budget) is not _F03RRGModelBudgetV1 or any(
+        type(value) is not int or value < 0
+        for value in (budget.open_ns, budget.query_ns, budget.close_ns, budget.later_reserve_ns)
+    ):
+        _f03_rrg_refuse("BUDGET_INVALID")
+    _f03_rrg_require_supported_abi()
+    attempt = _F03RRGAttemptV1(
+        process_instance_id=process_instance_id, t0_ns=t0_ns, ta_ns=ta_ns,
+        clock=monotonic_clock_ns, budget=budget)
+    try:
+        if _f03_rrg_now(attempt) >= ta_ns:
+            _f03_rrg_refuse("DEADLINE_EXPIRED")
+        anchor_edge = enrollment.ancestors[0]
+        anchor = _f03_rrg_open(attempt, None, anchor_edge.name, "G_ANCHOR")
+        _f03_rrg_query(attempt, anchor, anchor_edge.expected)
+        attempt.chain.append(anchor)
+        for edge in enrollment.ancestors[1:] + (enrollment.root,):
+            _f03_rrg_edge(attempt, attempt.chain[-1], edge)
+        for entry in tuple(attempt.chain):
+            _f03_rrg_query(attempt, entry, entry.identity)
+    except _F03RootGuardRefusal as refusal:
+        _f03_rrg_fail(attempt, refusal.code)
+    except Exception:
+        _f03_rrg_fail(attempt, "UNEXPECTED_EXCEPTION")
+    except BaseException as exc:  # interruption outside a fixed boundary: finalize, then re-raise it
+        _f03_rrg_note_interruption(attempt, exc)
+        _f03_rrg_fail(attempt, "INTERRUPTED")
+    if attempt.interruption is not None:  # a recorded interruption never yields a chain
+        _f03_rrg_fail(attempt, "INTERRUPTED")
+    return _F03RetainedRootModelChainV1(_F03_RRG_MODEL_CHAIN_KEY, attempt)
+
+
+def _f03_rrg_chain_attempt(chain: object) -> _F03RRGAttemptV1:
+    if type(chain) is not _F03RetainedRootModelChainV1:
+        _f03_rrg_refuse("CHAIN_INVALID")
+    return object.__getattribute__(chain, "_attempt")
+
+
+def _f03_rrg_revalidate_model_chain_v1(chain: object, *, process_instance_id: object) -> None:
+    """WG-015 live requery of every retained G on the same registered handle
+    under the same process, generations, states and original deadline.  Any
+    failure or changed evidence invalidates the chain and rolls it back."""
+    attempt = _f03_rrg_chain_attempt(chain)
+    if attempt.closed or attempt.invalidated:
+        _f03_rrg_refuse("CHAIN_CLOSED")
+    try:
+        if process_instance_id != attempt.process_instance_id or attempt.os_process_id != os.getpid():
+            _f03_rrg_refuse("PROCESS_MISMATCH")
+        for entry in tuple(attempt.chain):
+            _f03_rrg_require_live(attempt, entry, validated=True)
+            _f03_rrg_query(attempt, entry, entry.identity)
+    except _F03RootGuardRefusal as refusal:
+        _f03_rrg_fail(attempt, refusal.code)
+    except Exception:
+        _f03_rrg_fail(attempt, "UNEXPECTED_EXCEPTION")
+    except BaseException as exc:  # interruption outside a fixed boundary: invalidate first
+        _f03_rrg_note_interruption(attempt, exc)
+        _f03_rrg_fail(attempt, "INTERRUPTED")
+    if attempt.interruption is not None:  # e.g. an interrupted GetLastError on an otherwise valid path
+        _f03_rrg_fail(attempt, "INTERRUPTED")
+
+
+def _f03_rrg_release_model_chain_v1(chain: object, *, process_instance_id: object) -> _F03RRGAttemptReportV1:
+    """WG-018 normal release: close child-to-anchor G exactly once each.
+    Closes are attempted even after TA; an overrun or ambiguous close is
+    reported as a refusal and never as a clean bounded run."""
+    attempt = _f03_rrg_chain_attempt(chain)
+    if attempt.closed:
+        _f03_rrg_refuse("CHAIN_CLOSED")
+    if process_instance_id != attempt.process_instance_id:
+        _f03_rrg_refuse("PROCESS_MISMATCH")  # no side effect: the owner can still release
+    attempt.invalidated = True
+    attempt.closed = True
+    if attempt.os_process_id != os.getpid():
+        attempt.primary = attempt.primary or "PROCESS_MISMATCH"
+        attempt.cleanup_outcome = "PROCESS_MISMATCH_NOT_CLOSED"
+        raise _F03RootGuardRefusal("PROCESS_MISMATCH", _f03_rrg_report(attempt))
+    for entry in reversed(attempt.chain):
+        if entry.state in _F03_RRG_LIVE_STATES:
+            _f03_rrg_close_for_cleanup(attempt, entry)  # every remaining guard still closed once
+    _f03_rrg_settle_cleanup(attempt)
+    if attempt.interruption is not None:
+        attempt.primary = attempt.primary or "RELEASE_INTERRUPTED"
+        _f03_rrg_raise_final(attempt, attempt.primary)
+    if attempt.cleanup_outcome != "CLOSED_ALL_REGISTERED":
+        attempt.primary = attempt.primary or "RELEASE_CLOSE_UNCERTAIN"
+        raise _F03RootGuardRefusal("RELEASE_CLOSE_UNCERTAIN", _f03_rrg_report(attempt))
+    if attempt.overrun:
+        attempt.primary = attempt.primary or "RELEASE_OVERRUN"
+        raise _F03RootGuardRefusal("RELEASE_OVERRUN", _f03_rrg_report(attempt))
+    return _f03_rrg_report(attempt)
 
 
 __all__ = [
