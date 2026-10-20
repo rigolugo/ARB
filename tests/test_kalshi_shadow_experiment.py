@@ -1580,7 +1580,7 @@ PROTECTED_BASE_BLOBS = {
     "src/arb/venues/kalshi/risk_control.py": "111685c8c1dc7735a53b45830d93844c329f23e3",
     "tests/test_kalshi_d07_market_selector.py": "02dc6a12bd8883cd7c24fd8f9e3c1fba28c74096",
     "tests/test_kalshi_minimal_market_maker.py": "43e2a7fdbdbcfd769713e6e04cbaa321d8313e44",
-    "tests/test_kalshi_minimal_market_maker_experiment_runner.py": "01f9192735b5669ecb2de0f9475aa2a2c44315d9",
+    "tests/test_kalshi_minimal_market_maker_experiment_runner.py": "e31c7bf789e4bb0684fbd3688f4fa3867388cff5",
 }
 
 # Accepted Test-02 configuration input (996 bytes).  TEST FIXTURE ONLY.

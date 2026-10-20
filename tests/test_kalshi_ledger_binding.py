@@ -5101,23 +5101,1060 @@ def _auth_live_checkpoint(projection, contract, *, state_event_id=None):
     }
 
 
+# ---------------------------------------------------------------------------
+# Bounded C04-T17/T18 race evidence protocol (BR-03..BR-12).  Test-local only:
+# a closed terminal worker record, its structural and cross-field validator,
+# the branch oracle, one shared H0/Hc/Hf spawn lifecycle and owned-root
+# retention.  The real production consumption API, stores, receipt and
+# complete no-repair validation interfaces are called, never replaced.
+# ---------------------------------------------------------------------------
+
+import enum as _race_enum
+import os as _race_os
+import queue as _race_queue
+import re as _race_re
+import stat as _race_stat
+import threading as _race_threading
+import time as _race_time
+
+_RACE_SCHEMA_VERSION = 1
+_RACE_RECORD_MAX_BYTES = 4096
+_RACE_RECORD_KEYS = frozenset({
+    "schema_version", "fixture_id", "worker_label", "os_pid", "process_instance_id", "barrier_status",
+    "consumption_call_count", "outcome", "reason", "underlying_failure_code", "receipt_present",
+    "local_receipt_validation", "event", "error_category",
+})
+_RACE_EVENT_KEYS = frozenset({
+    "event_id", "event_hash", "sequence", "expectation_carrier_sha256", "authorization_binding_sha256",
+    "invocation_started_monotonic_ns", "absolute_deadline_monotonic_ns",
+})
+_RACE_WORKER_LABELS = frozenset({"w0", "w1"})
+_RACE_BARRIER_STATUSES = frozenset({"PASSED", "NOT_USED", "FAILED", "NOT_REACHED"})
+_RACE_REFUSAL_OUTCOMES = frozenset({
+    "REPLAYED", "CONFLICT", "STALE_BINDING", "FAILED", "INDETERMINATE", "UNAVAILABLE", "DEADLINE_EXPIRED",
+})
+_RACE_OUTCOMES = _RACE_REFUSAL_OUTCOMES | {"CONSUMED", "HARNESS_ERROR"}
+_RACE_VALIDATIONS = frozenset({"VALID", "INVALID", "NOT_APPLICABLE"})
+_RACE_ERROR_CATEGORIES = frozenset({"SETUP", "BARRIER", "CONSUMPTION", "RECEIPT_VALIDATION", "REPORTING"})
+_RACE_FIXTURE_RE = _race_re.compile(r"[A-Za-z0-9_-]{1,80}")
+_RACE_PROC_RE = _race_re.compile(r"proc_[0-9a-f]{32}")
+_RACE_EVENT_ID_RE = _race_re.compile(r"evt_[0-9a-f]{32}")
+_RACE_SHA_RE = _race_re.compile(r"[0-9a-f]{64}")
+_RACE_CODE_RE = _race_re.compile(r"[A-Z][A-Z0-9_]{0,127}")
+# BR-07: the only admissible refusal triples for the identical-input fixture.
+_RACE_BUSY_TRIPLE = ("UNAVAILABLE", "LEDGER_BUSY", "LEDGER_CONCURRENT_WRITER")
+_RACE_REPLAY_TRIPLE = ("REPLAYED", "SET_ALREADY_CONSUMED", None)
+# BR-09/BR-10: one combined real-monotonic budget from H0.
+_RACE_COLLECTION_S = 180.0
+_RACE_FINALIZATION_S = 60.0
+_RACE_BARRIER_MAX_S = 60.0
+_RACE_COOPERATIVE_S = 5.0
+_RACE_TERMINATE_JOIN_UNTIL_S = 210.0
+_RACE_KILL_JOIN_UNTIL_S = 225.0
+_RACE_TAIL_FIELDS = frozenset({"trusted_sequence", "trusted_event_hash", "last_sequence", "terminal_event_hash"})
+_RACE_CONSUMED_EVENT = "EXECUTION_AUTHORIZATION_SET_CONSUMED"
+# BR-06 orthogonal classes; any finding not listed here is FAIL_EVIDENCE.
+_RACE_FINDING_CLASS = {
+    "TWO_SUCCESSFUL_CONSUMERS": "FAIL_SAFETY",
+    "DUPLICATE_CONSUMPTION_EVENTS": "FAIL_SAFETY",
+    "SUCCESS_CLAIM_WITHOUT_VALID_RECEIPT": "FAIL_INTEGRITY",
+    "RECEIPT_LOCAL_VALIDATION_FAILED": "FAIL_INTEGRITY",
+    "PROCESS_IDENTITY_MISMATCH_ON_SUCCESS": "FAIL_INTEGRITY",
+    "RECEIPT_EVENT_MISMATCH": "FAIL_INTEGRITY",
+    "EVENT_METADATA_MISMATCH": "FAIL_INTEGRITY",
+    "SUCCESS_WITHOUT_ANCHORED_EVENT": "FAIL_INTEGRITY",
+    "HISTORY_PREFIX_CHANGED": "FAIL_INTEGRITY",
+    "UNEXPECTED_EVENT": "FAIL_INTEGRITY",
+    "SAFETY_PROJECTION_CHANGED": "FAIL_INTEGRITY",
+    "CONSUMED_STATE_MISMATCH": "FAIL_INTEGRITY",
+    "REPLAY_WITHOUT_VALIDATED_WINNER": "FAIL_INTEGRITY",
+    "CONTRADICTORY_REFUSAL": "FAIL_INTEGRITY",
+    "REFUSAL_TRIPLE_MISMATCH": "FAIL_INTEGRITY",
+    "EVENT_WITHOUT_RECEIPT": "TERMINAL_PERSISTENCE_UNCERTAIN",
+    "STORE_STATE_UNCERTAIN": "TERMINAL_PERSISTENCE_UNCERTAIN",
+    "UNEQUAL_TAILS": "TERMINAL_PERSISTENCE_UNCERTAIN",
+    "INDETERMINATE_OUTCOME": "TERMINAL_PERSISTENCE_UNCERTAIN",
+    "PERSISTENCE_UNPROVEN_FOR_SUCCESS": "TERMINAL_PERSISTENCE_UNCERTAIN",
+}
+
+
+class _RaceEvidenceError(ValueError):
+    """Closed evidence-validation failure; the message is a closed code."""
+
+
+class _RaceHarnessError(Exception):
+    def __init__(self, category: str) -> None:
+        super().__init__(category)
+        self.category = category
+
+
+def _race_encode_record(record) -> str:
+    return json.dumps(record, sort_keys=True, separators=(",", ":"), ensure_ascii=True, allow_nan=False)
+
+
+def _race_counting_call(function, counter):
+    """Transparent instrumented boundary (BR-08): count entry to the real
+    consumption API, then delegate exactly once with unchanged arguments,
+    clocks and locks, returning the unchanged result."""
+    def call(*args, **kwargs):
+        counter[0] += 1
+        return function(*args, **kwargs)
+    return call
+
+
+def _race_receipt_validation(receipt, expectation, params):
+    """Originating-worker validation of a genuine production receipt (BR-05).
+
+    Returns ``(valid, public_event_metadata)``.  The receipt itself is never
+    copied, serialized or transferred; only bounded public metadata is."""
+    if type(receipt) is not _lb.ActiveAuthorizationConsumptionV1:
+        return False, None
+    event = {
+        "event_id": receipt.consumption_event_id, "event_hash": receipt.consumption_event_hash,
+        "sequence": receipt.consumption_sequence,
+        "expectation_carrier_sha256": receipt.expectation_carrier_sha256,
+        "authorization_binding_sha256": receipt.authorization_binding_sha256,
+        "invocation_started_monotonic_ns": receipt.invocation_started_monotonic_ns,
+        "absolute_deadline_monotonic_ns": receipt.absolute_deadline_monotonic_ns,
+    }
+    try:
+        receipt.assert_live(process_instance_id=params["process_id"])
+    except LedgerError:
+        return False, event
+    valid = (
+        receipt.os_process_id == _race_os.getpid()
+        and receipt.claimed_stages == ()
+        and receipt.process_instance_id == params["process_id"]
+        and receipt.authorization_set_id == expectation.authorization_set_id
+        and receipt.orchestration_authorization_id == expectation.orchestration_authorization_id
+        and receipt.orchestration_authorization_class == expectation.orchestration_authorization_class
+        and receipt.gate_d_authorization_id == expectation.gate_d_authorization_id
+        and receipt.execution_attempt_id == expectation.binding["execution_attempt_id"]
+        and receipt.invocation_id == expectation.binding["invocation_id"]
+        and receipt.expectation_carrier_sha256 == expectation.expectation_carrier_sha256
+        and receipt.authorization_binding_sha256 == expectation.authorization_binding_sha256
+        and receipt.authorization_binding_sha256 == _lb.compute_authorization_binding_sha256(params["binding"])
+        and receipt.invocation_started_monotonic_ns == _AUTH_START
+        and receipt.absolute_deadline_monotonic_ns == _AUTH_END
+        and receipt.entry_state_class == expectation.entry_state_class
+        and receipt.consumption_event_id == params["expected_event_id"]
+        and receipt.consumption_sequence == params["checkpoint"]["trusted_sequence"] + 1
+    )
+    return valid, event
+
+
 def _authorization_race_worker(params, queue, barrier):
-    """Separate-process consumption attempt (T17/T18)."""
-    binding = AuthorityNamespaceBinding.bind(
-        authority_namespace_id=params["namespace_id"], authority_namespace_root=params["authority_root"],
-        canonical_repository_root=params["repository_root"])
-    domain = _lb.ExecutionDomainBindingV1(
-        venue="KALSHI", environment="KALSHI_DEMO", account_scope_ref=_AUTH_ACCOUNT, subaccount=1, exchange_index=0)
-    contract = _lb.ActiveExecutionDomainContractV1(binding=domain, bootstrap_contract_sha256=params["bootstrap_sha"])
-    expectation = _auth_expectation(params["binding"], params["checkpoint"])
-    if barrier is not None:
-        barrier.wait(timeout=60)
-    result = _lb.consume_active_execution_authorization_set_v1(
-        binding, canonical_repository_root=params["repository_root"], active_contract=contract,
-        expectation=expectation, process_instance_id=params["process_id"],
-        invocation_started_monotonic_ns=_AUTH_START, absolute_deadline_monotonic_ns=_AUTH_END,
-        monotonic_clock_ns=lambda: _AUTH_START + 1, expected_ledger_path=params["ledger_path"])
-    queue.put((result.outcome, result.receipt is not None, result.reason))
+    """Separate-process consumption attempt (C04-T17 / C04-T18).
+
+    Exactly one real production consumption call, an optional single barrier
+    rendezvous immediately before it, local validation of any genuine receipt
+    in this originating process, and ONE bounded closed terminal record
+    (BR-05/BR-08).  The receipt is revoked only after it was observed."""
+    entered = _race_time.monotonic()
+    record = {
+        "schema_version": _RACE_SCHEMA_VERSION, "fixture_id": params["fixture_id"],
+        "worker_label": params["worker_label"], "os_pid": _race_os.getpid(),
+        "process_instance_id": params["process_id"],
+        "barrier_status": "NOT_USED" if barrier is None else "NOT_REACHED",
+        "consumption_call_count": 0, "outcome": "HARNESS_ERROR", "reason": None,
+        "underlying_failure_code": None, "receipt_present": False,
+        "local_receipt_validation": "NOT_APPLICABLE", "event": None, "error_category": None,
+    }
+    counter = [0]
+    receipt = None
+    stage = "SETUP"
+    try:
+        binding = AuthorityNamespaceBinding.bind(
+            authority_namespace_id=params["namespace_id"], authority_namespace_root=params["authority_root"],
+            canonical_repository_root=params["repository_root"])
+        domain = _lb.ExecutionDomainBindingV1(
+            venue="KALSHI", environment="KALSHI_DEMO", account_scope_ref=_AUTH_ACCOUNT, subaccount=1, exchange_index=0)
+        contract = _lb.ActiveExecutionDomainContractV1(binding=domain, bootstrap_contract_sha256=params["bootstrap_sha"])
+        expectation = _auth_expectation(params["binding"], params["checkpoint"])
+        consume = _race_counting_call(_lb.consume_active_execution_authorization_set_v1, counter)
+        if barrier is not None:
+            stage = "BARRIER"
+            timeout = min(_RACE_BARRIER_MAX_S, params["barrier_timeout_cap_s"]) - (_race_time.monotonic() - entered)
+            if timeout <= 0:
+                raise _RaceHarnessError("BARRIER")
+            try:
+                barrier.wait(timeout=timeout)
+            except _race_threading.BrokenBarrierError:
+                record["barrier_status"] = "FAILED"
+                raise _RaceHarnessError("BARRIER") from None
+            record["barrier_status"] = "PASSED"
+        stage = "CONSUMPTION"
+        result = consume(
+            binding, canonical_repository_root=params["repository_root"], active_contract=contract,
+            expectation=expectation, process_instance_id=params["process_id"],
+            invocation_started_monotonic_ns=_AUTH_START, absolute_deadline_monotonic_ns=_AUTH_END,
+            monotonic_clock_ns=lambda: _AUTH_START + 1, expected_ledger_path=params["ledger_path"])
+        record["consumption_call_count"] = counter[0]
+        receipt = result.receipt
+        if result.outcome == "CONSUMED":
+            stage = "RECEIPT_VALIDATION"
+            valid, event = _race_receipt_validation(receipt, expectation, params)
+            record.update(
+                receipt_present=receipt is not None, event=event,
+                local_receipt_validation="VALID" if valid else "INVALID")
+            if not valid or result.reason is not None or result.underlying_failure_code is not None:
+                raise _RaceHarnessError("RECEIPT_VALIDATION")
+            record["outcome"] = "CONSUMED"
+        else:
+            if receipt is not None:
+                record["receipt_present"] = True
+                raise _RaceHarnessError("CONSUMPTION")
+            code = result.underlying_failure_code
+            record.update(
+                outcome=result.outcome, reason=result.reason,
+                underlying_failure_code=None if code is None else str(code))
+    except _RaceHarnessError as exc:
+        record.update(outcome="HARNESS_ERROR", error_category=exc.category,
+                      consumption_call_count=counter[0], reason=None, underlying_failure_code=None)
+    except Exception:
+        record.update(outcome="HARNESS_ERROR", error_category=stage,
+                      consumption_call_count=counter[0], reason=None, underlying_failure_code=None)
+    finally:
+        if type(receipt) is _lb.ActiveAuthorizationConsumptionV1:
+            receipt.revoke()  # terminal worker completion, after observation
+    stage = "REPORTING"
+    try:
+        text = _race_encode_record(record)
+        if len(text.encode("utf-8")) > _RACE_RECORD_MAX_BYTES:
+            raise _RaceHarnessError("REPORTING")
+    except Exception:
+        record.update(outcome="HARNESS_ERROR", error_category="REPORTING", event=None,
+                      reason=None, underlying_failure_code=None)
+        text = _race_encode_record(record)
+    queue.put(text)  # a failed enqueue is missing evidence, never replaced
+
+
+def _race_reject_float(text):
+    raise _RaceEvidenceError("FLOAT_VALUE")
+
+
+def _race_reject_constant(text):
+    raise _RaceEvidenceError("NONFINITE_VALUE")
+
+
+def _race_unique_pairs(pairs):
+    keys = [key for key, _ in pairs]
+    if len(set(keys)) != len(keys):
+        raise _RaceEvidenceError("DUPLICATE_JSON_KEY")
+    return dict(pairs)
+
+
+def _race_text(value, pattern) -> bool:
+    return type(value) is str and pattern.fullmatch(value) is not None
+
+
+def _race_member(value, allowed) -> bool:
+    return type(value) is str and value in allowed
+
+
+def _race_validate_record_structure(record) -> None:
+    """Closed Draft 2020-12 structure of WORKER_EVIDENCE.schema.json, enforced
+    with existing facilities (no third-party schema dependency)."""
+    if type(record) is not dict or set(record) != _RACE_RECORD_KEYS:
+        raise _RaceEvidenceError("RECORD_KEYS")
+    if type(record["schema_version"]) is not int or record["schema_version"] != _RACE_SCHEMA_VERSION:
+        raise _RaceEvidenceError("SCHEMA_VERSION")
+    if not _race_text(record["fixture_id"], _RACE_FIXTURE_RE):
+        raise _RaceEvidenceError("FIXTURE_ID")
+    if not _race_member(record["worker_label"], _RACE_WORKER_LABELS):
+        raise _RaceEvidenceError("WORKER_LABEL")
+    if type(record["os_pid"]) is not int or record["os_pid"] < 1:
+        raise _RaceEvidenceError("OS_PID")
+    if not _race_text(record["process_instance_id"], _RACE_PROC_RE):
+        raise _RaceEvidenceError("PROCESS_INSTANCE_ID")
+    if not _race_member(record["barrier_status"], _RACE_BARRIER_STATUSES):
+        raise _RaceEvidenceError("BARRIER_STATUS")
+    count = record["consumption_call_count"]
+    if type(count) is not int or not 0 <= count <= 1:
+        raise _RaceEvidenceError("CALL_COUNT")
+    if not _race_member(record["outcome"], _RACE_OUTCOMES):
+        raise _RaceEvidenceError("OUTCOME")
+    for name in ("reason", "underlying_failure_code"):
+        if record[name] is not None and not _race_text(record[name], _RACE_CODE_RE):
+            raise _RaceEvidenceError("CODE_TEXT")
+    if type(record["receipt_present"]) is not bool:
+        raise _RaceEvidenceError("RECEIPT_PRESENT")
+    if not _race_member(record["local_receipt_validation"], _RACE_VALIDATIONS):
+        raise _RaceEvidenceError("LOCAL_VALIDATION")
+    event = record["event"]
+    if event is not None:
+        if type(event) is not dict or set(event) != _RACE_EVENT_KEYS:
+            raise _RaceEvidenceError("EVENT_KEYS")
+        if not _race_text(event["event_id"], _RACE_EVENT_ID_RE):
+            raise _RaceEvidenceError("EVENT_ID")
+        for name in ("event_hash", "expectation_carrier_sha256", "authorization_binding_sha256"):
+            if not _race_text(event[name], _RACE_SHA_RE):
+                raise _RaceEvidenceError("EVENT_HASH")
+        if type(event["sequence"]) is not int or event["sequence"] < 1:
+            raise _RaceEvidenceError("EVENT_SEQUENCE")
+        for name in ("invocation_started_monotonic_ns", "absolute_deadline_monotonic_ns"):
+            if type(event[name]) is not int or event[name] < 0:
+                raise _RaceEvidenceError("EVENT_CLOCK")
+    category = record["error_category"]
+    if category is not None and not _race_member(category, _RACE_ERROR_CATEGORIES):
+        raise _RaceEvidenceError("ERROR_CATEGORY")
+    outcome = record["outcome"]
+    if outcome == "CONSUMED" and not (
+        record["receipt_present"] is True and record["local_receipt_validation"] == "VALID"
+        and type(event) is dict and count == 1 and record["reason"] is None
+        and record["underlying_failure_code"] is None and category is None
+    ):
+        raise _RaceEvidenceError("CONSUMED_SHAPE")
+    if outcome == "HARNESS_ERROR":
+        if category is None:
+            raise _RaceEvidenceError("HARNESS_ERROR_SHAPE")
+    elif category is not None or count != 1:
+        raise _RaceEvidenceError("NORMAL_RECORD_SHAPE")
+    if outcome in _RACE_REFUSAL_OUTCOMES and not (
+        record["receipt_present"] is False and record["local_receipt_validation"] == "NOT_APPLICABLE"
+        and event is None
+    ):
+        raise _RaceEvidenceError("REFUSAL_SHAPE")
+
+
+def _race_parse_record(raw):
+    """Bounded closed parse: <=4096 UTF-8 bytes, no duplicate keys, floats or
+    nonfinite values, then the closed structural contract."""
+    if type(raw) is not str:
+        raise _RaceEvidenceError("RECORD_NOT_TEXT")
+    try:
+        size = len(raw.encode("utf-8"))
+    except UnicodeError:
+        raise _RaceEvidenceError("RECORD_NOT_TEXT") from None
+    if size > _RACE_RECORD_MAX_BYTES:
+        raise _RaceEvidenceError("RECORD_TOO_LARGE")
+    try:
+        record = json.loads(raw, object_pairs_hook=_race_unique_pairs,
+                            parse_float=_race_reject_float, parse_constant=_race_reject_constant)
+    except _RaceEvidenceError:
+        raise
+    except (ValueError, RecursionError):
+        raise _RaceEvidenceError("RECORD_NOT_JSON") from None
+    _race_validate_record_structure(record)
+    return record
+
+
+def _race_plain(value):
+    if isinstance(value, _race_enum.Enum):
+        return value.value
+    if isinstance(value, Mapping):
+        return {key: _race_plain(item) for key, item in value.items()}
+    if isinstance(value, (tuple, list)):
+        return [_race_plain(item) for item in value]
+    return value
+
+
+def _race_authoritative_snapshot(binding, *, repository_root, contract, ledger_path, candidate):
+    """ONE bounded no-repair complete-validation episode (BR-04/BR-05).
+
+    Existing canonical interfaces only: authority-first/ledger-second locks,
+    complete schema/hash-chain/active-contract replay, equal tails, no
+    catch-up, bootstrap, abandonment or append; the handle is closed before
+    returning.  A failed episode is data (``complete=False``), never UNUSED."""
+    snapshot = {
+        "complete": False, "failure_code": None, "events": None, "tail": None, "trusted": None,
+        "projection": None, "entry_checkpoint": None, "candidate_state": None, "candidate_event_id": None,
+    }
+    try:
+        opened = ledger._acquire_consumption_state(
+            binding, conflict_domain_ref=contract.conflict_domain_ref, expected_environment=contract.environment,
+            canonical_repository_root=str(repository_root), expected_ledger_path=str(ledger_path),
+            history_validator=lambda events: _lb._validate_active_contract_against_events(events, contract))
+    except Exception:
+        snapshot["failure_code"] = "SNAPSHOT_OPEN_RAISED"
+        return snapshot
+    locked = opened.locked
+    if locked is None:
+        snapshot["failure_code"] = "UNKNOWN" if opened.failure_code is None else str(opened.failure_code)
+        return snapshot
+    try:
+        _lb._validate_active_locked(locked, contract)
+        projection = locked.projection()
+        state, matched = opened.consumption.classify(candidate)
+        state_event_id = None
+        for event in reversed(locked.events):
+            if event.event_type is EventType.RISK_CONTROL_STATE_CHANGED:
+                state_event_id = event.event_id
+                break
+        tail = locked.events[-1]
+        snapshot.update(
+            complete=True,
+            events=[{
+                "sequence": event.sequence, "event_id": event.event_id, "event_hash": event.event_hash,
+                "previous_event_hash": event.previous_event_hash, "event_type": event.event_type.value,
+                "payload": _race_plain(event.payload),
+            } for event in locked.events],
+            tail=[tail.sequence, tail.event_hash],
+            trusted=[locked.authority_row.trusted_sequence, locked.authority_row.trusted_event_hash],
+            projection={field.name: _race_plain(getattr(projection, field.name)) for field in fields(projection)},
+            entry_checkpoint=_race_plain(_auth_live_checkpoint(projection, contract, state_event_id=state_event_id)),
+            candidate_state=state, candidate_event_id=None if matched is None else matched.event_id)
+    except LedgerError as exc:
+        snapshot.update(complete=False, failure_code=str(exc.code))
+    finally:
+        try:
+            locked.close()
+        except Exception:
+            snapshot.update(complete=False, failure_code="SNAPSHOT_CLOSE_FAILED")
+    return snapshot
+
+
+def _race_expected_event_id(contract, expectation) -> str:
+    return "evt_" + ledger.sha256_hex(
+        b"ARB_EXECUTION_AUTHORIZATION_SET_CONSUMED_V1\x00" + ledger.canonical_json_bytes({
+            "conflict_domain_ref": contract.conflict_domain_ref,
+            "orchestration_authorization_id": expectation.orchestration_authorization_id}))[:32]
+
+
+def _race_expected_payload(expectation, checkpoint, baseline, process_id) -> dict:
+    """The exact canonical consumption payload this fixture may append at
+    baseline pre+1 (BR-06 clean one): independent expectation, not a bypass."""
+    tail_sequence, tail_hash = baseline["tail"]
+    return {
+        "consumption_schema_revision": ledger.AUTHORIZATION_CONSUMPTION_SCHEMA_REVISION,
+        "execution_package_id": expectation.execution_package_id,
+        "expectation_carrier_sha256": expectation.expectation_carrier_sha256,
+        "authorization_set_id": expectation.authorization_set_id,
+        "authorization_binding_sha256": expectation.authorization_binding_sha256,
+        "orchestration_authorization_id": expectation.orchestration_authorization_id,
+        "orchestration_authorization_class": expectation.orchestration_authorization_class,
+        "orchestration_authorization_sha256": expectation.orchestration_authorization_sha256,
+        "d07_read_authorization_id": expectation.d07_read_authorization_id,
+        "d07_read_authorization_sha256": expectation.d07_read_authorization_sha256,
+        "gate_d_authorization_id": expectation.gate_d_authorization_id,
+        "gate_d_authorization_sha256": expectation.gate_d_authorization_sha256,
+        "task_id": expectation.binding["task_id"],
+        "execution_attempt_id": expectation.binding["execution_attempt_id"],
+        "invocation_id": expectation.binding["invocation_id"],
+        "process_instance_id": process_id,
+        "binding": _race_plain(expectation.binding),
+        "authority_instance_id": checkpoint["authority_instance_id"],
+        "authority_namespace_id": checkpoint["authority_namespace_id"],
+        "authority_store_path_identity_sha256": checkpoint["authority_store_path_identity_sha256"],
+        "ledger_instance_id": checkpoint["ledger_instance_id"],
+        "ledger_path_identity_sha256": checkpoint["ledger_path_identity_sha256"],
+        "pre_consumption_sequence": tail_sequence,
+        "pre_consumption_event_hash": tail_hash,
+        "invocation_started_monotonic_ns": _AUTH_START,
+        "invocation_absolute_deadline_monotonic_ns": _AUTH_END,
+        "consumption_policy": ledger.AUTHORIZATION_CONSUMPTION_POLICY,
+    }
+
+
+def _race_context(*, fixture_id, labels, barrier_status, expectation, checkpoint, baseline, contract) -> dict:
+    return {
+        "fixture_id": fixture_id, "labels": tuple(labels), "barrier_status": barrier_status,
+        "process_id": _AUTH_PROC, "candidate": dict(expectation.uniqueness_candidate()),
+        "checkpoint": _race_plain(checkpoint),
+        "expected_event_id": _race_expected_event_id(contract, expectation),
+        "expected_payload": _race_expected_payload(expectation, checkpoint, baseline, _AUTH_PROC),
+        "carrier_sha": expectation.expectation_carrier_sha256,
+        "binding_sha": expectation.authorization_binding_sha256,
+    }
+
+
+def _race_baseline_findings(baseline, checkpoint, *, expected_candidate_state) -> list:
+    """BR-04: complete no-repair equal-tail history for this exact set."""
+    if type(baseline) is not dict or baseline.get("complete") is not True:
+        return ["BASELINE_INCOMPLETE"]
+    findings = []
+    if baseline["trusted"] != baseline["tail"]:
+        findings.append("BASELINE_UNEQUAL_TAILS")
+    if baseline["candidate_state"] != expected_candidate_state:
+        findings.append("BASELINE_CANDIDATE_STATE")
+    if baseline["entry_checkpoint"] != _race_plain(checkpoint):
+        findings.append("BASELINE_CHECKPOINT_MISMATCH")
+    return findings
+
+
+def _race_lenient(raw):
+    try:
+        value = json.loads(raw)
+    except Exception:
+        return None
+    return value if type(value) is dict else None
+
+
+def _race_records_by_label(ctx, raw_records, pids, findings) -> dict:
+    """Closed per-record validation; at most one counted record per label."""
+    parsed: dict = {}
+    if len(raw_records) > len(ctx["labels"]):
+        findings.add("RECORD_EXTRA")
+    for raw in raw_records:
+        try:
+            record = _race_parse_record(raw)
+        except _RaceEvidenceError:
+            findings.add("RECORD_MALFORMED")
+            loose = _race_lenient(raw) if type(raw) is str else None
+            if loose is not None:
+                count = loose.get("consumption_call_count")
+                if type(count) is int and count > 1:
+                    findings.add("NO_RETRY_VIOLATION")
+                if loose.get("outcome") == "CONSUMED" or loose.get("receipt_present") is True:
+                    findings.add("SUCCESS_CLAIM_WITHOUT_VALID_RECEIPT")
+            continue
+        if record["fixture_id"] != ctx["fixture_id"]:
+            findings.add("RECORD_FOREIGN_FIXTURE")
+            continue
+        label = record["worker_label"]
+        if label not in ctx["labels"]:
+            findings.add("RECORD_FOREIGN_LABEL")
+            continue
+        if label in parsed:
+            findings.add("RECORD_DUPLICATE_LABEL")  # never a second genuine receipt
+            continue
+        parsed[label] = record
+    if any(label not in parsed for label in ctx["labels"]):
+        findings.add("RECORD_MISSING")
+    expected_pids = [pids.get(label) for label in ctx["labels"]]
+    if any(type(pid) is not int for pid in expected_pids) or len(set(expected_pids)) != len(expected_pids):
+        findings.add("PARENT_PID_EVIDENCE_INVALID")
+    observed = [record["os_pid"] for record in parsed.values()]
+    if len(set(observed)) != len(observed):
+        findings.add("PID_NOT_DISTINCT")
+    for label, record in parsed.items():
+        success_claim = record["outcome"] == "CONSUMED" or record["receipt_present"] is True
+        if record["os_pid"] != pids.get(label):
+            findings.add("RECORD_PID_MISMATCH")
+            if success_claim:
+                findings.add("PROCESS_IDENTITY_MISMATCH_ON_SUCCESS")
+        if record["process_instance_id"] != ctx["process_id"]:
+            findings.add("RECORD_LOGICAL_PROCESS_MISMATCH")
+            if success_claim:
+                findings.add("PROCESS_IDENTITY_MISMATCH_ON_SUCCESS")
+        if record["outcome"] == "HARNESS_ERROR":
+            findings.add("WORKER_HARNESS_ERROR")
+            if record["receipt_present"] is True:
+                findings.add("RECEIPT_LOCAL_VALIDATION_FAILED")
+        elif record["barrier_status"] != ctx["barrier_status"]:
+            findings.add("BARRIER_STATUS_MISMATCH")
+    return parsed
+
+
+def _race_lifecycle_findings(ctx, lifecycle, findings) -> None:
+    if type(lifecycle) is not dict:
+        findings.add("LIFECYCLE_EVIDENCE_MISSING")
+        return
+    for code in lifecycle.get("failures", ()):
+        findings.add("LIFECYCLE_" + str(code))
+    if lifecycle.get("normal") is not True:
+        findings.add("LIFECYCLE_ABNORMAL")
+    exit_codes = lifecycle.get("exit_codes", {})
+    if any(exit_codes.get(label) != 0 for label in ctx["labels"]):
+        findings.add("WORKER_EXIT_NOT_ZERO")
+    if lifecycle.get("alive_after"):
+        findings.add("WORKER_LIVE_AFTER_FINALIZATION")
+
+
+def _race_matches_candidate(event, candidate) -> bool:
+    payload = event.get("payload") if type(event) is dict else None
+    return (
+        type(payload) is dict and event.get("event_type") == _RACE_CONSUMED_EVENT
+        and all(payload.get(key) == value for key, value in candidate.items())
+    )
+
+
+def _race_projection_changed(baseline, final) -> bool:
+    before, after = baseline.get("projection"), final.get("projection")
+    if type(before) is not dict or type(after) is not dict or set(before) != set(after):
+        return True
+    return any(before[name] != after[name] for name in before if name not in _RACE_TAIL_FIELDS)
+
+
+def _race_verdict(findings, *, branch, counts) -> dict:
+    classes = sorted({_RACE_FINDING_CLASS.get(code, "FAIL_EVIDENCE") for code in findings})
+    if classes:
+        branch = None
+    evidence_complete = "FAIL_EVIDENCE" not in classes
+    if "FAIL_SAFETY" in classes:
+        safety = "VIOLATED"
+    elif branch is not None:
+        safety = "ESTABLISHED_FOR_THIS_TRIAL"
+    else:
+        safety = "UNESTABLISHED"
+    return {
+        "branch": branch, "classes": classes, "findings": sorted(findings), "safety": safety,
+        "evidence": "COMPLETE" if evidence_complete else "INCOMPLETE",
+        "progress": counts.get("S") if branch is not None else None, **counts,
+    }
+
+
+def _race_classify(*, ctx, raw_records, lifecycle, baseline, final) -> dict:
+    """BR-06/BR-07 branch oracle for the two-worker identical-input race.
+
+    Pure decision logic over closed records, lifecycle evidence and complete
+    validated snapshots; counts are exact for this fixture only.  Safety,
+    integrity, persistence uncertainty and evidence completeness are
+    orthogonal; every proved violation is retained."""
+    findings: set = set()
+    pids = lifecycle.get("pids", {}) if type(lifecycle) is dict else {}
+    parsed = _race_records_by_label(ctx, list(raw_records), pids, findings)
+    _race_lifecycle_findings(ctx, lifecycle, findings)
+    if _race_baseline_findings(baseline, ctx["checkpoint"], expected_candidate_state="UNUSED"):
+        findings.add("BASELINE_UNPROVEN")
+    winners = [label for label, record in parsed.items() if record["outcome"] == "CONSUMED"]
+    S = len(winners)
+    R = sum(1 for record in parsed.values() if record["receipt_present"] is True)
+    if S >= 2 or R >= 2:
+        findings.add("TWO_SUCCESSFUL_CONSUMERS")
+    E = None
+    event = None
+    if final is None:
+        findings.add("POST_VALIDATION_UNAVAILABLE")
+    elif type(final) is not dict or final.get("complete") is not True:
+        findings.update({"POST_VALIDATION_FAILED", "STORE_STATE_UNCERTAIN"})
+        if S >= 1:
+            findings.update({"SUCCESS_WITHOUT_ANCHORED_EVENT", "PERSISTENCE_UNPROVEN_FOR_SUCCESS"})
+    elif type(baseline) is dict and baseline.get("complete") is True:
+        before, after = baseline["events"], final.get("events")
+        if type(after) is not list or after[: len(before)] != before:
+            findings.add("HISTORY_PREFIX_CHANGED")
+            after = after if type(after) is list else []
+        new = after[len(before):]
+        matching = [item for item in after if _race_matches_candidate(item, ctx["candidate"])]
+        E = len(matching)
+        if E >= 2:
+            findings.add("DUPLICATE_CONSUMPTION_EVENTS")
+        if any(not _race_matches_candidate(item, ctx["candidate"]) for item in new):
+            findings.add("UNEXPECTED_EVENT")
+        if final.get("trusted") != final.get("tail"):
+            findings.add("UNEQUAL_TAILS")
+        if _race_projection_changed(baseline, final):
+            findings.add("SAFETY_PROJECTION_CHANGED")
+        if E == 0:
+            if final.get("candidate_state") != "UNUSED" or final.get("trusted") != baseline["trusted"]:
+                findings.add("CONSUMED_STATE_MISMATCH")
+            if S >= 1:
+                findings.update({"SUCCESS_WITHOUT_ANCHORED_EVENT", "PERSISTENCE_UNPROVEN_FOR_SUCCESS"})
+        if E == 1:
+            event = matching[0]
+            pre_sequence, pre_hash = baseline["tail"]
+            if (
+                event.get("sequence") != pre_sequence + 1 or event.get("previous_event_hash") != pre_hash
+                or event.get("event_id") != ctx["expected_event_id"]
+                or event.get("payload") != ctx["expected_payload"]
+                or final.get("tail") != [event.get("sequence"), event.get("event_hash")]
+                or final.get("trusted") != final.get("tail")
+            ):
+                findings.add("EVENT_METADATA_MISMATCH")
+            if final.get("candidate_state") != "CONSUMED" or final.get("candidate_event_id") != event.get("event_id"):
+                findings.add("CONSUMED_STATE_MISMATCH")
+            if R == 0:
+                findings.add("EVENT_WITHOUT_RECEIPT")
+            for label in winners:
+                meta = parsed[label]["event"]
+                if meta != {
+                    "event_id": event.get("event_id"), "event_hash": event.get("event_hash"),
+                    "sequence": event.get("sequence"), "expectation_carrier_sha256": ctx["carrier_sha"],
+                    "authorization_binding_sha256": ctx["binding_sha"],
+                    "invocation_started_monotonic_ns": _AUTH_START, "absolute_deadline_monotonic_ns": _AUTH_END,
+                }:
+                    findings.add("RECEIPT_EVENT_MISMATCH")
+    else:
+        findings.add("POST_VALIDATION_UNAVAILABLE")
+    validated_winner = S == 1 and E == 1
+    for label, record in parsed.items():
+        outcome = record["outcome"]
+        if outcome in {"CONSUMED", "HARNESS_ERROR"}:
+            continue
+        triple = (outcome, record["reason"], record["underlying_failure_code"])
+        if triple == _RACE_BUSY_TRIPLE:
+            continue
+        if triple == _RACE_REPLAY_TRIPLE:
+            if not validated_winner:
+                findings.add("REPLAY_WITHOUT_VALIDATED_WINNER")
+        elif outcome in {"CONFLICT", "STALE_BINDING"}:
+            findings.add("CONTRADICTORY_REFUSAL")
+        elif outcome in {"UNAVAILABLE", "REPLAYED"}:
+            findings.add("REFUSAL_TRIPLE_MISMATCH")
+        elif outcome == "INDETERMINATE":
+            findings.update({"INDETERMINATE_OUTCOME", "NONPASSING_TERMINAL_OUTCOME"})
+        else:
+            findings.add("NONPASSING_TERMINAL_OUTCOME")
+    branch = None
+    if not findings:
+        if S == 0 and E == 0:
+            branch = "PASS_ZERO"
+        elif S == 1 and E == 1:
+            branch = "PASS_ONE"
+        else:
+            findings.add("NO_CLEAN_BRANCH")
+    return _race_verdict(findings, branch=branch, counts={"S": S, "R": R, "E": E})
+
+
+def _race_classify_replay(*, ctx, raw_records, lifecycle, baseline, final) -> dict:
+    """C04-T17 under the same closed protocol: one spawned independent process,
+    barrier NOT_USED, REPLAYED/SET_ALREADY_CONSUMED/null, no receipt and
+    exactly the one previously anchored event, unchanged."""
+    findings: set = set()
+    pids = lifecycle.get("pids", {}) if type(lifecycle) is dict else {}
+    parsed = _race_records_by_label(ctx, list(raw_records), pids, findings)
+    _race_lifecycle_findings(ctx, lifecycle, findings)
+    if _race_baseline_findings(baseline, ctx["checkpoint_after_first"], expected_candidate_state="CONSUMED"):
+        findings.add("BASELINE_UNPROVEN")
+    R = sum(1 for record in parsed.values() if record["receipt_present"] is True)
+    S = sum(1 for record in parsed.values() if record["outcome"] == "CONSUMED")
+    if S or R:
+        findings.add("SUCCESS_CLAIM_ON_CONSUMED_SET")
+    for record in parsed.values():
+        if record["outcome"] != "HARNESS_ERROR" and (
+            record["outcome"], record["reason"], record["underlying_failure_code"]) != _RACE_REPLAY_TRIPLE:
+            findings.add("REFUSAL_TRIPLE_MISMATCH")
+    E = None
+    if final is None:
+        findings.add("POST_VALIDATION_UNAVAILABLE")
+    elif type(final) is not dict or final.get("complete") is not True:
+        findings.update({"POST_VALIDATION_FAILED", "STORE_STATE_UNCERTAIN"})
+    elif type(baseline) is dict and baseline.get("complete") is True:
+        E = sum(1 for item in final.get("events") or () if _race_matches_candidate(item, ctx["candidate"]))
+        if final.get("events") != baseline["events"] or final.get("trusted") != baseline["trusted"]:
+            findings.add("UNEXPECTED_EVENT")
+        if E != 1:
+            findings.add("DUPLICATE_CONSUMPTION_EVENTS" if E > 1 else "CONSUMED_STATE_MISMATCH")
+        if final.get("candidate_state") != "CONSUMED" or final.get("candidate_event_id") != baseline["candidate_event_id"]:
+            findings.add("CONSUMED_STATE_MISMATCH")
+        if _race_projection_changed(baseline, final):
+            findings.add("SAFETY_PROJECTION_CHANGED")
+    else:
+        findings.add("POST_VALIDATION_UNAVAILABLE")
+    return _race_verdict(findings, branch=None if findings else "PASS_REPLAY", counts={"S": S, "R": R, "E": E})
+
+
+class _RaceRun:
+    """Owned spawn lifecycle with ONE shared real-monotonic budget (BR-09/10).
+
+    H0 is sampled immediately before the first worker start; Hc=H0+180s and
+    Hf=H0+240s are combined windows: every receive/join uses only the
+    remaining time to its applicable deadline and nothing resets H0.  No
+    replacement worker is launched and no attempt is repeated.  On abnormal
+    collection: cooperative completion until min(Hc, failure+5s), terminate,
+    collective join until min(H0+210s, Hf), kill, collective join until
+    H0+225s; no authoritative read follows.  An OS call that does not return
+    is an acknowledged limitation, never a fabricated completed close."""
+
+    def __init__(self, *, context, target, params_by_label, use_barrier, clock=_race_time.monotonic, poll_s=0.25):
+        self.context = context
+        self.target = target
+        self.params_by_label = dict(params_by_label)
+        self.labels = tuple(self.params_by_label)
+        self.use_barrier = use_barrier
+        self.clock = clock
+        self.poll_s = poll_s
+        self.processes: dict = {}
+        self.queue = None
+        self.barrier = None
+        self.h0 = self.hc = self.hf = None
+        self._failure_at = None
+        self.evidence = {
+            "labels": list(self.labels), "pids": {}, "exit_codes": {}, "records": [], "failures": [],
+            "normal": False, "terminated": [], "killed": [], "alive_after": [], "barrier_aborted": False,
+            "post_validation": "NOT_STARTED", "finalization": "NOT_STARTED", "timings_s": {},
+        }
+
+    def _remaining(self, deadline) -> float:
+        return max(0.0, deadline - self.clock())
+
+    def _fail(self, code) -> None:
+        if code not in self.evidence["failures"]:
+            self.evidence["failures"].append(code)
+        if self._failure_at is None:
+            self._failure_at = self.clock()
+
+    def _mark(self, name) -> None:
+        self.evidence["timings_s"][name] = round(self.clock() - self.h0, 6)
+
+    def _alive(self) -> list:
+        return [label for label, process in self.processes.items() if process.is_alive()]
+
+    def _join_all(self, until) -> None:
+        """Collective bounded join: the shared remaining time, never a fixed
+        per-actor window."""
+        while True:
+            alive = [process for process in self.processes.values() if process.is_alive()]
+            if not alive or self._remaining(until) <= 0:
+                return
+            for process in alive:
+                left = self._remaining(until)
+                if left <= 0:
+                    return
+                process.join(timeout=min(left, self.poll_s))
+
+    def _abort_barrier(self) -> None:
+        if self.barrier is None or self.evidence["barrier_aborted"]:
+            return
+        try:
+            self.barrier.abort()
+            self.evidence["barrier_aborted"] = True
+        except Exception:
+            self._fail("BARRIER_ABORT_FAILED")
+
+    def start_and_collect(self) -> None:
+        try:
+            self.queue = self.context.Queue()
+            self.barrier = self.context.Barrier(len(self.labels)) if self.use_barrier else None
+        except Exception:
+            self.h0 = self.clock()
+            self.hc, self.hf = self.h0 + _RACE_COLLECTION_S, self.h0 + _RACE_COLLECTION_S + _RACE_FINALIZATION_S
+            self._fail("HANDLE_CREATION_FAILED")
+            self._abnormal()
+            return
+        self.h0 = self.clock()
+        self.hc, self.hf = self.h0 + _RACE_COLLECTION_S, self.h0 + _RACE_COLLECTION_S + _RACE_FINALIZATION_S
+        for label in self.labels:
+            params = dict(self.params_by_label[label],
+                          barrier_timeout_cap_s=min(_RACE_BARRIER_MAX_S, self._remaining(self.hc)))
+            try:
+                process = self.context.Process(target=self.target, args=(params, self.queue, self.barrier))
+                process.start()
+            except Exception:
+                self._fail("SPAWN_FAILED")
+                break
+            self.processes[label] = process
+            self.evidence["pids"][label] = process.pid
+        self._mark("started")
+        if not self.evidence["failures"]:
+            self._collect()
+        if not self.evidence["failures"]:
+            self._join_all(self.hc)
+            if self._alive():
+                self._fail("WORKER_LIVE_AT_COLLECTION_DEADLINE")
+            elif self.clock() >= self.hc:
+                # BR-10 (R1): worker exit / collection completion observed at
+                # or after Hc is late evidence even when every actor has now
+                # exited with code 0; Hf never admits an expired collection.
+                self._fail("COLLECTION_DEADLINE_EXCEEDED")
+        self._mark("collection_end")
+        if self.evidence["failures"]:
+            self._abnormal()
+        else:
+            self._normal_exit_checks()
+
+    def _collect(self) -> None:
+        received: set = set()
+        while len(received) < len(self.labels):
+            left = self._remaining(self.hc)
+            if left <= 0:
+                self._fail("COLLECTION_TIMEOUT")
+                return
+            try:
+                raw = self.queue.get(timeout=min(self.poll_s, left))
+            except _race_queue.Empty:
+                if not any(label not in received and not process.is_alive()
+                           for label, process in self.processes.items()):
+                    continue
+                left = self._remaining(self.hc)
+                try:
+                    raw = self.queue.get(timeout=min(1.0, left)) if left > 0 else None
+                except _race_queue.Empty:
+                    raw = None
+                except Exception:
+                    self._fail("QUEUE_RECEIVE_ERROR")
+                    return
+                if raw is None:
+                    self._fail("WORKER_EXITED_WITHOUT_RECORD")
+                    return
+            except Exception:
+                self._fail("QUEUE_RECEIVE_ERROR")
+                return
+            self.evidence["records"].append(raw)  # retained as evidence either way
+            if self.clock() >= self.hc:
+                # BR-10 (R1): a receive that RETURNS at or after Hc is late,
+                # even if the requested wait was bounded and the record is
+                # well formed; a bounded request is not timely completion.
+                self._fail("COLLECTION_DEADLINE_EXCEEDED")
+                return
+            try:
+                record = _race_parse_record(raw)
+            except _RaceEvidenceError:
+                self._fail("INVALID_RECORD")
+                return
+            label = record["worker_label"]
+            if (
+                label not in self.labels or label in received
+                or record["fixture_id"] != self.params_by_label[label]["fixture_id"]
+            ):
+                self._fail("UNEXPECTED_RECORD")
+                return
+            received.add(label)
+            if record["outcome"] == "HARNESS_ERROR":
+                self._abort_barrier()  # cooperative release of a peer; never a store action
+
+    def _normal_exit_checks(self) -> None:
+        self.evidence["exit_codes"] = {label: process.exitcode for label, process in self.processes.items()}
+        if any(code != 0 for code in self.evidence["exit_codes"].values()):
+            self._fail("NONZERO_EXIT")
+        while True:  # final bounded drain after confirmed exit (no Queue.empty/qsize)
+            left = self._remaining(self.hf)
+            if left <= 0:
+                self._fail("FINALIZATION_DEADLINE")
+                break
+            try:
+                raw = self.queue.get(timeout=min(0.2, left))
+            except _race_queue.Empty:
+                break
+            except Exception:
+                self._fail("QUEUE_RECEIVE_ERROR")
+                break
+            self.evidence["records"].append(raw)
+            self._fail("EXTRA_RECORD")
+        self.evidence["normal"] = not self.evidence["failures"]
+
+    def _abnormal(self) -> None:
+        failure_at = self._failure_at if self._failure_at is not None else self.clock()
+        self._abort_barrier()
+        self._join_all(min(self.hc, failure_at + _RACE_COOPERATIVE_S))
+        for label in self._alive():
+            try:
+                self.processes[label].terminate()
+                self.evidence["terminated"].append(label)
+            except Exception:
+                self._fail("TERMINATE_FAILED")
+        self._join_all(min(self.h0 + _RACE_TERMINATE_JOIN_UNTIL_S, self.hf))
+        for label in self._alive():
+            try:
+                self.processes[label].kill()
+                self.evidence["killed"].append(label)
+            except Exception:
+                self._fail("KILL_FAILED")
+        self._join_all(self.h0 + _RACE_KILL_JOIN_UNTIL_S)
+        self.evidence["alive_after"] = self._alive()
+        if self.evidence["alive_after"]:
+            self._fail("WORKER_SURVIVED_KILL")
+        self.evidence["exit_codes"] = {label: process.exitcode for label, process in self.processes.items()}
+        while self.queue is not None:  # retain partial records; bounded by Hf
+            left = self._remaining(self.hf)
+            if left <= 0:
+                break
+            try:
+                raw = self.queue.get(timeout=min(0.2, left))
+            except _race_queue.Empty:
+                break
+            except Exception:
+                self._fail("QUEUE_RECEIVE_ERROR")
+                break
+            self.evidence["records"].append(raw)
+        self.evidence["normal"] = False
+        self._mark("abnormal_finalization_end")
+
+    def post_validate(self, episode):
+        """The single post-race validation episode, only after every worker
+        is confirmed exited with code 0 and the normal records are in hand."""
+        if self.evidence["normal"] is not True:
+            self.evidence["post_validation"] = "SKIPPED_ABNORMAL"
+            return None
+        if self._alive():
+            self._fail("POST_VALIDATION_WITH_LIVE_WORKER")
+            self.evidence["normal"] = False
+            self.evidence["post_validation"] = "SKIPPED_LIVE_WORKER"
+            return None
+        if self._remaining(self.hf) <= 0:
+            self._fail("FINALIZATION_DEADLINE")
+            self.evidence["normal"] = False
+            self.evidence["post_validation"] = "SKIPPED_DEADLINE"
+            return None
+        self.evidence["post_validation"] = "STARTED"
+        try:
+            result = episode()
+        except Exception:
+            self._fail("POST_VALIDATION_RAISED")
+            self.evidence["normal"] = False
+            self.evidence["post_validation"] = "RAISED"
+            return None
+        self._mark("post_validation_end")
+        if self.clock() >= self.hf:
+            self._fail("POST_VALIDATION_LATE")  # data retained for safety findings
+            self.evidence["normal"] = False
+            self.evidence["post_validation"] = "LATE"
+            return result
+        self.evidence["post_validation"] = "COMPLETED"
+        return result
+
+    def close(self) -> None:
+        """Bounded handle closure; cleanup errors are additional failures and
+        never mask the primary failure; live actors are never closed."""
+        before = len(self.evidence["failures"])
+        if self.queue is not None:
+            try:
+                self.queue.close()
+                if self.evidence["normal"] is True:
+                    self.queue.join_thread()
+                else:
+                    self.queue.cancel_join_thread()
+            except Exception:
+                self._fail("CLEANUP_ERROR")
+        live = []
+        for label, process in self.processes.items():
+            try:
+                if process.is_alive():
+                    live.append(label)
+                    continue
+                process.close()
+            except Exception:
+                self._fail("CLEANUP_ERROR")
+        if self.hf is not None and self.clock() >= self.hf:
+            self._fail("FINALIZATION_LATE")
+        if self.h0 is not None:
+            self._mark("finalization_end")
+        complete = not live and len(self.evidence["failures"]) == before
+        self.evidence["finalization"] = "COMPLETE" if complete else "INCOMPLETE"
+        if not complete:
+            self.evidence["normal"] = False
+
+
+def _race_create_owned_root(fixture_id) -> dict:
+    """A newly task-owned synthetic root (BR-12) with its ownership record."""
+    root = Path(tempfile.mkdtemp(prefix="arb_c04_race_")).resolve()
+    identity = _race_os.lstat(root)
+    return {
+        "root": str(root), "fixture_id": fixture_id, "created_by_os_pid": _race_os.getpid(),
+        "creation_identity": [identity.st_dev, identity.st_ino],
+        "worker_labels": [], "worker_pids": {}, "handles": [],
+    }
+
+
+def _race_is_link(path) -> bool:
+    isjunction = getattr(_race_os.path, "isjunction", None)
+    return _race_os.path.islink(path) or bool(isjunction is not None and isjunction(path))
+
+
+def _race_remove_owned_root(ownership) -> list:
+    """Remove ONLY positively verified paths under the recorded owned root.
+
+    Any identity mismatch, link or escape retains everything and is reported;
+    a partial removal failure retains the remainder."""
+    root = Path(ownership["root"])
+    try:
+        identity = _race_os.lstat(root)
+    except OSError:
+        return ["OWNED_ROOT_MISSING"]
+    if (
+        [identity.st_dev, identity.st_ino] != ownership["creation_identity"]
+        or not _race_stat.S_ISDIR(identity.st_mode) or _race_is_link(root)
+    ):
+        return ["OWNED_ROOT_IDENTITY_MISMATCH"]
+    files, directories = [], []
+    for current, dirnames, filenames in _race_os.walk(root, topdown=False, followlinks=False):
+        for name in filenames:
+            files.append(Path(current) / name)
+        for name in dirnames:
+            directories.append(Path(current) / name)
+    for path in files + directories:
+        if _race_is_link(path) or not path.resolve().is_relative_to(root):
+            return ["OWNED_ROOT_UNVERIFIED_ENTRY"]
+    try:
+        for path in files:
+            _race_os.unlink(path)
+        for path in directories:
+            _race_os.rmdir(path)
+        _race_os.rmdir(root)
+    except OSError:
+        return ["OWNED_ROOT_CLEANUP_FAILED"]
+    return []
 
 
 class AuthorizationConsumptionBindingTests(unittest.TestCase):
@@ -5126,6 +6163,9 @@ class AuthorizationConsumptionBindingTests(unittest.TestCase):
     def setUp(self) -> None:
         self.temp = tempfile.TemporaryDirectory()
         self.root = Path(self.temp.name)
+        self._build_authorization_fixture()
+
+    def _build_authorization_fixture(self) -> None:
         self.repository_root = Path(__file__).resolve().parents[1]
         self.authority_root = self.root / "authority"
         self.authority_root.mkdir()
@@ -5779,40 +6819,617 @@ class AuthorizationConsumptionBindingTests(unittest.TestCase):
             "checkpoint": checkpoint, "process_id": _AUTH_PROC,
         }
 
+    def _race_params(self, checkpoint, *, fixture_id, label, expected_event_id):
+        return dict(self._worker_params(checkpoint), fixture_id=fixture_id, worker_label=label,
+                    expected_event_id=expected_event_id)
+
+    def _rebind_to_owned_race_root(self, fixture_id) -> dict:
+        """BR-12: the affected T17/T18 path runs on a NEW task-owned root that
+        is never removed by tearDown; only a complete clean pass removes it."""
+        ownership = _race_create_owned_root(fixture_id)
+        self.root = Path(ownership["root"])
+        self._build_authorization_fixture()
+        return ownership
+
+    def _race_snapshot(self, candidate):
+        return _race_authoritative_snapshot(
+            self.binding, repository_root=self.repository_root, contract=self.contract,
+            ledger_path=self.ledger_path, candidate=candidate)
+
+    def _race_report(self, label, *, trial_id, fixture_id, ownership, run, verdict, cleanup, baseline_findings=()):
+        report = {
+            "test": label, "trial_id": trial_id, "fixture_id": fixture_id,
+            "logical_process_instance_id": _AUTH_PROC, "records": list(run.evidence["records"]) if run else [],
+            "lifecycle": {key: value for key, value in (run.evidence if run else {}).items() if key != "records"},
+            "verdict": verdict, "baseline_findings": list(baseline_findings),
+            "owned_root": ownership["root"], "owned_root_creation_identity": ownership["creation_identity"],
+            "owned_root_disposition": "REMOVED_VERIFIED" if verdict and verdict.get("branch") and not cleanup
+            else "RETAINED", "cleanup_failures": list(cleanup),
+            "worker_pids": ownership["worker_pids"], "handles": ownership["handles"],
+        }
+        print("ARB_" + label + "_TRIAL_EVIDENCE " + json.dumps(report, sort_keys=True, default=str),
+              file=sys.stderr, flush=True)
+        return report
+
     def test_new_independent_process_cannot_reuse_a_consumed_set(self) -> None:
+        """C04-T17 on the closed record protocol: a separately spawned process
+        replays the already consumed set (barrier NOT_USED), obtains no
+        receipt and appends nothing; the one prior anchored event stands."""
+        trial_id = uuid.uuid4().hex
+        fixture_id = "C04T17_" + trial_id
+        ownership = self._rebind_to_owned_race_root(fixture_id)
         checkpoint = self._checkpoint()
-        self.assertEqual(self._consume(self._expectation(checkpoint=checkpoint)).outcome, "CONSUMED")
-        context = _mp.get_context("spawn")
-        queue = context.Queue()
-        process = context.Process(target=_authorization_race_worker, args=(self._worker_params(checkpoint), queue, None))
-        process.start()
-        outcome = queue.get(timeout=120)
-        process.join(timeout=60)
-        self.assertEqual(outcome[:2], ("REPLAYED", False))
-        self.assertEqual(self._event_types().count("EXECUTION_AUTHORIZATION_SET_CONSUMED"), 1)
+        expectation = self._expectation(checkpoint=checkpoint)
+        first = self._consume(expectation)
+        self.assertEqual(first.outcome, "CONSUMED")
+        first.receipt.assert_live(process_instance_id=_AUTH_PROC)
+        first.receipt.revoke()  # the parent's own receipt is retired; it is never transferred
+        candidate = expectation.uniqueness_candidate()
+        baseline = self._race_snapshot(candidate)
+        ctx = {
+            "fixture_id": fixture_id, "labels": ("w0",), "barrier_status": "NOT_USED", "process_id": _AUTH_PROC,
+            "candidate": dict(candidate), "checkpoint_after_first": _race_plain(self._checkpoint()),
+        }
+        params = {"w0": self._race_params(checkpoint, fixture_id=fixture_id, label="w0",
+                                          expected_event_id=_race_expected_event_id(self.contract, expectation))}
+        ownership["worker_labels"] = ["w0"]
+        ownership["handles"] = ["queue", "process:w0"]
+        run = _RaceRun(context=_mp.get_context("spawn"), target=_authorization_race_worker,
+                       params_by_label=params, use_barrier=False)
+        run.start_and_collect()
+        ownership["worker_pids"] = dict(run.evidence["pids"])
+        final = run.post_validate(lambda: self._race_snapshot(candidate))
+        run.close()
+        verdict = _race_classify_replay(ctx=ctx, raw_records=run.evidence["records"], lifecycle=run.evidence,
+                                        baseline=baseline, final=final)
+        cleanup = _race_remove_owned_root(ownership) if verdict["branch"] == "PASS_REPLAY" else []
+        report = self._race_report("C04_T17", trial_id=trial_id, fixture_id=fixture_id, ownership=ownership,
+                                   run=run, verdict=verdict, cleanup=cleanup)
+        self.assertEqual(cleanup, [], report)
+        self.assertEqual(verdict["branch"], "PASS_REPLAY", report)
+        record = _race_parse_record(run.evidence["records"][0])
+        self.assertEqual((record["outcome"], record["reason"], record["underlying_failure_code"]), _RACE_REPLAY_TRIPLE)
+        self.assertEqual((record["receipt_present"], record["barrier_status"], record["consumption_call_count"]),
+                         (False, "NOT_USED", 1))
+        self.assertEqual(verdict["E"], 1)
 
     def test_parallel_consumption_has_at_most_one_winner_and_never_retries(self) -> None:
+        """C04-T18 / R01: ONE real two-process production-backed trial.
+
+        Zero or one successful consumer is valid; two are prohibited.  The
+        trial passes only as PASS_ZERO (two whitelisted busy refusals, proved
+        unchanged complete history, no consumed key) or PASS_ONE (one locally
+        validated genuine receipt, one exact canonical pre+1 anchored event
+        and one whitelisted busy/replay refusal).  It is never retried; a
+        failed or incomplete trial retains its owned root and evidence."""
+        trial_id = uuid.uuid4().hex
+        fixture_id = "C04T18_" + trial_id
+        ownership = self._rebind_to_owned_race_root(fixture_id)
         checkpoint = self._checkpoint()
-        context = _mp.get_context("spawn")
-        queue = context.Queue()
-        barrier = context.Barrier(2)
-        processes = [
-            context.Process(target=_authorization_race_worker, args=(self._worker_params(checkpoint), queue, barrier))
-            for _ in range(2)
-        ]
-        for process in processes:
-            process.start()
-        outcomes = [queue.get(timeout=180) for _ in processes]
-        for process in processes:
-            process.join(timeout=60)
-        winners = [o for o in outcomes if o[0] == "CONSUMED"]
-        self.assertEqual(len(winners), 1, outcomes)
-        self.assertTrue(winners[0][1])
-        losers = [o for o in outcomes if o[0] != "CONSUMED"]
-        self.assertEqual(len(losers), 1)
-        self.assertIn(losers[0][0], {"REPLAYED", "UNAVAILABLE", "CONFLICT", "STALE_BINDING"})
-        self.assertFalse(losers[0][1])
-        self.assertEqual(self._event_types().count("EXECUTION_AUTHORIZATION_SET_CONSUMED"), 1)
+        expectation = self._expectation(checkpoint=checkpoint)
+        candidate = expectation.uniqueness_candidate()
+        baseline = self._race_snapshot(candidate)  # setup is complete; the handle is closed before spawn
+        baseline_findings = _race_baseline_findings(baseline, checkpoint, expected_candidate_state="UNUSED")
+        if baseline_findings:
+            report = self._race_report("C04_T18", trial_id=trial_id, fixture_id=fixture_id, ownership=ownership,
+                                       run=None, verdict=None, cleanup=[], baseline_findings=baseline_findings)
+            self.fail(("BASELINE_UNPROVEN_NO_RACE_STARTED", report))
+        ctx = _race_context(fixture_id=fixture_id, labels=("w0", "w1"), barrier_status="PASSED",
+                            expectation=expectation, checkpoint=checkpoint, baseline=baseline, contract=self.contract)
+        params = {label: self._race_params(checkpoint, fixture_id=fixture_id, label=label,
+                                           expected_event_id=ctx["expected_event_id"]) for label in ("w0", "w1")}
+        ownership["worker_labels"] = ["w0", "w1"]
+        ownership["handles"] = ["queue", "barrier", "process:w0", "process:w1"]
+        run = _RaceRun(context=_mp.get_context("spawn"), target=_authorization_race_worker,
+                       params_by_label=params, use_barrier=True)
+        run.start_and_collect()
+        ownership["worker_pids"] = dict(run.evidence["pids"])
+        final = run.post_validate(lambda: self._race_snapshot(candidate))
+        run.close()
+        verdict = _race_classify(ctx=ctx, raw_records=run.evidence["records"], lifecycle=run.evidence,
+                                 baseline=baseline, final=final)
+        cleanup = _race_remove_owned_root(ownership) if verdict["branch"] is not None else []
+        report = self._race_report("C04_T18", trial_id=trial_id, fixture_id=fixture_id, ownership=ownership,
+                                   run=run, verdict=verdict, cleanup=cleanup)
+        self.assertEqual(cleanup, [], report)
+        self.assertNotIn("FAIL_SAFETY", verdict["classes"], report)
+        self.assertEqual(verdict["classes"], [], report)
+        self.assertIn(verdict["branch"], {"PASS_ZERO", "PASS_ONE"}, report)
+        self.assertLessEqual(verdict["S"], 1)
+        self.assertLessEqual(verdict["E"], 1)
+        self.assertEqual(verdict["S"], verdict["E"])
+        records = [_race_parse_record(raw) for raw in run.evidence["records"]]
+        self.assertEqual(sorted(r["worker_label"] for r in records), ["w0", "w1"])
+        self.assertEqual({r["consumption_call_count"] for r in records}, {1})  # no consumption retry
+        self.assertEqual({r["barrier_status"] for r in records}, {"PASSED"})
+        self.assertEqual(len({r["os_pid"] for r in records}), 2)
+
+    # -- bounded race oracle / receipt validation (O01-O17, synthetic) ---------------------
+    _SYNTHETIC_PIDS = {"w0": 4101, "w1": 4102}
+
+    def _race_oracle_inputs(self):
+        """Real production-backed complete baseline / zero / one snapshots from
+        a singleton in-process consumption; worker records are SYNTHETIC.
+        O17: these prove oracle decisions only, never real locking or a race."""
+        checkpoint = self._checkpoint()
+        expectation = self._expectation(checkpoint=checkpoint)
+        candidate = expectation.uniqueness_candidate()
+        baseline = self._race_snapshot(candidate)
+        zero = self._race_snapshot(candidate)
+        ctx = _race_context(fixture_id="O17_SYNTHETIC", labels=("w0", "w1"), barrier_status="PASSED",
+                            expectation=expectation, checkpoint=checkpoint, baseline=baseline, contract=self.contract)
+        result = self._consume(expectation)
+        self.assertEqual(result.outcome, "CONSUMED")
+        receipt = result.receipt
+        meta = {
+            "event_id": receipt.consumption_event_id, "event_hash": receipt.consumption_event_hash,
+            "sequence": receipt.consumption_sequence, "expectation_carrier_sha256": receipt.expectation_carrier_sha256,
+            "authorization_binding_sha256": receipt.authorization_binding_sha256,
+            "invocation_started_monotonic_ns": receipt.invocation_started_monotonic_ns,
+            "absolute_deadline_monotonic_ns": receipt.absolute_deadline_monotonic_ns,
+        }
+        receipt.revoke()
+        one = self._race_snapshot(candidate)
+        self.assertTrue(baseline["complete"] and zero["complete"] and one["complete"])
+        return ctx, baseline, zero, one, meta
+
+    def _synthetic_record(self, label, *, outcome, reason=None, code=None, event=None, **overrides):
+        record = {
+            "schema_version": 1, "fixture_id": "O17_SYNTHETIC", "worker_label": label,
+            "os_pid": self._SYNTHETIC_PIDS[label], "process_instance_id": _AUTH_PROC, "barrier_status": "PASSED",
+            "consumption_call_count": 1, "outcome": outcome, "reason": reason, "underlying_failure_code": code,
+            "receipt_present": outcome == "CONSUMED",
+            "local_receipt_validation": "VALID" if outcome == "CONSUMED" else "NOT_APPLICABLE",
+            "event": event, "error_category": None,
+        }
+        record.update(overrides)
+        return record
+
+    def _busy(self, label, **overrides):
+        record = self._synthetic_record(label, outcome="UNAVAILABLE", reason="LEDGER_BUSY", code="LEDGER_CONCURRENT_WRITER")
+        record.update(overrides)
+        return record
+
+    def _replay(self, label, **overrides):
+        record = self._synthetic_record(label, outcome="REPLAYED", reason="SET_ALREADY_CONSUMED")
+        record.update(overrides)
+        return record
+
+    def _won(self, label, meta, **overrides):
+        record = self._synthetic_record(label, outcome="CONSUMED", event=dict(meta))
+        record.update(overrides)
+        return record
+
+    def _lifecycle(self, **overrides):
+        value = {"normal": True, "pids": dict(self._SYNTHETIC_PIDS), "exit_codes": {"w0": 0, "w1": 0},
+                 "failures": [], "alive_after": []}
+        value.update(overrides)
+        return value
+
+    def _judge(self, ctx, baseline, final, records, *, lifecycle=None, raw=None):
+        raws = raw if raw is not None else [_race_encode_record(record) for record in records]
+        return _race_classify(ctx=ctx, raw_records=raws, lifecycle=lifecycle or self._lifecycle(),
+                              baseline=baseline, final=final)
+
+    def test_race_oracle_accepts_only_the_clean_zero_and_clean_one_branches(self) -> None:
+        """O01/O02/O03 (synthetic records over real complete snapshots)."""
+        ctx, baseline, zero, one, meta = self._race_oracle_inputs()
+        verdict = self._judge(ctx, baseline, zero, [self._busy("w0"), self._busy("w1")])
+        self.assertEqual((verdict["branch"], verdict["classes"], verdict["S"], verdict["R"], verdict["E"]),
+                         ("PASS_ZERO", [], 0, 0, 0))
+        self.assertEqual((verdict["safety"], verdict["evidence"], verdict["progress"]),
+                         ("ESTABLISHED_FOR_THIS_TRIAL", "COMPLETE", 0))
+        for loser in (self._busy("w1"), self._replay("w1")):
+            with self.subTest(loser=loser["outcome"]):
+                verdict = self._judge(ctx, baseline, one, [self._won("w0", meta), loser])
+                self.assertEqual((verdict["branch"], verdict["classes"], verdict["S"], verdict["E"], verdict["progress"]),
+                                 ("PASS_ONE", [], 1, 1, 1))
+        # The single anchored event is exactly the canonical pre+1 event.
+        event = one["events"][-1]
+        self.assertEqual((event["sequence"], event["previous_event_hash"]), (baseline["tail"][0] + 1, baseline["tail"][1]))
+        self.assertEqual(event["payload"], ctx["expected_payload"])
+        self.assertEqual(event["event_id"], ctx["expected_event_id"])
+
+    def test_race_oracle_two_successes_or_two_events_fail_safety(self) -> None:
+        """O04/O05: never collapse duplicates; duplicated REPORTS are evidence failures."""
+        ctx, baseline, zero, one, meta = self._race_oracle_inputs()
+        two = self._judge(ctx, baseline, one, [self._won("w0", meta), self._won("w1", meta)])
+        self.assertIn("FAIL_SAFETY", two["classes"])
+        self.assertIn("TWO_SUCCESSFUL_CONSUMERS", two["findings"])
+        self.assertEqual(two["safety"], "VIOLATED")
+        self.assertIsNone(two["branch"])
+        duplicate = copy.deepcopy(one)
+        extra = dict(duplicate["events"][-1], sequence=duplicate["events"][-1]["sequence"] + 1)
+        duplicate["events"].append(extra)
+        for records in ([self._busy("w0"), self._busy("w1")], [self._won("w0", meta), self._busy("w1")]):
+            with self.subTest(records=[r["outcome"] for r in records]):
+                verdict = self._judge(ctx, baseline, duplicate, records)
+                self.assertIn("DUPLICATE_CONSUMPTION_EVENTS", verdict["findings"])
+                self.assertIn("FAIL_SAFETY", verdict["classes"])
+        # Two identical reports from ONE worker label are malformed harness
+        # evidence, not a second genuine receipt.
+        dup_report = self._judge(ctx, baseline, one, [self._won("w0", meta), self._won("w0", meta)])
+        self.assertNotIn("FAIL_SAFETY", dup_report["classes"])
+        self.assertIn("RECORD_DUPLICATE_LABEL", dup_report["findings"])
+        self.assertIn("FAIL_EVIDENCE", dup_report["classes"])
+        self.assertEqual(dup_report["S"], 1)
+
+    def test_race_oracle_apparent_or_mismatched_success_fails_integrity(self) -> None:
+        """O06/O07/O08: flag-only, invalid local validation, wrong process,
+        wrong metadata and success without an anchored event."""
+        ctx, baseline, zero, one, meta = self._race_oracle_inputs()
+        cases = {
+            "flag_only": self._synthetic_record("w0", outcome="CONSUMED", event=None, receipt_present=False,
+                                                local_receipt_validation="NOT_APPLICABLE"),
+            "local_invalid": self._synthetic_record("w0", outcome="HARNESS_ERROR", event=dict(meta),
+                                                    receipt_present=True, local_receipt_validation="INVALID",
+                                                    error_category="RECEIPT_VALIDATION"),
+            "wrong_logical_process": self._won("w0", meta, process_instance_id="proc_" + "8" * 32),
+            "wrong_os_pid": self._won("w0", meta, os_pid=9999),
+        }
+        for name, change in (("event_hash", "0" * 64), ("event_id", "evt_" + "0" * 32), ("sequence", meta["sequence"] + 1),
+                             ("expectation_carrier_sha256", "f" * 64), ("authorization_binding_sha256", "f" * 64),
+                             ("absolute_deadline_monotonic_ns", _AUTH_END + 1)):
+            cases["meta_" + name] = self._won("w0", dict(meta, **{name: change}))
+        for label, record in cases.items():
+            with self.subTest(case=label):
+                verdict = self._judge(ctx, baseline, one, [record, self._busy("w1")])
+                self.assertIn("FAIL_INTEGRITY", verdict["classes"], verdict)
+                self.assertIsNone(verdict["branch"])
+        missing = self._judge(ctx, baseline, zero, [self._won("w0", meta), self._busy("w1")])
+        self.assertIn("SUCCESS_WITHOUT_ANCHORED_EVENT", missing["findings"])
+        self.assertIn("TERMINAL_PERSISTENCE_UNCERTAIN", missing["classes"])
+        self.assertIn("FAIL_INTEGRITY", missing["classes"])
+        for name, mutate in (
+            ("payload", lambda e: e["payload"].update(invocation_id="inv_9")),
+            ("previous_hash", lambda e: e.update(previous_event_hash="0" * 64)),
+            ("event_id", lambda e: e.update(event_id="evt_" + "1" * 32)),
+        ):
+            with self.subTest(event=name):
+                bad = copy.deepcopy(one)
+                mutate(bad["events"][-1])
+                verdict = self._judge(ctx, baseline, bad, [self._won("w0", dict(meta, event_id=bad["events"][-1]["event_id"])),
+                                                           self._busy("w1")])
+                self.assertIn("FAIL_INTEGRITY", verdict["classes"])
+        unequal = dict(copy.deepcopy(one), trusted=[one["tail"][0] - 1, baseline["tail"][1]])
+        verdict = self._judge(ctx, baseline, unequal, [self._won("w0", meta), self._busy("w1")])
+        self.assertIn("UNEQUAL_TAILS", verdict["findings"])
+        self.assertIn("TERMINAL_PERSISTENCE_UNCERTAIN", verdict["classes"])
+
+    def test_race_oracle_persistence_uncertainty_is_terminal_never_unused(self) -> None:
+        """O09/O10/O16: event without receipt, incomplete/failed validation,
+        divergent stores and empty or unvalidated absence."""
+        ctx, baseline, zero, one, meta = self._race_oracle_inputs()
+        anchored = self._judge(ctx, baseline, one, [self._busy("w0"), self._busy("w1")])
+        self.assertIn("EVENT_WITHOUT_RECEIPT", anchored["findings"])
+        self.assertIn("TERMINAL_PERSISTENCE_UNCERTAIN", anchored["classes"])
+        self.assertIsNone(anchored["branch"])
+        replay_only = self._judge(ctx, baseline, one, [self._replay("w0"), self._busy("w1")])
+        self.assertIn("REPLAY_WITHOUT_VALIDATED_WINNER", replay_only["findings"])
+        self.assertIn("TERMINAL_PERSISTENCE_UNCERTAIN", replay_only["classes"])
+        failed = {"complete": False, "failure_code": "NO_REPAIR_AUTHORITY_LEDGER_TAIL_MISMATCH"}
+        for final in (failed, None, {"complete": True, "events": [], "tail": [0, "0" * 64], "trusted": [0, "0" * 64],
+                                     "projection": {}, "candidate_state": "UNUSED", "candidate_event_id": None}):
+            with self.subTest(final=None if final is None else final.get("failure_code")):
+                verdict = self._judge(ctx, baseline, final, [self._busy("w0"), self._busy("w1")])
+                self.assertIsNone(verdict["branch"])
+                self.assertNotEqual(verdict["safety"], "ESTABLISHED_FOR_THIS_TRIAL")
+        self.assertIn("STORE_STATE_UNCERTAIN", self._judge(ctx, baseline, failed, [self._busy("w0"), self._busy("w1")])["findings"])
+        incomplete_baseline = self._judge(ctx, {"complete": False}, zero, [self._busy("w0"), self._busy("w1")])
+        self.assertIn("BASELINE_UNPROVEN", incomplete_baseline["findings"])
+        self.assertIsNone(incomplete_baseline["branch"])
+        # A real ledger-ahead (after-commit, before-anchor) store is uncertain, never UNUSED.
+        (ahead_ctx, ahead_baseline), ahead_final = self._race_ledger_ahead_inputs()
+        verdict = self._judge(ahead_ctx, ahead_baseline, ahead_final, [self._busy("w0"), self._busy("w1")])
+        self.assertIn("STORE_STATE_UNCERTAIN", verdict["findings"])
+        self.assertIn("TERMINAL_PERSISTENCE_UNCERTAIN", verdict["classes"])
+        self.assertIsNone(verdict["branch"])
+
+    def _race_ledger_ahead_inputs(self):
+        """A fresh owned fixture driven ledger-ahead by the REAL production
+        after-commit/before-anchor fault; the snapshot must fail closed."""
+        ownership = self._rebind_to_owned_race_root("O10_LEDGER_AHEAD")
+        try:
+            checkpoint = self._checkpoint()
+            expectation = self._expectation(checkpoint=checkpoint)
+            candidate = expectation.uniqueness_candidate()
+            baseline = self._race_snapshot(candidate)
+            ctx = _race_context(fixture_id="O17_SYNTHETIC", labels=("w0", "w1"), barrier_status="PASSED",
+                                expectation=expectation, checkpoint=checkpoint, baseline=baseline,
+                                contract=self.contract)
+            result = self._consume(expectation, fault_hook=self._fault("after_ledger_commit", RuntimeError("crash")))
+            self.assertEqual((result.outcome, result.receipt), ("INDETERMINATE", None))
+            final = self._race_snapshot(candidate)
+            self.assertFalse(final["complete"])
+            self.assertEqual(final["failure_code"], str(FailureCode.NO_REPAIR_AUTHORITY_LEDGER_TAIL_MISMATCH))
+            return (ctx, baseline), final
+        finally:
+            self.assertEqual(_race_remove_owned_root(ownership), [])
+
+    def test_race_oracle_refusal_whitelist_is_exact(self) -> None:
+        """O11: only the BR-07 triples; no widening, no exception-as-busy."""
+        ctx, baseline, zero, one, meta = self._race_oracle_inputs()
+        bad_zero = {
+            "busy_wrong_code": self._busy("w1", underlying_failure_code="LEDGER_COMMIT_FAILURE"),
+            "busy_wrong_reason": self._busy("w1", reason="LEDGER_LOCKED"),
+            "conflict": self._synthetic_record("w1", outcome="CONFLICT", reason="SET_ID_CONFLICT"),
+            "stale": self._synthetic_record("w1", outcome="STALE_BINDING", reason="ENTRY_CHECKPOINT_MISMATCH"),
+            "replay_with_zero_events": self._replay("w1"),
+            "failed": self._synthetic_record("w1", outcome="FAILED", reason="APPEND_FAILED", code="LEDGER_COMMIT_FAILURE"),
+            "indeterminate": self._synthetic_record("w1", outcome="INDETERMINATE", reason="APPEND_UNCERTAIN"),
+            "deadline": self._synthetic_record("w1", outcome="DEADLINE_EXPIRED", reason="BEFORE_CONSUMPTION"),
+            "generic_exception": self._synthetic_record("w1", outcome="HARNESS_ERROR", error_category="CONSUMPTION"),
+        }
+        expected_class = {
+            "busy_wrong_code": "FAIL_INTEGRITY", "busy_wrong_reason": "FAIL_INTEGRITY", "conflict": "FAIL_INTEGRITY",
+            "stale": "FAIL_INTEGRITY", "replay_with_zero_events": "FAIL_INTEGRITY", "failed": "FAIL_EVIDENCE",
+            "indeterminate": "TERMINAL_PERSISTENCE_UNCERTAIN", "deadline": "FAIL_EVIDENCE",
+            "generic_exception": "FAIL_EVIDENCE",
+        }
+        for name, record in bad_zero.items():
+            with self.subTest(case=name):
+                verdict = self._judge(ctx, baseline, zero, [self._busy("w0"), record])
+                self.assertIsNone(verdict["branch"])
+                self.assertIn(expected_class[name], verdict["classes"], verdict)
+        # With a validated winner, only busy or the exact replay triple is admissible.
+        for record in (self._synthetic_record("w1", outcome="CONFLICT", reason="SET_ID_CONFLICT"),
+                       self._replay("w1", underlying_failure_code="LEDGER_BUSY")):
+            with self.subTest(winner_loser=record["outcome"]):
+                verdict = self._judge(ctx, baseline, one, [self._won("w0", meta), record])
+                self.assertIn("FAIL_INTEGRITY", verdict["classes"])
+
+    def test_race_oracle_report_and_worker_failures_fail_evidence(self) -> None:
+        """O12/O13/O14: missing, duplicate, foreign, extra and malformed
+        reports; crashes, nonzero exits, barrier/count failures and
+        lifecycle deadline/finalization failures."""
+        ctx, baseline, zero, one, meta = self._race_oracle_inputs()
+        good = [self._busy("w0"), self._busy("w1")]
+        cases = {
+            "missing": ([self._busy("w0")], None, "RECORD_MISSING"),
+            "duplicate_label": ([self._busy("w0"), self._busy("w0")], None, "RECORD_DUPLICATE_LABEL"),
+            "foreign_fixture": ([self._busy("w0"), self._busy("w1", fixture_id="OTHER")], None, "RECORD_FOREIGN_FIXTURE"),
+            "wrong_pid": ([self._busy("w0"), self._busy("w1", os_pid=4101)], None, "RECORD_PID_MISMATCH"),
+            "extra_third": (good + [self._busy("w1")], None, "RECORD_EXTRA"),
+            "barrier_failed": ([self._busy("w0"), self._synthetic_record(
+                "w1", outcome="HARNESS_ERROR", barrier_status="FAILED", consumption_call_count=0,
+                error_category="BARRIER")], None, "WORKER_HARNESS_ERROR"),
+            "barrier_not_passed": ([self._busy("w0"), self._busy("w1", barrier_status="NOT_USED")], None,
+                                   "BARRIER_STATUS_MISMATCH"),
+            "call_count_zero": ([self._busy("w0"), self._busy("w1", consumption_call_count=0)], None, "RECORD_MALFORMED"),
+            "nonzero_exit": (good, self._lifecycle(exit_codes={"w0": 0, "w1": 1}), "WORKER_EXIT_NOT_ZERO"),
+            "timeout": (good, self._lifecycle(normal=False, failures=["COLLECTION_TIMEOUT"]), "LIFECYCLE_COLLECTION_TIMEOUT"),
+            "live_actor": (good, self._lifecycle(normal=False, alive_after=["w1"], failures=["WORKER_SURVIVED_KILL"]),
+                           "WORKER_LIVE_AFTER_FINALIZATION"),
+            "finalization": (good, self._lifecycle(normal=False, failures=["CLEANUP_ERROR"]), "LIFECYCLE_CLEANUP_ERROR"),
+            "late_validation": (good, self._lifecycle(normal=False, failures=["POST_VALIDATION_LATE"]),
+                                "LIFECYCLE_POST_VALIDATION_LATE"),
+        }
+        for name, (records, lifecycle, finding) in cases.items():
+            with self.subTest(case=name):
+                verdict = self._judge(ctx, baseline, zero, records, lifecycle=lifecycle)
+                self.assertIn(finding, verdict["findings"], verdict)
+                self.assertIn("FAIL_EVIDENCE", verdict["classes"])
+                self.assertEqual(verdict["evidence"], "INCOMPLETE")
+                self.assertIsNone(verdict["branch"])
+        count_two = _race_encode_record(self._busy("w1", consumption_call_count=2))
+        verdict = self._judge(ctx, baseline, zero, [], raw=[_race_encode_record(self._busy("w0")), count_two])
+        self.assertIn("NO_RETRY_VIOLATION", verdict["findings"])
+        # A proved safety violation is preserved under incomplete evidence.
+        both = self._judge(ctx, baseline, one, [self._won("w0", meta), self._won("w1", meta)],
+                           lifecycle=self._lifecycle(normal=False, failures=["POST_VALIDATION_LATE"]))
+        self.assertIn("FAIL_SAFETY", both["classes"])
+        self.assertIn("FAIL_EVIDENCE", both["classes"])
+
+    def test_race_oracle_unexpected_mutation_fails_integrity(self) -> None:
+        """O15: compare the whole validated delta and safety projection."""
+        ctx, baseline, zero, one, meta = self._race_oracle_inputs()
+        extra = copy.deepcopy(zero)
+        extra["events"].append(dict(extra["events"][-1], sequence=extra["events"][-1]["sequence"] + 1,
+                                    event_type="RESTRICTED_SESSION_STARTED", payload={}))
+        moved = copy.deepcopy(zero)
+        moved["projection"]["risk_state_epoch"] = moved["projection"]["risk_state_epoch"] + 1
+        rewritten = copy.deepcopy(zero)
+        rewritten["events"][0]["event_hash"] = "0" * 64
+        for name, final in (("extra_event", extra), ("projection", moved), ("history", rewritten)):
+            with self.subTest(case=name):
+                verdict = self._judge(ctx, baseline, final, [self._busy("w0"), self._busy("w1")])
+                self.assertIn("FAIL_INTEGRITY", verdict["classes"])
+                self.assertIsNone(verdict["branch"])
+
+    def test_race_late_collection_can_never_become_a_clean_branch(self) -> None:
+        """R1 (Correction 01), SYNTHETIC lifecycle doubles + real complete
+        snapshots: two well-formed busy records with both actors exited code 0
+        and an unchanged complete history are PASS_ZERO only when collection
+        completed before Hc; at Hc the result is FAIL_EVIDENCE, the ordinary
+        post-validation never runs and no clean branch exists (so the owned
+        root would be retained by the T17/T18 consumers)."""
+        ctx, baseline, zero, one, meta = self._race_oracle_inputs()
+        records = [_race_encode_record(self._busy("w0")), _race_encode_record(self._busy("w1"))]
+        for name, final_at, exit_at, expected in (("late_at_hc", 180, 180, None),
+                                                  ("just_before_hc", 179.9, 179.95, "PASS_ZERO")):
+            with self.subTest(case=name):
+                clock = _FakeRaceClock()
+                processes = [_FakeRaceProcess(clock, self._SYNTHETIC_PIDS["w0"], exit_at=clock.now + exit_at),
+                             _FakeRaceProcess(clock, self._SYNTHETIC_PIDS["w1"], exit_at=clock.now + exit_at)]
+                queue = _FakeRaceQueue(clock, [(clock.now + 1, records[0]), (clock.now + final_at, records[1])])
+                run = _RaceRun(context=_FakeRaceContext(queue, processes), target=None, use_barrier=True,
+                               clock=clock, params_by_label={"w0": {"fixture_id": ctx["fixture_id"]},
+                                                             "w1": {"fixture_id": ctx["fixture_id"]}})
+                run.start_and_collect()
+                episodes = []
+                final = run.post_validate(lambda: episodes.append(1) or zero)
+                run.close()
+                verdict = _race_classify(ctx=ctx, raw_records=run.evidence["records"], lifecycle=run.evidence,
+                                         baseline=baseline, final=final)
+                self.assertEqual(verdict["branch"], expected, verdict)
+                if expected is None:
+                    self.assertEqual(episodes, [])
+                    self.assertIn("LIFECYCLE_COLLECTION_DEADLINE_EXCEEDED", verdict["findings"])
+                    self.assertIn("FAIL_EVIDENCE", verdict["classes"])
+                    self.assertNotEqual(verdict["safety"], "ESTABLISHED_FOR_THIS_TRIAL")
+                else:
+                    self.assertEqual((episodes, verdict["classes"]), ([1], []))
+
+    def test_race_record_structure_is_closed_and_typed(self) -> None:
+        """O17: closed WORKER_EVIDENCE.schema.json structure (synthetic records)."""
+        ctx, baseline, zero, one, meta = self._race_oracle_inputs()
+        accepted = (
+            self._busy("w0"), self._replay("w1"), self._won("w0", meta),
+            self._synthetic_record("w1", outcome="HARNESS_ERROR", barrier_status="NOT_REACHED",
+                                   consumption_call_count=0, error_category="SETUP"),
+            self._synthetic_record("w0", outcome="HARNESS_ERROR", event=dict(meta), receipt_present=True,
+                                   local_receipt_validation="INVALID", error_category="RECEIPT_VALIDATION"),
+            self._replay("w0", barrier_status="NOT_USED"),
+        )
+        for record in accepted:
+            with self.subTest(accepted=record["outcome"]):
+                self.assertEqual(_race_parse_record(_race_encode_record(record)), record)
+        base = self._busy("w0")
+        rejected = {
+            "unknown_key": dict(base, extra=1),
+            "missing_key": {k: v for k, v in base.items() if k != "reason"},
+            "bool_pid": dict(base, os_pid=True),
+            "bool_count": dict(base, consumption_call_count=True),
+            "bool_version": dict(base, schema_version=True),
+            "string_pid": dict(base, os_pid="4101"),
+            "zero_pid": dict(base, os_pid=0),
+            "bad_label": dict(base, worker_label="w2"),
+            "bad_proc": dict(base, process_instance_id="proc_" + "A" * 32),
+            "bad_fixture": dict(base, fixture_id="bad fixture"),
+            "lower_reason": dict(base, reason="ledger_busy"),
+            "bad_outcome": dict(base, outcome="WON"),
+            "receipt_flag_int": dict(base, receipt_present=0),
+            "refusal_with_event": dict(base, event=dict(meta)),
+            "refusal_with_receipt": dict(base, receipt_present=True),
+            "consumed_with_reason": self._won("w0", meta, reason="LEDGER_BUSY"),
+            "consumed_without_event": self._won("w0", meta, event=None),
+            "consumed_with_error": self._won("w0", meta, error_category="REPORTING"),
+            "harness_without_category": self._synthetic_record("w0", outcome="HARNESS_ERROR"),
+            "event_extra_key": self._won("w0", dict(meta, extra="x")),
+            "event_bool_sequence": self._won("w0", dict(meta, sequence=True)),
+            "event_upper_hash": self._won("w0", dict(meta, event_hash="A" * 64)),
+            "event_bad_id": self._won("w0", dict(meta, event_id="evt_" + "0" * 31)),
+            "event_negative_clock": self._won("w0", dict(meta, invocation_started_monotonic_ns=-1)),
+            "bad_category": self._synthetic_record("w0", outcome="HARNESS_ERROR", error_category="OTHER"),
+            "count_two": dict(base, consumption_call_count=2),
+            "not_object": [base],
+        }
+        for name, record in rejected.items():
+            with self.subTest(rejected=name):
+                with self.assertRaises(_RaceEvidenceError):
+                    _race_parse_record(_race_encode_record(record))
+        text = _race_encode_record(base)
+        for name, raw in (
+            ("float_pid", text.replace('"os_pid":4101', '"os_pid":4101.0')),
+            ("nan", text.replace('"os_pid":4101', '"os_pid":NaN')),
+            ("duplicate_key", text[:-1] + ',"reason":null}'),
+            ("trailing_newline_fixture", text.replace('"O17_SYNTHETIC"', '"O17_SYNTHETIC\\n"')),
+            ("oversize", text[:-1] + ',"pad":"' + "x" * 4096 + '"}'),
+            ("not_json", text[:-1]),
+            ("bytes", text.encode("utf-8")),
+        ):
+            with self.subTest(raw=name):
+                with self.assertRaises(_RaceEvidenceError):
+                    _race_parse_record(raw)
+
+    def test_race_worker_receipt_validation_uses_production_liveness(self) -> None:
+        """BR-05/O06: only the genuine live original-process receipt validates;
+        forged, revoked, wrong-process, staged or non-receipt objects fail."""
+        checkpoint = self._checkpoint()
+        expectation = self._expectation(checkpoint=checkpoint)
+        params = dict(self._worker_params(checkpoint), expected_event_id=_race_expected_event_id(self.contract, expectation))
+        receipt = self._consume(expectation).receipt
+        valid, event = _race_receipt_validation(receipt, expectation, params)
+        self.assertTrue(valid)
+        record = self._synthetic_record("w0", outcome="CONSUMED", event=event)
+        self.assertEqual(_race_parse_record(_race_encode_record(record))["event"], event)
+        forged = _lb.ActiveAuthorizationConsumptionV1(
+            _lb._AUTHORIZATION_RECEIPT_ISSUER_KEY, **{name: getattr(receipt, name) for name in _lb._RECEIPT_FIELDS})
+        forged.revoke()
+        self.assertFalse(_race_receipt_validation(forged, expectation, params)[0])
+        self.assertFalse(_race_receipt_validation(object(), expectation, params)[0])
+        self.assertFalse(_race_receipt_validation(receipt, expectation, dict(params, process_id="proc_" + "8" * 32))[0])
+        self.assertFalse(_race_receipt_validation(receipt, expectation, dict(params, expected_event_id="evt_" + "0" * 32))[0])
+        with _mock.patch.object(_lb.os, "getpid", return_value=receipt.os_process_id + 1):
+            self.assertFalse(_race_receipt_validation(receipt, expectation, params)[0])
+        for operation in (copy.copy, copy.deepcopy, pickle.dumps):
+            with self.assertRaises(TypeError):
+                operation(receipt)
+        receipt.claim_stage("PHASE_1_READ")
+        self.assertFalse(_race_receipt_validation(receipt, expectation, params)[0])  # a latch was claimed
+        receipt.revoke()
+        self.assertFalse(_race_receipt_validation(receipt, expectation, params)[0])
+
+    def test_race_counting_boundary_is_transparent_and_counts_entries(self) -> None:
+        """BR-08: the instrumented boundary delegates once, unchanged."""
+        calls = []
+        sentinel = object()
+
+        def real(*args, **kwargs):
+            calls.append((args, kwargs))
+            return sentinel
+
+        counter = [0]
+        wrapped = _race_counting_call(real, counter)
+        self.assertIs(wrapped(1, key="v"), sentinel)
+        self.assertEqual((counter[0], calls), (1, [((1,), {"key": "v"})]))
+        source = _inspect.getsource(_authorization_race_worker)
+        self.assertIn("_race_counting_call(_lb.consume_active_execution_authorization_set_v1, counter)", source)
+        self.assertEqual(source.count("consume("), 1)  # one real call site, no retry loop
+        self.assertNotIn("while", source)
+
+    def test_race_real_single_process_busy_refusal_is_the_whitelisted_triple(self) -> None:
+        """BR-07 static basis exercised without a race: while the real lock
+        pair is held, the production consumption returns exactly the busy
+        triple, appends nothing and the set stays UNUSED."""
+        expectation = self._expectation()
+        candidate = expectation.uniqueness_candidate()
+        before = self._race_snapshot(candidate)
+        held = ledger._acquire_consumption_state(
+            self.binding, conflict_domain_ref=self.contract.conflict_domain_ref, expected_environment="KALSHI_DEMO",
+            canonical_repository_root=str(self.repository_root), expected_ledger_path=str(self.ledger_path))
+        self.assertIsNotNone(held.locked)
+        try:
+            result = self._consume(expectation)
+        finally:
+            held.locked.close()
+        self.assertEqual((result.outcome, result.reason, str(result.underlying_failure_code)), _RACE_BUSY_TRIPLE)
+        self.assertIsNone(result.receipt)
+        after = self._race_snapshot(candidate)
+        self.assertEqual((after["events"], after["trusted"], after["candidate_state"]),
+                         (before["events"], before["trusted"], "UNUSED"))
+
+    def test_race_owned_root_removal_is_verified_and_retains_on_mismatch(self) -> None:
+        """BR-12: only verified newly owned paths are removed."""
+        ownership = _race_create_owned_root("BR12_OWNERSHIP")
+        root = Path(ownership["root"])
+        (root / "nested").mkdir()
+        (root / "nested" / "store.sqlite3").write_bytes(b"x")
+        self.assertEqual(_race_remove_owned_root(ownership), [])
+        self.assertFalse(root.exists())
+        self.assertEqual(_race_remove_owned_root(ownership), ["OWNED_ROOT_MISSING"])
+        mismatch = _race_create_owned_root("BR12_MISMATCH")
+        try:
+            self.assertEqual(_race_remove_owned_root(dict(mismatch, creation_identity=[0, 0])),
+                             ["OWNED_ROOT_IDENTITY_MISMATCH"])
+            self.assertTrue(Path(mismatch["root"]).exists())  # retained
+            (Path(mismatch["root"]) / "f").write_bytes(b"y")
+            with _mock.patch.object(_race_os, "unlink", side_effect=OSError("denied")):
+                self.assertEqual(_race_remove_owned_root(mismatch), ["OWNED_ROOT_CLEANUP_FAILED"])
+            self.assertTrue((Path(mismatch["root"]) / "f").exists())
+        finally:
+            self.assertEqual(_race_remove_owned_root(mismatch), [])
+
+    def test_c04_t18_real_trial_is_collected_exactly_once(self) -> None:
+        """One real T18 per full discovery: no subclass or alias re-collects it."""
+        name = "test_parallel_consumption_has_at_most_one_winner_and_never_retries"
+        module = sys.modules[type(self).__module__]
+        owners = [value for value in vars(module).values()
+                  if isinstance(value, type) and issubclass(value, unittest.TestCase) and hasattr(value, name)]
+        self.assertEqual(owners, [AuthorizationConsumptionBindingTests])
+        ids = [test.id() for suite in unittest.TestLoader().loadTestsFromModule(module) for test in suite
+               if test.id().endswith("." + name)]
+        self.assertEqual(len(ids), 1)
 
     # -- CORRECTION_02 closure: C04-T15 authority/ledger divergence -----------
     def _snapshot_ledger(self):
@@ -5918,6 +7535,424 @@ class AuthorizationConsumptionBindingTests(unittest.TestCase):
         ):
             self.assertNotIn(forbidden, self._event_types())
         self.assertEqual(self._event_types().count("EXECUTION_AUTHORIZATION_SET_CONSUMED"), 1)
+
+
+class _FakeRaceClock:
+    def __init__(self) -> None:
+        self.now = 1000.0
+        self.waits: list = []
+
+    def __call__(self) -> float:
+        return self.now
+
+    def wait(self, kind, timeout, until=None) -> None:
+        if timeout < 0:
+            raise AssertionError("negative wait")
+        self.waits.append((kind, self.now, timeout))
+        self.now += timeout if until is None else max(0.0, min(timeout, until - self.now))
+
+
+class _FakeRaceQueue:
+    def __init__(self, clock, items=(), *, close_raises=False, oversleep=0.0) -> None:
+        self.clock = clock
+        self.items = sorted(items, key=lambda item: item[0])
+        self.close_raises = close_raises
+        self.oversleep = oversleep  # delayed return after an in-window arrival (R1 double)
+        self.calls: list = []
+
+    def get(self, timeout):
+        ready = [item for item in self.items if item[0] <= self.clock.now]
+        if not ready and self.items and self.items[0][0] - self.clock.now <= timeout:
+            ready = [self.items[0]]
+            self.clock.wait("get", timeout, until=self.items[0][0])
+            self.clock.now += self.oversleep
+        if ready:
+            self.items.remove(ready[0])
+            return ready[0][1]
+        self.clock.wait("get", timeout)
+        raise _race_queue.Empty
+
+    def close(self) -> None:
+        self.calls.append("close")
+        if self.close_raises:
+            raise OSError("synthetic close failure")
+
+    def join_thread(self) -> None:
+        self.calls.append("join_thread")
+
+    def cancel_join_thread(self) -> None:
+        self.calls.append("cancel_join_thread")
+
+
+class _FakeRaceBarrier:
+    def __init__(self, processes) -> None:
+        self.processes = processes
+        self.aborted = False
+
+    def abort(self) -> None:
+        self.aborted = True
+        for process in self.processes:
+            if process.exit_on_abort and process.is_alive():
+                process.exit_at = process.clock.now + 0.1
+
+
+class _FakeRaceProcess:
+    def __init__(self, clock, pid, *, exit_at=None, exitcode=0, terminate_works=True, kill_works=True,
+                 start_raises=False, exit_on_abort=False, join_oversleep=0.0) -> None:
+        self.clock = clock
+        self.pid = pid
+        self.exit_at = exit_at
+        self.join_oversleep = join_oversleep  # join observed late after an in-window exit (R1 double)
+        self._exitcode = exitcode
+        self.terminate_works = terminate_works
+        self.kill_works = kill_works
+        self.start_raises = start_raises
+        self.exit_on_abort = exit_on_abort
+        self.actions: list = []
+        self.closed = False
+
+    def start(self) -> None:
+        if self.start_raises:
+            raise OSError("synthetic spawn failure")
+        self.actions.append(("start", self.clock.now))
+
+    def is_alive(self) -> bool:
+        if self.closed:
+            raise ValueError("closed")
+        return self.exit_at is None or self.clock.now < self.exit_at
+
+    @property
+    def exitcode(self):
+        return None if self.is_alive() else self._exitcode
+
+    def join(self, timeout) -> None:
+        if self.is_alive():
+            exits = self.exit_at is not None and self.exit_at - self.clock.now <= timeout
+            self.clock.wait("join", timeout, until=self.exit_at)
+            if exits:
+                self.clock.now += self.join_oversleep
+
+    def terminate(self) -> None:
+        self.actions.append(("terminate", self.clock.now))
+        if self.terminate_works:
+            self.exit_at, self._exitcode = self.clock.now + 0.05, -15
+
+    def kill(self) -> None:
+        self.actions.append(("kill", self.clock.now))
+        if self.kill_works:
+            self.exit_at, self._exitcode = self.clock.now + 0.05, -9
+
+    def close(self) -> None:
+        if self.is_alive():
+            raise ValueError("live")
+        self.closed = True
+
+
+class _FakeRaceContext:
+    def __init__(self, queue, processes) -> None:
+        self.queue = queue
+        self.processes = list(processes)
+        self.created: list = []
+        self.barrier = None
+
+    def Queue(self):
+        return self.queue
+
+    def Barrier(self, parties):
+        self.barrier = _FakeRaceBarrier(self.processes)
+        return self.barrier
+
+    def Process(self, target, args):
+        process = self.processes[len(self.created)]
+        self.created.append(args[0])
+        return process
+
+
+class AuthorizationRaceLifecycleTests(unittest.TestCase):
+    """BR-09/BR-10/O13/O14 lifecycle decisions with SYNTHETIC process, queue,
+    barrier and clock doubles.  They prove the harness scheduling logic only,
+    never real OS scheduling, locking or a production race."""
+
+    FIXTURE = "O14_SYNTHETIC"
+
+    def _record(self, label, **overrides):
+        record = {
+            "schema_version": 1, "fixture_id": self.FIXTURE, "worker_label": label,
+            "os_pid": {"w0": 501, "w1": 502}[label], "process_instance_id": _AUTH_PROC,
+            "barrier_status": "PASSED", "consumption_call_count": 1, "outcome": "UNAVAILABLE",
+            "reason": "LEDGER_BUSY", "underlying_failure_code": "LEDGER_CONCURRENT_WRITER",
+            "receipt_present": False, "local_receipt_validation": "NOT_APPLICABLE", "event": None,
+            "error_category": None,
+        }
+        record.update(overrides)
+        return _race_encode_record(record)
+
+    def _run(self, *, items=(), processes=None, close_raises=False, labels=("w0", "w1"), oversleep=0.0):
+        clock = _FakeRaceClock()
+        if processes is None:
+            processes = [_FakeRaceProcess(clock, 501, exit_at=clock.now + 3), _FakeRaceProcess(clock, 502, exit_at=clock.now + 3)]
+        else:
+            processes = [factory(clock) for factory in processes]
+        queue = _FakeRaceQueue(clock, [(clock.now + at, raw) for at, raw in items], close_raises=close_raises,
+                               oversleep=oversleep)
+        context = _FakeRaceContext(queue, processes)
+        run = _RaceRun(context=context, target=None, use_barrier=True, clock=clock,
+                       params_by_label={label: {"fixture_id": self.FIXTURE} for label in labels})
+        return run, clock, processes, queue, context
+
+    def _assert_budget(self, run, clock) -> None:
+        """No wait ever extends past the applicable combined deadline and the
+        whole lifecycle ends by Hf: no per-actor multiplication or reset."""
+        for kind, started, timeout in clock.waits:
+            self.assertLessEqual(started + timeout, run.hf + 1e-9, (kind, started, timeout))
+        self.assertLessEqual(clock.now, run.hf + 1e-9)
+        self.assertEqual(run.hf - run.h0, 240.0)
+        self.assertEqual(run.hc - run.h0, 180.0)
+
+    def test_normal_lifecycle_collects_joins_and_validates_once(self) -> None:
+        run, clock, processes, queue, context = self._run(items=[(1, self._record("w0")), (2, self._record("w1"))])
+        run.start_and_collect()
+        self.assertTrue(run.evidence["normal"], run.evidence)
+        calls = []
+        self.assertEqual(run.post_validate(lambda: calls.append(clock.now) or "SNAPSHOT"), "SNAPSHOT")
+        run.close()
+        self.assertEqual(len(calls), 1)
+        self.assertFalse(any(p.is_alive() for p in processes if not p.closed))
+        self.assertEqual(run.evidence["finalization"], "COMPLETE")
+        self.assertEqual(queue.calls, ["close", "join_thread"])
+        self.assertEqual(run.evidence["exit_codes"], {"w0": 0, "w1": 0})
+        self.assertEqual(run.evidence["pids"], {"w0": 501, "w1": 502})
+        self.assertEqual([p["barrier_timeout_cap_s"] for p in context.created], [60.0, 60.0])
+        self._assert_budget(run, clock)
+
+    def test_collection_timeout_terminates_collectively_and_never_post_reads(self) -> None:
+        run, clock, processes, queue, _ = self._run(
+            items=[(179.5, self._record("w0"))],
+            processes=[lambda c: _FakeRaceProcess(c, 501), lambda c: _FakeRaceProcess(c, 502)])
+        run.start_and_collect()
+        self.assertIn("COLLECTION_TIMEOUT", run.evidence["failures"])
+        self.assertFalse(run.evidence["normal"])
+        reads = []
+        self.assertIsNone(run.post_validate(lambda: reads.append(1)))
+        self.assertEqual(reads, [])
+        self.assertEqual(run.evidence["post_validation"], "SKIPPED_ABNORMAL")
+        self.assertEqual(sorted(run.evidence["terminated"]), ["w0", "w1"])
+        for process in processes:
+            terminate_at = [at for action, at in process.actions if action == "terminate"][0]
+            self.assertLessEqual(terminate_at, run.hc + 1e-9)  # min(Hc, failure+5) == Hc here
+        run.close()
+        self.assertEqual(queue.calls, ["close", "cancel_join_thread"])  # never an unbounded feeder join
+        self._assert_budget(run, clock)
+
+    def test_dead_worker_without_record_aborts_early_and_releases_the_barrier(self) -> None:
+        run, clock, processes, _, context = self._run(
+            items=[],
+            processes=[lambda c: _FakeRaceProcess(c, 501, exit_at=c.now + 1, exitcode=1),
+                       lambda c: _FakeRaceProcess(c, 502, exit_on_abort=True)])
+        run.start_and_collect()
+        self.assertIn("WORKER_EXITED_WITHOUT_RECORD", run.evidence["failures"])
+        self.assertTrue(context.barrier.aborted)
+        self.assertEqual(run.evidence["terminated"], [])  # the peer completed cooperatively
+        self.assertLess(clock.now - run.h0, 10.0)  # early abort, not the 180s window
+        self.assertEqual(run.evidence["exit_codes"]["w0"], 1)
+        run.close()
+        self._assert_budget(run, clock)
+
+    def test_unresponsive_workers_are_killed_and_finalization_is_reported_incomplete(self) -> None:
+        run, clock, processes, _, _ = self._run(
+            items=[],
+            processes=[lambda c: _FakeRaceProcess(c, 501, terminate_works=False, kill_works=False),
+                       lambda c: _FakeRaceProcess(c, 502, terminate_works=False, kill_works=False)])
+        run.start_and_collect()
+        self.assertEqual(sorted(run.evidence["killed"]), ["w0", "w1"])
+        self.assertEqual(sorted(run.evidence["alive_after"]), ["w0", "w1"])
+        self.assertIn("WORKER_SURVIVED_KILL", run.evidence["failures"])
+        for process in processes:
+            kill_at = [at for action, at in process.actions if action == "kill"][0]
+            self.assertLessEqual(kill_at, run.h0 + _RACE_TERMINATE_JOIN_UNTIL_S + 1e-9)
+        self.assertIsNone(run.post_validate(lambda: self.fail("post-read with live actors")))
+        run.close()
+        self.assertEqual(run.evidence["finalization"], "INCOMPLETE")
+        self.assertFalse(any(p.closed for p in processes))  # a live actor is never closed or deleted
+        self._assert_budget(run, clock)
+
+    def test_spawn_failure_and_invalid_record_abort_without_replacement(self) -> None:
+        run, clock, processes, _, context = self._run(
+            processes=[lambda c: _FakeRaceProcess(c, 501), lambda c: _FakeRaceProcess(c, 502, start_raises=True)])
+        run.start_and_collect()
+        self.assertIn("SPAWN_FAILED", run.evidence["failures"])
+        self.assertEqual(len(context.created), 2)  # no replacement worker
+        self.assertEqual(run.evidence["terminated"], ["w0"])
+        run.close()
+        self._assert_budget(run, clock)
+        run, clock, processes, _, _ = self._run(items=[(1, "{not json")])
+        run.start_and_collect()
+        self.assertIn("INVALID_RECORD", run.evidence["failures"])
+        self.assertFalse(run.evidence["normal"])
+        run.close()
+        self._assert_budget(run, clock)
+
+    def test_extra_record_late_validation_and_cleanup_errors_fail_evidence(self) -> None:
+        run, clock, _, _, _ = self._run(items=[(1, self._record("w0")), (2, self._record("w1")),
+                                               (3.1, self._record("w1"))])
+        run.start_and_collect()
+        self.assertIn("EXTRA_RECORD", run.evidence["failures"])
+        self.assertFalse(run.evidence["normal"])
+        run.close()
+        run, clock, _, _, _ = self._run(items=[(1, self._record("w0")), (2, self._record("w1"))])
+        run.start_and_collect()
+
+        def slow_episode():
+            clock.now = run.hf + 1
+            return "LATE_SNAPSHOT"
+
+        self.assertEqual(run.post_validate(slow_episode), "LATE_SNAPSHOT")  # data kept for safety findings
+        self.assertIn("POST_VALIDATION_LATE", run.evidence["failures"])
+        self.assertFalse(run.evidence["normal"])
+        run, clock, _, queue, _ = self._run(items=[(1, self._record("w0")), (2, self._record("w1", outcome="FAILED",
+                                                                                            reason="APPEND_FAILED"))],
+                                            close_raises=True)
+        run.start_and_collect()
+        run.close()
+        self.assertEqual(run.evidence["failures"], ["CLEANUP_ERROR"])
+        self.assertEqual(run.evidence["finalization"], "INCOMPLETE")
+        # A primary failure stays first when cleanup also fails.
+        run, clock, _, _, _ = self._run(
+            items=[], processes=[lambda c: _FakeRaceProcess(c, 501), lambda c: _FakeRaceProcess(c, 502)],
+            close_raises=True)
+        run.start_and_collect()
+        run.close()
+        self.assertEqual(run.evidence["failures"][0], "COLLECTION_TIMEOUT")
+        self.assertIn("CLEANUP_ERROR", run.evidence["failures"])
+
+    def test_live_worker_at_collection_deadline_is_not_post_read(self) -> None:
+        run, clock, processes, _, _ = self._run(
+            items=[(1, self._record("w0")), (2, self._record("w1"))],
+            processes=[lambda c: _FakeRaceProcess(c, 501, exit_at=c.now + 3), lambda c: _FakeRaceProcess(c, 502)])
+        run.start_and_collect()
+        self.assertIn("WORKER_LIVE_AT_COLLECTION_DEADLINE", run.evidence["failures"])
+        self.assertEqual(run.evidence["terminated"], ["w1"])
+        self.assertIsNone(run.post_validate(lambda: self.fail("post-read after forced termination")))
+        run.close()
+        self._assert_budget(run, clock)
+
+    def test_harness_error_record_releases_peer_barrier_and_is_retained(self) -> None:
+        run, clock, _, _, context = self._run(items=[
+            (1, self._record("w0", outcome="HARNESS_ERROR", reason=None, underlying_failure_code=None,
+                             consumption_call_count=0, barrier_status="FAILED", error_category="BARRIER")),
+            (2, self._record("w1"))])
+        run.start_and_collect()
+        self.assertTrue(context.barrier.aborted)
+        self.assertEqual(len(run.evidence["records"]), 2)
+        verdict = _race_classify(
+            ctx={"fixture_id": self.FIXTURE, "labels": ("w0", "w1"), "barrier_status": "PASSED",
+                 "process_id": _AUTH_PROC, "candidate": {}, "checkpoint": {}},
+            raw_records=run.evidence["records"], lifecycle=run.evidence, baseline=None, final=None)
+        self.assertIn("WORKER_HARNESS_ERROR", verdict["findings"])
+        self.assertIsNone(verdict["branch"])
+        run.close()
+
+    # -- R1 (Correction 01): collection-deadline admission boundaries (SYNTHETIC) --------
+    # H0=1000, Hc=1180, Hf=1240.  Every failing case has two well-formed records
+    # and both actors exited with code 0; Hc is asserted separately from Hf.
+
+    def _exited(self, at, *, join_oversleep=0.0):
+        return [lambda c: _FakeRaceProcess(c, 501, exit_at=c.now + at, join_oversleep=join_oversleep),
+                lambda c: _FakeRaceProcess(c, 502, exit_at=c.now + at, join_oversleep=join_oversleep)]
+
+    def _assert_collection_waits_within_hc(self, run, clock) -> None:
+        """Every wait REQUESTED during collection ends by Hc (not merely Hf)."""
+        collection_end = run.h0 + run.evidence["timings_s"]["collection_end"]
+        for kind, started, timeout in clock.waits:
+            if started < min(collection_end, run.hc):
+                self.assertLessEqual(started + timeout, run.hc + 1e-9, (kind, started, timeout))
+
+    def _assert_late_collection_rejected(self, run, clock) -> None:
+        self.assertIn("COLLECTION_DEADLINE_EXCEEDED", run.evidence["failures"], run.evidence)
+        self.assertFalse(run.evidence["normal"])
+        self.assertGreaterEqual(run._failure_at, run.hc)  # observed at/after Hc ...
+        self.assertLess(run._failure_at, run.hf)  # ... while Hf alone would still have admitted it
+        self.assertEqual(run.evidence["exit_codes"], {"w0": 0, "w1": 0})
+        self.assertEqual((run.evidence["terminated"], run.evidence["killed"]), ([], []))
+        self.assertEqual(len(run.evidence["records"]), 2)  # retained, and well formed
+        self.assertEqual(sorted(_race_parse_record(raw)["worker_label"] for raw in run.evidence["records"]),
+                         ["w0", "w1"])
+        reads = []
+        self.assertIsNone(run.post_validate(lambda: reads.append(clock.now)))
+        self.assertEqual(reads, [])  # the ordinary post-validation episode never runs
+        self.assertEqual(run.evidence["post_validation"], "SKIPPED_ABNORMAL")
+        run.close()
+        self.assertFalse(run.evidence["normal"])
+        self._assert_budget(run, clock)
+        self._assert_collection_waits_within_hc(run, clock)
+        verdict = _race_classify(
+            ctx={"fixture_id": self.FIXTURE, "labels": ("w0", "w1"), "barrier_status": "PASSED",
+                 "process_id": _AUTH_PROC, "candidate": {}, "checkpoint": {}},
+            raw_records=run.evidence["records"], lifecycle=run.evidence, baseline=None, final=None)
+        self.assertIn("LIFECYCLE_COLLECTION_DEADLINE_EXCEEDED", verdict["findings"])
+        self.assertIn("FAIL_EVIDENCE", verdict["classes"])
+        self.assertIsNone(verdict["branch"])
+
+    def _assert_timely_collection_admitted(self, run, clock) -> None:
+        self.assertTrue(run.evidence["normal"], run.evidence)
+        self.assertLess(run.h0 + run.evidence["timings_s"]["collection_end"], run.hc)
+        reads = []
+        self.assertEqual(run.post_validate(lambda: reads.append(clock.now) or "SNAPSHOT"), "SNAPSHOT")
+        self.assertEqual(len(reads), 1)
+        run.close()
+        self.assertEqual(run.evidence["finalization"], "COMPLETE")
+        self._assert_budget(run, clock)
+        self._assert_collection_waits_within_hc(run, clock)
+
+    def test_r1_final_receive_returning_exactly_at_hc_is_rejected(self) -> None:
+        # The Marco counterexample: second valid record returned AT Hc, both exit at Hc.
+        run, clock, _, _, _ = self._run(items=[(1, self._record("w0")), (180, self._record("w1"))],
+                                        processes=self._exited(180))
+        run.start_and_collect()
+        self._assert_late_collection_rejected(run, clock)
+        self.assertEqual(run._failure_at, run.hc)
+
+    def test_r1_final_receive_at_hc_after_actors_already_exited_is_rejected(self) -> None:
+        # Both actors exited before Hc (dead-worker drain path); the final valid record returns at Hc.
+        run, clock, _, _, _ = self._run(items=[(1, self._record("w0")), (180, self._record("w1"))],
+                                        processes=self._exited(179.5))
+        run.start_and_collect()
+        self._assert_late_collection_rejected(run, clock)
+
+    def test_r1_final_receive_delayed_past_hc_by_oversleep_is_rejected(self) -> None:
+        # Arrival is inside the window (Hc-0.1) but the wait RETURNS late (Hc+0.1).
+        run, clock, _, _, _ = self._run(items=[(1, self._record("w0")), (179.9, self._record("w1"))],
+                                        processes=self._exited(179.95), oversleep=0.2)
+        run.start_and_collect()
+        self._assert_late_collection_rejected(run, clock)
+        self.assertGreater(run._failure_at, run.hc)
+
+    def test_r1_final_receive_just_before_hc_is_admitted(self) -> None:
+        run, clock, _, _, _ = self._run(items=[(1, self._record("w0")), (179.9, self._record("w1"))],
+                                        processes=self._exited(179.95))
+        run.start_and_collect()
+        self._assert_timely_collection_admitted(run, clock)
+
+    def test_r1_successful_join_observed_exactly_at_hc_is_rejected(self) -> None:
+        run, clock, _, _, _ = self._run(items=[(1, self._record("w0")), (2, self._record("w1"))],
+                                        processes=self._exited(180))
+        run.start_and_collect()
+        self._assert_late_collection_rejected(run, clock)
+        self.assertEqual(run._failure_at, run.hc)
+
+    def test_r1_successful_join_delayed_past_hc_by_oversleep_is_rejected(self) -> None:
+        # Exit happens inside the window (Hc-0.1) but the join is observed at Hc+0.1.
+        run, clock, _, _, _ = self._run(items=[(1, self._record("w0")), (2, self._record("w1"))],
+                                        processes=self._exited(179.9, join_oversleep=0.2))
+        run.start_and_collect()
+        self._assert_late_collection_rejected(run, clock)
+        self.assertGreater(run._failure_at, run.hc)
+
+    def test_r1_successful_join_just_before_hc_is_admitted(self) -> None:
+        run, clock, _, _, _ = self._run(items=[(1, self._record("w0")), (2, self._record("w1"))],
+                                        processes=self._exited(179.9))
+        run.start_and_collect()
+        self._assert_timely_collection_admitted(run, clock)
 
 
 class AccountAggregateReleaseSemanticsTestCase(unittest.TestCase):

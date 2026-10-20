@@ -18425,7 +18425,7 @@ class G1StaticConformanceTests(unittest.TestCase):
         "src/arb/venues/kalshi/write_result_reconciliation.py": "a26985c64c62fd7288724be52f050212d0fea97f",
         "tests/test_execution_ledger.py": "242566dd3146e1a8461e59f71c9e2c2f8b6dd701",
         "tests/test_kalshi_emergency_cancel.py": "7bea1f054eaec81383a369a5860f43f8dd2847a3",
-        "tests/test_kalshi_ledger_binding.py": "52cb51a0dc78ceda39e60f120a742c049ea8846e",
+        "tests/test_kalshi_ledger_binding.py": "35ae9eb723e847827c63e077e20a725255df12dc",
         "tests/test_kalshi_minimal_market_maker.py": "43e2a7fdbdbcfd769713e6e04cbaa321d8313e44",
         "tests/test_kalshi_one_order_lifecycle.py": "850ed38cdb8fe526e9c947a003d8a1d5a433e3e5",
         "tests/test_kalshi_quote_lifecycle.py": "3d5cf1373a7282ebc6ad36809a8391ce1438ae30",

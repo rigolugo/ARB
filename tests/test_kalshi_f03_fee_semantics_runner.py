@@ -84,8 +84,8 @@ PROTECTED_BLOBS = {
     "src/arb/venues/kalshi/models.py": "628dee54853c09071f93556d404b45bf4e87755a",
     "src/arb/venues/kalshi/validation.py": "8f84f06f74604356daaa62662c7d74220ffef312",
     "src/arb/venues/kalshi/serialization.py": "df25df110775e2fc4542c63b8ce2c4e42eca5e34",
-    "tests/test_kalshi_minimal_market_maker_experiment_runner.py": "01f9192735b5669ecb2de0f9475aa2a2c44315d9",
-    "tests/test_kalshi_shadow_experiment.py": "87284e25c5817f988266bd231896bdfa32db6a6e",
+    "tests/test_kalshi_minimal_market_maker_experiment_runner.py": "e31c7bf789e4bb0684fbd3688f4fa3867388cff5",
+    "tests/test_kalshi_shadow_experiment.py": "03e39ee183555d825b24e48317b6356c41fe98f1",
 }
 
 _RSA: dict = {}
@@ -4601,7 +4601,7 @@ class StageAPinClosureTests(unittest.TestCase):
         self.assertEqual(ts_pins["project_context/START_HERE.md"], self._blob(root / "project_context" / "START_HERE.md"))
         self.assertEqual(PROTECTED_BLOBS["tests/test_kalshi_shadow_experiment.py"], self._blob(ts_path))
         self.assertEqual(ts_pins[tr_rel], PROTECTED_BLOBS[tr_rel])  # TR protected and unchanged in both
-        self.assertEqual(self._blob(root / tr_rel), "01f9192735b5669ecb2de0f9475aa2a2c44315d9")
+        self.assertEqual(self._blob(root / tr_rel), "e31c7bf789e4bb0684fbd3688f4fa3867388cff5")
         for pinned in (ts_pins, PROTECTED_BLOBS):
             self.assertNotIn("tests/test_kalshi_f03_fee_semantics_runner.py", pinned)
             self.assertNotIn("src/arb/venues/kalshi/f03_fee_semantics_runner.py", pinned)
